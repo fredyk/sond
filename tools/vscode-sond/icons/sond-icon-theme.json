@@ -1,0 +1,18 @@
+{
+  "iconDefinitions": {
+    "sond":        { "iconPath": "./sond.svg" },
+    "_file":       { "iconPath": "./file.svg" },
+    "_folder":     { "iconPath": "./folder.svg" },
+    "_folderOpen": { "iconPath": "./folder-open.svg" }
+  },
+  "file": "_file",
+  "folder": "_folder",
+  "folderExpanded": "_folderOpen",
+  "fileExtensions": {
+    "sond": "sond",
+    "snd": "sond"
+  },
+  "languageIds": {
+    "sond": "sond"
+  }
+}
