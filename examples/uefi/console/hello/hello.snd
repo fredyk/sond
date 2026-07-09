@@ -1,0 +1,8 @@
+// Sond running on BARE UEFI, no OS underneath. The firmware loads this PE32+
+// application and calls efi_main; print() writes to the UEFI console (ConOut).
+//   sondc examples/uefi-hello/hello.snd --uefi -o BOOTX64.EFI
+fn efi_main() -> i64 {
+    print("Hello from Sond, running on bare UEFI!")
+    print("No Linux. No libc. Just Sond on the firmware.")
+    0
+}

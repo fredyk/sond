@@ -1,0 +1,17 @@
+// Dynamic memory on bare UEFI: alloc() calls BootServices->AllocatePool for a
+// heap block; poke64/peek64 write and read machine words at raw addresses. This
+// round-trips two values through firmware-allocated memory, no OS.
+//   sondc examples/uefi-heap/heap.snd --uefi -o BOOTX64.EFI && tools/boot-uefi.sh BOOTX64.EFI
+fn efi_main() -> i64 {
+    print("Sond heap on bare UEFI (AllocatePool):")
+    let p = alloc(64)
+    poke64(p, 12345)
+    poke64(p + 8, 67890)
+    print("  slot[0] =")
+    print_int(peek64(p))
+    print("  slot[8] =")
+    print_int(peek64(p + 8))
+    print("")
+    print("heap round-trip OK on the metal.")
+    0
+}

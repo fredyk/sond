@@ -1,0 +1,33 @@
+// A real mini-shell on bare UEFI: a command dispatcher driven by the keyboard.
+// Keys are read from ConIn; 'h' prints help, 'c' counts 1..5 (loop + numbers on
+// the metal), 'q' quits; any other key is echoed. No OS underneath.
+//   sondc examples/uefi-repl/repl.snd --uefi -o BOOTX64.EFI  (feed keys via FIFO)
+fn efi_main() -> i64 {
+    print("Sond mini-shell on bare UEFI. Keys: h=help  c=count  q=quit")
+    for {
+        let k = readkey()
+        if k == 113 {
+            break
+        }
+        if k == 104 {
+            print("")
+            print("  commands: h=help  c=count to 5  q=quit")
+        } else {
+            if k == 99 {
+                print("")
+                let mut i = 1
+                for i < 6 {
+                    print_int(i)
+                    print_char(32)
+                    i = i + 1
+                }
+                print("")
+            } else {
+                print_char(k)
+            }
+        }
+    }
+    print("")
+    print("shell exit. bye from the metal.")
+    0
+}

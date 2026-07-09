@@ -1,0 +1,21 @@
+// Printing integers on bare UEFI: converts numbers to UTF-16 decimal and shows
+// them on the firmware console (ConOut), no OS. print_int computes 4200 and the
+// sum 0..99 == 4950 entirely on the metal.
+//   sondc examples/uefi-numbers/numbers.snd --uefi -o BOOTX64.EFI && tools/boot-uefi.sh BOOTX64.EFI
+fn efi_main() -> i64 {
+    print("Sond prints integers on bare UEFI.")
+    print("  42 * 100 =")
+    print_int(42 * 100)
+    print("")
+    let mut i = 0
+    let mut s = 0
+    for i < 100 {
+        s = s + i
+        i = i + 1
+    }
+    print("  sum 0..99 =")
+    print_int(s)
+    print("")
+    print("done on the metal.")
+    0
+}

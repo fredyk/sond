@@ -1,0 +1,269 @@
+# Sond, Implemented Language Surface (what the compiler accepts TODAY)
+
+<!-- SOND-MD-BEGIN -->
+> **⭐ Prime Directive (permanent):** Sond is a language written by AI and used by AI.
+> Hard-to-implement features are never avoided, the goal is a language in which it is
+> *almost impossible* to make a programming or logic error: extremely hard for a human
+> to write, yet extraordinarily hard for an AI to be wrong. Correctness guarantees
+> always win over ease of authorship. (Full statement in `docs/rfc-0000-vision.md`.)
+
+> This is the practical, ground-truth reference for the CURRENT `sondc` compiler.
+> The design RFCs describe features (contracts, effects, modules, capabilities)
+> that are mostly NOT implemented yet. **To write programs that compile and run,
+> use ONLY the constructs on this page.**
+
+## Reusable libraries (include)
+
+A top-level line `include "path.snd"` (path relative to the including file) pulls in
+another file's functions and globals, so you can factor a library out (e.g.
+`chacha20.snd`) and share it. Includes are recursive and de-duplicated, so including
+the same library from two files defines it only once. One flat namespace.
+
+```sond
+include "mathlib.snd"          // brings in square()
+fn main() -> i64 { square(6) }
+```
+
+Libraries shipped in `lib/` (include by relative path): crypto `any/crypto/{dh/x25519,
+hash/sha256, hash/sha512, sign/ed25519-sign, mac/poly1305, cipher/xor, ssh-kex}.snd`;
+`any/strings.snd` (strlen/memcpy/streq/itoa/atoi); Linux `x86_64/linux/{syscall-nums,
+io, proc, capture, net}.snd`; networking `x86_64/net/tcp-server.snd`,
+`x86_64/drivers/net/virtio-net.snd`.
+
+## Program shape
+
+A program is one or more functions:
+
+```sond
+fn efi_main() -> i64 {
+    print("hello from Sond")
+    0
+}
+```
+
+- `fn name(params) -> Type { ... }`. Parameters are `name: Type`, comma-separated.
+  The only value type is `i64` (also written `bool`, `Money` etc., all 64-bit).
+  Arrays/buffers are just i64 ADDRESSES, so an array parameter is typed `i64`; the
+  annotations `[]` and `[i64]` are also accepted for it and mean exactly `i64`. You
+  may also omit the type entirely (`fn f(a, b)`), it defaults to i64.
+- The **entry function** is `main` for the hosted/freestanding targets, or
+  `efi_main` for the UEFI target. If neither name is present, the LAST function is
+  the entry. Its integer value is the process exit code (hosted) or EFI status.
+- Functions may call each other. Arguments are passed by position; at most 6.
+- Statements are newline-terminated (no `;` needed). `//` starts a line comment.
+- The value of a block is its last expression with no trailing newline-statement
+  after it (a "tail expression"), e.g. the `0` above.
+
+## Types
+
+- `i64`, 64-bit signed integer. This is also used for pointers and characters.
+- `bool`, `true` / `false`.
+- String literals `"..."` exist only as arguments to `print`/`write`/`serial_print`.
+
+There is no `Money`/decimal, no strings-as-values, no arrays yet in codegen.
+
+## Expressions
+
+- Integer literals: `42`, `0`, `1000000`; hex `0x3F8`; character literals
+  `'A'` (== 65), `'0'` (== 48), `'\n'` (== 10), all are just integers.
+- Booleans: `true`, `false`.
+- Arithmetic: `+`, `-`, `*`, `/` (integer division), `%` (remainder).
+- Bitwise/shift: `&`, `|`, `^`, `<<`, `>>`, `>>>` (integers), and prefix `~` for
+  bitwise NOT / one's complement (e.g. `~x`, or a fixed-width mask `~x & 0xFFFFFFFF`).
+  IMPORTANT: `>>` is ARITHMETIC (sign-preserving), `>>>` is LOGICAL (zero-fill).
+  For crypto/bit rotations on values whose high bit may be set, use `>>>`, e.g.
+  rotate-right of a 64-bit word: `(x >>> n) | (x << (64 - n))`. Using `>>` there
+  would sign-extend and corrupt the result.
+  These bind TIGHTER than arithmetic and comparisons, so `reg & 0x20 == 0x20`
+  means `(reg & 0x20) == 0x20`. Use them for masks, flags and byte order:
+  `lsr & 0x20`, `hi << 8 | lo`, `~mask & 0xFF`.
+- Unary prefixes: `-x` (arithmetic negation), `~x` (bitwise NOT), `not b` (boolean).
+- Comparisons: `==`, `!=`, `<`, `>`, `<=`, `>=` → `bool`.
+- Logical: `&&`, `||` (short-circuit), and prefix `not` for boolean negation
+  (`not` is BOOLEAN only, for integer bit-complement use `~`).
+- Parentheses group as usual: `(a + b) * c`.
+- Function/builtin calls: `name(arg, arg)`.
+
+## Statements and control flow
+
+```sond
+let x = 10          // immutable binding
+let mut i = 0       // mutable binding
+let mut n: i64      // no initializer -> defaults to 0
+i = i + 1           // assignment (only to `let mut`)
+
+if cond {           // if / else; also usable as an expression
+    ...
+} else {
+    ...
+}
+
+for i < 10 {        // while-style loop
+    ...
+    i = i + 1
+}
+
+for {               // infinite loop
+    if done { break }
+    continue
+}
+
+return 0            // early return
+```
+
+`if` can be an expression: `let m = if a > b { a } else { b }`. Chains work too: `if a { .. } else if b { .. } else { .. }`.
+
+### Constraints (common gotchas, save yourself the iteration)
+- **Functions are TOP-LEVEL only**, you CANNOT define a `fn` inside another `fn`.
+  Factor helpers out to the top level (they can call each other freely).
+- **Parameters are IMMUTABLE**, you cannot write `fn f(mut x: ...)` nor assign to a
+  parameter. To mutate, copy it into a local: `fn f(x: i64) { let mut v = x  v = v + 1 ... }`.
+- A stack array `let a[N]` is written with `a[i] = ...`, it needs NO `let mut` (the
+  name is an address). Only scalar bindings you reassign need `let mut`.
+- No `println`, use `print`, `print_int`, `print_char`, `serial_print`.
+
+## Module-level globals
+
+At the top level (outside any function) you may declare globals:
+
+```sond
+let POLY = 0xEDB88320       // a named constant
+let mut counter = 0         // mutable global state, persists across calls
+```
+
+The initializer must be a CONSTANT integer expression (literals, arithmetic,
+bitwise). Read a global like any variable; assign to a `let mut` one to keep state
+between function calls (e.g. a connection table, a ring index, a checksum table).
+
+
+## Contracts (requires / ensures)
+
+A function can carry a contract. It is PROVEN AT COMPILE TIME, for every possible
+input, not merely checked at runtime. If the compiler cannot prove a
+postcondition, it REJECTS the program (it never accepts a contract it cannot
+verify). So only put a contract on a function when the prover can verify it.
+
+The prover today handles **straight-line integer bodies** (let-bindings, `+ - *`,
+and a tail expression, no loops or calls) and decides comparison propositions,
+using the preconditions as assumptions. Rules of thumb that WILL verify:
+- constant results: `ensures { r == 42 } { 6 * 7 }`;
+- arithmetic identities: `ensures { r == x + x } { x + x }`;
+- passing a precondition through: `requires { x > 0 } ensures { r > 0 } { x }`.
+A contract whose body has a loop, or that needs reasoning the prover lacks, will be
+rejected, so for loop-based programs, just omit the contract for now.
+
+Syntax: `fn f(x: i64) -> (q: i64) requires { x >= 0 } ensures { q >= 0 } { x }`.
+- `requires`/`ensures` each hold one or more propositions (newline/`;` separated,
+  implicit AND). Each proposition is a SINGLE comparison (`a > b`, `x == y`), no
+  `&&` yet, so write several.
+- The named return `-> (name: Type)` binds the result so `ensures` can name it.
+  Parameters are in scope in both; the result name only in `ensures`.
+
+## Builtins, provided by the COMPILER itself (no `include` needed)
+
+Everything below is emitted by the compiler directly and is ALWAYS available.
+Everything else (crypto, strings, drivers) is a `.snd` library you must `include`
+(catalog under "Reusable libraries" above).
+
+### All targets
+- `print("literal")`, write a string to the console EXACTLY as given, with NO
+  automatic newline (hosted: `write(1,…)`; UEFI: `ConOut`). The argument MUST be a
+  string literal; it may contain `\n` (`print("line\n")`), or emit one separately
+  with `print_char(10)`. (`print("")` therefore writes nothing.)
+- `print_int(n)`, print the integer `n` in decimal (no newline).
+- `peek64(ptr) -> i64` / `peek32(ptr) -> i64` / `peek16(ptr) -> i64` / `peek8(ptr) -> i64` -
+  load a 64/32/16/8-bit value from address `ptr` (all zero-extend into the i64 result).
+- `poke64(ptr, val)` / `poke32(ptr, val)` / `poke16(ptr, val)` / `poke8(ptr, val)` -
+  store the low 64/32/16/8 bits of `val` at address `ptr`. The sized forms are for
+  hardware structures with packed fields (e.g. a device ring: 32-bit length, 16-bit flags).
+- `let a[N]` declares a fixed-size array of N words on the stack (no allocator
+  needed, works on every target); index it with `a[i]`. Great for tables (K[64]).
+- **Structs** (all fields i64, one word each). `struct Point { x: i64, y: i64 }`;
+  make one with `let p = Point { x: 1, y: 2 }` or `let p: Point` (zeroed); read/write
+  `p.x` / `p.x = 5`. **Methods**: `impl Point { fn sum(self) -> i64 { self.x + self.y } }`,
+  called `p.sum()`. **Value vs pointer**: a value struct (`p: Point`) is read-only once
+  passed to a function, only its creator may mutate it; to let a callee mutate, declare
+  a pointer `*Point` up front (there is no `&`): `fn inc(c: *Point) { c.x = c.x + 1 }`.
+  Mutating a value-struct PARAMETER is a compile error.
+- `let a[N] = [e0, e1, ...]` also INITIALIZES the words in order (a constant table,
+  e.g. `let k[64] = [0x428a2f98, ...]`); the list may span many lines. The SAME form
+  at MODULE level (outside any function) is the idiomatic shared crypto table
+  (`K[64]`, S-boxes) placed in `.data`, readable from every function.
+- `a[i]` reads / `a[i] = v` writes the 8-byte WORD at `a + i*8` (sugar over
+  peek64/poke64). For BYTE buffers keep peek8/poke8. `a` is any address.
+- `write(fd, "literal") -> i64`, raw `write` syscall (hosted/freestanding only).
+
+### Port I/O (drivers), all targets, ring-0 (UEFI/kernel) at runtime
+- `outb(port, val)` / `outw(port, val)` / `outl(port, val)`, write a byte/word/dword to an I/O PORT.
+- `inb(port) -> i64` / `inw(port) -> i64` / `inl(port) -> i64`, read a byte/word/dword from an I/O PORT.
+
+The 32-bit `outl`/`inl` are what PCI configuration space needs: write the target
+register's address to port 0xCF8, then read or write the 32-bit datum at 0xCFC.
+
+IMPORTANT: I/O ports are a SEPARATE address space from memory. To touch a device
+register (e.g. the COM1 UART at 0x3F8, its status register at 0x3FD) use
+`inb`/`outb`, NOT `peek8`/`poke8` (those read/write RAM at that numeric address,
+which is a different thing entirely). Integer literals may be hex: `0x3F8`.
+
+### UEFI target only (`--uefi`)
+- `print_char(c)`, print one character (its code point) via `ConOut`.
+- `readkey() -> i64`, block until a key is pressed, return its character code.
+- `alloc(size) -> i64`, allocate `size` bytes, return the address (use with
+  `peek*`/`poke*`). Firmware `AllocatePool` before `exit_boot_services()`, Sond's own
+  bump heap over the UEFI memory map after, so it keeps working in the kernel.
+- `serial_print("literal")` / `serial_putc(byte)`, write to the COM1 serial port
+  by direct hardware I/O. Works before and after `exit_boot_services()`.
+- `exit_boot_services()`, drop the UEFI firmware; Sond becomes a bare-metal kernel.
+  It seeds Sond's own heap from the memory map, so `alloc` and `print` KEEP WORKING
+  (`print` falls back from ConOut to COM1 automatically). Only `readkey` (firmware
+  console input) stops.
+- `halt()`, stop the CPU forever (used to end a kernel).
+- `asm("instruction")`, inline assembly (AT&T syntax): emit one instruction
+  verbatim, e.g. `asm("cli")`, `asm("sti")`, `asm("int $0x20")`. You own the
+  registers. The escape hatch for anything no builtin covers.
+
+### Kernel: interrupts (`--uefi`, after `exit_boot_services`)
+- `interrupt fn name() { ... }`, an interrupt handler: codegen saves every GP
+  register on entry, restores on exit, returns with `iretq`. A hardware-IRQ handler
+  must acknowledge it (e.g. `outb(0x20, 0x20)`, PIC EOI).
+- `addr_of(name) -> i64`, a function's address (IDT gates; function pointers).
+- `lidt(ptr)`, load the IDT register from a 10-byte pseudo-descriptor (2-byte limit,
+  8-byte base) at `ptr`.
+- `read_cs() -> i64`, the current code-segment selector (IDT gate selector field).
+  Full timer ISR: `examples/uefi/kernel/timer-interrupt/`.
+- `swtch(old_ctx_ptr, new_ctx)`, context switch: save callee-saved regs + `%rsp` to
+  `*old_ctx_ptr`, load `%rsp` from `new_ctx`, restore its regs, return. Bootstrap a
+  task with its entry address above six register slots. Called from a timer ISR it
+  gives preemptive multitasking: `examples/uefi/kernel/preempt-two-tasks/`.
+
+Character codes you may need: `'q'`=113, `'h'`=104, `'c'`=99, space=32, `'0'`=48,
+newline=10, carriage-return=13, `'A'`=65, `'a'`=97.
+
+## How programs are compiled (for reference)
+
+```
+sondc prog.snd                 # hosted ELF; entry `main`, value = exit code
+sondc prog.snd --freestanding  # static, libc-free ELF /init; entry `main`
+sondc prog.snd --uefi -o BOOTX64.EFI   # PE32+ EFI app; entry `efi_main`
+sondc prog.snd --shared -o libNAME.so    # C-ABI .so; pub fn exported (C/C++/Go/Rust/Python)
+```
+
+## Worked example (UEFI, uses only the surface above)
+
+```sond
+// Sum 1..=5 and print it on bare UEFI.
+fn efi_main() -> i64 {
+    print("Sond: summing 1..5")
+    let mut i = 1
+    let mut s = 0
+    for i <= 5 {
+        s = s + i
+        i = i + 1
+    }
+    print("  total =")
+    print_int(s)
+    print("")
+    0
+}
+```
+<!-- SOND-MD-END -->

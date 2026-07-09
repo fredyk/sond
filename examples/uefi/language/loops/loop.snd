@@ -1,0 +1,16 @@
+// Loops on bare UEFI: a while-style `for` sums 0..9 on the firmware, no OS.
+//   sondc examples/uefi-loop/loop.snd --uefi -o BOOTX64.EFI && tools/boot-uefi.sh BOOTX64.EFI
+fn efi_main() -> i64 {
+    let mut i = 0
+    let mut s = 0
+    for i < 10 {
+        s = s + i
+        i = i + 1
+    }
+    if s == 45 {
+        print("Sond ran a LOOP on bare UEFI: sum 0..9 == 45. Iteration on the metal!")
+    } else {
+        print("loop failed")
+    }
+    0
+}

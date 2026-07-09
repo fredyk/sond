@@ -1,0 +1,9 @@
+fn efi_main() -> i64 {
+    let mut k = readkey()
+    if k == 121 {
+        print("you said yes")
+    } else {
+        print("not a yes")
+    }
+    0
+}

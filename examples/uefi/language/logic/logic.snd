@@ -1,0 +1,13 @@
+// The FULL Sond language on bare UEFI: variables, arithmetic, comparison and
+// if/else, all running directly on the firmware, no OS underneath.
+//   sondc examples/uefi-logic/logic.snd --uefi -o BOOTX64.EFI
+//   tools/boot-uefi.sh BOOTX64.EFI
+fn efi_main() -> i64 {
+    let x = 40 + 2
+    if x == 42 {
+        print("Sond computed 40+2==42 on bare UEFI. Logic works on the metal!")
+    } else {
+        print("wrong branch")
+    }
+    0
+}

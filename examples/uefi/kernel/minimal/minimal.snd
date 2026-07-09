@@ -1,0 +1,6 @@
+fn efi_main() -> i64 {
+    serial_print("Sond bare-metal kernel booting...")
+    exit_boot_services()
+    serial_print("Kernel now owns the machine.")
+    halt()
+}

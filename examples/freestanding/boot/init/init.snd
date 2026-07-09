@@ -1,0 +1,8 @@
+// Sond as an initramfs /init (kernel profile): no libc, own _start, raw syscalls.
+// Prints to the console, then cleanly powers off the machine/VM.
+//   sondc examples/init/init.snd --freestanding -o /tmp/init
+fn init() -> i64 {
+    write(1, "Sond OS: init is alive on bare metal. Powering off.")
+    poweroff()
+    0
+}

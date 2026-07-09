@@ -1,0 +1,23 @@
+// A tiny interactive shell on bare UEFI: reads keys from the firmware console
+// (ConIn), echoes them, and quits on 'q'. No OS underneath.
+//   sondc examples/uefi-shell/shell.snd --uefi -o BOOTX64.EFI && tools/boot-uefi.sh BOOTX64.EFI
+fn efi_main() -> i64 {
+    print("Sond mini-shell on bare UEFI. Type; press q to quit.")
+    for {
+        let c = readkey()
+        if c == 113 {
+            break
+        }
+        print_char(c)
+    }
+    print("bye from Sond on the metal.")
+    0
+}
+// To verify the interactive echo headless, feed keystrokes AFTER OVMF's boot
+// timeout (piping stdin at once loses them, the boot manager consumes them). Use
+// a FIFO and type once efi_main is running:
+//   mkfifo /tmp/qin
+//   qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd \
+//     -drive format=raw,file=fat:rw:$ESP,media=disk -nographic -m 256 < /tmp/qin &
+//   exec 3>/tmp/qin; sleep 12; printf 'helloq' >&3
+// The console echoes "hello" and quits on 'q', the keyboard read on bare metal.
