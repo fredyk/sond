@@ -1,0 +1,9 @@
+.opencode-prompts/
+*.db-shm
+*.db-wal
+oc-*.log
+
+# compiled example binaries
+*.out
+tools/vscode-sond/node_modules/
+tools/sprint/
