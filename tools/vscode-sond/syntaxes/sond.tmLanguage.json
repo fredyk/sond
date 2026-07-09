@@ -1,0 +1,122 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Sond",
+  "scopeName": "source.sond",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#annotations" },
+    { "include": "#function-definition" },
+    { "include": "#keywords" },
+    { "include": "#constants" },
+    { "include": "#types" },
+    { "include": "#numbers" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.sond",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.sond",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.triple.sond",
+          "begin": "\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [
+            { "name": "meta.template.expression.sond", "match": "\\{\\{[^}]*\\}\\}" }
+          ]
+        },
+        {
+          "name": "string.quoted.double.sond",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.sond", "match": "\\\\." }
+          ]
+        }
+      ]
+    },
+    "annotations": {
+      "patterns": [
+        {
+          "name": "entity.name.tag.sond",
+          "match": "@(server|client|perfil|target)\\b"
+        }
+      ]
+    },
+    "function-definition": {
+      "match": "\\b(fn|lemma)\\s+([a-zA-Z_\\u00C0-\\u024F][a-zA-Z0-9_\\u00C0-\\u024F]*)",
+      "captures": {
+        "1": { "name": "keyword.other.fn.sond" },
+        "2": { "name": "entity.name.function.sond" }
+      }
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.sond",
+          "match": "\\b(if|else|for|in|return|match|break|continue|implies)\\b"
+        },
+        {
+          "name": "keyword.declaration.sond",
+          "match": "\\b(fn|let|mut|mutable|const|type|enum|phantom|lemma|modulo|query|plantilla|estilo|where|pub|priv|extern|import|package|require|link|effects|reactive|requires|ensures|old)\\b"
+        },
+        {
+          "name": "keyword.operator.word.sond",
+          "match": "\\b(and|or|not|forall|exists|self)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "name": "constant.language.sond",
+      "match": "\\b(true|false)\\b"
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.sond",
+          "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|char|String|List|Map|Result|Option|UI|Money|Percent)\\b"
+        },
+        {
+          "name": "storage.type.effect.sond",
+          "match": "\\b(IO|Red|FS|DB|Env|Temporal|Crypto|Random|Concurrencia)\\b"
+        },
+        {
+          "name": "support.type.capability.sond",
+          "match": "\\bCap[A-Z][a-zA-Z0-9_]*\\b"
+        },
+        {
+          "name": "entity.name.type.sond",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.decimal.sond",
+          "match": "\\b[0-9]+\\.[0-9]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.sond",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "operators": {
+      "name": "keyword.operator.sond",
+      "match": "->|=>|==|!=|<=|>=|\\+\\+|::|[-+*/%<>=?.]"
+    }
+  }
+}

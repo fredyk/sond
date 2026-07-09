@@ -1,0 +1,43 @@
+{
+  "name": "sond",
+  "displayName": "Sond",
+  "description": "Syntax highlighting for the Sond programming language (.snd / .sond).",
+  "version": "0.3.0",
+  "publisher": "sond-lang",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "sond",
+        "aliases": [
+          "Sond",
+          "sond"
+        ],
+        "extensions": [
+          ".snd",
+          ".sond"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "sond",
+        "scopeName": "source.sond",
+        "path": "./syntaxes/sond.tmLanguage.json"
+      }
+    ],
+    "iconThemes": [
+      {
+        "id": "sond-icons",
+        "label": "Sond",
+        "path": "./icons/sond-icon-theme.json"
+      }
+    ]
+  }
+}
