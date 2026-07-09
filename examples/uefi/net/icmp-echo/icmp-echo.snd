@@ -1,0 +1,42 @@
+fn icmp_checksum(buf: i64, len: i64) -> i64 {
+    let mut sum = 0
+    let mut i = 0
+    for i + 1 < len {
+        let b0 = peek8(buf + i)
+        let b1 = peek8(buf + i + 1)
+        let word = b0 << 8 | b1
+        sum = sum + word
+        i = i + 2
+    }
+    if i < len {
+        let b0 = peek8(buf + i)
+        sum = sum + b0 << 8
+    }
+    for sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16)
+    }
+    sum ^ 0xffff
+}
+
+fn build_echo_reply(buf: i64, len: i64) {
+    poke8(buf, 0)
+    poke8(buf + 2, 0)
+    poke8(buf + 3, 0)
+    let cs = icmp_checksum(buf, len)
+    poke8(buf + 2, cs >> 8)
+    poke8(buf + 3, cs & 0xff)
+}
+
+fn efi_main() -> i64 {
+    let buf = alloc(64)
+    poke8(buf, 8)
+    poke8(buf + 1, 0)
+    poke8(buf + 2, 0)
+    poke8(buf + 3, 0)
+    build_echo_reply(buf, 64)
+    let typ = peek8(buf)
+    let cs = peek8(buf + 2) << 8 | peek8(buf + 3)
+    print_int(typ)
+    print_int(cs)
+    0
+}

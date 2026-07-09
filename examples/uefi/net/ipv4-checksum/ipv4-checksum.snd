@@ -1,0 +1,127 @@
+// IPv4 header parsing and checksum (RFC 791 + RFC 1071)
+// Header layout:
+//   byte 0:   version (nib) + IHL (nib)
+//   byte 1:   DSCP/ECN
+//   bytes 2-3: total length (big-endian 16)
+//   bytes 4-5: identification (big-endian 16)
+//   bytes 6-7: flags + fragment offset (big-endian 16)
+//   byte 8:   TTL
+//   byte 9:   protocol
+//   bytes 10-11: header checksum (big-endian 16)
+//   bytes 12-15: source IP (big-endian 32)
+//   bytes 16-19: destination IP (big-endian 32)
+
+// parse_ipv4(buf): return IHL value (header length in 32-bit words)
+fn parse_ipv4(buf: i64) -> i64 {
+    let v = peek8(buf)
+    let ihl = v >> 4
+    ihl
+}
+
+// read_be16(buf, offset): read a big-endian 16-bit value from memory
+fn read_be16(buf: i64, off: i64) -> i64 {
+    let hi = peek8(buf + off)
+    let lo = peek8(buf + off + 1)
+    hi << 8 | lo
+}
+
+// read_be32(buf, offset): read a big-endian 32-bit value from memory
+fn read_be32(buf: i64, off: i64) -> i64 {
+    let b0 = peek8(buf + off)
+    let b1 = peek8(buf + off + 1)
+    let b2 = peek8(buf + off + 2)
+    let b3 = peek8(buf + off + 3)
+    b0 << 24 | b1 << 16 | b2 << 8 | b3
+}
+
+// ipv4_checksum(buf, ihl_words): one's complement 16-bit sum over the header
+// ihl_words is the IHL field (number of 32-bit words in header)
+fn ipv4_checksum(buf: i64, ihl_words: i64) -> i64 {
+    let mut sum = 0
+    let mut i = 0
+    let header_bytes = ihl_words * 4
+    for i < header_bytes {
+        let w = peek8(buf + i) << 8 | peek8(buf + i + 1)
+        sum = sum + w
+        i = i + 2
+    }
+    // end-around carry: fold all carries back into lower 16 bits
+    for sum >> 16 > 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16)
+    }
+    // complement
+    sum = sum ^ 0xFFFF
+    sum & 0xFFFF
+}
+
+// verify_checksum(buf, ihl_words): returns 1 if checksum is valid (computed = 0xFFFF)
+fn verify_checksum(buf: i64, ihl_words: i64) -> i64 {
+    let cs = ipv4_checksum(buf, ihl_words)
+    if cs == 0xFFFF {
+        1
+    } else {
+        0
+    }
+}
+
+fn efi_main() -> i64 {
+    // Allocate a buffer for the IPv4 header (20 bytes = minimum header, IHL=5)
+    let buf = alloc(32)
+
+    // Build a known IPv4 header (20 bytes, no options)
+    // Byte 0: version=4, IHL=5 => 0x45
+    poke8(buf + 0, 0x45)
+    // Byte 1: DSCP/ECN = 0
+    poke8(buf + 1, 0x00)
+    // Bytes 2-3: total length = 20 (0x0014) big-endian
+    poke8(buf + 2, 0x00)
+    poke8(buf + 3, 0x14)
+    // Bytes 4-5: identification = 0x1234
+    poke8(buf + 4, 0x12)
+    poke8(buf + 5, 0x34)
+    // Bytes 6-7: flags=0, fragment offset=0
+    poke8(buf + 6, 0x00)
+    poke8(buf + 7, 0x00)
+    // Byte 8: TTL = 64
+    poke8(buf + 8, 0x40)
+    // Byte 9: protocol = 6 (TCP)
+    poke8(buf + 9, 0x06)
+    // Bytes 10-11: header checksum, set to 0 first, then compute
+    poke8(buf + 10, 0x00)
+    poke8(buf + 11, 0x00)
+    // Bytes 12-15: source IP = 192.168.1.1 => 0xC0A80101
+    poke8(buf + 12, 0xC0)
+    poke8(buf + 13, 0xA8)
+    poke8(buf + 14, 0x01)
+    poke8(buf + 15, 0x01)
+    // Bytes 16-19: dest IP = 10.0.0.1 => 0x0A000001
+    poke8(buf + 16, 0x0A)
+    poke8(buf + 17, 0x00)
+    poke8(buf + 18, 0x00)
+    poke8(buf + 19, 0x01)
+
+    // Parse the header
+    let ihl = parse_ipv4(buf)
+
+    // Read total length and protocol
+    let total_len = read_be16(buf, 2)
+    let proto = peek8(buf + 9)
+
+    // Print total length and protocol
+    print_int(total_len)
+    print("")
+    print_int(proto)
+    print("")
+
+    // Compute and store the correct checksum
+    let cs = ipv4_checksum(buf, ihl)
+    poke8(buf + 10, cs >> 8)
+    poke8(buf + 11, cs & 0xFF)
+
+    // Verify the checksum, should return 1
+    let valid = verify_checksum(buf, ihl)
+    print_int(valid)
+    print("")
+
+    0
+}

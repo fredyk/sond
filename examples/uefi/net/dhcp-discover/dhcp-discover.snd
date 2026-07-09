@@ -1,0 +1,182 @@
+// DHCP DISCOVER builder (RFC 2131) for UEFI in Sond
+
+// ---- DHCP constants ----
+
+let MAGIC: i64 = 0x63825363
+
+let DHCP_MSGDISCOVER: i64 = 1
+let DHCP_MSGTYPE: i64 = 53
+let DHCP_PARAMREQ: i64 = 55
+let DHCP_END: i64 = 253
+
+// ---- Big-endian helpers ----
+
+fn get_be32(buf: i64, off: i64) -> i64 {
+    let b0 = peek8(buf + off)
+    let b1 = peek8(buf + off + 1)
+    let b2 = peek8(buf + off + 2)
+    let b3 = peek8(buf + off + 3)
+    b0 << 24 | b1 << 16 | b2 << 8 | b3
+}
+
+fn put_be32(buf: i64, off: i64, val: i64) {
+    poke8(buf + off, val >> 24 & 0xFF)
+    poke8(buf + off + 1, val >> 16 & 0xFF)
+    poke8(buf + off + 2, val >> 8 & 0xFF)
+    poke8(buf + off + 3, val & 0xFF)
+}
+
+fn put_magic(buf: i64, off: i64) {
+    poke8(buf + off, 0x63)
+    poke8(buf + off + 1, 0x82)
+    poke8(buf + off + 2, 0x53)
+    poke8(buf + off + 3, 0x63)
+}
+
+// Zero a region of the buffer
+fn zero_buf(buf: i64, len: i64) {
+    let mut i = 0
+    for i < len {
+        poke8(buf + i, 0)
+        i = i + 1
+    }
+}
+
+fn zero_at(buf: i64, off: i64, len: i64) {
+    zero_buf(buf + off, len)
+}
+
+// ---- Build DHCP DISCOVER ----
+
+fn put_dhcp_options(buf: i64) {
+    // Option 53: Message Type = DISCOVER (1)
+    poke8(buf + 240, DHCP_MSGTYPE)
+    poke8(buf + 241, 1)
+    poke8(buf + 242, DHCP_MSGDISCOVER)
+
+    // Option 55: Parameter Request List (3 params: subnet mask, router, DNS)
+    poke8(buf + 243, DHCP_PARAMREQ)
+    poke8(buf + 244, 3)
+    poke8(buf + 245, 1)
+    poke8(buf + 246, 3)
+    poke8(buf + 247, 15)
+
+    // Padding bytes between options (option 0 pad)
+    poke8(buf + 248, 0)
+    poke8(buf + 249, 0)
+    poke8(buf + 250, 0)
+    poke8(buf + 251, 0)
+    poke8(buf + 252, 0)
+    poke8(buf + 253, 0)
+    poke8(buf + 254, 0)
+    poke8(buf + 255, 0)
+    poke8(buf + 256, 0)
+    poke8(buf + 257, 0)
+    poke8(buf + 258, 0)
+    poke8(buf + 259, 0)
+    poke8(buf + 260, 0)
+    poke8(buf + 261, 0)
+    poke8(buf + 262, 0)
+    poke8(buf + 263, 0)
+    poke8(buf + 264, 0)
+    poke8(buf + 265, 0)
+    poke8(buf + 266, 0)
+    poke8(buf + 267, 0)
+    poke8(buf + 268, 0)
+    poke8(buf + 269, 0)
+
+    // Option 253: End marker
+    poke8(buf + 270, 255)
+}
+
+fn write_dhcp_discover(buf: i64, xid: i64, macoff: i64) -> i64 {
+    // Clear entire buffer first
+    zero_buf(buf, 576)
+
+    // BOOTP header, op (offset 0)
+    poke8(buf + 0, 1)
+
+    // htype (offset 1) = 1 (Ethernet)
+    poke8(buf + 1, 1)
+
+    // hlen (offset 2) = 6
+    poke8(buf + 2, 6)
+
+    // hops (offset 3) = 0
+    poke8(buf + 3, 0)
+
+    // xid, big-endian 32-bit (offset 4)
+    put_be32(buf, 4, xid)
+
+    // secs/flags at offset 8 (big-endian), secs=0, flags=0
+    put_be32(buf, 8, 0)
+
+    // ciaddr at offset 12 = 0 (4 bytes, already zeroed)
+
+    // yiaddr at offset 16 = 0
+
+    // siaddr at offset 20 = 0
+
+    // giaddr at offset 24 = 0
+
+    // chaddr: client MAC at offset 28, 6 bytes
+    poke8(buf + 28, peek8(macoff + 0))
+    poke8(buf + 29, peek8(macoff + 1))
+    poke8(buf + 30, peek8(macoff + 2))
+    poke8(buf + 31, peek8(macoff + 3))
+    poke8(buf + 32, peek8(macoff + 4))
+    poke8(buf + 33, peek8(macoff + 5))
+
+    // sname at offset 44: 64 bytes (already zeroed)
+
+    // file at offset 108: 128 bytes (already zeroed)
+
+    // Magic cookie big-endian at offset 236
+    put_magic(buf, 236)
+
+    // DHCP options
+    put_dhcp_options(buf)
+
+    0
+}
+
+// ---- UEFI entry point ----
+
+fn efi_main() -> i64 {
+    let buf = alloc(576)
+    let mac = alloc(6)
+
+    // Write MAC address: 00:11:22:33:44:55
+    poke8(mac, 0x00)
+    poke8(mac + 1, 0x11)
+    poke8(mac + 2, 0x22)
+    poke8(mac + 3, 0x33)
+    poke8(mac + 4, 0x44)
+    poke8(mac + 5, 0x55)
+
+    // Build a DISCOVER: xid = 0xDEADBEEF
+    write_dhcp_discover(buf, 0xDEADBEEF, mac)
+
+    // Verify op = 1
+    print("DHCP DISCOVER verification:")
+    print("")
+
+    let op = peek8(buf + 0)
+    print("op=")
+    print_int(op)
+    print("")
+
+    // Verify magic cookie at offset 236 via get_be32
+    let magic = get_be32(buf, 236)
+    print("magic=")
+    print_int(magic)
+    print("")
+
+    // Verify message type option at offset 242
+    let mtype = peek8(buf + 242)
+    print("msgtype=")
+    print_int(mtype)
+    print("")
+
+    0
+}
