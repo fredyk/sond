@@ -1,0 +1,111 @@
+// Sond 16550 UART driver for COM1 (base 0x3F8), UEFI entry efi_main
+
+// Map a nibble value 0..15 to its ASCII character
+fn nibble_to_ascii(d: i64) -> i64 {
+    let base = if d < 10 { '0' } else { 'A' }
+    let mut result = base
+    let mut offset = d
+    if d >= 10 {
+        offset = d - 10
+    }
+    result = result + offset
+    result
+}
+
+// Print n as exactly 16 hex digits to COM1 serial port
+fn uart_put_hex(n: i64) {
+    let mut i = 0
+
+    for i < 16 {
+        let shift = 60 - i * 4
+        let mut bits = n >> shift
+        let mut nibble = bits & 0xF
+        let ch = nibble_to_ascii(nibble)
+        uart_putc(ch)
+        i = i + 1
+    }
+}
+
+// Wait until the Transmit Holding Register is empty (LSR bit 5 set)
+fn uart_tx_ready() -> i64 {
+    inb(0x3FD) & 0x20
+}
+
+// Send one byte to COM1 UART
+fn uart_putc(c: i64) {
+    for {
+        let status = uart_tx_ready()
+        if status != 0 {
+            break
+        }
+    }
+    outb(0x3F8, c)
+}
+
+// Read one byte from COM1 UART (blocking)
+fn uart_getc() -> i64 {
+    for {
+        let status = inb(0x3FD) & 1
+        if status != 0 {
+            break
+        }
+    }
+    inb(0x3F8)
+}
+
+// Initialize the 16550 UART at COM1 (0x3F8)
+fn uart_init() {
+    // Disable interrupts: DLAB=0, IMR=0 (outb 0x3F9 = 0)
+    outb(0x3F9, 0)
+    // Set DLAB=1 to access divisor latch
+    outb(0x3FB, 0x80)
+    // Set baud rate divisor: DLL=3 at 0x3F8, DLH=0 at 0x3F9
+    outb(0x3F8, 3)
+    outb(0x3F9, 0)
+    // Set 8N1: data length 8 bits, 1 stop bit, no parity; clear DLAB
+    outb(0x3FB, 0x03)
+    // Enable and clear FIFO: enable FIFO, clear TX/RX queues, set 14-byte threshold
+    outb(0x3FA, 0xC7)
+    // Assert DTR and RTS
+    outb(0x3FC, 0x0B)
+}
+
+// Print a single ASCII character via uart_putc
+fn print_char_via_uart(c: i64) {
+    uart_putc(c)
+}
+
+// Entry point for UEFI: initialize UART, print banner, return 0
+fn efi_main() -> i64 {
+    uart_init()
+
+    // Banner: "SOND-UART-READY"
+    uart_putc(83)  // S
+    uart_putc(79)  // O
+    uart_putc(78)  // N
+    uart_putc(68)  // D
+    uart_putc(45)  // -
+    uart_putc(85)  // U
+    uart_putc(65)  // A
+    uart_putc(82)  // R
+    uart_putc(84)  // T
+    uart_putc(45)  // -
+    uart_putc(82)  // R
+    uart_putc(69)  // E
+    uart_putc(65)  // A
+    uart_putc(68)  // D
+    uart_putc(89)  // Y
+
+    // Newline: CR + LF
+    uart_putc(13)
+    uart_putc(10)
+
+    // Print hex value 0xDEADBEEF
+    uart_put_hex(0xDEADBEEF)
+
+    // Newline: CR + LF
+    uart_putc(13)
+    uart_putc(10)
+
+    0
+}

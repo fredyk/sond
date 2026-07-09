@@ -1,0 +1,89 @@
+// FAT16 small-dir: directory-entry parsing for Sond / UEFI
+// Entry: [name 8 + ext 3] (0) attr(11) … first_cluster le16(26) size le32(28)
+
+fn get_le16(buf: i64, off: i64) -> i64 {
+    let lo = peek8(buf + off)
+    let hi = peek8(buf + off + 1)
+    hi << 8 | lo
+}
+
+fn get_le32(buf: i64, off: i64) -> i64 {
+    let b0 = peek8(buf + off)
+    let b1 = peek8(buf + off + 1)
+    let b2 = peek8(buf + off + 2)
+    let b3 = peek8(buf + off + 3)
+    b0 | b1 << 8 | b2 << 16 | b3 << 24
+}
+
+// attr at offset 11
+fn dirent_attr(buf: i64) -> i64 {
+    peek8(buf + 11)
+}
+
+// first cluster = le16 at offset 26
+fn dirent_first_cluster(buf: i64) -> i64 {
+    get_le16(buf, 26)
+}
+
+// file size = le32 at offset 28
+fn dirent_size(buf: i64) -> i64 {
+    get_le32(buf, 28)
+}
+
+// is_valid_file: entry in use & not directory/volume/long-name
+// cond1: b0 != 0x00 AND b0 != 0xE5  →  hi(nibble of b0) == 0  (since 0xE5>>4==0xE≠0, 0x00>>4==0)
+// cond2: (attr & 0x18) == 0  →  (attr | 0x18) == attr  →  (attr | 0x18) >> 5 == attr >> 5
+fn is_valid_file(buf: i64) -> i64 {
+    let b0 = peek8(buf)
+    let a = dirent_attr(buf)
+    let c1 = if b0 >> 4 == 0 { 1 } else { 0 }
+    let c2 = if (a | 0x18) >> 5 == a >> 5 { 1 } else { 0 }
+    let c3 = if a >> 4 == 0 { 1 } else { 0 }
+    if c1 == 1 & c2 == 1 & c3 == 1 { 1 } else { 0 }
+}
+
+fn efi_main() -> i64 {
+    // allocate 32-byte fake directory entry for "HELLOWORLD"
+    let buf = alloc(32)
+
+    // name: "HELLOWORLD"
+    poke8(buf + 0, 'H')
+    poke8(buf + 1, 'E')
+    poke8(buf + 2, 'L')
+    poke8(buf + 3, 'L')
+    poke8(buf + 4, 'O')
+    poke8(buf + 5, 'W')
+    poke8(buf + 6, 'O')
+    poke8(buf + 7, 'R')
+    poke8(buf + 8, 'L')
+    poke8(buf + 9, 'D')
+
+    // ext: none (padding)
+    poke8(buf + 10, 0)
+    poke8(buf + 11, 0)
+    poke8(buf + 12, 0)
+
+    // attr = FILE (0x20)  [offset 11]
+    poke8(buf + 11, 0x20)
+
+    // first cluster = 0x0002  (le16 at 26)
+    poke8(buf + 26, 2)
+    poke8(buf + 27, 0)
+
+    // file size = 100  (le32 at 28)
+    poke8(buf + 28, 100)
+    poke8(buf + 29, 0)
+    poke8(buf + 30, 0)
+    poke8(buf + 31, 0)
+
+    print("first_cluster=")
+    print_int(dirent_first_cluster(buf))
+
+    print(" size=")
+    print_int(dirent_size(buf))
+
+    print(" valid=")
+    print_int(is_valid_file(buf))
+
+    0
+}

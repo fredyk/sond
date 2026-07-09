@@ -1,0 +1,176 @@
+// Ethernet + ARP frame construction and parsing in Sond
+// Target: UEFI (entry fn efi_main)
+
+// Store a 16-bit value in big-endian at buf[offset]
+fn put_be16(buf: i64, off: i64, v: i64) {
+    poke8(buf + off, (v >> 8) & 0xFF)
+    poke8(buf + off + 1, v & 0xFF)
+}
+
+// Load a 16-bit value from buf[offset] in big-endian
+fn get_be16(buf: i64, off: i64) -> i64 {
+    let hi = peek8(buf + off)
+    let lo = peek8(buf + off + 1)
+    hi << 8 | lo
+}
+
+// Build an ARP request frame in the given buffer.
+//   sip , sender IP as 32-bit integer (e.g. 0xC0A80102 = 192.168.1.2)
+//   tip , target IP as 32-bit integer (e.g. 0xC0A80101 = 192.168.1.1)
+//
+// Ethernet header (14 bytes):
+//   offset 0 : destination MAC  (broadcast ff:ff:ff:ff:ff:ff)
+//   offset 6 : source MAC       (fixed 52:54:00:12:34:56)
+//   offset 12: ethertype        (0x0806 for ARP, big-endian)
+//
+// ARP payload (28 bytes, starts at offset 14):
+//   offset 14 : hardware type      (1 = Ethernet, be16)
+//   offset 16 : protocol type     (0x0800 = IPv4, be16)
+//   offset 18 : hardware size     (6)
+//   offset 19 : protocol size     (4)
+//   offset 20 : operation         (1 = request, be16)
+//   offset 22 : sender MAC        (6 bytes)
+//   offset 28 : sender IP         (4 bytes, big-endian)
+//   offset 32 : target MAC        (6 zero bytes)
+//   offset 38 : target IP         (4 bytes, big-endian)
+fn build_arp_request(buf: i64, sip: i64, tip: i64) {
+    // Fixed MAC: 52:54:00:12:34:56
+    let src_mac_0: i64 = 0x52
+    let src_mac_1: i64 = 0x54
+    let src_mac_2: i64 = 0x00
+    let src_mac_3: i64 = 0x12
+    let src_mac_4: i64 = 0x34
+    let src_mac_5: i64 = 0x56
+
+    // --- Ethernet header ---
+
+    // Destination MAC = broadcast (6 bytes of 0xFF)
+    poke8(buf + 0, 0xFF)
+    poke8(buf + 1, 0xFF)
+    poke8(buf + 2, 0xFF)
+    poke8(buf + 3, 0xFF)
+    poke8(buf + 4, 0xFF)
+    poke8(buf + 5, 0xFF)
+
+    // Source MAC = fixed 52:54:00:12:34:56
+    poke8(buf + 6, src_mac_0)
+    poke8(buf + 7, src_mac_1)
+    poke8(buf + 8, src_mac_2)
+    poke8(buf + 9, src_mac_3)
+    poke8(buf + 10, src_mac_4)
+    poke8(buf + 11, src_mac_5)
+
+    // Ethertype = 0x0806 (ARP), big-endian
+    put_be16(buf, 12, 0x0806)
+
+    // --- ARP payload (starts at offset 14) ---
+
+    // Hardware type = 1 (Ethernet), big-endian
+    put_be16(buf, 14, 1)
+
+    // Protocol type = 0x0800 (IPv4), big-endian
+    put_be16(buf, 16, 0x0800)
+
+    // Hardware size = 6
+    poke8(buf + 18, 6)
+
+    // Protocol size = 4
+    poke8(buf + 19, 4)
+
+    // Operation = 1 (request), big-endian
+    put_be16(buf, 20, 1)
+
+    // Sender MAC = fixed 6 bytes
+    poke8(buf + 22, src_mac_0)
+    poke8(buf + 23, src_mac_1)
+    poke8(buf + 24, src_mac_2)
+    poke8(buf + 25, src_mac_3)
+    poke8(buf + 26, src_mac_4)
+    poke8(buf + 27, src_mac_5)
+
+    // Sender IP = sip in big-endian (4 bytes, via shifts)
+    poke8(buf + 28, (sip >> 24) & 0xFF)
+    poke8(buf + 29, (sip >> 16) & 0xFF)
+    poke8(buf + 30, (sip >> 8) & 0xFF)
+    poke8(buf + 31, sip & 0xFF)
+
+    // Target MAC = 6 zero bytes
+    poke8(buf + 32, 0)
+    poke8(buf + 33, 0)
+    poke8(buf + 34, 0)
+    poke8(buf + 35, 0)
+    poke8(buf + 36, 0)
+    poke8(buf + 37, 0)
+
+    // Target IP = tip in big-endian
+    poke8(buf + 38, (tip >> 24) & 0xFF)
+    poke8(buf + 39, (tip >> 16) & 0xFF)
+    poke8(buf + 40, (tip >> 8) & 0xFF)
+    poke8(buf + 41, tip & 0xFF)
+}
+
+// Parse the ethertype from an Ethernet frame buffer.
+// Returns the 16-bit ethertype value (e.g. 0x0806 = ARP, 0x0800 = IPv4).
+fn parse_ethertype(buf: i64) -> i64 {
+    get_be16(buf, 12)
+}
+
+// Print a single byte as a 2-digit hex string via print_char
+fn print_hex_byte(b: i64) {
+    let hi = (b >> 4) & 0xF
+    let lo = b & 0xF
+    // Convert nibble to hex character
+    let hi_ch = if hi >= 10 { hi + 87 } else { hi + 48 }
+    let lo_ch = if lo >= 10 { lo + 87 } else { lo + 48 }
+    print_char(hi_ch)
+    print_char(lo_ch)
+}
+
+// Print a short hexdump of the first n bytes of buf
+fn print_hexdump(buf: i64, n: i64) {
+    let mut i = 0
+    for i < n {
+        if i > 0 {
+            print_char(32)
+        }
+        print_hex_byte(peek8(buf + i))
+        i = i + 1
+    }
+    print_char(10)
+}
+
+// Entry point for UEFI target
+fn efi_main() -> i64 {
+    // Allocate 64 bytes for the frame buffer
+    let buf = alloc(64)
+
+    // Build an ARP request: sip=192.168.1.2 (0xC0A80102), tip=192.168.1.1 (0xC0A80101)
+    build_arp_request(buf, 0xC0A80102, 0xC0A80101)
+
+    // Print the ethertype, expected 2054 (= 0x0806)
+    print("ethertype =")
+    print_int(parse_ethertype(buf))
+
+    // Hexdump the Ethernet header (first 14 bytes)
+    print("eth header:")
+    print_hexdump(buf, 14)
+
+    // Hexdump the ARP payload (first 28 bytes starting at offset 14)
+    print("arp payload:")
+    print_hexdump(buf + 14, 28)
+
+    // Print a few individual fields to verify correctness
+    // Sender IP (offsets 28-31): should be 192.168.1.2
+    print("sender_ip_bytes:")
+    print_hexdump(buf + 28, 4)
+
+    // Target IP (offsets 38-41): should be 192.168.1.1
+    print("target_ip_bytes:")
+    print_hexdump(buf + 38, 4)
+
+    // Operation field (offset 20-21): should be 1 (request)
+    print("arp_oper =")
+    print_int(get_be16(buf, 20))
+
+    0
+}
