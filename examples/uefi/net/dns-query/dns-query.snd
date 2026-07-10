@@ -1,0 +1,152 @@
+// DNS query packet builder, RFC 1035
+// Header: ID(16) Flags(16) QDCOUNT(16) ANCOUNT(16) NSCOUNT(16) ARCOUNT(16)
+// Question: QNAME (length-prefixed labels) QTYPE(16) QCLASS(16)
+
+// Helper: write a big-endian 16-bit value into the buffer at offset off
+fn be16(buf: i64, off: i64, val: i64) {
+    poke8(buf + off, (val >> 8) & 0xFF)
+    poke8(buf + off + 1, val & 0xFF)
+}
+
+// Helper: read a big-endian 16-bit value from the buffer at offset off
+fn get_be16(buf: i64, off: i64) -> i64 {
+    (peek8(buf + off) << 8) | peek8(buf + off + 1)
+}
+
+// Encode a single label into the buffer at offset off.
+// Returns the new offset after writing: off + 1 (length byte) + label_len
+fn encode_label(buf: i64, off: i64, text: i64) -> i64 {
+    // Count the length of the string by scanning for the null terminator
+    let mut len = 0
+    let mut p = text
+    for {
+        if peek8(p) == 0 { break }
+        p = p + 1
+        len = len + 1
+    }
+    // Write length byte
+    poke8(buf + off, len)
+    // Copy label bytes
+    p = text
+    let mut i = 0
+    for i < len {
+        poke8(buf + off + 1 + i, peek8(p))
+        p = p + 1
+        i = i + 1
+    }
+    off + 1 + len
+}
+
+// Build a full DNS query packet in the allocated buffer.
+// hostname: pointer to null-terminated string (e.g. "example.com\0")
+// query_id: 16-bit identifier to place in header
+// Returns: the total size of the packet in bytes
+fn build_dns_query(buf: i64, hostname: i64, query_id: i64) -> i64 {
+    // --- Header ---
+    // ID (bytes 0-1): query_id
+    be16(buf, 0, query_id)
+    // Flags (bytes 2-3): QR=0, Opcode=0, AA=0, TC=0, RD=1, RA=0, Z=0, RCODE=0
+    // => 0x0100 (recursion desired)
+    be16(buf, 2, 0x0100)
+    // QDCOUNT = 1
+    be16(buf, 4, 1)
+    // ANCOUNT = 0
+    be16(buf, 6, 0)
+    // NSCOUNT = 0
+    be16(buf, 8, 0)
+    // ARCOUNT = 0
+    be16(buf, 10, 0)
+
+    // --- Question section ---
+    let mut off = 12
+
+    // Parse hostname into labels separated by dots and encode each
+    // hostname is like "example.com" (null-terminated)
+    let mut start = hostname
+    let mut dot = peek8(hostname)
+    let mut first = 1
+
+    for {
+        if dot == 0 {
+            // End of hostname: write terminating zero label
+            poke8(buf + off, 0)
+            off = off + 1
+            break
+        }
+        if dot == '.' {
+            // Found a dot: encode label from start to here
+            off = encode_label(buf, off, start)
+            // Skip past the dot
+            start = start + 1
+        }
+        // Check next character
+        if dot == 0 {
+            // Last label (no trailing dot): encode it, then add terminator
+            off = encode_label(buf, off, start)
+            poke8(buf + off, 0)
+            off = off + 1
+            break
+        }
+        start = start + 1
+        dot = peek8(start)
+    }
+
+    // QTYPE = 1 (A record)
+    be16(buf, off, 1)
+    off = off + 2
+
+    // QCLASS = 1 (IN)
+    be16(buf, off, 1)
+    off = off + 2
+
+    off
+}
+
+fn efi_main() -> i64 {
+    // Allocate buffer for the DNS query (enough space for "example.com" query)
+    let buf = alloc(256)
+
+    // Fixed hostname: "example.com" null-terminated
+    let hostname = alloc(15)
+    let mut host = hostname
+    let mut i = 0
+    let mut chars = "example.com\0"
+    // sondc strings-as-values are NOT supported; only string literals in print/write.
+    // We need to write the hostname byte by byte.
+    // "example.com" = 11 chars + null = 12 bytes
+    // We'll write it manually using poke8
+
+    // e=101, x=120, a=97, m=109, p=112, l=108, e=101, .=46, c=99, o=111, m=109, \0=0
+    poke8(host + 0, 101)  // e
+    poke8(host + 1, 120)  // x
+    poke8(host + 2, 97)   // a
+    poke8(host + 3, 109)  // m
+    poke8(host + 4, 112)  // p
+    poke8(host + 5, 108)  // l
+    poke8(host + 6, 101)  // e
+    poke8(host + 7, 46)   // .
+    poke8(host + 8, 99)   // c
+    poke8(host + 9, 111)  // o
+    poke8(host + 10, 109) // m
+    poke8(host + 11, 0)   // null terminator
+
+    // Build DNS query with id = 0x1234
+    let pkt_size = build_dns_query(buf, hostname, 0x1234)
+
+    // Print qdcount read back from the buffer (offset 4, big-endian)
+    let qdcount = get_be16(buf, 4)
+    print("qdcount=")
+    print_int(qdcount)
+
+    // Print qtype read back from the buffer
+    // qname starts at offset 12, we need to find where it ends to read qtype
+    // The qtype is right after the question name and qclass
+    // qclass is at pkt_size - 4, qtype at pkt_size - 2
+    let qtype = get_be16(buf, pkt_size - 4)
+    print(" qtype=")
+    print_int(qtype)
+
+    print("")
+
+    0
+}
