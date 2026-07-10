@@ -1,0 +1,22 @@
+fn barrett_reduce(a: i64, q: i64, v: i64) -> i64 {
+    let t = (v * a + (1 << 25)) >> 26
+    let mut r = a - (t * q)
+    if r < 0 { r = r + q }
+    if r >= q { r = r - q }
+    return r
+}
+
+fn main() -> i64 {
+    let q = 3329
+    let v = 20159
+    print_int(barrett_reduce(3329, q, v))
+    print(" ")
+    print_int(barrett_reduce(5000, q, v))
+    print(" ")
+    print_int(barrett_reduce(10000, q, v))
+    print(" ")
+    print_int(barrett_reduce(3328, q, v))
+    print(" ")
+    print_int(barrett_reduce(65535, q, v))
+    return 0
+}

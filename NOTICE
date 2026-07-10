@@ -1,0 +1,29 @@
+Sond, a verification-oriented programming language for the AI era
+Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this software except in compliance with the License. You may obtain a
+copy of the License in the LICENSE file or at
+http://www.apache.org/licenses/LICENSE-2.0
+
+---
+
+Attribution of algorithm sources
+================================
+
+Every cryptographic primitive, checksum, and protocol framing in this
+repository is an INDEPENDENT clean-room implementation written from public
+specifications (IETF RFCs, NIST FIPS publications, and academic papers). No
+third-party source code was copied or adapted. Under the idea/expression
+dichotomy (Directive 2009/24/EC art. 1.2; Spain, art. 96.4 TRLPI; U.S.,
+17 U.S.C. 102(b); CJEU C-406/10 SAS v. WPL), an algorithm is not protected by
+copyright, only a specific source expression is, so these re-derived
+implementations carry only this project's own license.
+
+The specification each file implements is cited in that file's header. Where
+a NIST FIPS test vector is reused it is public domain (17 U.S.C. 105). No
+IETF RFC "Code Component" (ABNF grammar, pseudocode block, or test vector,
+Revised BSD via the IETF Trust Legal Provisions) is reproduced verbatim; all
+such algorithms are re-implemented from the prose.
+
+See docs/licensing-and-attribution.md for the full policy.
