@@ -1,0 +1,121 @@
+fn efi_main() -> i64 {
+    // Allocate 42 bytes for the packet buffer
+    let buf = alloc(42)
+
+    // --- Build Ethernet frame ---
+    // dst MAC (6 bytes): 00:11:22:33:44:55
+    poke8(buf + 0, 0x00)
+    poke8(buf + 1, 0x11)
+    poke8(buf + 2, 0x22)
+    poke8(buf + 3, 0x33)
+    poke8(buf + 4, 0x44)
+    poke8(buf + 5, 0x55)
+
+    // src MAC (6 bytes): 00:AA:BB:CC:DD:EE
+    poke8(buf + 6, 0x00)
+    poke8(buf + 7, 0xAA)
+    poke8(buf + 8, 0xBB)
+    poke8(buf + 9, 0xCC)
+    poke8(buf + 10, 0xDD)
+    poke8(buf + 11, 0xEE)
+
+    // ethertype at offset 12: 0x0800 (big-endian)
+    poke8(buf + 12, 0x08)
+    poke8(buf + 13, 0x00)
+
+    // --- Build IPv4 header at offset 14 ---
+    // Byte 0: version=4, IHL=5 => 0x45
+    poke8(buf + 14, 0x45)
+
+    // Byte 1: DSCP/ECN = 0
+    poke8(buf + 15, 0x00)
+
+    // Bytes 2-3: total length = 20 (IP) + 8 (ICMP) = 28 => 0x001C
+    poke8(buf + 16, 0x00)
+    poke8(buf + 17, 0x1C)
+
+    // Bytes 4-5: identification = 0
+    poke8(buf + 18, 0x00)
+    poke8(buf + 19, 0x00)
+
+    // Bytes 6-7: flags+fragment offset = 0
+    poke8(buf + 20, 0x00)
+    poke8(buf + 21, 0x00)
+
+    // Byte 8: TTL = 64
+    poke8(buf + 22, 64)
+
+    // Byte 9: protocol = 1 (ICMP)
+    poke8(buf + 23, 1)
+
+    // Bytes 10-11: header checksum = 0 (not needed for this task)
+    poke8(buf + 24, 0x00)
+    poke8(buf + 25, 0x00)
+
+    // Bytes 12-15: src IP = 0xC0A80101 (192.168.1.1) big-endian
+    poke8(buf + 26, 0xC0)
+    poke8(buf + 27, 0xA8)
+    poke8(buf + 28, 0x01)
+    poke8(buf + 29, 0x01)
+
+    // Bytes 16-19: dst IP = 0xC0A80102 (192.168.1.2) big-endian
+    poke8(buf + 30, 0xC0)
+    poke8(buf + 31, 0xA8)
+    poke8(buf + 32, 0x01)
+    poke8(buf + 33, 0x02)
+
+    // --- Build ICMP header at offset 34 ---
+    // Byte 0: type = 8 (echo request)
+    poke8(buf + 34, 8)
+
+    // Byte 1: code = 0
+    poke8(buf + 35, 0)
+
+    // Bytes 2-3: checksum = 0
+    poke8(buf + 36, 0x00)
+    poke8(buf + 37, 0x00)
+
+    // Bytes 4-7: identifier + sequence (not needed for this task)
+    poke8(buf + 38, 0x00)
+    poke8(buf + 39, 0x00)
+    poke8(buf + 40, 0x00)
+    poke8(buf + 41, 0x00)
+
+    // --- Dispatch: walk the layers ---
+
+    // Read ethertype at offset 12 (big-endian 16-bit)
+    let eth_hi = peek8(buf + 12)
+    let eth_lo = peek8(buf + 13)
+    let ethertype = eth_hi << 8 | eth_lo
+
+    if ethertype == 0x0800 {
+        serial_print("ipv4")
+
+        // Read IP protocol at byte 9 of IP header (offset 23 from buf)
+        let ip_proto = peek8(buf + 23)
+
+        if ip_proto == 1 {
+            serial_print("icmp")
+
+            // Read ICMP type at byte 0 of ICMP header (offset 34 from buf)
+            let icmp_type = peek8(buf + 34)
+
+            if icmp_type == 8 {
+                serial_print("echo-request")
+            }
+        }
+    }
+
+    // serial_int the source IP (be32 at IP header offset 12 = buf+26)
+    let ip0 = peek8(buf + 26)
+    let ip1 = peek8(buf + 27)
+    let ip2 = peek8(buf + 28)
+    let ip3 = peek8(buf + 29)
+    let src_ip = ip0 << 24 | ip1 << 16 | ip2 << 8 | ip3
+    serial_int(src_ip)
+
+    serial_print("dispatch ok")
+
+    halt()
+    0
+}

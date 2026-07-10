@@ -1,0 +1,42 @@
+fn main() -> i64 {
+    let mut mac[6]
+    mac[0] = 0x52
+    mac[1] = 0x54
+    mac[2] = 0x00
+    mac[3] = 0x12
+    mac[4] = 0x34
+    mac[5] = 0x56
+
+    // mac_to_u64: pack big-endian into 48-bit integer
+    // result = b0<<40 | b1<<32 | b2<<24 | b3<<16 | b4<<8 | b5
+    let mut result: i64 = 0
+    result = result * 256 + mac[0]
+    result = result * 256 + mac[1]
+    result = result * 256 + mac[2]
+    result = result * 256 + mac[3]
+    result = result * 256 + mac[4]
+    result = result * 256 + mac[5]
+
+    print_int(result)
+    print("")
+
+    // is_broadcast: all six bytes are 0xFF
+    let mut all_ff = true
+    let mut j = 0
+    for j < 6 {
+        if mac[j] != 0xFF {
+            all_ff = false
+        }
+        j = j + 1
+    }
+    let broadcast_val = if all_ff { 1 } else { 0 }
+    print_int(broadcast_val)
+    print("")
+
+    // is_multicast: low bit of first byte
+    let multicast_val = mac[0] & 1
+    print_int(multicast_val)
+    print("")
+
+    0
+}

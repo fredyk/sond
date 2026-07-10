@@ -1,0 +1,13 @@
+fn efi_main() -> i64 {
+    serial_print("sond kernel booting")
+    let mut heap = alloc(65536)
+    serial_print("mem: heap ready")
+    outb(0x43, 0x36)
+    outb(0x40, 0x00)
+    outb(0x40, 0x10)
+    serial_print("timer: pit programmed")
+    serial_print("serial: com1 up")
+    serial_print("kernel ready")
+    serial_int(42)
+    halt()
+}

@@ -1,0 +1,24 @@
+fn main() -> i64 {
+    let mut a[4]
+    a[0] = 0xFFFFFFFF
+    a[1] = 0xFFFFFFFF
+    a[2] = 0xFFFFFFFF
+    a[3] = 0xFFFFFFFF
+
+    // Poly1305 clamp per RFC 8439 section 2.5
+    a[0] = a[0] & 0x0FFFFFFF
+    a[1] = a[1] & 0x0FFFFFFC
+    a[2] = a[2] & 0x0FFFFFFC
+    a[3] = a[3] & 0x0FFFFFFC
+
+    print_int(a[0])
+    print("")
+    print_int(a[1])
+    print("")
+    print_int(a[2])
+    print("")
+    print_int(a[3])
+    print("")
+
+    0
+}

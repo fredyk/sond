@@ -1,0 +1,29 @@
+fn task_a() {
+    serial_int(1)
+    serial_putc(32)
+}
+
+fn task_b() {
+    serial_int(2)
+    serial_putc(32)
+}
+
+fn task_c() {
+    serial_int(3)
+    serial_putc(32)
+}
+
+fn efi_main() -> i64 {
+    exit_boot_services()
+    serial_print("Sond kernel: cooperative scheduler\n")
+    let mut i = 0
+    for i < 3 {
+        task_a()
+        task_b()
+        task_c()
+        i = i + 1
+    }
+    serial_print("tasks done")
+    halt()
+    0
+}

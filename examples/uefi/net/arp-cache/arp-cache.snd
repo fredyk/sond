@@ -1,0 +1,54 @@
+fn efi_main() -> i64 {
+    serial_print("ARP Cache Kernel\n")
+
+    let ips[16]
+    let macs[16]
+    let mut count = 0
+
+    // Add entry 0: (0xC0A80101, 0x525400123456)
+    poke64(ips + 0 * 8, 0xC0A80101)
+    poke64(macs + 0 * 8, 0x525400123456)
+    count = 1
+
+    // Add entry 1: (0xC0A80102, 0x525400ABCDEF)
+    poke64(ips + 1 * 8, 0xC0A80102)
+    poke64(macs + 1 * 8, 0x525400ABCDEF)
+    count = 2
+
+    // Add entry 2: (0xC0A80103, 0x525400111111)
+    poke64(ips + 2 * 8, 0xC0A80103)
+    poke64(macs + 2 * 8, 0x525400111111)
+    count = 3
+
+    // arp_lookup(0xC0A80102) → 0x525400ABCDEF = 90520741989871
+    let mut found = false
+    let mut i = 0
+    for i < count {
+        if peek64(ips + i * 8) == 0xC0A80102 {
+            print_int(peek64(macs + i * 8))
+            found = true
+        }
+        i = i + 1
+    }
+    if not found {
+        serial_print("miss")
+    }
+    serial_putc(32)
+
+    // arp_lookup(0xC0A80109) → miss (not in table)
+    found = false
+    i = 0
+    for i < count {
+        if peek64(ips + i * 8) == 0xC0A80109 {
+            print_int(peek64(macs + i * 8))
+            found = true
+        }
+        i = i + 1
+    }
+    if not found {
+        serial_print("miss")
+    }
+
+    serial_print("\narp cache ok\n")
+    halt()
+}

@@ -1,0 +1,23 @@
+fn tcp_step(state: i64, event: i64) -> i64 {
+    if state == 1 && event == 1 {
+        2
+    } else {
+        if state == 2 && event == 2 {
+            3
+        } else {
+            state
+        }
+    }
+}
+
+fn efi_main() -> i64 {
+    let mut state = 1
+    state = tcp_step(state, 1)
+    serial_int(state)
+    serial_print(" ")
+    state = tcp_step(state, 2)
+    serial_int(state)
+    serial_print("handshake ok")
+    halt()
+    0
+}

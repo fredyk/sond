@@ -1,0 +1,37 @@
+fn efi_main() -> i64 {
+    let mut buf: i64
+    buf = alloc(12)
+
+    // Build UDP header: src_port(2) dst_port(2) length(2) checksum(2)
+    // be16 write for src port = 12345
+    poke8(buf + 0, 12345 >> 8)
+    poke8(buf + 1, 12345 & 0xFF)
+    // dst port = 53
+    poke8(buf + 2, 53 >> 8)
+    poke8(buf + 3, 53 & 0xFF)
+    // length = 16
+    poke8(buf + 4, 16 >> 8)
+    poke8(buf + 5, 16 & 0xFF)
+    // checksum = 0
+    poke8(buf + 6, 0 >> 8)
+    poke8(buf + 7, 0 & 0xFF)
+
+    // Parse back: be16 read
+    let mut src: i64
+    src = peek8(buf + 0) << 8 | peek8(buf + 1)
+    let mut dst: i64
+    dst = peek8(buf + 2) << 8 | peek8(buf + 3)
+    let mut len: i64
+    len = peek8(buf + 4) << 8 | peek8(buf + 5)
+
+    serial_int(src)
+    serial_print(" ")
+    serial_int(dst)
+    serial_print(" ")
+    serial_int(len)
+    serial_print("\n")
+    serial_print("udp ok")
+
+    halt()
+    0
+}

@@ -1,0 +1,68 @@
+// Base32 decode of 'JBSWY3DP' per RFC 4648
+// Alphabet: A-Z = 0..25, 2-7 = 26..31
+// 8 chars -> 5 bytes
+
+fn b32_decode_byte(c: i64) -> i64 {
+    let mut r: i64
+    if c >= 65 && c <= 90 {
+        r = c - 65
+    } else if c >= 50 && c <= 55 {
+        r = c - 24
+    } else {
+        r = -1
+    }
+    r
+}
+
+fn main() -> i64 {
+    // Input: 'JBSWY3DP' (8 chars)
+    let mut input[9]
+    input[0] = 74   // 'J'
+    input[1] = 66   // 'B'
+    input[2] = 83   // 'S'
+    input[3] = 87   // 'W'
+    input[4] = 89   // 'Y'
+    input[5] = 51   // '3'
+    input[6] = 68   // 'D'
+    input[7] = 80   // 'P'
+    input[8] = 0    // null terminator
+
+    // Decode each char to 5-bit value
+    let mut K[8]
+    let mut i = 0
+    for i < 8 {
+        let val = b32_decode_byte(input[i])
+        K[i] = val
+        i = i + 1
+    }
+
+    // 8 x 5-bit values -> 5 bytes (40 bits total)
+    // Pack into a 64-bit word, then extract bytes
+    let mut bits = 0
+    let mut t = 0
+    for t < 8 {
+        bits = bits << 5 | K[t]
+        t = t + 1
+    }
+
+    // Extract 5 bytes from the 40 bits
+    let mut out[5]
+    out[0] = bits >> 32 & 0xFF
+    out[1] = bits >> 24 & 0xFF
+    out[2] = bits >> 16 & 0xFF
+    out[3] = bits >> 8 & 0xFF
+    out[4] = bits & 0xFF
+
+    // Print the 5 decoded bytes
+    let mut j = 0
+    for j < 5 {
+        if j > 0 {
+            print(" ")
+        }
+        print_int(out[j])
+        j = j + 1
+    }
+    print("")
+
+    0
+}

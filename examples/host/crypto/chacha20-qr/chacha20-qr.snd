@@ -1,0 +1,36 @@
+// ChaCha20 quarter-round per RFC 8439 section 2.1
+// qr operates on 4 32-bit words a,b,c,d
+
+fn main() -> i64 {
+    let mut mask = 0xFFFFFFFF
+    let mut a: i64 = 0x11111111
+    let mut b: i64 = 0x01020304
+    let mut c: i64 = 0x9b8d6f43
+    let mut d: i64 = 0x01234567
+
+    // a += b; d ^= a; d = rotl(d,16);
+    a = (a + b) & mask
+    d = d ^ a
+    d = ((d << 16) | (d >> 16)) & mask
+
+    // c += d; b ^= c; b = rotl(b,12);
+    c = (c + d) & mask
+    b = b ^ c
+    b = ((b << 12) | (b >> 20)) & mask
+
+    // a += b; d ^= a; d = rotl(d,8);
+    a = (a + b) & mask
+    d = d ^ a
+    d = ((d << 8) | (d >> 24)) & mask
+
+    // c += d; b ^= c; b = rotl(b,7);
+    c = (c + d) & mask
+    b = b ^ c
+    b = ((b << 7) | (b >> 25)) & mask
+
+    print_int(a)
+    print_int(b)
+    print_int(c)
+    print_int(d)
+    0
+}

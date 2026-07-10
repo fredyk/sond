@@ -1,0 +1,32 @@
+fn main() -> i64 {
+    let key = 75
+    let mut i = 0
+
+    let p0: i64 = 'A'
+    let p1: i64 = 'T'
+    let p2: i64 = 'T'
+    let p3: i64 = 'A'
+    let p4: i64 = 'C'
+    let p5: i64 = 'K'
+
+    let r0 = p0 ^ key
+    let r1 = p1 ^ key
+    let r2 = p2 ^ key
+    let r3 = p3 ^ key
+    let r4 = p4 ^ key
+    let r5 = p5 ^ key
+
+    print_int(r0)
+    print(" ")
+    print_int(r1)
+    print(" ")
+    print_int(r2)
+    print(" ")
+    print_int(r3)
+    print(" ")
+    print_int(r4)
+    print(" ")
+    print_int(r5)
+
+    0
+}

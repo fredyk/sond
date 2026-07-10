@@ -1,0 +1,65 @@
+fn main() -> i64 {
+    // SSH Binary Packet Protocol framing (RFC 4253 §6)
+    // For payload "hello" (5 bytes):
+    //   block=8, pad>=4, (4+1+payload+pad)%8==0
+    //   4+1+5+pad = 10+pad, pad>=4, 10+pad % 8 == 0
+    //   pad=10 -> 10+10=20, 20%8=4 no... 20%8=4. Wait: 20/8=2.5. 20%8=4. No.
+    //   pad=6 -> 16, 16%8=0 yes but 16-10=6>=4 ok. packet_length=10. no.
+    // Let me recompute:
+    //   packet_length = padding_length + payload_len + padding  (RFC 4253)
+    //   total = 4 + packet_length
+    //   block = 8
+    //   padding_length = 1
+    //   (padding_length + payload_len + padding) % block == 0  => packet_length % 8 == 0
+    //   padding >= 4
+    //   For payload_len=5: padding_length + payload_len = 1 + 5 = 6
+    //   need 6 + padding = multiple of 8, padding >= 4
+    //   padding=2 -> 8, but 2<4 no. padding=10 -> 16, yes. pad=10.
+    //   packet_length = 6 + 10 = 16
+    //   total = 4 + 16 = 20
+
+    let mut a[20]
+    let mut outbuf[256]
+
+    let payload_len = 5
+    let padding_length = 1
+    let block = 8
+
+    // Compute padding: (padding_length + payload_len + padding) % block == 0, padding >= 4
+    let base = padding_length + payload_len
+    // find smallest padding >= 4 such that (base + padding) % block == 0
+    let mut padding = 4
+    for (base + padding) % block != 0 {
+        padding = padding + 1
+    }
+
+    let packet_length = base + padding
+    let total = 4 + packet_length
+
+    // packet_length in big-endian (4 bytes)
+    let mut p = packet_length
+    // be32: most significant byte first
+    let b0 = (p >> 24) & 0xFF
+    let b1 = (p >> 16) & 0xFF
+    let b2 = (p >> 8) & 0xFF
+    let b3 = p & 0xFF
+
+    // Write packet_length as big-endian to outbuf[0..4]
+    // Since this is a host task, we just need to verify by reading back
+    // We'll store the packet_length as be32 bytes, then read back
+
+    // Build the packet: [be32 packet_length][padding_length][payload][zero padding]
+    // For verification, read back packet_length from the be32-encoded bytes
+    let mut be_val = 0
+    be_val = b0 << 24 | b1 << 16 | b2 << 8 | b3
+
+    // Print: packet_length total padding_length
+    print_int(be_val)
+    print(" ")
+    print_int(total)
+    print(" ")
+    print_int(padding)
+    print("")
+
+    0
+}
