@@ -1,0 +1,74 @@
+// SSH KEXINIT builder, RFC 4253 section 7.1
+// Build: type(1) + cookie(16) + name-list-len(4) + name-list(27)
+// Total: 48 bytes
+
+fn main() -> i64 {
+    let mut outbuf[6]  // 48 bytes / 8 = 6 words
+
+    // SSH_MSG_KEXINIT = 20 at byte offset 0
+    poke8(outbuf + 0, 20)
+
+    // cookie at byte offsets 1..16, bytes 0..15
+    let mut i = 0
+    for i < 16 {
+        poke8(outbuf + 1 + i, i)
+        i = i + 1
+    }
+
+    // name-list length at byte offsets 17..20 (big-endian u32 = 27 = 0x1B)
+    poke8(outbuf + 17, 0)
+    poke8(outbuf + 18, 0)
+    poke8(outbuf + 19, 0)
+    poke8(outbuf + 20, 27)
+
+    // name-list string at byte offsets 21..47: "diffie-hellman-group14-sha1" (27 chars)
+    let mut str_i = 0
+    let mut c: i64 = 0
+
+    c = 'd';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'i';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'f';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'f';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'i';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'e';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = '-';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'h';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'e';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'l';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'l';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'm';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'a';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'n';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = '-';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'g';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'r';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'o';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'u';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'p';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = '-';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = '1';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = '4';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = '-';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 's';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'h';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = 'a';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+    c = '1';    poke8(outbuf + 21 + str_i, c); str_i = str_i + 1
+
+    // --- Read back and print ---
+    // msg type at byte offset 0
+    let msg_type = peek8(outbuf + 0)
+    print_int(msg_type)
+    print("\n")
+
+    // cookie byte at byte offset 5
+    let cookie_byte = peek8(outbuf + 5)
+    print_int(cookie_byte)
+    print("\n")
+
+    // name-list length (be32 at byte offsets 17..20)
+    let nl_len = (peek8(outbuf + 17) << 24) | (peek8(outbuf + 18) << 16) | (peek8(outbuf + 19) << 8) | peek8(outbuf + 20)
+    print_int(nl_len)
+    print("\n")
+
+    0
+}

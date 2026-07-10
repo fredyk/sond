@@ -1,0 +1,66 @@
+// Mini-OS kernel for Sond, all 5 stages
+
+fn efi_main() -> i64 {
+    // Stage 1: Boot banner
+    serial_print("=== SOND MINI-OS ===")
+    serial_print("boot: ok")
+
+    // Stage 2: Memory allocation
+    let mut heap = alloc(65536)
+    serial_print("mem: 64K heap")
+
+    // Stage 3: Cooperative scheduler, 6 ticks round-robin
+    // Each tick prints: "task " + task_id + newline
+    // Tasks 0, 1, 2 repeating
+    let mut tick = 0
+    let mut cur = 0
+    for tick < 6 {
+        cur = tick % 3
+        if cur == 0 {
+            serial_print("task 0")
+        } else if cur == 1 {
+            serial_print("task 1")
+        } else {
+            serial_print("task 2")
+        }
+        tick = tick + 1
+    }
+
+    // Stage 4: Network packet buffer
+    // Allocate 1500 bytes (standard Ethernet MTU)
+    let mut pkt = alloc(1500)
+
+    // Hardcode ethertype 0x0800 at offset 12 (be16)
+    poke8(pkt + 12, 8)
+    poke8(pkt + 13, 0)
+
+    // Hardcode IP src 0xC0A80101 at offset 26 (be32)
+    poke8(pkt + 26, 192)
+    poke8(pkt + 27, 168)
+    poke8(pkt + 28, 1)
+    poke8(pkt + 29, 1)
+
+    // Read ethertype back: reconstruct be16 from two bytes
+    let mut hi = peek8(pkt + 12)
+    let mut lo = peek8(pkt + 13)
+    let mut ethertype = hi << 8 | lo
+
+    // Check if ethertype is 0x0800
+    if ethertype == 0x0800 {
+        serial_print("net: ipv4")
+    }
+
+    // Read IP src back: reconstruct be32 from four bytes
+    let mut b0 = peek8(pkt + 26)
+    let mut b1 = peek8(pkt + 27)
+    let mut b2 = peek8(pkt + 28)
+    let mut b3 = peek8(pkt + 29)
+    let mut ip_src = b0 << 24 | b1 << 16 | b2 << 8 | b3
+
+    serial_int(ip_src)
+    serial_putc('\n')
+
+    // Stage 5: Idle and halt
+    serial_print("=== idle ===")
+    halt()
+}
