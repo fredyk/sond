@@ -1,0 +1,445 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Clean-room IPv4/UDP/DNS over virtio-net from RFCs 791/768/1035. Original work;
+// no third-party source copied.
+//
+// M2: Send a DNS query for example.com to QEMU's resolver (10.0.2.3:53)
+// over virtio-net and receive + print the DNS response A-record IP address.
+
+let PAGE = 4096
+let QSZ = 256
+
+fn pci_cfg_read(bus: i64, dev: i64, fn_num: i64, reg: i64) -> i64 {
+    let addr = 0x80000000 | (bus << 16) | (dev << 11) | (fn_num << 8) | ((reg & 0x3F) << 2)
+    outl(0xCF8, addr)
+    inl(0xCFC)
+}
+fn pci_cfg_write32(bus: i64, dev: i64, fn_num: i64, reg: i64, val: i64) {
+    let addr = 0x80000000 | (bus << 16) | (dev << 11) | (fn_num << 8) | ((reg & 0x3F) << 2)
+    outl(0xCF8, addr)
+    outl(0xCFC, val)
+}
+fn vio_w32(b: i64, o: i64, v: i64) { outl(b + o, v) }
+fn vio_w16(b: i64, o: i64, v: i64) { outw(b + o, v) }
+fn vio_w8(b: i64, o: i64, v: i64) { outb(b + o, v) }
+
+fn sp(ch: i64) { serial_putc(ch) }
+fn sp_nib(v: i64) {
+    if v < 10 { sp(48 + v) } else { sp(55 + v) }
+    0
+}
+fn sp_hex(v: i64) {
+    sp_nib((v >> 4) & 0xF)
+    sp_nib(v & 0xF)
+    0
+}
+fn sp_dec(v: i64) {
+    if v >= 10 { sp_dec(v / 10) }
+    sp(48 + v % 10)
+    0
+}
+fn sp_mac(a: i64) {
+    sp_hex(peek8(a)); sp(58)
+    sp_hex(peek8(a + 1)); sp(58)
+    sp_hex(peek8(a + 2)); sp(58)
+    sp_hex(peek8(a + 3)); sp(58)
+    sp_hex(peek8(a + 4)); sp(58)
+    sp_hex(peek8(a + 5))
+    0
+}
+
+let mut io_base = 0
+let mut rx_desc = 0
+let mut tx_desc = 0
+let mut tx_buf = 0
+
+fn vq_total() -> i64 {
+    let da = 16 * QSZ + 4 + 2 * QSZ
+    let a_da = (da + PAGE - 1) / PAGE * PAGE
+    let u = 4 + 8 * QSZ
+    let a_u = (u + PAGE - 1) / PAGE * PAGE
+    a_da + a_u
+}
+fn vq_alloc() -> i64 {
+    let raw = alloc(vq_total() + PAGE)
+    let aligned = (raw + PAGE - 1) / PAGE * PAGE
+    let mut z = 0
+    for z < vq_total() { poke8(aligned + z, 0); z = z + 1 }
+    aligned
+}
+fn post_rx(buf_addr: i64) {
+    let avail_off = 16 * QSZ
+    let idx = peek16(rx_desc + avail_off + 2) & (QSZ - 1)
+    poke64(rx_desc + idx * 16, buf_addr)
+    poke32(rx_desc + idx * 16 + 8, 1526)
+    poke16(rx_desc + idx * 16 + 12, 2)
+    poke16(rx_desc + avail_off + 4 + idx * 2, idx)
+    asm("mfence")
+    poke16(rx_desc + avail_off + 2, peek16(rx_desc + avail_off + 2) + 1)
+    vio_w16(io_base, 0x10, 0)
+}
+fn tx_send(buf: i64, len: i64) {
+    let avail_off = 16 * QSZ
+    let idx = peek16(tx_desc + avail_off + 2) & (QSZ - 1)
+    let mut i = 0
+    for i < len { poke8(tx_buf + i, peek8(buf + i)); i = i + 1 }
+    asm("mfence")
+    poke64(tx_desc + idx * 16, tx_buf)
+    poke32(tx_desc + idx * 16 + 8, len)
+    poke16(tx_desc + idx * 16 + 12, 0)
+    poke16(tx_desc + avail_off + 4 + idx * 2, idx)
+    asm("mfence")
+    poke16(tx_desc + avail_off + 2, peek16(tx_desc + avail_off + 2) + 1)
+    vio_w16(io_base, 0x10, 1)
+}
+
+// Drain all pending RX frames (discard them)
+fn rx_drain() {
+    let avail_off = 16 * QSZ
+    let used_off = rx_desc + (avail_off + 4 + QSZ * 2 + PAGE - 1) / PAGE * PAGE
+    let mut seen = peek16(used_off + 2)
+    let mut limit = 100
+    for limit > 0 {
+        let nu = peek16(used_off + 2)
+        if nu != seen {
+            let ei = (nu - 1) & (QSZ - 1)
+            let desc_id = peek16(used_off + 4 + ei * 8)
+            let buf_addr = peek64(rx_desc + desc_id * 16)
+            post_rx(buf_addr)
+            seen = nu
+        }
+        limit = limit - 1
+    }
+}
+
+fn efi_main() -> i64 {
+    sp(10)
+    serial_print("=== M2: IP+UDP+DNS over virtio-net ===")
+    sp(10)
+
+    // PCI scan
+    let mut found = 0
+    let mut bus = 0
+    for bus < 4 {
+        let mut dev = 0
+        for dev < 32 {
+            let v = pci_cfg_read(bus, dev, 0, 0)
+            if (v & 0xFFFF) == 0x1AF4 {
+                let d = (v >> 16) & 0xFFFF
+                if d == 0x1000 || d == 0x1041 || d == 0x0200 {
+                    serial_print("Found virtio-net")
+                    sp(10)
+                    found = 1
+                    let bar0 = pci_cfg_read(bus, dev, 0, 4)
+                    io_base = bar0 & ~3
+                    let cmd = pci_cfg_read(bus, dev, 0, 1)
+                    pci_cfg_write32(bus, dev, 0, 1, cmd | 5)
+                }
+            }
+            dev = dev + 1
+        }
+        bus = bus + 1
+    }
+    if not (found == 1) {
+        serial_print("FATAL: no virtio-net")
+        sp(10)
+        halt()
+    }
+
+    // Legacy virtio init
+    vio_w8(io_base, 0x12, 0)
+    vio_w8(io_base, 0x12, 1)
+    vio_w8(io_base, 0x12, 3)
+    vio_w32(io_base, 0x04, 0)
+
+    // RX queue
+    vio_w16(io_base, 0x0E, 0)
+    rx_desc = vq_alloc()
+    vio_w32(io_base, 0x08, rx_desc / PAGE)
+
+    // TX queue
+    vio_w16(io_base, 0x0E, 1)
+    tx_desc = vq_alloc()
+    vio_w32(io_base, 0x08, tx_desc / PAGE)
+
+    vio_w8(io_base, 0x12, 4)
+
+    // TX buffer
+    tx_buf = alloc(1526)
+    let mut z = 0
+    for z < 1526 { poke8(tx_buf + z, 0); z = z + 1 }
+
+    // Post 8 RX buffers
+    let rxb0 = alloc(1526)
+    let rxb1 = alloc(1526)
+    let rxb2 = alloc(1526)
+    let rxb3 = alloc(1526)
+    let rxb4 = alloc(1526)
+    let rxb5 = alloc(1526)
+    let rxb6 = alloc(1526)
+    let rxb7 = alloc(1526)
+    z = 0
+    for z < 1526 { poke8(rxb0 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb1 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb2 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb3 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb4 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb5 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb6 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb7 + z, 0); z = z + 1 }
+    post_rx(rxb0)
+    post_rx(rxb1)
+    post_rx(rxb2)
+    post_rx(rxb3)
+    post_rx(rxb4)
+    post_rx(rxb5)
+    post_rx(rxb6)
+    post_rx(rxb7)
+
+    // --- Phase 1: ARP-resolve 10.0.2.3 ---
+    serial_print("ARP-resolving 10.0.2.3...")
+    sp(10)
+
+    let arp_buf = alloc(52)
+    let mut i = 0
+    for i < 52 { poke8(arp_buf + i, 0); i = i + 1 }
+    let eth = arp_buf + 10
+    poke32(eth, 0xFFFFFFFF)
+    poke16(eth + 4, 0xFFFF)
+    poke16(eth + 6, 0x5452)
+    poke32(eth + 8, 0x56341200)
+    poke16(eth + 12, 0x0608)
+    let p = eth + 14
+    poke16(p, 0x0100)
+    poke16(p + 2, 0x0008)
+    poke8(p + 4, 6)
+    poke8(p + 5, 4)
+    poke16(p + 6, 0x0100)
+    poke16(p + 8, 0x5452)
+    poke32(p + 10, 0x56341200)
+    poke32(p + 14, 0x0F02000A)
+    poke32(p + 18, 0)
+    poke16(p + 22, 0)
+    poke32(p + 24, 0x0302000A)
+
+    tx_send(arp_buf, 52)
+
+    // Poll for ARP reply
+    let avail_off = 16 * QSZ
+    let used_off = rx_desc + (avail_off + 4 + QSZ * 2 + PAGE - 1) / PAGE * PAGE
+    let mut seen = peek16(used_off + 2)
+    let mut dns_mac = 0
+    let mut mac_ok = 0
+    let mut t = 300000000
+    let mut arp_cnt = 0
+
+    for t > 0 {
+        let nu = peek16(used_off + 2)
+        if nu != seen {
+            let ei = (nu - 1) & (QSZ - 1)
+            let desc_id = peek16(used_off + 4 + ei * 8)
+            let wlen = peek32(used_off + 4 + ei * 8 + 4)
+            let buf_addr = peek64(rx_desc + desc_id * 16)
+            let frame = buf_addr + 10
+            let ethtype = (peek8(frame + 12) << 8) | peek8(frame + 13)
+            if ethtype == 0x0806 {
+                let arp_op = (peek8(frame + 20) << 8) | peek8(frame + 21)
+                if arp_op == 2 {
+                    serial_print("MAC=")
+                    sp_mac(frame + 22)
+                    sp(10)
+                    dns_mac = (peek8(frame + 22) << 40) | (peek8(frame + 23) << 32) | (peek8(frame + 24) << 24) | (peek8(frame + 25) << 16) | (peek8(frame + 26) << 8) | peek8(frame + 27)
+                    mac_ok = 1
+                    t = 0
+                }
+            }
+            post_rx(buf_addr)
+            seen = nu
+        }
+        arp_cnt = arp_cnt + 1
+        if arp_cnt == 50000000 {
+            tx_send(arp_buf, 52)
+            arp_cnt = 0
+        }
+        t = t - 1
+    }
+    if not (mac_ok == 1) {
+        serial_print("ARP TIMEOUT")
+        sp(10)
+        halt()
+    }
+
+    // --- Phase 2: Send DNS query for example.com ---
+    // DNS query: 12 hdr + 13 QNAME + 2 QTYPE + 2 QCLASS = 29 bytes
+    // UDP: 8 + 29 = 37 bytes;  IP: 20 + 37 = 57 bytes
+    serial_print("Sending DNS query for example.com ...")
+    sp(10)
+
+    let pkt = alloc(90)
+    i = 0
+    for i < 90 { poke8(pkt + i, 0); i = i + 1 }
+
+    // Ethernet header at pkt+10
+    let e = pkt + 10
+    // dst MAC
+    poke8(e + 0, (dns_mac >> 40) & 0xFF)
+    poke8(e + 1, (dns_mac >> 32) & 0xFF)
+    poke8(e + 2, (dns_mac >> 24) & 0xFF)
+    poke8(e + 3, (dns_mac >> 16) & 0xFF)
+    poke8(e + 4, (dns_mac >> 8) & 0xFF)
+    poke8(e + 5, dns_mac & 0xFF)
+    // src MAC 52:54:00:12:34:56
+    poke8(e + 6, 0x52); poke8(e + 7, 0x54)
+    poke8(e + 8, 0x00); poke8(e + 9, 0x12)
+    poke8(e + 10, 0x34); poke8(e + 11, 0x56)
+    // EtherType = IPv4
+    poke8(e + 12, 0x08); poke8(e + 13, 0x00)
+
+    // IPv4 header at e+14
+    let ip = e + 14
+    poke8(ip + 0, 0x45)
+    poke8(ip + 2, 0x00); poke8(ip + 3, 0x39)  // total=57
+    poke8(ip + 4, 0xAB); poke8(ip + 5, 0xCD)
+    poke8(ip + 6, 0x40); poke8(ip + 7, 0x00)
+    poke8(ip + 8, 64)    // TTL
+    poke8(ip + 9, 17)    // UDP
+    // src IP 10.0.2.15
+    poke8(ip + 12, 0x0A); poke8(ip + 13, 0x00)
+    poke8(ip + 14, 0x02); poke8(ip + 15, 0x0F)
+    // dst IP 10.0.2.3
+    poke8(ip + 16, 0x0A); poke8(ip + 17, 0x00)
+    poke8(ip + 18, 0x02); poke8(ip + 19, 0x03)
+    // IPv4 checksum
+    let mut sum = 0
+    i = 0
+    for i < 20 {
+        sum = sum + ((peek8(ip + i) << 8) | peek8(ip + i + 1))
+        i = i + 2
+    }
+    sum = (sum & 0xFFFF) + (sum >> 16)
+    sum = (sum & 0xFFFF) + (sum >> 16)
+    let csum = ~sum & 0xFFFF
+    poke8(ip + 10, (csum >> 8) & 0xFF)
+    poke8(ip + 11, csum & 0xFF)
+
+    // UDP header at ip+20
+    let udp = ip + 20
+    poke8(udp + 0, 0x30); poke8(udp + 1, 0x39)  // src port 12345
+    poke8(udp + 2, 0x00); poke8(udp + 3, 0x35)  // dst port 53
+    poke8(udp + 4, 0x00); poke8(udp + 5, 0x25)  // UDP len=37
+    poke8(udp + 6, 0x00); poke8(udp + 7, 0x00)  // checksum=0 (skip)
+
+    // DNS query at udp+8
+    let dns = udp + 8
+    poke8(dns + 0, 0xD2); poke8(dns + 1, 0x07)  // ID
+    poke8(dns + 2, 0x01); poke8(dns + 3, 0x00)  // flags RD=1
+    poke8(dns + 4, 0x00); poke8(dns + 5, 0x01)  // QDCOUNT=1
+    poke8(dns + 6, 0x00); poke8(dns + 7, 0x00)  // ANCOUNT=0
+    poke8(dns + 8, 0x00); poke8(dns + 9, 0x00)  // NSCOUNT=0
+    poke8(dns + 10, 0x00); poke8(dns + 11, 0x00) // ARCOUNT=0
+    // QNAME: example.com
+    poke8(dns + 12, 7)
+    poke8(dns + 13, 'e'); poke8(dns + 14, 'x'); poke8(dns + 15, 'a')
+    poke8(dns + 16, 'm'); poke8(dns + 17, 'p'); poke8(dns + 18, 'l')
+    poke8(dns + 19, 'e')
+    poke8(dns + 20, 3)
+    poke8(dns + 21, 'c'); poke8(dns + 22, 'o'); poke8(dns + 23, 'm')
+    poke8(dns + 24, 0)
+    poke8(dns + 25, 0x00); poke8(dns + 26, 0x01) // QTYPE=A
+    poke8(dns + 27, 0x00); poke8(dns + 28, 0x01) // QCLASS=IN
+
+    tx_send(pkt, 81)
+    serial_print("Query sent, waiting...")
+    sp(10)
+
+    // --- Phase 3: Poll for DNS response ---
+    seen = peek16(used_off + 2)
+    t = 300000000
+    let mut got_dns = 0
+    arp_cnt = 0
+
+    for t > 0 {
+        let nu = peek16(used_off + 2)
+        if nu != seen {
+            let ei = (nu - 1) & (QSZ - 1)
+            let desc_id = peek16(used_off + 4 + ei * 8)
+            let wlen = peek32(used_off + 4 + ei * 8 + 4)
+            let buf_addr = peek64(rx_desc + desc_id * 16)
+            let frame = buf_addr + 10
+            let ethtype = (peek8(frame + 12) << 8) | peek8(frame + 13)
+
+            if ethtype == 0x0800 {
+                let ihl = peek8(frame + 14) & 0x0F
+                let proto = peek8(frame + 23)
+                if proto == 17 {
+                    let dns_off = 14 + ihl * 4 + 8
+
+                    serial_print("DNS response received")
+                    sp(10)
+
+                    // Source IP
+                    serial_print("from ")
+                    sp_dec(peek8(frame + 26))
+                    sp(46)
+                    sp_dec(peek8(frame + 27))
+                    sp(46)
+                    sp_dec(peek8(frame + 28))
+                    sp(46)
+                    sp_dec(peek8(frame + 29))
+                    sp(10)
+
+                    // Answer count
+                    let ancount = (peek8(frame + dns_off + 6) << 8) | peek8(frame + dns_off + 7)
+                    serial_print("Answers: ")
+                    sp_dec(ancount)
+                    sp(10)
+
+                    if ancount > 0 {
+                        let ans = dns_off + 29
+                        let rtype = (peek8(frame + ans + 2) << 8) | peek8(frame + ans + 3)
+                        if rtype == 1 {
+                            serial_print("A record: ")
+                            sp_dec(peek8(frame + ans + 12))
+                            sp(46)
+                            sp_dec(peek8(frame + ans + 13))
+                            sp(46)
+                            sp_dec(peek8(frame + ans + 14))
+                            sp(46)
+                            sp_dec(peek8(frame + ans + 15))
+                            sp(10)
+                        }
+                        got_dns = 1
+                    }
+                    t = 0
+                }
+            }
+
+            post_rx(buf_addr)
+            seen = nu
+        }
+
+        arp_cnt = arp_cnt + 1
+        if arp_cnt == 50000000 {
+            tx_send(arp_buf, 52)
+            arp_cnt = 0
+        }
+        t = t - 1
+    }
+
+    if not (got_dns == 1) {
+        serial_print("TIMEOUT")
+        sp(10)
+    }
+
+    serial_print("=== M2 DONE ===")
+    sp(10)
+    halt()
+}
