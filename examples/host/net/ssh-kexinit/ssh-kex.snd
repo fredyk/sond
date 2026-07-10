@@ -1,0 +1,327 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Clean-room SSH KEXINIT build/parse from RFC 4253/4251. Original work; no
+// third-party source copied.
+
+fn write_u32be(buf: i64, pos: i64, val: i64) -> i64 {
+    poke8(buf + pos, (val >> 24) & 0xFF)
+    poke8(buf + pos + 1, (val >> 16) & 0xFF)
+    poke8(buf + pos + 2, (val >> 8) & 0xFF)
+    poke8(buf + pos + 3, val & 0xFF)
+    pos + 4
+}
+
+fn read_u32be(buf: i64, pos: i64) -> i64 {
+    (peek8(buf + pos) << 24) | (peek8(buf + pos + 1) << 16) | (peek8(buf + pos + 2) << 8) | peek8(buf + pos + 3)
+}
+
+fn print_buf(buf: i64, offset: i64, n: i64) -> i64 {
+    let mut i = 0
+    for i < n {
+        print_char(peek8(buf + offset + i))
+        i = i + 1
+    }
+    0
+}
+
+fn build_kexinit(buf: i64) -> i64 {
+    let mut pos = 0
+
+    // SSH_MSG_KEXINIT = 20
+    poke8(buf, 20)
+    pos = 1
+
+    // 16-byte cookie (fixed demo bytes)
+    poke8(buf + 1, 0xDE)
+    poke8(buf + 2, 0xAD)
+    poke8(buf + 3, 0xBE)
+    poke8(buf + 4, 0xEF)
+    poke8(buf + 5, 0xCA)
+    poke8(buf + 6, 0xFE)
+    poke8(buf + 7, 0xBA)
+    poke8(buf + 8, 0xBE)
+    poke8(buf + 9, 0x01)
+    poke8(buf + 10, 0x02)
+    poke8(buf + 11, 0x03)
+    poke8(buf + 12, 0x04)
+    poke8(buf + 13, 0x05)
+    poke8(buf + 14, 0x06)
+    poke8(buf + 15, 0x07)
+    poke8(buf + 16, 0x08)
+    pos = 17
+
+    // kex_algorithms = "curve25519-sha256" (17 bytes)
+    pos = write_u32be(buf, pos, 17)
+    poke8(buf + pos, 99)
+    poke8(buf + pos + 1, 117)
+    poke8(buf + pos + 2, 114)
+    poke8(buf + pos + 3, 118)
+    poke8(buf + pos + 4, 101)
+    poke8(buf + pos + 5, 50)
+    poke8(buf + pos + 6, 53)
+    poke8(buf + pos + 7, 53)
+    poke8(buf + pos + 8, 49)
+    poke8(buf + pos + 9, 57)
+    poke8(buf + pos + 10, 45)
+    poke8(buf + pos + 11, 115)
+    poke8(buf + pos + 12, 104)
+    poke8(buf + pos + 13, 97)
+    poke8(buf + pos + 14, 50)
+    poke8(buf + pos + 15, 53)
+    poke8(buf + pos + 16, 54)
+    pos = pos + 17
+
+    // server_host_key_algorithms = "ssh-ed25519" (11 bytes)
+    pos = write_u32be(buf, pos, 11)
+    poke8(buf + pos, 115)
+    poke8(buf + pos + 1, 115)
+    poke8(buf + pos + 2, 104)
+    poke8(buf + pos + 3, 45)
+    poke8(buf + pos + 4, 101)
+    poke8(buf + pos + 5, 100)
+    poke8(buf + pos + 6, 50)
+    poke8(buf + pos + 7, 53)
+    poke8(buf + pos + 8, 53)
+    poke8(buf + pos + 9, 49)
+    poke8(buf + pos + 10, 57)
+    pos = pos + 11
+
+    // encryption_algorithms_c2s = "chacha20-poly1305@openssh.com" (29 bytes)
+    pos = write_u32be(buf, pos, 29)
+    poke8(buf + pos, 99)
+    poke8(buf + pos + 1, 104)
+    poke8(buf + pos + 2, 97)
+    poke8(buf + pos + 3, 99)
+    poke8(buf + pos + 4, 104)
+    poke8(buf + pos + 5, 97)
+    poke8(buf + pos + 6, 50)
+    poke8(buf + pos + 7, 48)
+    poke8(buf + pos + 8, 45)
+    poke8(buf + pos + 9, 112)
+    poke8(buf + pos + 10, 111)
+    poke8(buf + pos + 11, 108)
+    poke8(buf + pos + 12, 121)
+    poke8(buf + pos + 13, 49)
+    poke8(buf + pos + 14, 51)
+    poke8(buf + pos + 15, 48)
+    poke8(buf + pos + 16, 53)
+    poke8(buf + pos + 17, 64)
+    poke8(buf + pos + 18, 111)
+    poke8(buf + pos + 19, 112)
+    poke8(buf + pos + 20, 101)
+    poke8(buf + pos + 21, 110)
+    poke8(buf + pos + 22, 115)
+    poke8(buf + pos + 23, 115)
+    poke8(buf + pos + 24, 104)
+    poke8(buf + pos + 25, 46)
+    poke8(buf + pos + 26, 99)
+    poke8(buf + pos + 27, 111)
+    poke8(buf + pos + 28, 109)
+    pos = pos + 29
+
+    // encryption_algorithms_s2c = "chacha20-poly1305@openssh.com" (29 bytes)
+    pos = write_u32be(buf, pos, 29)
+    poke8(buf + pos, 99)
+    poke8(buf + pos + 1, 104)
+    poke8(buf + pos + 2, 97)
+    poke8(buf + pos + 3, 99)
+    poke8(buf + pos + 4, 104)
+    poke8(buf + pos + 5, 97)
+    poke8(buf + pos + 6, 50)
+    poke8(buf + pos + 7, 48)
+    poke8(buf + pos + 8, 45)
+    poke8(buf + pos + 9, 112)
+    poke8(buf + pos + 10, 111)
+    poke8(buf + pos + 11, 108)
+    poke8(buf + pos + 12, 121)
+    poke8(buf + pos + 13, 49)
+    poke8(buf + pos + 14, 51)
+    poke8(buf + pos + 15, 48)
+    poke8(buf + pos + 16, 53)
+    poke8(buf + pos + 17, 64)
+    poke8(buf + pos + 18, 111)
+    poke8(buf + pos + 19, 112)
+    poke8(buf + pos + 20, 101)
+    poke8(buf + pos + 21, 110)
+    poke8(buf + pos + 22, 115)
+    poke8(buf + pos + 23, 115)
+    poke8(buf + pos + 24, 104)
+    poke8(buf + pos + 25, 46)
+    poke8(buf + pos + 26, 99)
+    poke8(buf + pos + 27, 111)
+    poke8(buf + pos + 28, 109)
+    pos = pos + 29
+
+    // mac_algorithms_c2s = "hmac-sha2-256" (13 bytes)
+    pos = write_u32be(buf, pos, 13)
+    poke8(buf + pos, 104)
+    poke8(buf + pos + 1, 109)
+    poke8(buf + pos + 2, 97)
+    poke8(buf + pos + 3, 99)
+    poke8(buf + pos + 4, 45)
+    poke8(buf + pos + 5, 115)
+    poke8(buf + pos + 6, 104)
+    poke8(buf + pos + 7, 97)
+    poke8(buf + pos + 8, 50)
+    poke8(buf + pos + 9, 45)
+    poke8(buf + pos + 10, 50)
+    poke8(buf + pos + 11, 53)
+    poke8(buf + pos + 12, 54)
+    pos = pos + 13
+
+    // mac_algorithms_s2c = "hmac-sha2-256" (13 bytes)
+    pos = write_u32be(buf, pos, 13)
+    poke8(buf + pos, 104)
+    poke8(buf + pos + 1, 109)
+    poke8(buf + pos + 2, 97)
+    poke8(buf + pos + 3, 99)
+    poke8(buf + pos + 4, 45)
+    poke8(buf + pos + 5, 115)
+    poke8(buf + pos + 6, 104)
+    poke8(buf + pos + 7, 97)
+    poke8(buf + pos + 8, 50)
+    poke8(buf + pos + 9, 45)
+    poke8(buf + pos + 10, 50)
+    poke8(buf + pos + 11, 53)
+    poke8(buf + pos + 12, 54)
+    pos = pos + 13
+
+    // compression_algorithms_c2s = "none" (4 bytes)
+    pos = write_u32be(buf, pos, 4)
+    poke8(buf + pos, 110)
+    poke8(buf + pos + 1, 111)
+    poke8(buf + pos + 2, 110)
+    poke8(buf + pos + 3, 101)
+    pos = pos + 4
+
+    // compression_algorithms_s2c = "none" (4 bytes)
+    pos = write_u32be(buf, pos, 4)
+    poke8(buf + pos, 110)
+    poke8(buf + pos + 1, 111)
+    poke8(buf + pos + 2, 110)
+    poke8(buf + pos + 3, 101)
+    pos = pos + 4
+
+    // languages_c2s = empty
+    pos = write_u32be(buf, pos, 0)
+
+    // languages_s2c = empty
+    pos = write_u32be(buf, pos, 0)
+
+    // first_kex_packet_follows = false
+    poke8(buf + pos, 0)
+    pos = pos + 1
+
+    // reserved uint32 = 0
+    pos = write_u32be(buf, pos, 0)
+
+    pos
+}
+
+fn parse_kexinit(buf: i64) -> i64 {
+    let mut pos = 0
+
+    let msg = peek8(buf)
+    pos = 17
+
+    let len1 = read_u32be(buf, pos)
+    pos = pos + 4
+    print("  kex_algorithms:")
+    print_buf(buf, pos, len1)
+    print("\n")
+    pos = pos + len1
+
+    let len2 = read_u32be(buf, pos)
+    pos = pos + 4
+    print("  server_host_key_algorithms:")
+    print_buf(buf, pos, len2)
+    print("\n")
+    pos = pos + len2
+
+    let len3 = read_u32be(buf, pos)
+    pos = pos + 4
+    print("  encryption_algorithms_c2s:")
+    print_buf(buf, pos, len3)
+    print("\n")
+    pos = pos + len3
+
+    let len4 = read_u32be(buf, pos)
+    pos = pos + 4
+    print("  encryption_algorithms_s2c:")
+    print_buf(buf, pos, len4)
+    print("\n")
+    pos = pos + len4
+
+    let len5 = read_u32be(buf, pos)
+    pos = pos + 4
+    print("  mac_algorithms_c2s:")
+    print_buf(buf, pos, len5)
+    print("\n")
+    pos = pos + len5
+
+    let len6 = read_u32be(buf, pos)
+    pos = pos + 4
+    print("  mac_algorithms_s2c:")
+    print_buf(buf, pos, len6)
+    print("\n")
+    pos = pos + len6
+
+    let len7 = read_u32be(buf, pos)
+    pos = pos + 4
+    print("  compression_c2s:")
+    print_buf(buf, pos, len7)
+    print("\n")
+    pos = pos + len7
+
+    let len8 = read_u32be(buf, pos)
+    pos = pos + 4
+    print("  compression_s2c:")
+    print_buf(buf, pos, len8)
+    print("\n")
+    pos = pos + len8
+
+    let len9 = read_u32be(buf, pos)
+    pos = pos + 4 + len9
+
+    let len10 = read_u32be(buf, pos)
+    pos = pos + 4 + len10
+
+    pos = pos + 1
+    pos = pos + 4
+
+    msg
+}
+
+fn main() -> i64 {
+    let mut buf[512] = [0]
+
+    print("=== SSH Transport: KEXINIT Build & Parse (RFC 4253) ===\n")
+    print("\n")
+
+    let pkt_len = build_kexinit(buf)
+
+    print("KEXINIT msg=20\n")
+    print("\n")
+
+    let msg = parse_kexinit(buf)
+
+    print("\n")
+    print("Parsed msg number: ")
+    print_int(msg)
+    print("\n\n")
+
+    let orig_kex_len = read_u32be(buf, 17)
+    print("Round-trip kex length field: ")
+    print_int(orig_kex_len)
+    print("\n\n")
+
+    print("--- Negotiated algorithms ---\n")
+    print("kex=curve25519-sha256\n")
+    print("cipher=chacha20-poly1305@openssh.com\n")
+    print("mac=hmac-sha2-256\n")
+    print("\n")
+
+    print("=== All done ===\n")
+    0
+}

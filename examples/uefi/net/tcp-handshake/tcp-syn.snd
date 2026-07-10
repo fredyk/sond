@@ -1,0 +1,296 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Clean-room IPv4/TCP handshake over virtio-net from RFCs 791/793/826. Original
+// work; no third-party source copied.
+
+include "x86_64/drivers/net/virtio-net.snd"
+
+// Our identity
+let MY_IP = 0x0A00020F
+let mut iss = 0x10000000
+
+fn peek16be(addr) -> i64 {
+    (peek8(addr) << 8) | peek8(addr + 1)
+}
+
+fn poke16be(addr, val) {
+    poke8(addr, (val >> 8) & 0xFF)
+    poke8(addr + 1, val & 0xFF)
+}
+
+fn poke32be(addr, val) {
+    poke8(addr, (val >> 24) & 0xFF)
+    poke8(addr + 1, (val >> 16) & 0xFF)
+    poke8(addr + 2, (val >> 8) & 0xFF)
+    poke8(addr + 3, val & 0xFF)
+}
+
+fn checksum16(addr, words) -> i64 {
+    let mut sum = 0
+    let mut i = 0
+    for i < words {
+        sum = sum + peek16be(addr + i * 2)
+        i = i + 1
+    }
+    sum = (sum & 0xFFFF) + (sum >> 16)
+    sum = (sum & 0xFFFF) + (sum >> 16)
+    (~sum) & 0xFFFF
+}
+
+fn tcp_checksum(iphdr, tcphdr, tcp_len) -> i64 {
+    let mut sum = 0
+    sum = sum + peek16be(iphdr + 12)
+    sum = sum + peek16be(iphdr + 14)
+    sum = sum + peek16be(iphdr + 16)
+    sum = sum + peek16be(iphdr + 18)
+    sum = sum + 0x0006
+    sum = sum + tcp_len
+    let mut i = 0
+    for i < tcp_len / 2 {
+        sum = sum + peek16be(tcphdr + i * 2)
+        i = i + 1
+    }
+    sum = (sum & 0xFFFF) + (sum >> 16)
+    sum = (sum & 0xFFFF) + (sum >> 16)
+    let mut ck = (~sum) & 0xFFFF
+    if ck == 0 { ck = 0xFFFF }
+    ck
+}
+
+fn arp_gratuitous(buf) {
+    let mut i = 0
+    for i < 6 {
+        poke8(buf + i, 0xFF)
+        i = i + 1
+    }
+    poke8(buf + 6, 0x52)
+    poke8(buf + 7, 0x54)
+    poke8(buf + 8, 0x00)
+    poke8(buf + 9, 0x12)
+    poke8(buf + 10, 0x34)
+    poke8(buf + 11, 0x56)
+    poke8(buf + 12, 0x08)
+    poke8(buf + 13, 0x06)
+    poke8(buf + 14, 0x00)
+    poke8(buf + 15, 0x01)
+    poke8(buf + 16, 0x08)
+    poke8(buf + 17, 0x00)
+    poke8(buf + 18, 6)
+    poke8(buf + 19, 4)
+    poke8(buf + 20, 0x00)
+    poke8(buf + 21, 0x02)
+    poke8(buf + 22, 0x52)
+    poke8(buf + 23, 0x54)
+    poke8(buf + 24, 0x00)
+    poke8(buf + 25, 0x12)
+    poke8(buf + 26, 0x34)
+    poke8(buf + 27, 0x56)
+    poke8(buf + 28, 0x0A)
+    poke8(buf + 29, 0x00)
+    poke8(buf + 30, 0x02)
+    poke8(buf + 31, 0x0F)
+    poke8(buf + 32, 0xFF)
+    poke8(buf + 33, 0xFF)
+    poke8(buf + 34, 0xFF)
+    poke8(buf + 35, 0xFF)
+    poke8(buf + 36, 0xFF)
+    poke8(buf + 37, 0xFF)
+    poke8(buf + 38, 0x0A)
+    poke8(buf + 39, 0x00)
+    poke8(buf + 40, 0x02)
+    poke8(buf + 41, 0x0F)
+    tx_send(buf, 42)
+    serial_print("Gratuitous ARP sent\n")
+}
+
+fn arp_reply(buf) {
+    if peek8(buf + 12) != 0x08 { return }
+    if peek8(buf + 13) != 0x06 { return }
+    if peek8(buf + 20) != 0x00 { return }
+    if peek8(buf + 21) != 0x01 { return }
+    if peek8(buf + 38) != 0x0A { return }
+    if peek8(buf + 39) != 0x00 { return }
+    if peek8(buf + 40) != 0x02 { return }
+    if peek8(buf + 41) != 0x0F { return }
+
+    let cm0 = peek8(buf + 6)
+    let cm1 = peek8(buf + 7)
+    let cm2 = peek8(buf + 8)
+    let cm3 = peek8(buf + 9)
+    let cm4 = peek8(buf + 10)
+    let cm5 = peek8(buf + 11)
+    let ci0 = peek8(buf + 28)
+    let ci1 = peek8(buf + 29)
+    let ci2 = peek8(buf + 30)
+    let ci3 = peek8(buf + 31)
+
+    poke8(buf, cm0)
+    poke8(buf + 1, cm1)
+    poke8(buf + 2, cm2)
+    poke8(buf + 3, cm3)
+    poke8(buf + 4, cm4)
+    poke8(buf + 5, cm5)
+    poke8(buf + 6, 0x52)
+    poke8(buf + 7, 0x54)
+    poke8(buf + 8, 0x00)
+    poke8(buf + 9, 0x12)
+    poke8(buf + 10, 0x34)
+    poke8(buf + 11, 0x56)
+    poke8(buf + 20, 0x00)
+    poke8(buf + 21, 0x02)
+    poke8(buf + 22, 0x52)
+    poke8(buf + 23, 0x54)
+    poke8(buf + 24, 0x00)
+    poke8(buf + 25, 0x12)
+    poke8(buf + 26, 0x34)
+    poke8(buf + 27, 0x56)
+    poke8(buf + 28, 0x0A)
+    poke8(buf + 29, 0x00)
+    poke8(buf + 30, 0x02)
+    poke8(buf + 31, 0x0F)
+    poke8(buf + 32, cm0)
+    poke8(buf + 33, cm1)
+    poke8(buf + 34, cm2)
+    poke8(buf + 35, cm3)
+    poke8(buf + 36, cm4)
+    poke8(buf + 37, cm5)
+    poke8(buf + 38, ci0)
+    poke8(buf + 39, ci1)
+    poke8(buf + 40, ci2)
+    poke8(buf + 41, ci3)
+
+    tx_send(buf, 42)
+    serial_print("ARP reply sent\n")
+}
+
+fn send_synack(txbuf, rxbuf) {
+    let cm0 = peek8(rxbuf + 6)
+    let cm1 = peek8(rxbuf + 7)
+    let cm2 = peek8(rxbuf + 8)
+    let cm3 = peek8(rxbuf + 9)
+    let cm4 = peek8(rxbuf + 10)
+    let cm5 = peek8(rxbuf + 11)
+    let ci0 = peek8(rxbuf + 26)
+    let ci1 = peek8(rxbuf + 27)
+    let ci2 = peek8(rxbuf + 28)
+    let ci3 = peek8(rxbuf + 29)
+    let cp0 = peek8(rxbuf + 34)
+    let cp1 = peek8(rxbuf + 35)
+    let cs0 = peek8(rxbuf + 38)
+    let cs1 = peek8(rxbuf + 39)
+    let cs2 = peek8(rxbuf + 40)
+    let cs3 = peek8(rxbuf + 41)
+
+    let client_seq = (cs0 << 24) | (cs1 << 16) | (cs2 << 8) | cs3
+    let ack = client_seq + 1
+
+    // Ethernet header
+    poke8(txbuf, cm0)
+    poke8(txbuf + 1, cm1)
+    poke8(txbuf + 2, cm2)
+    poke8(txbuf + 3, cm3)
+    poke8(txbuf + 4, cm4)
+    poke8(txbuf + 5, cm5)
+    poke8(txbuf + 6, 0x52)
+    poke8(txbuf + 7, 0x54)
+    poke8(txbuf + 8, 0x00)
+    poke8(txbuf + 9, 0x12)
+    poke8(txbuf + 10, 0x34)
+    poke8(txbuf + 11, 0x56)
+    poke8(txbuf + 12, 0x08)
+    poke8(txbuf + 13, 0x00)
+
+    // IPv4 header
+    let ip = txbuf + 14
+    poke8(ip, 0x45)
+    poke8(ip + 1, 0)
+    poke16be(ip + 2, 40)
+    poke16be(ip + 4, 0)
+    poke16be(ip + 6, 0)
+    poke8(ip + 8, 64)
+    poke8(ip + 9, 6)
+    poke16be(ip + 10, 0)
+    poke8(ip + 12, 0x0A)
+    poke8(ip + 13, 0x00)
+    poke8(ip + 14, 0x02)
+    poke8(ip + 15, 0x0F)
+    poke8(ip + 16, ci0)
+    poke8(ip + 17, ci1)
+    poke8(ip + 18, ci2)
+    poke8(ip + 19, ci3)
+
+    // TCP header
+    let tcp = txbuf + 34
+    poke8(tcp, 0x00)
+    poke8(tcp + 1, 22)
+    poke8(tcp + 2, cp0)
+    poke8(tcp + 3, cp1)
+    poke32be(tcp + 4, iss)
+    poke32be(tcp + 8, ack)
+    poke8(tcp + 12, 0x50)
+    poke8(tcp + 13, 0x12)
+    poke8(tcp + 14, 0xFF)
+    poke8(tcp + 15, 0xFF)
+    poke8(tcp + 16, 0)
+    poke8(tcp + 17, 0)
+    poke8(tcp + 18, 0)
+    poke8(tcp + 19, 0)
+
+    let ip_cksum = checksum16(ip, 10)
+    poke16be(ip + 10, ip_cksum)
+
+    let tcp_cksum = tcp_checksum(ip, tcp, 20)
+    poke16be(tcp + 16, tcp_cksum)
+
+    tx_send(txbuf, 54)
+    serial_print("SYN-ACK sent\n")
+}
+
+fn efi_main() -> i64 {
+    if vnet_init() == 0 {
+        serial_print("vnet_init failed\n")
+        halt()
+    }
+
+    serial_print("TCP SYN server starting on port 22\n")
+
+    let txbuf = alloc(1514)
+    let rxbuf = alloc(1514)
+
+    arp_gratuitous(txbuf)
+
+    let mut established = 0
+
+    for {
+        let n = rx_poll(rxbuf)
+        if n > 0 {
+            let et0 = peek8(rxbuf + 12)
+            let et1 = peek8(rxbuf + 13)
+
+            if et0 == 0x08 && et1 == 0x06 {
+                arp_reply(rxbuf)
+            }
+
+            if et0 == 0x08 && et1 == 0x00 {
+                if peek8(rxbuf + 23) == 6 {
+                    let dphi = peek8(rxbuf + 36)
+                    let dplo = peek8(rxbuf + 37)
+                    if dphi == 0x00 && dplo == 22 {
+                        let flags = peek8(rxbuf + 47)
+                        if flags & 0x02 == 0x02 {
+                            serial_print("SYN received\n")
+                            send_synack(txbuf, rxbuf)
+                        }
+                        if flags & 0x10 == 0x10 && flags & 0x02 == 0x00 {
+                            if established == 0 {
+                                serial_print("TCP ESTABLISHED\n")
+                                established = 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

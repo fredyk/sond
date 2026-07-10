@@ -1,0 +1,326 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/drivers/net/virtio-net.snd, a reusable virtio-net driver for the
+// UEFI target (boot-services mode). Supports BOTH the legacy interface (I/O BAR +
+// PFN queue register, e.g. QEMU) and the MODERN virtio 1.0 interface (MMIO
+// common_cfg, e.g. VirtualBox's transitional device, which ignores the legacy PFN
+// register). vnet_init() detects the virtio 1.0 PCI capabilities and picks the
+// path; the public API is identical either way.
+// Clean-room from the OASIS virtio spec + the PCI Local Bus spec. No third-party
+// source copied.
+//
+// Public API (include this file, then call):
+//   vnet_init() -> i64          // find + set up the device; 1 on success, 0 if none
+//   tx_send(buf, len)           // transmit `len` bytes at `buf` as one Ethernet frame
+//   rx_poll(out_buf) -> i64     // if a frame arrived, copy it to out_buf, return its
+//                               // length (past the virtio_net_hdr); else return 0
+
+let PAGE = 4096
+let mut QSZ = 256    // overwritten by the device's reported queue size at init
+let mut modern = 0   // 1 = virtio 1.0 MMIO path, 0 = legacy I/O path
+
+// legacy state
+let mut io_base = 0
+// modern MMIO state
+let mut common = 0
+let mut notify_base = 0
+let mut notify_mult = 0
+let mut device_cfg = 0  // modern device-specific config (virtio_net_config); MAC at +0
+let mut mac_addr = 0    // 6-byte buffer holding the NIC's real MAC (read at init)
+// virtqueue rings. Legacy uses rx_desc/tx_desc as the single contiguous queue base;
+// modern uses the three separately-allocated rings per queue.
+let mut rx_desc = 0
+let mut rx_avail = 0
+let mut rx_used = 0
+let mut rx_qnotify = 0
+let mut tx_desc = 0
+let mut tx_avail = 0
+let mut tx_used = 0
+let mut tx_qnotify = 0
+let mut tx_buf = 0
+let mut rx_used_seen = 0
+let mut rx_rearm = 0  // empty-poll counter; periodically re-kicks RX (see rx_poll_modern)
+
+// Read/write a 32-bit dword at BYTE offset `off` in the device's PCI config space.
+fn pci_r(bus: i64, dev: i64, off: i64) -> i64 {
+    outl(0xCF8, 0x80000000 | (bus << 16) | (dev << 11) | (off & 0xFC))
+    inl(0xCFC)
+}
+fn pci_w(bus: i64, dev: i64, off: i64, val: i64) {
+    outl(0xCF8, 0x80000000 | (bus << 16) | (dev << 11) | (off & 0xFC))
+    outl(0xCFC, val)
+}
+// Write a 64-bit value as two 32-bit stores (modern MMIO wants 32-bit access;
+// VirtualBox faults on a 64-bit access to the common_cfg address fields).
+fn wr64(addr: i64, v: i64) { poke32(addr, v & 0xFFFFFFFF)  poke32(addr + 4, v >>> 32) }
+
+fn alloc_zero(n: i64) -> i64 {
+    let p = alloc(n)
+    let mut z = 0
+    for z < n { poke8(p + z, 0); z = z + 1 }
+    p
+}
+
+fn vio_w32(b: i64, o: i64, v: i64) { outl(b + o, v) }
+fn vio_w16(b: i64, o: i64, v: i64) { outw(b + o, v) }
+fn vio_w8(b: i64, o: i64, v: i64) { outb(b + o, v) }
+
+// ── legacy virtqueue (one contiguous block: desc | avail | page-aligned used) ──
+fn vq_total() -> i64 {
+    let da = 16 * QSZ + 4 + 2 * QSZ
+    let a_da = (da + PAGE - 1) / PAGE * PAGE
+    let u = 4 + 8 * QSZ
+    let a_u = (u + PAGE - 1) / PAGE * PAGE
+    a_da + a_u
+}
+fn vq_alloc() -> i64 {
+    let raw = alloc(vq_total() + PAGE)
+    let aligned = (raw + PAGE - 1) / PAGE * PAGE
+    let mut z = 0
+    for z < vq_total() { poke8(aligned + z, 0); z = z + 1 }
+    aligned
+}
+
+fn post_rx_legacy(buf_addr: i64) {
+    let avail_off = 16 * QSZ
+    let idx = peek16(rx_desc + avail_off + 2) & (QSZ - 1)
+    poke64(rx_desc + idx * 16, buf_addr)
+    poke32(rx_desc + idx * 16 + 8, 1526)
+    poke16(rx_desc + idx * 16 + 12, 2)
+    poke16(rx_desc + avail_off + 4 + idx * 2, idx)
+    asm("mfence")
+    poke16(rx_desc + avail_off + 2, peek16(rx_desc + avail_off + 2) + 1)
+    vio_w16(io_base, 0x10, 0)
+}
+fn tx_send_legacy(buf: i64, len: i64) {
+    let avail_off = 16 * QSZ
+    let idx = peek16(tx_desc + avail_off + 2) & (QSZ - 1)
+    let mut i = 0
+    for i < len { poke8(tx_buf + 10 + i, peek8(buf + i)); i = i + 1 }
+    let mut z = 0
+    for z < 10 { poke8(tx_buf + z, 0); z = z + 1 }
+    asm("mfence")
+    poke64(tx_desc + idx * 16, tx_buf)
+    poke32(tx_desc + idx * 16 + 8, len + 10)
+    poke16(tx_desc + idx * 16 + 12, 0)
+    poke16(tx_desc + avail_off + 4 + idx * 2, idx)
+    asm("mfence")
+    poke16(tx_desc + avail_off + 2, peek16(tx_desc + avail_off + 2) + 1)
+    vio_w16(io_base, 0x10, 1)
+}
+fn rx_poll_legacy(out_buf: i64) -> i64 {
+    let avail_off = 16 * QSZ
+    let used_off = rx_desc + (avail_off + 4 + QSZ * 2 + PAGE - 1) / PAGE * PAGE
+    let cur = peek16(used_off + 2)
+    if cur == rx_used_seen {
+        0
+    } else {
+        let ei = (cur - 1) & (QSZ - 1)
+        let desc_id = peek16(used_off + 4 + ei * 8)
+        let used_len = peek32(used_off + 4 + ei * 8 + 4)
+        let buf_addr = peek64(rx_desc + desc_id * 16)
+        let flen = used_len - 10
+        let mut i = 0
+        for i < flen { poke8(out_buf + i, peek8(buf_addr + 10 + i)); i = i + 1 }
+        rx_used_seen = cur
+        post_rx_legacy(buf_addr)
+        flen
+    }
+}
+
+// ── modern virtio 1.0 virtqueue (separate desc/avail/used rings, 12-byte hdr) ──
+fn post_rx_modern(buf_addr: i64) {
+    let idx = peek16(rx_avail + 2) & (QSZ - 1)
+    wr64(rx_desc + idx * 16, buf_addr)
+    poke32(rx_desc + idx * 16 + 8, 2048)
+    poke16(rx_desc + idx * 16 + 12, 2) // VIRTQ_DESC_F_WRITE
+    poke16(rx_avail + 4 + idx * 2, idx)
+    asm("mfence")
+    poke16(rx_avail + 2, peek16(rx_avail + 2) + 1)
+    poke16(notify_base + rx_qnotify * notify_mult, 0)
+}
+fn tx_send_modern(buf: i64, len: i64) {
+    let idx = peek16(tx_avail + 2) & (QSZ - 1)
+    let mut i = 0
+    for i < 12 { poke8(tx_buf + i, 0); i = i + 1 }
+    i = 0
+    for i < len { poke8(tx_buf + 12 + i, peek8(buf + i)); i = i + 1 }
+    asm("mfence")
+    wr64(tx_desc + idx * 16, tx_buf)
+    poke32(tx_desc + idx * 16 + 8, len + 12)
+    poke16(tx_desc + idx * 16 + 12, 0)
+    poke16(tx_avail + 4 + idx * 2, idx)
+    asm("mfence")
+    poke16(tx_avail + 2, peek16(tx_avail + 2) + 1)
+    poke16(notify_base + tx_qnotify * notify_mult, 1)
+}
+fn rx_poll_modern(out_buf: i64) -> i64 {
+    let cur = peek16(rx_used + 2)
+    if cur == rx_used_seen {
+        // VirtualBox's transitional virtio device only pulls from the RX queue when
+        // notified, the single notify at init is not enough to deliver UNSOLICITED
+        // inbound frames (verified: without this, the guest never sees the host's ARP
+        // request or a TCP SYN; it only ever received replies right after its own TX).
+        // Re-kick RX periodically from the idle poll path so the device stays armed.
+        // Extra available-ring notifications are always spec-safe; throttled to bound
+        // VM exits. QEMU's device delivers without this, so it is harmless there too.
+        rx_rearm = rx_rearm + 1
+        if rx_rearm & 0xFF == 0 { poke16(notify_base + rx_qnotify * notify_mult, 0) }
+        0
+    } else {
+        let ei = (cur - 1) & (QSZ - 1)
+        let desc_id = peek32(rx_used + 4 + ei * 8)
+        let used_len = peek32(rx_used + 4 + ei * 8 + 4)
+        let buf_addr = peek64(rx_desc + desc_id * 16)
+        let flen = used_len - 12
+        let mut i = 0
+        for i < flen { poke8(out_buf + i, peek8(buf_addr + 12 + i)); i = i + 1 }
+        rx_used_seen = cur
+        post_rx_modern(buf_addr)
+        flen
+    }
+}
+
+// ── public API: dispatch to the detected path ──
+fn post_rx(buf_addr: i64) {
+    if modern == 1 { post_rx_modern(buf_addr) } else { post_rx_legacy(buf_addr) }
+}
+// Hint the device to (re-)scan the RX available ring. A conformant device notices
+// posted buffers on its own, but some (VirtualBox's transitional device) only pull
+// from the RX queue when kicked; calling this in an idle poll loop keeps RX armed.
+pub fn rx_kick() {
+    if modern == 1 { poke16(notify_base + rx_qnotify * notify_mult, 0) }
+    else { vio_w16(io_base, 0x10, 0) }
+}
+pub fn tx_send(buf: i64, len: i64) {
+    if modern == 1 { tx_send_modern(buf, len) } else { tx_send_legacy(buf, len) }
+}
+pub fn rx_poll(out_buf: i64) -> i64 {
+    if modern == 1 { rx_poll_modern(out_buf) } else { rx_poll_legacy(out_buf) }
+}
+// The NIC's own MAC address, byte `i` (0..5), read from the device at init. The
+// network stack must use THIS as its source/identity, hypervisors assign their own
+// MAC (VirtualBox uses 08:00:27:xx) and the device filters incoming unicast on it,
+// so a hardcoded address would have its frames dropped. Valid after vnet_init().
+pub fn vnet_mac(i: i64) -> i64 { peek8(mac_addr + i) }
+
+// Set up one modern queue `qi` (0 = RX, 1 = TX): read its size, allocate the three
+// rings, publish their 64-bit addresses, record the notify offset, and enable it.
+fn setup_q_modern(qi: i64) {
+    poke16(common + 22, qi)
+    QSZ = peek16(common + 24)
+    let d = alloc_zero(16 * QSZ)
+    let av = alloc_zero(6 + 2 * QSZ)
+    let us = alloc_zero(6 + 8 * QSZ)
+    wr64(common + 32, d) wr64(common + 40, av) wr64(common + 48, us)
+    let qn = peek16(common + 30)
+    poke16(common + 28, 1) // queue_enable
+    if qi == 0 { rx_desc = d rx_avail = av rx_used = us rx_qnotify = qn }
+    else { tx_desc = d tx_avail = av tx_used = us tx_qnotify = qn }
+}
+
+// Base address of BAR `bi` (0..5). Handles 64-bit memory BARs (the modern virtio
+// config lives in one). Each virtio capability names its own BAR, so we must resolve
+// per-cap rather than assume they all share one.
+fn bar_base(bus: i64, dev: i64, bi: i64) -> i64 {
+    let lo = pci_r(bus, dev, 0x10 + bi * 4)
+    if (lo & 1) == 1 {
+        lo & 0xFFFFFFFC // I/O BAR
+    } else {
+        let mut base = lo & 0xFFFFFFF0
+        if (lo & 6) == 4 { base = base | (pci_r(bus, dev, 0x10 + bi * 4 + 4) << 32) } // 64-bit
+        base
+    }
+}
+
+// Detect the virtio 1.0 capabilities (common_cfg, notify, device_cfg) and, if present,
+// resolve `common`/`notify_base`/`notify_mult`/`device_cfg` each against its own BAR.
+// Returns 1 (modern) if the common cfg was found, else 0.
+fn detect_modern(bus: i64, dev: i64) -> i64 {
+    let mut have = 0
+    let mut cap = pci_r(bus, dev, 0x34) & 0xFF
+    let mut g = 0
+    for g < 16 {
+        if cap == 0 { g = 16 } else {
+            let w = pci_r(bus, dev, cap)
+            if (w & 0xFF) == 0x09 {
+                let cf = (w >> 24) & 0xFF
+                let base = bar_base(bus, dev, pci_r(bus, dev, cap + 4) & 0xFF)
+                let of = pci_r(bus, dev, cap + 8)
+                if cf == 1 { common = base + of  have = 1 }
+                if cf == 2 { notify_base = base + of  notify_mult = pci_r(bus, dev, cap + 16) }
+                if cf == 4 { device_cfg = base + of } // VIRTIO_PCI_CAP_DEVICE_CFG (virtio_net_config)
+            }
+            cap = (w >> 8) & 0xFF
+            g = g + 1
+        }
+    }
+    have
+}
+
+// Find the virtio-net device, set up RX/TX queues (modern if the virtio 1.0 caps
+// are present, else legacy), post receive buffers. Returns 1 on success, 0 if none.
+pub fn vnet_init() -> i64 {
+    let mut found = 0
+    let mut fbus = 0
+    let mut fdev = 0
+    let mut bus = 0
+    for bus < 4 {
+        let mut dev = 0
+        for dev < 32 {
+            let v = pci_r(bus, dev, 0)
+            if (v & 0xFFFF) == 0x1AF4 {
+                let d = (v >> 16) & 0xFFFF
+                if d == 0x1000 || d == 0x1041 || d == 0x0200 {
+                    if found == 0 { found = 1  fbus = bus  fdev = dev }
+                }
+            }
+            dev = dev + 1
+        }
+        bus = bus + 1
+    }
+    if not (found == 1) {
+        0
+    } else {
+        // Enable I/O + memory space + bus master.
+        pci_w(fbus, fdev, 0x04, pci_r(fbus, fdev, 0x04) | 7)
+        mac_addr = alloc(6)
+        modern = detect_modern(fbus, fdev)
+        if modern == 1 {
+            poke8(common + 20, 0) poke8(common + 20, 1) poke8(common + 20, 3)
+            poke32(common + 8, 1) poke32(common + 12, 1) // accept VIRTIO_F_VERSION_1 (bit 32)
+            poke32(common + 8, 0)
+            poke32(common + 12, peek32(common + 4) & 0x20) // accept VIRTIO_NET_F_MAC (bit 5) if offered
+            poke8(common + 20, 11) // FEATURES_OK
+            setup_q_modern(0)
+            setup_q_modern(1)
+            poke8(common + 20, 15) // DRIVER_OK
+            let mut mm = 0
+            for mm < 6 { poke8(mac_addr + mm, peek8(device_cfg + mm))  mm = mm + 1 }
+        } else {
+            io_base = pci_r(fbus, fdev, 0x10) & ~3
+            vio_w8(io_base, 0x12, 0)
+            vio_w8(io_base, 0x12, 1)
+            vio_w8(io_base, 0x12, 3)
+            vio_w32(io_base, 0x04, inl(io_base) & 0x20) // accept VIRTIO_NET_F_MAC (bit 5) if offered
+            vio_w16(io_base, 0x0E, 0)
+            QSZ = inw(io_base + 0x0C)
+            rx_desc = vq_alloc()
+            vio_w32(io_base, 0x08, rx_desc / PAGE)
+            vio_w16(io_base, 0x0E, 1)
+            tx_desc = vq_alloc()
+            vio_w32(io_base, 0x08, tx_desc / PAGE)
+            vio_w8(io_base, 0x12, 7)
+            let mut ml = 0
+            for ml < 6 { poke8(mac_addr + ml, inb(io_base + 0x14 + ml))  ml = ml + 1 }
+        }
+        tx_buf = alloc(2048)
+        let mut n = 0
+        for n < 8 {
+            post_rx(alloc(2048))
+            n = n + 1
+        }
+        1
+    }
+}
