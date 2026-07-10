@@ -1,0 +1,221 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/net/tcp-server.snd, a minimal TCP SERVER on port 22 over the
+// virtio-net driver, for the UEFI target (boot-services mode). Clean-room from
+// RFCs 791/793/826, factored from the verified M4a example. Original work; no
+// third-party source copied.
+//
+// It handles ARP, the TCP 3-way handshake, sequence/ack tracking and the TCP/IP
+// checksums so a program can speak an application protocol (e.g. SSH) without
+// reimplementing TCP. Environment: QEMU user net; guest 10.0.2.15, MAC
+// 52:54:00:12:34:56, peer 10.0.2.2.
+//
+// Public API:
+//   tcp_start()              // bring up the NIC and announce ourselves (call once)
+//   tcp_poll(out) -> i64     // process one frame; returns >0 = that many bytes of
+//                            //   application data copied to `out`, else 0
+//   tcp_send(data, len)      // send `len` bytes at `data` to the peer (PSH|ACK)
+//   tcp_established() -> i64  // 1 once the handshake has completed, else 0
+//   tb16(a, v) / tb32(a, v)  // write a big-endian u16 / u32 (for building payloads)
+//   tg16(a) -> i64           // read a big-endian u16
+
+include "x86_64/drivers/net/virtio-net.snd"
+
+let T_B0 = 10
+let T_B1 = 0
+let T_B2 = 2
+let T_B3 = 15
+// Our MAC is the NIC's real hardware address (vnet_mac), read from the device by
+// the driver, hypervisors assign their own and filter inbound unicast on it.
+
+let mut t_sseq = 0x12345678
+let mut t_cack = 0
+let mut t_st = 0
+let mut t_pm0 = 0
+let mut t_pm1 = 0
+let mut t_pm2 = 0
+let mut t_pm3 = 0
+let mut t_pm4 = 0
+let mut t_pm5 = 0
+let mut t_pi0 = 0
+let mut t_pi1 = 0
+let mut t_pi2 = 0
+let mut t_pi3 = 0
+let mut t_pport = 0
+let mut t_txp = 0
+let mut t_rxp = 0
+
+pub fn tb16(a: i64, v: i64) {
+    poke8(a, (v >> 8) & 0xFF)
+    poke8(a + 1, v & 0xFF)
+}
+pub fn tb32(a: i64, v: i64) {
+    poke8(a, (v >> 24) & 0xFF)
+    poke8(a + 1, (v >> 16) & 0xFF)
+    poke8(a + 2, (v >> 8) & 0xFF)
+    poke8(a + 3, v & 0xFF)
+}
+pub fn tg16(a: i64) -> i64 {
+    (peek8(a) << 8) | peek8(a + 1)
+}
+fn tg32(a: i64) -> i64 {
+    (peek8(a) << 24) | (peek8(a + 1) << 16) | (peek8(a + 2) << 8) | peek8(a + 3)
+}
+fn t_mac(a: i64, m0: i64, m1: i64, m2: i64, m3: i64, m4: i64, m5: i64) {
+    poke8(a, m0); poke8(a + 1, m1); poke8(a + 2, m2)
+    poke8(a + 3, m3); poke8(a + 4, m4); poke8(a + 5, m5)
+}
+fn t_ip(a: i64, b0: i64, b1: i64, b2: i64, b3: i64) {
+    poke8(a, b0); poke8(a + 1, b1); poke8(a + 2, b2); poke8(a + 3, b3)
+}
+fn t_cks(buf: i64, len: i64) -> i64 {
+    let mut sum = 0
+    let mut i = 0
+    for i < len / 2 {
+        sum = sum + tg16(buf + i * 2)
+        i = i + 1
+    }
+    if len & 1 == 1 {
+        sum = sum + (peek8(buf + len - 1) << 8)
+    }
+    sum = (sum & 0xFFFF) + (sum >> 16)
+    sum = (sum & 0xFFFF) + (sum >> 16)
+    ~sum & 0xFFFF
+}
+fn t_tcpcks(ip: i64, tp: i64, tlen: i64) -> i64 {
+    let t = alloc(2048)
+    t_ip(t, peek8(ip + 12), peek8(ip + 13), peek8(ip + 14), peek8(ip + 15))
+    t_ip(t + 4, peek8(ip + 16), peek8(ip + 17), peek8(ip + 18), peek8(ip + 19))
+    poke8(t + 8, 0)
+    poke8(t + 9, 6)
+    tb16(t + 10, tlen)
+    let mut j = 0
+    for j < tlen {
+        poke8(t + 12 + j, peek8(tp + j))
+        j = j + 1
+    }
+    t_cks(t, 12 + tlen)
+}
+
+// Emit an Ethernet+IPv4+TCP segment to the peer with the given TCP flags and
+// `dlen` payload bytes already placed at t_txp+54. Fills headers + checksums.
+fn t_emit(flags: i64, dlen: i64) {
+    let p = t_txp
+    t_mac(p, t_pm0, t_pm1, t_pm2, t_pm3, t_pm4, t_pm5)
+    t_mac(p + 6, vnet_mac(0), vnet_mac(1), vnet_mac(2), vnet_mac(3), vnet_mac(4), vnet_mac(5))
+    tb16(p + 12, 0x0800)
+    poke8(p + 14, 0x45); poke8(p + 15, 0)
+    tb16(p + 16, 40 + dlen); tb16(p + 18, 0); tb16(p + 20, 0x4000)
+    poke8(p + 22, 64); poke8(p + 23, 6); tb16(p + 24, 0)
+    t_ip(p + 26, T_B0, T_B1, T_B2, T_B3)
+    t_ip(p + 30, t_pi0, t_pi1, t_pi2, t_pi3)
+    tb16(p + 34, 22); tb16(p + 36, t_pport)
+    tb32(p + 38, t_sseq); tb32(p + 42, t_cack)
+    poke8(p + 46, 0x50); poke8(p + 47, flags)
+    tb16(p + 48, 0x2000); tb16(p + 50, 0); tb16(p + 52, 0)
+    tb16(p + 24, t_cks(p + 14, 20))
+    tb16(p + 50, t_tcpcks(p + 14, p + 34, 20 + dlen))
+    tx_send(p, 54 + dlen)
+}
+
+pub fn tcp_established() -> i64 {
+    if t_st >= 2 { 1 } else { 0 }
+}
+
+// Send `len` bytes at `data` as a TCP data segment (PSH|ACK), advancing our seq.
+pub fn tcp_send(data: i64, len: i64) {
+    let mut i = 0
+    while i < len {
+        poke8(t_txp + 54 + i, peek8(data + i))
+        i = i + 1
+    }
+    t_emit(0x18, len)
+    t_sseq = t_sseq + len
+}
+
+// Bring up the NIC and send a gratuitous ARP so slirp learns our MAC.
+pub fn tcp_start() {
+    vnet_init()
+    t_txp = alloc(2048)
+    t_rxp = alloc(2048)
+    let p = t_txp
+    t_mac(p, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
+    t_mac(p + 6, vnet_mac(0), vnet_mac(1), vnet_mac(2), vnet_mac(3), vnet_mac(4), vnet_mac(5))
+    tb16(p + 12, 0x0806)
+    tb16(p + 14, 1); tb16(p + 16, 0x0800)
+    poke8(p + 18, 6); poke8(p + 19, 4)
+    tb16(p + 20, 1)
+    t_mac(p + 22, vnet_mac(0), vnet_mac(1), vnet_mac(2), vnet_mac(3), vnet_mac(4), vnet_mac(5))
+    t_ip(p + 28, T_B0, T_B1, T_B2, T_B3)
+    t_mac(p + 32, 0, 0, 0, 0, 0, 0)
+    t_ip(p + 38, T_B0, T_B1, T_B2, T_B3)
+    tx_send(p, 42)
+}
+
+// Process one incoming frame. Replies to ARP and drives the TCP handshake
+// internally; returns the number of application-data bytes copied to `out`
+// (0 if none this call).
+pub fn tcp_poll(out: i64) -> i64 {
+    let r = t_rxp
+    let n = rx_poll(r)
+    if n <= 0 {
+        return 0
+    }
+    let et = tg16(r + 12)
+    if et == 0x0806 {
+        let op = tg16(r + 20)
+        if op == 1 && peek8(r + 38) == T_B0 && peek8(r + 39) == T_B1 && peek8(r + 40) == T_B2 && peek8(r + 41) == T_B3 {
+            let p = t_txp
+            t_mac(p, peek8(r + 6), peek8(r + 7), peek8(r + 8), peek8(r + 9), peek8(r + 10), peek8(r + 11))
+            t_mac(p + 6, vnet_mac(0), vnet_mac(1), vnet_mac(2), vnet_mac(3), vnet_mac(4), vnet_mac(5))
+            tb16(p + 12, 0x0806)
+            tb16(p + 14, 1); tb16(p + 16, 0x0800)
+            poke8(p + 18, 6); poke8(p + 19, 4)
+            tb16(p + 20, 2)
+            t_mac(p + 22, vnet_mac(0), vnet_mac(1), vnet_mac(2), vnet_mac(3), vnet_mac(4), vnet_mac(5))
+            t_ip(p + 28, T_B0, T_B1, T_B2, T_B3)
+            t_mac(p + 32, peek8(r + 22), peek8(r + 23), peek8(r + 24), peek8(r + 25), peek8(r + 26), peek8(r + 27))
+            t_ip(p + 38, peek8(r + 28), peek8(r + 29), peek8(r + 30), peek8(r + 31))
+            tx_send(p, 42)
+        }
+        return 0
+    }
+    if et != 0x0800 { return 0 }
+    if peek8(r + 14) != 0x45 { return 0 }
+    if peek8(r + 23) != 6 { return 0 }
+    if peek8(r + 30) != T_B0 || peek8(r + 31) != T_B1 || peek8(r + 32) != T_B2 || peek8(r + 33) != T_B3 { return 0 }
+    if tg16(r + 36) != 22 { return 0 }
+    let fl = peek8(r + 47)
+    let ts = tg32(r + 38)
+    let thl = (peek8(r + 46) >> 4) * 4
+    let dlen = (tg16(r + 16) - 20) - thl
+    // Record the peer from this segment.
+    t_pm0 = peek8(r + 6); t_pm1 = peek8(r + 7); t_pm2 = peek8(r + 8)
+    t_pm3 = peek8(r + 9); t_pm4 = peek8(r + 10); t_pm5 = peek8(r + 11)
+    t_pi0 = peek8(r + 26); t_pi1 = peek8(r + 27); t_pi2 = peek8(r + 28); t_pi3 = peek8(r + 29)
+    t_pport = tg16(r + 34)
+    if (fl & 2) == 2 && (fl & 16) == 0 {
+        // SYN -> SYN-ACK
+        t_cack = ts + 1
+        t_emit(0x12, 0)
+        t_sseq = t_sseq + 1
+        t_st = 1
+        return 0
+    }
+    if (fl & 16) == 16 {
+        if t_st == 1 { t_st = 2 }
+        if dlen > 0 {
+            t_cack = ts + dlen
+            let mut i = 0
+            while i < dlen {
+                poke8(out + i, peek8(r + 54 + i))
+                i = i + 1
+            }
+            // ACK the received data.
+            t_emit(0x10, 0)
+            return dlen
+        }
+    }
+    0
+}

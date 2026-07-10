@@ -1,0 +1,39 @@
+// Auto-generated Sond header, public interface only. Do not edit.
+
+// Hint the device to (re-)scan the RX available ring. A conformant device notices
+// posted buffers on its own, but some (VirtualBox's transitional device) only pull
+// from the RX queue when kicked; calling this in an idle poll loop keeps RX armed.
+pub fn rx_kick()
+
+pub fn tx_send(buf: i64, len: i64)
+
+pub fn rx_poll(out_buf: i64) -> i64
+
+// The NIC's own MAC address, byte `i` (0..5), read from the device at init. The
+// network stack must use THIS as its source/identity, hypervisors assign their own
+// MAC (VirtualBox uses 08:00:27:xx) and the device filters incoming unicast on it,
+// so a hardcoded address would have its frames dropped. Valid after vnet_init().
+pub fn vnet_mac(i: i64) -> i64
+
+// Find the virtio-net device, set up RX/TX queues (modern if the virtio 1.0 caps
+// are present, else legacy), post receive buffers. Returns 1 on success, 0 if none.
+pub fn vnet_init() -> i64
+
+pub fn tb16(a: i64, v: i64)
+
+pub fn tb32(a: i64, v: i64)
+
+pub fn tg16(a: i64) -> i64
+
+pub fn tcp_established() -> i64
+
+// Send `len` bytes at `data` as a TCP data segment (PSH|ACK), advancing our seq.
+pub fn tcp_send(data: i64, len: i64)
+
+// Bring up the NIC and send a gratuitous ARP so slirp learns our MAC.
+pub fn tcp_start()
+
+// Process one incoming frame. Replies to ARP and drives the TCP handshake
+// internally; returns the number of application-data bytes copied to `out`
+// (0 if none this call).
+pub fn tcp_poll(out: i64) -> i64

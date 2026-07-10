@@ -1,0 +1,126 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Clean-room SSH banner + KEXINIT over TCP using the TCP-server library.
+// Original work; no third-party source copied.
+
+include "x86_64/net/tcp-server.snd"
+
+fn efi_main() -> i64 {
+    tcp_start()
+    let rx = alloc(2048)
+
+    // Build the SSH banner: "SSH-2.0-Sond_0.1\r\n" (18 bytes)
+    let banner = alloc(18)
+    poke8(banner,     'S'); poke8(banner + 1,  'S'); poke8(banner + 2,  'H')
+    poke8(banner + 3,  '-'); poke8(banner + 4,  '2'); poke8(banner + 5,  '.')
+    poke8(banner + 6,  '0'); poke8(banner + 7,  '-'); poke8(banner + 8,  'S')
+    poke8(banner + 9,  'o'); poke8(banner + 10, 'n'); poke8(banner + 11, 'd')
+    poke8(banner + 12, '_'); poke8(banner + 13, '0'); poke8(banner + 14, '.')
+    poke8(banner + 15, '1'); poke8(banner + 16, 0x0D); poke8(banner + 17, 0x0A)
+
+    // Build the KEXINIT SSH binary packet (192 bytes)
+    // SSH binary packet header: uint32 packet_length, byte padding_length
+    // packet_length = 1 + payload_len(182) + padding_len(5) = 188
+    // (4 + 188) = 192, multiple of 8, >= 16. padding_len = 5 >= 4.
+    let pk = alloc(256)
+    tb32(pk, 188)
+    poke8(pk + 4, 5)
+
+    // Payload starts at pk+5
+    // SSH_MSG_KEXINIT = 20
+    poke8(pk + 5, 20)
+
+    // 16-byte cookie (all zeros)
+    let mut i = 1
+    for i < 17 {
+        poke8(pk + 5 + i, 0)
+        i = i + 1
+    }
+
+    // Name-list 1: kex_algorithms = "curve25519-sha256" (17 bytes)
+    tb32(pk + 22, 17)
+    poke8(pk + 26, 'c'); poke8(pk + 27, 'u'); poke8(pk + 28, 'r'); poke8(pk + 29, 'v')
+    poke8(pk + 30, 'e'); poke8(pk + 31, '2'); poke8(pk + 32, '5'); poke8(pk + 33, '5')
+    poke8(pk + 34, '1'); poke8(pk + 35, '9'); poke8(pk + 36, '-'); poke8(pk + 37, 's')
+    poke8(pk + 38, 'h'); poke8(pk + 39, 'a'); poke8(pk + 40, '2'); poke8(pk + 41, '5')
+    poke8(pk + 42, '6')
+
+    // Name-list 2: server_host_key_algorithms = "ssh-ed25519" (11 bytes)
+    tb32(pk + 43, 11)
+    poke8(pk + 47, 's'); poke8(pk + 48, 's'); poke8(pk + 49, 'h'); poke8(pk + 50, '-')
+    poke8(pk + 51, 'e'); poke8(pk + 52, 'd'); poke8(pk + 53, '2'); poke8(pk + 54, '5')
+    poke8(pk + 55, '5'); poke8(pk + 56, '1'); poke8(pk + 57, '9')
+
+    // Name-list 3: encryption_algorithms_client_to_server = "chacha20-poly1305@openssh.com" (29 bytes)
+    tb32(pk + 58, 29)
+    poke8(pk + 62, 'c'); poke8(pk + 63, 'h'); poke8(pk + 64, 'a'); poke8(pk + 65, 'c')
+    poke8(pk + 66, 'h'); poke8(pk + 67, 'a'); poke8(pk + 68, '2'); poke8(pk + 69, '0')
+    poke8(pk + 70, '-'); poke8(pk + 71, 'p'); poke8(pk + 72, 'o'); poke8(pk + 73, 'l')
+    poke8(pk + 74, 'y'); poke8(pk + 75, '1'); poke8(pk + 76, '3'); poke8(pk + 77, '0')
+    poke8(pk + 78, '5'); poke8(pk + 79, '@'); poke8(pk + 80, 'o'); poke8(pk + 81, 'p')
+    poke8(pk + 82, 'e'); poke8(pk + 83, 'n'); poke8(pk + 84, 's'); poke8(pk + 85, 's')
+    poke8(pk + 86, 'h'); poke8(pk + 87, '.'); poke8(pk + 88, 'c'); poke8(pk + 89, 'o')
+    poke8(pk + 90, 'm')
+
+    // Name-list 4: encryption_algorithms_server_to_client = "chacha20-poly1305@openssh.com" (29 bytes)
+    tb32(pk + 91, 29)
+    poke8(pk + 95, 'c'); poke8(pk + 96, 'h'); poke8(pk + 97, 'a'); poke8(pk + 98, 'c')
+    poke8(pk + 99, 'h'); poke8(pk + 100, 'a'); poke8(pk + 101, '2'); poke8(pk + 102, '0')
+    poke8(pk + 103, '-'); poke8(pk + 104, 'p'); poke8(pk + 105, 'o'); poke8(pk + 106, 'l')
+    poke8(pk + 107, 'y'); poke8(pk + 108, '1'); poke8(pk + 109, '3'); poke8(pk + 110, '0')
+    poke8(pk + 111, '5'); poke8(pk + 112, '@'); poke8(pk + 113, 'o'); poke8(pk + 114, 'p')
+    poke8(pk + 115, 'e'); poke8(pk + 116, 'n'); poke8(pk + 117, 's'); poke8(pk + 118, 's')
+    poke8(pk + 119, 'h'); poke8(pk + 120, '.'); poke8(pk + 121, 'c'); poke8(pk + 122, 'o')
+    poke8(pk + 123, 'm')
+
+    // Name-list 5: mac_algorithms_client_to_server = "hmac-sha2-256" (13 bytes)
+    tb32(pk + 124, 13)
+    poke8(pk + 128, 'h'); poke8(pk + 129, 'm'); poke8(pk + 130, 'a'); poke8(pk + 131, 'c')
+    poke8(pk + 132, '-'); poke8(pk + 133, 's'); poke8(pk + 134, 'h'); poke8(pk + 135, 'a')
+    poke8(pk + 136, '2'); poke8(pk + 137, '-'); poke8(pk + 138, '2'); poke8(pk + 139, '5')
+    poke8(pk + 140, '6')
+
+    // Name-list 6: mac_algorithms_server_to_client = "hmac-sha2-256" (13 bytes)
+    tb32(pk + 141, 13)
+    poke8(pk + 145, 'h'); poke8(pk + 146, 'm'); poke8(pk + 147, 'a'); poke8(pk + 148, 'c')
+    poke8(pk + 149, '-'); poke8(pk + 150, 's'); poke8(pk + 151, 'h'); poke8(pk + 152, 'a')
+    poke8(pk + 153, '2'); poke8(pk + 154, '-'); poke8(pk + 155, '2'); poke8(pk + 156, '5')
+    poke8(pk + 157, '6')
+
+    // Name-list 7: compression_algorithms_client_to_server = "none" (4 bytes)
+    tb32(pk + 158, 4)
+    poke8(pk + 162, 'n'); poke8(pk + 163, 'o'); poke8(pk + 164, 'n'); poke8(pk + 165, 'e')
+
+    // Name-list 8: compression_algorithms_server_to_client = "none" (4 bytes)
+    tb32(pk + 166, 4)
+    poke8(pk + 170, 'n'); poke8(pk + 171, 'o'); poke8(pk + 172, 'n'); poke8(pk + 173, 'e')
+
+    // Name-list 9: languages_client_to_server = "" (0 bytes)
+    tb32(pk + 174, 0)
+
+    // Name-list 10: languages_server_to_client = "" (0 bytes)
+    tb32(pk + 178, 0)
+
+    // first_kex_packet_follows = 0
+    poke8(pk + 182, 0)
+
+    // reserved = uint32 0
+    tb32(pk + 183, 0)
+
+    // padding (5 bytes at pk+187..pk+191) is already zero from alloc
+
+    let mut phase = 0
+    for {
+        let n = tcp_poll(rx)
+        n = n  // suppress unused warning
+        if tcp_established() == 1 {
+            if phase == 0 {
+                tcp_send(banner, 18)
+                tcp_send(pk, 192)
+                phase = 1
+            }
+        }
+    }
+    0
+}
