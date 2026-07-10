@@ -1,0 +1,199 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Clean-room legacy virtio-net TX from the OASIS virtio spec and the PCI
+// Local Bus spec. Original work; no third-party source copied.
+//
+// Transmits ONE broadcast Ethernet frame via legacy virtio-net PCI device.
+
+fn efi_main() -> i64 {
+    serial_print("Sond virtio-tx: start\n")
+
+    // --- PCI scan for virtio-net (vendor 0x1AF4, device 0x1000) ---
+    let mut io_base = 0
+    let mut found = false
+    let mut dev = 0
+    for dev < 32 {
+        let addr = 0x80000000 | (dev << 11)
+        outl(0xCF8, addr)
+        let val = inl(0xCFC)
+        let vendor = val & 0xFFFF
+        let devid = (val >> 16) & 0xFFFF
+        if vendor == 0x1AF4 && devid == 0x1000 {
+            outl(0xCF8, addr | 0x10)
+            io_base = inl(0xCFC) & 0xFFFC
+            found = true
+            serial_print("  dev=")
+            print_int(dev)
+            serial_print(" io=")
+            print_int(io_base)
+            serial_print("\n")
+            break
+        }
+        dev = dev + 1
+    }
+
+    if not found {
+        serial_print("FATAL: no virtio-net\n")
+        return 1
+    }
+
+    // --- Device status handshake (legacy: no FEATURES_OK) ---
+    outb(io_base + 0x12, 0)
+    outb(io_base + 0x12, 1)
+    serial_print("  ACK\n")
+    outb(io_base + 0x12, 3)
+    serial_print("  DRIVER\n")
+
+    // Feature negotiation: accept 0 features (minimal TX)
+    let dev_feat = inl(io_base + 0x00)
+    outl(io_base + 0x04, 0)
+    serial_print("  dev_feat=")
+    print_int(dev_feat)
+    serial_print("\n")
+
+    // --- Set up BOTH virtqueues BEFORE DRIVER_OK (spec 3.1.1 step 5) ---
+
+    // Queue 0 (RX) - minimal setup
+    outw(io_base + 0x0E, 0)
+    let rx_qsize = inw(io_base + 0x0C)
+    serial_print("  rx_qsize=")
+    print_int(rx_qsize)
+    serial_print("\n")
+
+    // Virtqueue layout: desc(16*qsz) | avail(6+2*qsz) | pad | used(6+8*qsz)
+    let rx_desc_end = 16 * rx_qsize
+    let rx_avail_end = rx_desc_end + 6 + 2 * rx_qsize
+    let rx_used_off = ((rx_avail_end + 4095) / 4096) * 4096
+    let rx_vq_total = rx_used_off + 6 + 8 * rx_qsize
+
+    let rx_raw = alloc(rx_vq_total + 4096)
+    let rx_mis = rx_raw % 4096
+    let rx_vq = if rx_mis == 0 { rx_raw } else { rx_raw + 4096 - rx_mis }
+
+    let mut rz = 0
+    for rz < rx_vq_total {
+        poke8(rx_vq + rz, 0)
+        rz = rz + 1
+    }
+
+    outl(io_base + 0x08, rx_vq >> 12)
+
+    // Queue 1 (TX)
+    outw(io_base + 0x0E, 1)
+    let qsize = inw(io_base + 0x0C)
+    serial_print("  tx_qsize=")
+    print_int(qsize)
+    serial_print("\n")
+
+    let desc_end = 16 * qsize
+    let avail_end = desc_end + 6 + 2 * qsize
+    let used_off = ((avail_end + 4095) / 4096) * 4096
+    let vq_total = used_off + 6 + 8 * qsize
+
+    let raw = alloc(vq_total + 4096)
+    let mis = raw % 4096
+    let vq = if mis == 0 { raw } else { raw + 4096 - mis }
+
+    let mut z = 0
+    for z < vq_total {
+        poke8(vq + z, 0)
+        z = z + 1
+    }
+
+    outl(io_base + 0x08, vq >> 12)
+    serial_print("  tx_vq=")
+    print_int(vq)
+    serial_print(" pfn=")
+    print_int(vq >> 12)
+    serial_print("\n")
+
+    // --- NOW set DRIVER_OK ---
+    outb(io_base + 0x12, 7)
+    serial_print("  DRIVER_OK\n")
+
+    // --- Build TX buffer: virtio_net_hdr (10 bytes) + Ethernet frame ---
+    let buf = alloc(42)
+    let mut i = 0
+    for i < 42 {
+        poke8(buf + i, 0)
+        i = i + 1
+    }
+
+    // Ethernet frame starts at buf + 10
+    let f = buf + 10
+
+    // Dest MAC: FF:FF:FF:FF:FF:FF
+    let mut m = 0
+    for m < 6 {
+        poke8(f + m, 0xFF)
+        m = m + 1
+    }
+
+    // Src MAC: 52:54:00:12:34:56
+    poke8(f + 6, 0x52)
+    poke8(f + 7, 0x54)
+    poke8(f + 8, 0x00)
+    poke8(f + 9, 0x12)
+    poke8(f + 10, 0x34)
+    poke8(f + 11, 0x56)
+
+    // EtherType: 0x0806 (ARP) big-endian
+    poke8(f + 12, 0x08)
+    poke8(f + 13, 0x06)
+
+    // ARP payload (18 bytes)
+    poke8(f + 14, 0x00)
+    poke8(f + 15, 0x01)
+    poke8(f + 16, 0x08)
+    poke8(f + 17, 0x00)
+    poke8(f + 18, 0x06)
+    poke8(f + 19, 0x04)
+    poke8(f + 20, 0x00)
+    poke8(f + 21, 0x01)
+    poke8(f + 22, 0x52)
+    poke8(f + 23, 0x54)
+    poke8(f + 24, 0x00)
+    poke8(f + 25, 0x12)
+    poke8(f + 26, 0x34)
+    poke8(f + 27, 0x56)
+    poke8(f + 28, 0x0A)
+    poke8(f + 29, 0x00)
+    poke8(f + 30, 0x02)
+    poke8(f + 31, 0x0F)
+
+    // --- Descriptor 0: buf, len=42, flags=0 (device-readable) ---
+    // Descriptor table starts at vq+0, each entry is 16 bytes
+    poke64(vq, buf)
+    poke32(vq + 8, 42)
+    poke16(vq + 12, 0)
+    poke16(vq + 14, 0)
+
+    // Available ring starts right after desc table at vq + desc_end
+    // flags(u16) + idx(u16) + ring[0](u16)
+    let avail = vq + desc_end
+    poke16(avail, 0)
+    poke16(avail + 2, 1)
+    poke16(avail + 4, 0)
+
+    serial_print("  TX buf=")
+    print_int(buf)
+    serial_print(" len=42\n")
+
+    // --- Notify queue 1 ---
+    outw(io_base + 0x10, 1)
+    serial_print("  notified q1\n")
+
+    // Brief wait for device to process
+    let mut w = 0
+    for w < 1000000 {
+        w = w + 1
+    }
+
+    let isr = inb(io_base + 0x13)
+    serial_print("  ISR=")
+    print_int(isr)
+    serial_print("\nSond virtio-tx: DONE\n")
+
+    0
+}

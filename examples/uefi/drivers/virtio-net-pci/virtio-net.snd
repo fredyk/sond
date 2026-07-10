@@ -1,0 +1,93 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Clean-room PCI enumeration for virtio-net, from the PCI Local Bus spec
+// (config mechanism #1) and the OASIS virtio spec. Original work; no
+// third-party source copied.
+
+let PCI_ENABLE = 0x80000000
+let PCI_CONFIG_ADDR = 0xCF8
+let PCI_CONFIG_DATA = 0xCFC
+let VIRTIO_VENDOR = 0x1AF4
+
+fn serial_print_hex(n: i64) -> i64 {
+    let mut i = 7
+    for i >= 0 {
+        let shift = i * 4
+        let nibble = (n >> shift) & 0xF
+        let mut c = nibble + '0'
+        if nibble > 9 {
+            c = nibble - 10 + 'A'
+        }
+        serial_putc(c)
+        i = i - 1
+    }
+    0
+}
+
+fn print_hex8(n: i64) -> i64 {
+    let mut i = 7
+    for i >= 0 {
+        let shift = i * 4
+        let nibble = (n >> shift) & 0xF
+        let mut c = nibble + '0'
+        if nibble > 9 {
+            c = nibble - 10 + 'A'
+        }
+        print_char(c)
+        i = i - 1
+    }
+    0
+}
+
+fn pci_cfg_read(bus: i64, dev: i64, func: i64, offset: i64) -> i64 {
+    let addr = PCI_ENABLE | (bus << 16) | (dev << 11) | (func << 8) | (offset & 0xFC)
+    poke64(0, addr)
+    asm("movl (0), %eax")
+    asm("movw $0xCF8, %dx")
+    asm("outl %eax, %dx")
+    asm("movw $0xCFC, %dx")
+    asm("inl %dx, %eax")
+    asm("movl %eax, (0)")
+    peek64(0)
+}
+
+fn efi_main() -> i64 {
+    serial_print("=== PCI SCAN ===\n")
+    print("=== PCI SCAN ===")
+
+    let mut dev = 0
+    for dev < 32 {
+        let reg0 = pci_cfg_read(0, dev, 0, 0)
+        let vendor = reg0 & 0xFFFF
+
+        if vendor != 0xFFFF {
+            let device_id = (reg0 >> 16) & 0xFFFF
+
+            if vendor == VIRTIO_VENDOR {
+                let bar0 = pci_cfg_read(0, dev, 0, 0x10)
+                serial_print("  >> virtio-net: bus=0 dev=")
+                serial_putc('0' + dev)
+                serial_print(" device_id=0x")
+                serial_print_hex(device_id)
+                serial_print(" BAR0=0x")
+                serial_print_hex(bar0)
+                serial_putc('\n')
+
+                print("  >> virtio-net: bus=0 dev=")
+                print_int(dev)
+                print(" device_id=0x")
+                print_hex8(device_id)
+                print(" BAR0=0x")
+                print_hex8(bar0)
+                print("")
+            }
+        }
+
+        dev = dev + 1
+    }
+
+    serial_print("=== PCI SCAN DONE ===\n")
+    print("=== PCI SCAN DONE ===")
+    0
+}

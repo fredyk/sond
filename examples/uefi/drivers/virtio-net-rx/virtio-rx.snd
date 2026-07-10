@@ -1,0 +1,265 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Clean-room legacy virtio-net RX/TX from the OASIS virtio spec. Original work;
+// no third-party source copied.
+//
+// M1c: Send a broadcast ARP request for 10.0.2.2 and receive the ARP reply,
+// printing the gateway MAC address from the serial console.
+
+let PAGE = 4096
+let QSZ = 256
+
+fn pci_cfg_read(bus: i64, dev: i64, fn_num: i64, reg: i64) -> i64 {
+    let addr = 0x80000000 | (bus << 16) | (dev << 11) | (fn_num << 8) | ((reg & 0x3F) << 2)
+    outl(0xCF8, addr)
+    inl(0xCFC)
+}
+fn pci_cfg_write32(bus: i64, dev: i64, fn_num: i64, reg: i64, val: i64) {
+    let addr = 0x80000000 | (bus << 16) | (dev << 11) | (fn_num << 8) | ((reg & 0x3F) << 2)
+    outl(0xCF8, addr)
+    outl(0xCFC, val)
+    0
+}
+fn vio_w32(b: i64, o: i64, v: i64) { outl(b + o, v) }
+fn vio_r32(b: i64, o: i64) -> i64 { inl(b + o) }
+fn vio_w16(b: i64, o: i64, v: i64) { outw(b + o, v) }
+fn vio_r16(b: i64, o: i64) -> i64 { inw(b + o) }
+fn vio_w8(b: i64, o: i64, v: i64) { outb(b + o, v) }
+
+fn sp(ch: i64) { serial_putc(ch) }
+fn sp_nib(v: i64) {
+    if v < 10 { sp(48 + v) } else { sp(55 + v) }
+    0
+}
+fn sp_hex(v: i64) {
+    sp_nib((v >> 4) & 0xF)
+    sp_nib(v & 0xF)
+    0
+}
+fn sp_mac(a: i64) {
+    sp_hex(peek8(a)); sp(58)
+    sp_hex(peek8(a + 1)); sp(58)
+    sp_hex(peek8(a + 2)); sp(58)
+    sp_hex(peek8(a + 3)); sp(58)
+    sp_hex(peek8(a + 4)); sp(58)
+    sp_hex(peek8(a + 5))
+    0
+}
+fn sp_dec(v: i64) {
+    if v >= 10 { sp_dec(v / 10) }
+    sp(48 + v % 10)
+    0
+}
+
+let mut io_base = 0
+let mut rx_desc = 0
+let mut tx_desc = 0
+let mut tx_buf = 0
+
+fn vq_total() -> i64 {
+    let da = 16 * QSZ + 4 + 2 * QSZ
+    let a_da = (da + PAGE - 1) / PAGE * PAGE
+    let u = 4 + 8 * QSZ
+    let a_u = (u + PAGE - 1) / PAGE * PAGE
+    a_da + a_u
+}
+fn vq_alloc() -> i64 {
+    let raw = alloc(vq_total() + PAGE)
+    let aligned = (raw + PAGE - 1) / PAGE * PAGE
+    let mut z = 0
+    for z < vq_total() { poke8(aligned + z, 0); z = z + 1 }
+    aligned
+}
+
+fn post_rx(buf_addr: i64) {
+    let avail_off = 16 * QSZ
+    let idx = peek16(rx_desc + avail_off + 2) & (QSZ - 1)
+    poke64(rx_desc + idx * 16, buf_addr)
+    poke32(rx_desc + idx * 16 + 8, 1526)
+    poke16(rx_desc + idx * 16 + 12, 2)  // VIRTQ_DESC_F_WRITE
+    poke16(rx_desc + avail_off + 4 + idx * 2, idx)
+    asm("mfence")
+    poke16(rx_desc + avail_off + 2, peek16(rx_desc + avail_off + 2) + 1)
+    vio_w16(io_base, 0x10, 0)
+    0
+}
+
+fn tx_send(buf: i64, len: i64) {
+    let avail_off = 16 * QSZ
+    let idx = peek16(tx_desc + avail_off + 2) & (QSZ - 1)
+    let mut i = 0
+    for i < len { poke8(tx_buf + i, peek8(buf + i)); i = i + 1 }
+    asm("mfence")
+    poke64(tx_desc + idx * 16, tx_buf)
+    poke32(tx_desc + idx * 16 + 8, len)
+    poke16(tx_desc + idx * 16 + 12, 0)
+    poke16(tx_desc + avail_off + 4 + idx * 2, idx)
+    asm("mfence")
+    poke16(tx_desc + avail_off + 2, peek16(tx_desc + avail_off + 2) + 1)
+    vio_w16(io_base, 0x10, 1)
+    0
+}
+
+fn build_arp(buf: i64) {
+    let mut i = 0
+    for i < 52 { poke8(buf + i, 0); i = i + 1 }
+    let eth = buf + 10
+    poke32(eth, 0xFFFFFFFF)
+    poke16(eth + 4, 0xFFFF)
+    poke16(eth + 6, 0x5552)
+    poke32(eth + 8, 0x0F02000A)
+    poke16(eth + 12, 0x0608)
+    let p = eth + 14
+    poke32(p, 0x00010800)
+    poke16(p + 4, 0x0406)
+    poke16(p + 6, 0x0100)
+    poke16(p + 8, 0x5552)
+    poke32(p + 10, 0x0F02000A)
+    poke32(p + 14, 0x0F02000A)
+    poke32(p + 18, 0)
+    poke16(p + 22, 0)
+    poke32(p + 24, 0x0202000A)
+    0
+}
+
+fn efi_main() -> i64 {
+    sp(10)
+    serial_print("=== virtio-net M1c ===")
+
+    // PCI scan
+    let mut found = 0
+    let mut bus = 0
+    for bus < 4 {
+        let mut dev = 0
+        for dev < 32 {
+            let v = pci_cfg_read(bus, dev, 0, 0)
+            if (v & 0xFFFF) == 0x1AF4 {
+                let d = (v >> 16) & 0xFFFF
+                if d == 0x1000 || d == 0x1041 || d == 0x0200 {
+                    serial_print("Found virtio")
+                    found = 1
+                    let bar0 = pci_cfg_read(bus, dev, 0, 4)
+                    io_base = bar0 & ~3
+                    let cmd = pci_cfg_read(bus, dev, 0, 1)
+                    pci_cfg_write32(bus, dev, 0, 1, cmd | 5)
+                }
+            }
+            dev = dev + 1
+        }
+        bus = bus + 1
+    }
+    if not (found == 1) {
+        serial_print("FATAL: no virtio-net")
+        halt()
+    }
+
+    // Legacy virtio init
+    vio_w8(io_base, 0x12, 0)
+    vio_w8(io_base, 0x12, 1)
+    vio_w8(io_base, 0x12, 3)
+    vio_w32(io_base, 0x04, 0)
+
+    // Set up queue 0 (RX)
+    vio_w16(io_base, 0x0E, 0)
+    rx_desc = vq_alloc()
+    vio_w32(io_base, 0x08, rx_desc / PAGE)
+
+    // Set up queue 1 (TX)
+    vio_w16(io_base, 0x0E, 1)
+    tx_desc = vq_alloc()
+    vio_w32(io_base, 0x08, tx_desc / PAGE)
+
+    // DRIVER_OK
+    vio_w8(io_base, 0x12, 4)
+
+    // TX buffer
+    tx_buf = alloc(1526)
+    let mut z = 0
+    for z < 1526 { poke8(tx_buf + z, 0); z = z + 1 }
+
+    // Allocate 8 separate RX buffers and post them
+    let rxb0 = alloc(1526)
+    let rxb1 = alloc(1526)
+    let rxb2 = alloc(1526)
+    let rxb3 = alloc(1526)
+    let rxb4 = alloc(1526)
+    let rxb5 = alloc(1526)
+    let rxb6 = alloc(1526)
+    let rxb7 = alloc(1526)
+    z = 0
+    for z < 1526 { poke8(rxb0 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb1 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb2 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb3 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb4 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb5 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb6 + z, 0); z = z + 1 }
+    z = 0
+    for z < 1526 { poke8(rxb7 + z, 0); z = z + 1 }
+
+    post_rx(rxb0)
+    post_rx(rxb1)
+    post_rx(rxb2)
+    post_rx(rxb3)
+    post_rx(rxb4)
+    post_rx(rxb5)
+    post_rx(rxb6)
+    post_rx(rxb7)
+
+    // Build and send ARP
+    let arp_buf = alloc(52)
+    build_arp(arp_buf)
+    tx_send(arp_buf, 52)
+
+    // Poll RX used ring, send ARP multiple times to ensure we catch the reply
+    let avail_off = 16 * QSZ
+    let used_off = rx_desc + (avail_off + 4 + QSZ * 2 + PAGE - 1) / PAGE * PAGE
+    let mut old_used = peek16(used_off + 2)
+    let mut t = 300000000
+    let mut got = 0
+    let mut arp_count = 0
+
+    for t > 0 {
+        let nu = peek16(used_off + 2)
+        if nu != old_used {
+            let ei = (nu - 1) & (QSZ - 1)
+            let desc_id = peek16(used_off + 4 + ei * 8)
+            let wlen = peek32(used_off + 4 + ei * 8 + 4)
+            let buf_addr = peek64(rx_desc + desc_id * 16)
+            let frame = buf_addr + 10
+            let ethtype = (peek8(frame + 12) << 8) | peek8(frame + 13)
+            if ethtype == 0x0806 {
+                let arp_op = (peek8(frame + 20) << 8) | peek8(frame + 21)
+                if arp_op == 2 {
+                    serial_print("gateway MAC=")
+                    sp_mac(frame + 22)
+                    sp(10)
+                    serial_print("=== SUCCESS ===")
+                    got = 1
+                    t = 0
+                }
+            }
+            post_rx(buf_addr)
+            old_used = nu
+        }
+        // Re-send ARP every 50M iterations if no reply yet
+        arp_count = arp_count + 1
+        if arp_count == 50000000 {
+            tx_send(arp_buf, 52)
+            arp_count = 0
+        }
+        t = t - 1
+    }
+    if not (got == 1) {
+        serial_print("TIMEOUT")
+    }
+    serial_print("=== done ===")
+    halt()
+}
