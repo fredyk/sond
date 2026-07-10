@@ -1,0 +1,375 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Parse SSH connection-layer channel messages (RFC 4254 §5): CHANNEL_OPEN,
+// CHANNEL_REQUEST (exec), CHANNEL_DATA.  Builds hardcoded payloads in byte
+// buffers, parses them, prints extracted fields, and runs PASS/FAIL checks.
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+// Read big-endian uint32 at word-address off → i64
+fn buf_u32(buf: i64, off: i64) -> i64 {
+    let b0 = peek8(buf + off)
+    let b1 = peek8(buf + off + 1)
+    let b2 = peek8(buf + off + 2)
+    let b3 = peek8(buf + off + 3)
+    b0 << 24 | b1 << 16 | b2 << 8 | b3
+}
+
+// Write big-endian uint32 at word-address off
+fn buf_set_u32(buf: i64, off: i64, val: i64) {
+    poke8(buf + off, val >>> 24)
+    poke8(buf + off + 1, (val >>> 16) & 0xFF)
+    poke8(buf + off + 2, (val >>> 8) & 0xFF)
+    poke8(buf + off + 3, val & 0xFF)
+}
+
+// Print len ASCII chars from buf+off
+fn print_str(buf: i64, off: i64, len: i64) {
+    let mut i = 0
+    for i < len {
+        print_char(peek8(buf + off + i))
+        i = i + 1
+    }
+}
+
+// ── Build CHANNEL_OPEN payload into buf ─────────────────────────────────────
+// Layout:
+//   [0]      msg type = 90
+//   [1..4]   uint32 BE type-string-length (=7)
+//   [5..11]  "session"
+//   [12..15] uint32 BE sender_channel (=0)
+//   [16..19] uint32 BE initial_window (=2097152)
+//   [20..23] uint32 BE max_packet (=32768)
+fn build_open(buf: i64) {
+    poke8(buf + 0, 90)
+
+    // "session" = 7 bytes at offset 5, length at 1..4
+    poke8(buf + 1 + 0, 0)
+    poke8(buf + 1 + 1, 0)
+    poke8(buf + 1 + 2, 0)
+    poke8(buf + 1 + 3, 7)
+
+    poke8(buf + 5 + 0, 's')
+    poke8(buf + 5 + 1, 'e')
+    poke8(buf + 5 + 2, 's')
+    poke8(buf + 5 + 3, 's')
+    poke8(buf + 5 + 4, 'i')
+    poke8(buf + 5 + 5, 'o')
+    poke8(buf + 5 + 6, 'n')
+
+    buf_set_u32(buf, 5 + 7, 0)        // sender_channel = 0
+    buf_set_u32(buf, 5 + 7 + 4, 2097152)  // initial_window
+    buf_set_u32(buf, 5 + 7 + 4 + 4, 32768) // max_packet
+}
+
+// ── Build CHANNEL_REQUEST(exec) payload into buf ───────────────────────────
+// Layout:
+//   [0]      = 98
+//   [1..4]   sender_channel=0
+//   [5..8]   type-string-length("exec")=4
+//   [9..12]  "exec"
+//   [13]     want_reply=1
+//                exec data follows:  string
+//   [14..17] command-length=9
+//   [18..26] "echo hola"
+fn build_req_exec(buf: i64) {
+    poke8(buf + 0, 98)
+    buf_set_u32(buf, 1, 0)                          // sender_channel=0
+
+    poke8(buf + 5 + 0, 0)
+    poke8(buf + 5 + 1, 0)
+    poke8(buf + 5 + 2, 0)
+    poke8(buf + 5 + 3, 4)                            // "exec" length=4
+
+    poke8(buf + 9 + 0, 'e')
+    poke8(buf + 9 + 1, 'x')
+    poke8(buf + 9 + 2, 'e')
+    poke8(buf + 9 + 3, 'c')
+
+    poke8(buf + 13, 1)                               // want_reply=1
+
+    // exec data: string command="echo hola"
+    poke8(buf + 14 + 0, 0)
+    poke8(buf + 14 + 1, 0)
+    poke8(buf + 14 + 2, 0)
+    poke8(buf + 14 + 3, 9)                            // command length=9
+
+    poke8(buf + 18 + 0, 'e')
+    poke8(buf + 18 + 1, 'c')
+    poke8(buf + 18 + 2, 'h')
+    poke8(buf + 18 + 3, 'o')
+    poke8(buf + 18 + 4, ' ')
+    poke8(buf + 18 + 5, 'h')
+    poke8(buf + 18 + 6, 'o')
+    poke8(buf + 18 + 7, 'l')
+    poke8(buf + 18 + 8, 'a')
+}
+
+// ── Build CHANNEL_DATA payload into buf ────────────────────────────────────
+// Layout:
+//   [0]      = 94
+//   [1..4]   recipient_channel=0
+//   [5..8]   data-length("hi")=2
+//   [9..10]  "hi"
+fn build_data(buf: i64) {
+    poke8(buf + 0, 94)
+    buf_set_u32(buf, 1, 0)                          // recipient_channel=0
+
+    poke8(buf + 5 + 0, 0)
+    poke8(buf + 5 + 1, 0)
+    poke8(buf + 5 + 2, 0)
+    poke8(buf + 5 + 3, 2)                            // data length=2
+
+    poke8(buf + 9 + 0, 'h')
+    poke8(buf + 9 + 1, 'i')
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+fn pass_ok() {
+    print("PASS")
+    newline()
+}
+
+fn fail_msg(expected: i64, actual: i64) {
+    print("FAIL expected=")
+    print_int(expected)
+    print(" got=")
+    print_int(actual)
+    newline()
+}
+
+fn newline() {
+    print_char(10)
+}
+
+// ── main ───────────────────────────────────────────────────────────────────
+
+fn main() -> i64 {
+    let open_buf[256]
+    let req_buf[256]
+    let data_buf[256]
+
+    let mut pass = 0
+    let mut fail = 0
+
+    // ── Build payloads ──────────────────────────────────────────────────
+    build_open(open_buf)
+    build_req_exec(req_buf)
+    build_data(data_buf)
+
+    // ── Parse CHANNEL_OPEN ──────────────────────────────────────────────
+    print("=== CHANNEL_OPEN (90) ===")
+    newline()
+
+    // payload[0]    = msg type 90  (skip)
+    // payload[1..4] = len of type string
+    // payload[5..5+len] = type string
+    // payload[5+len..5+len+4] = sender_channel
+    // payload[9+len..9+len+4] = initial_window
+    // payload[13+len..13+len+4] = max_packet
+
+    let mut o_type_len = buf_u32(open_buf, 1)
+    let o_type_off = 5
+    let o_sender = buf_u32(open_buf, 5 + o_type_len)
+    let o_initwin = buf_u32(open_buf, 9 + o_type_len)
+
+    print("channel_type_len = ")
+    print_int(o_type_len)
+    newline()
+
+    print("channel_type = ")
+    print_str(open_buf, o_type_off, o_type_len)
+    newline()
+
+    print("sender_channel = ")
+    print_int(o_sender)
+    newline()
+
+    print("initial_window = ")
+    print_int(o_initwin)
+    newline()
+
+    // ── Verify CHANNEL_OPEN ─────────────────────────────────────────────
+    if o_type_len == 7 {
+        print("  type_len: ")
+        pass_ok()
+        pass = pass + 1
+    } else {
+        print("  type_len: ")
+        fail_msg(7, o_type_len)
+        fail = fail + 1
+    }
+
+    if o_sender == 0 {
+        print("  sender_channel: ")
+        pass_ok()
+        pass = pass + 1
+    } else {
+        print("  sender_channel: ")
+        fail_msg(0, o_sender)
+        fail = fail + 1
+    }
+
+    if o_initwin == 2097152 {
+        print("  initial_window: ")
+        pass_ok()
+        pass = pass + 1
+    } else {
+        print("  initial_window: ")
+        fail_msg(2097152, o_initwin)
+        fail = fail + 1
+    }
+
+    // ── Parse CHANNEL_REQUEST (exec) ────────────────────────────────────
+    print("")
+    print("=== CHANNEL_REQUEST (98) ===")
+    newline()
+
+    // payload[0]     = msg type 98  (skip)
+    // payload[1..4]  = sender_channel
+    // payload[5..8]  = request_type len
+    // payload[9..9+len] = request_type
+    // payload[9+len] = want_reply (boolean byte)
+    // payload[10+len..] = exec data (if want_reply=1)
+    //   string command → len at [10+len..10+len+4], data at [14+len..]
+
+    let mut r_sender = buf_u32(req_buf, 1)
+    let r_type_len = buf_u32(req_buf, 5)
+    let r_type_off = 9
+    let r_want_reply_off = 9 + r_type_len
+    let r_want_reply = peek8(req_buf + r_want_reply_off)
+
+    // command lives just after want_reply byte
+    let mut r_cmd_len = 0
+    let mut r_cmd_off = 0
+    if r_want_reply != 0 {
+        r_cmd_len = buf_u32(req_buf, r_want_reply_off + 1)
+        r_cmd_off = r_want_reply_off + 1 + 4
+    }
+
+    print("recipient_channel = ")
+    print_int(r_sender)
+    newline()
+
+    print("request_type = ")
+    print_str(req_buf, r_type_off, r_type_len)
+    newline()
+
+    print("want_reply = ")
+    print_int(r_want_reply)
+    newline()
+
+    if r_cmd_len > 0 {
+        print("command = ")
+        print_str(req_buf, r_cmd_off, r_cmd_len)
+        newline()
+    }
+
+    // ── Verify CHANNEL_REQUEST ──────────────────────────────────────────
+    if r_sender == 0 {
+        print("  recipient_channel: ")
+        pass_ok()
+        pass = pass + 1
+    } else {
+        print("  recipient_channel: ")
+        fail_msg(0, r_sender)
+        fail = fail + 1
+    }
+
+    if r_type_len == 4 {
+        print("  type_len: ")
+        pass_ok()
+        pass = pass + 1
+    } else {
+        print("  type_len: ")
+        fail_msg(4, r_type_len)
+        fail = fail + 1
+    }
+
+    if r_want_reply == 1 {
+        print("  want_reply: ")
+        pass_ok()
+        pass = pass + 1
+    } else {
+        print("  want_reply: ")
+        fail_msg(1, r_want_reply)
+        fail = fail + 1
+    }
+
+    if r_cmd_len == 9 {
+        print("  cmd_len: ")
+        pass_ok()
+        pass = pass + 1
+    } else {
+        print("  cmd_len: ")
+        fail_msg(9, r_cmd_len)
+        fail = fail + 1
+    }
+
+    // ── Parse CHANNEL_DATA ──────────────────────────────────────────────
+    print("")
+    print("=== CHANNEL_DATA (94) ===")
+    newline()
+
+    // payload[0]     = msg type 94  (skip)
+    // payload[1..4]  = recipient_channel
+    // payload[5..8]  = data string len
+    // payload[9..9+len] = data
+
+    let mut d_recip = buf_u32(data_buf, 1)
+    let d_data_len = buf_u32(data_buf, 5)
+    let d_data_off = 9
+
+    print("recipient_channel = ")
+    print_int(d_recip)
+    newline()
+
+    print("data_len = ")
+    print_int(d_data_len)
+    newline()
+
+    print("data = ")
+    print_str(data_buf, d_data_off, d_data_len)
+    newline()
+
+    // ── Verify CHANNEL_DATA ─────────────────────────────────────────────
+    if d_recip == 0 {
+        print("  recipient_channel: ")
+        pass_ok()
+        pass = pass + 1
+    } else {
+        print("  recipient_channel: ")
+        fail_msg(0, d_recip)
+        fail = fail + 1
+    }
+
+    if d_data_len == 2 {
+        print("  data_len: ")
+        pass_ok()
+        pass = pass + 1
+    } else {
+        print("  data_len: ")
+        fail_msg(2, d_data_len)
+        fail = fail + 1
+    }
+
+    // ── Summary ─────────────────────────────────────────────────────────
+    newline()
+    print("Results: ")
+    print_int(pass)
+    print(" passed, ")
+    print_int(fail)
+    print(" failed")
+    newline()
+
+    if fail == 0 {
+        print("ALL PASS")
+        newline()
+    } else {
+        print("SOME FAILURES")
+        newline()
+    }
+
+    fail
+}

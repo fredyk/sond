@@ -1,0 +1,426 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Parse SSH service-request and userauth-request messages from hardcoded payloads.
+
+// Print a null-terminated string from an address, printing each char via print_char.
+fn print_str_from_addr(ptr: i64) {
+    for {
+        let ch = peek8(ptr)
+        if ch == 0 { break }
+        print_char(ch)
+        ptr = ptr + 1
+    }
+}
+
+// Print a string from an address with a given length.
+fn print_str_len(ptr: i64, len: i64) {
+    let mut i = 0
+    for i < len {
+        let ch = peek8(ptr + i)
+        print_char(ch)
+        i = i + 1
+    }
+}
+
+// Build a big-endian uint32 at ptr: 4 bytes from most-significant to least-significant.
+fn build_be32(ptr: i64, val: i64) {
+    let mut b3 = val & 0xFF
+    let mut b2 = (val >>> 8) & 0xFF
+    let mut b1 = (val >>> 16) & 0xFF
+    let mut b0 = (val >>> 24) & 0xFF
+    poke8(ptr, b0)
+    poke8(ptr + 1, b1)
+    poke8(ptr + 2, b2)
+    poke8(ptr + 3, b3)
+}
+
+// Parse an SSH string: reads 4-byte big-endian length, then returns (addr, len) via stack.
+// out[0] = address of string data, out[1] = length.
+// Returns new pointer (after the string).
+fn parse_ssh_string(buf: i64, offset: i64, out: i64) -> i64 {
+    // Read big-endian length
+    let len = peek8(buf + offset) * 16777216 + peek8(buf + offset + 1) * 65536 + peek8(buf + offset + 2) * 256 + peek8(buf + offset + 3)
+    // Store address and length to the output buffer
+    out[0] = buf + offset + 4
+    out[1] = len
+    // Return the offset after this string (length field + data)
+    offset + 4 + len
+}
+
+fn main() -> i64 {
+    let mut pass_fail = true
+
+    // =========================================================
+    // TEST 1: SSH_MSG_SERVICE_REQUEST (5) for "ssh-userauth"
+    // =========================================================
+    print("=== TEST 1: SSH_MSG_SERVICE_REQUEST ===")
+    print("")
+
+    // Build payload:
+    // [0] = 0x05 (message type)
+    // [1-4] = uint32 BE length of "ssh-userauth" = 12
+    // [5-16] = "ssh-userauth"
+    // Total = 17 bytes
+    let mut svc_req[32]
+    svc_req[0] = 0x05  // message type = 5
+
+    // Build the string "ssh-userauth" starting at offset 5
+    let svc_str = "ssh-userauth"
+    let mut si = 0
+    for si < 12 {
+        poke8(svc_req + 5 + si, svc_str[si])
+        si = si + 1
+    }
+    // But Sond doesn't have string indexing... we need to use poke8 byte by byte.
+    // Let me just poke each byte individually.
+    // Actually, Sond string literals only work inside print/write/serial_print.
+    // We need to manually build the buffer.
+
+    // Reset and rebuild properly
+    // message type = 5
+    poke8(svc_req + 0, 5)
+    // length = 12 (0x0000000C)
+    build_be32(svc_req + 1, 12)
+    // service name bytes: s=115, s=115, h=104, -=45, u=117, s=115, e=101, r=114, -=45, a=97, u=117, t=116, h=104
+    poke8(svc_req + 5, 115)   // s
+    poke8(svc_req + 6, 115)   // s
+    poke8(svc_req + 7, 104)   // h
+    poke8(svc_req + 8, 45)    // -
+    poke8(svc_req + 9, 117)   // u
+    poke8(svc_req + 10, 115)  // s
+    poke8(svc_req + 11, 101)  // e
+    poke8(svc_req + 12, 114)  // r
+    poke8(svc_req + 13, 97)   // a
+    poke8(svc_req + 14, 117)  // u
+    poke8(svc_req + 15, 116)  // t
+    poke8(svc_req + 16, 104)  // h
+
+    print("svc_req message type =")
+    print_int(peek8(svc_req + 0))
+    print("")
+
+    // Parse: offset 1 points to length
+    let mut parse_out[2]
+    let next_offset = parse_ssh_string(svc_req, 1, parse_out)
+    let svc_data_addr = parse_out[0]
+    let svc_len = parse_out[1]
+
+    print("svc_len = ")
+    print_int(svc_len)
+    print("")
+    print("service_name = ")
+    print_str_len(svc_data_addr, svc_len)
+    print("")
+
+    // Verify: service_name should be "ssh-userauth" and length 12
+    let mut correct = true
+    if svc_len != 12 { correct = false }
+    if peek8(svc_data_addr + 0) != 115 { correct = false }  // s
+    if peek8(svc_data_addr + 1) != 115 { correct = false }  // s
+    if peek8(svc_data_addr + 2) != 104 { correct = false }  // h
+    if peek8(svc_data_addr + 3) != 45 { correct = false }   // -
+    if peek8(svc_data_addr + 4) != 117 { correct = false }  // u
+    if peek8(svc_data_addr + 5) != 115 { correct = false }  // s
+    if peek8(svc_data_addr + 6) != 101 { correct = false }  // e
+    if peek8(svc_data_addr + 7) != 114 { correct = false }  // r
+    if peek8(svc_data_addr + 8) != 97 { correct = false }   // a
+    if peek8(svc_data_addr + 9) != 117 { correct = false }  // u
+    if peek8(svc_data_addr + 10) != 116 { correct = false } // t
+    if peek8(svc_data_addr + 11) != 104 { correct = false } // h
+    if correct {
+        print("PASS: service_name = ssh-userauth")
+    } else {
+        print("FAIL: service_name mismatch")
+        pass_fail = false
+    }
+    print("")
+
+    // =========================================================
+    // TEST 2: SSH_MSG_USERAUTH_REQUEST (50) method="none", user="user", service="ssh-connection"
+    // =========================================================
+    print("=== TEST 2: SSH_MSG_USERAUTH_REQUEST method=none ===")
+    print("")
+
+    // Layout:
+    // [0]  = 0x32 (50, message type)
+    // [1-4] = uint32 BE length of "user" = 4
+    // [5-8] = "user"
+    // [9-12] = uint32 BE length of "ssh-connection" = 14
+    // [13-26] = "ssh-connection"
+    // [27-30] = uint32 BE length of "none" = 4
+    // [31-34] = "none"
+    // Total = 35 bytes
+
+    let mut ua_req[64]
+
+    // message type = 50
+    poke8(ua_req + 0, 50)
+
+    // user_name: "user" (length 4)
+    build_be32(ua_req + 1, 4)
+    poke8(ua_req + 5, 117)  // u
+    poke8(ua_req + 6, 115)  // s
+    poke8(ua_req + 7, 101)  // e
+    poke8(ua_req + 8, 114)  // r
+
+    // service_name: "ssh-connection" (length 14)
+    build_be32(ua_req + 9, 14)
+    poke8(ua_req + 13, 115)  // s
+    poke8(ua_req + 14, 115)  // s
+    poke8(ua_req + 15, 104)  // h
+    poke8(ua_req + 16, 45)   // -
+    poke8(ua_req + 17, 99)   // c
+    poke8(ua_req + 18, 111)  // o
+    poke8(ua_req + 19, 110)  // n
+    poke8(ua_req + 20, 110)  // n
+    poke8(ua_req + 21, 101)  // e
+    poke8(ua_req + 22, 99)   // c
+    poke8(ua_req + 23, 116)  // t
+    poke8(ua_req + 24, 105)  // i
+    poke8(ua_req + 25, 111)  // o
+    poke8(ua_req + 26, 110)  // n
+
+    // method_name: "none" (length 4)
+    build_be32(ua_req + 27, 4)
+    poke8(ua_req + 31, 110)  // n
+    poke8(ua_req + 32, 111)  // o
+    poke8(ua_req + 33, 110)  // n
+    poke8(ua_req + 34, 101)  // e
+
+    print("ua_req message type = ")
+    print_int(peek8(ua_req + 0))
+    print("")
+
+    // Parse user_name at offset 1
+    let mut uo[2]
+    let mut off = parse_ssh_string(ua_req, 1, uo)
+    let user_addr = uo[0]
+    let user_len = uo[1]
+
+    print("user_name = ")
+    print_str_len(user_addr, user_len)
+    print("")
+
+    // Verify user_name = "user"
+    let mut user_ok = user_len == 4
+    if user_ok {
+        if peek8(user_addr + 0) != 117 { user_ok = false }
+        if peek8(user_addr + 1) != 115 { user_ok = false }
+        if peek8(user_addr + 2) != 101 { user_ok = false }
+        if peek8(user_addr + 3) != 114 { user_ok = false }
+    }
+    if user_ok {
+        print("PASS: user_name = user")
+    } else {
+        print("FAIL: user_name mismatch")
+        pass_fail = false
+    }
+    print("")
+
+    // Parse service_name at current offset
+    let mut so[2]
+    off = parse_ssh_string(ua_req, off, so)
+    let svc_conn_addr = so[0]
+    let svc_conn_len = so[1]
+
+    print("service_name = ")
+    print_str_len(svc_conn_addr, svc_conn_len)
+    print("")
+
+    // Verify service_name = "ssh-connection"
+    let mut svc_ok = svc_conn_len == 14
+    if svc_ok {
+        if peek8(svc_conn_addr + 0) != 115 { svc_ok = false }
+        if peek8(svc_conn_addr + 5) != 111 { svc_ok = false }
+        if peek8(svc_conn_addr + 13) != 110 { svc_ok = false }
+    }
+    if svc_ok {
+        print("PASS: service_name = ssh-connection")
+    } else {
+        print("FAIL: service_name mismatch")
+        pass_fail = false
+    }
+    print("")
+
+    // Parse method_name at current offset
+    let mut mo[2]
+    off = parse_ssh_string(ua_req, off, mo)
+    let method_addr = mo[0]
+    let method_len = mo[1]
+
+    print("method_name = ")
+    print_str_len(method_addr, method_len)
+    print("")
+
+    // Verify method_name = "none"
+    let mut method_ok = method_len == 4
+    if method_ok {
+        if peek8(method_addr + 0) != 110 { method_ok = false }
+        if peek8(method_addr + 3) != 101 { method_ok = false }
+    }
+    if method_ok {
+        print("PASS: method_name = none")
+    } else {
+        print("FAIL: method_name mismatch")
+        pass_fail = false
+    }
+    print("")
+
+    // =========================================================
+    // TEST 3: SSH_MSG_USERAUTH_REQUEST (50) method="password", user="user", service="ssh-connection", password="testpass"
+    // =========================================================
+    print("=== TEST 3: SSH_MSG_USERAUTH_REQUEST method=password ===")
+    print("")
+
+    // Layout:
+    // [0]  = 0x32 (50)
+    // [1-4] = length of "user" = 4
+    // [5-8] = "user"
+    // [9-12] = length of "ssh-connection" = 14
+    // [13-26] = "ssh-connection"
+    // [27-30] = length of "password" = 8
+    // [31-38] = "password"
+    // [39] = FALSE (0)
+    // [40-47] = length of "testpass" = 8
+    // [48-55] = "testpass"
+    // Total = 52 bytes
+
+    let mut ua_pw[64]
+
+    // message type = 50
+    poke8(ua_pw + 0, 50)
+
+    // user_name: "user" (length 4)
+    build_be32(ua_pw + 1, 4)
+    poke8(ua_pw + 5, 117)  // u
+    poke8(ua_pw + 6, 115)  // s
+    poke8(ua_pw + 7, 101)  // e
+    poke8(ua_pw + 8, 114)  // r
+
+    // service_name: "ssh-connection" (length 14)
+    build_be32(ua_pw + 9, 14)
+    poke8(ua_pw + 13, 115)  // s
+    poke8(ua_pw + 14, 115)  // s
+    poke8(ua_pw + 15, 104)  // h
+    poke8(ua_pw + 16, 45)   // -
+    poke8(ua_pw + 17, 99)   // c
+    poke8(ua_pw + 18, 111)  // o
+    poke8(ua_pw + 19, 110)  // n
+    poke8(ua_pw + 20, 110)  // n
+    poke8(ua_pw + 21, 101)  // e
+    poke8(ua_pw + 22, 99)   // c
+    poke8(ua_pw + 23, 116)  // t
+    poke8(ua_pw + 24, 105)  // i
+    poke8(ua_pw + 25, 111)  // o
+    poke8(ua_pw + 26, 110)  // n
+
+    // method_name: "password" (length 8)
+    build_be32(ua_pw + 27, 8)
+    poke8(ua_pw + 31, 112)  // p
+    poke8(ua_pw + 32, 97)   // a
+    poke8(ua_pw + 33, 115)  // s
+    poke8(ua_pw + 34, 115)  // s
+    poke8(ua_pw + 35, 119)  // w
+    poke8(ua_pw + 36, 111)  // o
+    poke8(ua_pw + 37, 114)  // r
+    poke8(ua_pw + 38, 100)  // d
+
+    // password: FALSE byte
+    poke8(ua_pw + 39, 0)
+
+    // password string: "testpass" (length 8)
+    build_be32(ua_pw + 40, 8)
+    poke8(ua_pw + 44, 116)  // t
+    poke8(ua_pw + 45, 101)  // e
+    poke8(ua_pw + 46, 115)  // s
+    poke8(ua_pw + 47, 116)  // t
+    poke8(ua_pw + 48, 112)  // p
+    poke8(ua_pw + 49, 97)   // a
+    poke8(ua_pw + 50, 115)  // s
+    poke8(ua_pw + 51, 115)  // s
+
+    // Parse user_name at offset 1
+    let mut uo2[2]
+    let mut off2 = parse_ssh_string(ua_pw, 1, uo2)
+    let user2_addr = uo2[0]
+    let user2_len = uo2[1]
+
+    print("user_name = ")
+    print_str_len(user2_addr, user2_len)
+    print("")
+
+    // Parse service_name
+    let mut so2[2]
+    off2 = parse_ssh_string(ua_pw, off2, so2)
+    let svc2_addr = so2[0]
+    let svc2_len = so2[1]
+
+    print("service_name = ")
+    print_str_len(svc2_addr, svc2_len)
+    print("")
+
+    // Parse method_name
+    let mut mo2[2]
+    off2 = parse_ssh_string(ua_pw, off2, mo2)
+    let method2_addr = mo2[0]
+    let method2_len = mo2[1]
+
+    print("method_name = ")
+    print_str_len(method2_addr, method2_len)
+    print("")
+
+    // For password method: next byte should be FALSE (0), then password string
+    let mut pw_false = peek8(ua_pw + off2)
+    print("password FALSE byte = ")
+    print_int(pw_false)
+    print("")
+
+    if pw_false == 0 {
+        print("PASS: password FALSE byte = 0")
+    } else {
+        print("FAIL: expected FALSE (0) for password")
+        pass_fail = false
+    }
+    print("")
+
+    // Parse password string at offset+1
+    let mut po[2]
+    off2 = parse_ssh_string(ua_pw, off2 + 1, po)
+    let pw_addr = po[0]
+    let pw_len = po[1]
+
+    print("password = ")
+    print_str_len(pw_addr, pw_len)
+    print("")
+
+    // Verify password = "testpass" (length 8)
+    let mut pw_ok = pw_len == 8
+    if pw_ok {
+        if peek8(pw_addr + 0) != 116 { pw_ok = false }  // t
+        if peek8(pw_addr + 1) != 101 { pw_ok = false }  // e
+        if peek8(pw_addr + 2) != 115 { pw_ok = false }  // s
+        if peek8(pw_addr + 3) != 116 { pw_ok = false }  // t
+        if peek8(pw_addr + 4) != 112 { pw_ok = false }  // p
+        if peek8(pw_addr + 5) != 97  { pw_ok = false }  // a
+        if peek8(pw_addr + 6) != 115 { pw_ok = false }  // s
+        if peek8(pw_addr + 7) != 115 { pw_ok = false }  // s
+    }
+    if pw_ok {
+        print("PASS: password = testpass")
+    } else {
+        print("FAIL: password mismatch")
+        pass_fail = false
+    }
+    print("")
+
+    // =========================================================
+    // FINAL RESULT
+    // =========================================================
+    if pass_fail {
+        print("ALL TESTS PASSED")
+    } else {
+        print("SOME TESTS FAILED")
+    }
+
+    0
+}

@@ -1,0 +1,266 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Build an SSH_MSG_KEXINIT payload (RFC 4253 §7.1) and print it as hex.
+fn main() -> i64 {
+    // Buffer for the full payload, max 256 bytes is plenty
+    let buf[256]
+
+    // Helper: write a big-endian uint32 at offset off (4 bytes)
+    // SSH strings use network byte order (big-endian) for lengths.
+    // poke32 writes native (little-endian), so we write byte-by-byte.
+    // We inline this for each name-list since Sond has no function calls.
+
+    // 1. byte: SSH_MSG_KEXINIT = 20
+    poke8(buf, 20)
+
+    // 2. cookie: 16 bytes 0x00..0x0F
+    let mut ci = 1
+    for ci <= 16 {
+        poke8(buf + ci, ci - 1)
+        ci = ci + 1
+    }
+
+    let mut off = 17
+
+    // kex_algorithms: "curve25519-sha256" (17 bytes = 0x00000011)
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 17);  off = off + 1
+    poke8(buf + off, 99);  off = off + 1  // c
+    poke8(buf + off, 117); off = off + 1  // u
+    poke8(buf + off, 114); off = off + 1  // r
+    poke8(buf + off, 118); off = off + 1  // v
+    poke8(buf + off, 101); off = off + 1  // e
+    poke8(buf + off, 50);  off = off + 1  // 2
+    poke8(buf + off, 53);  off = off + 1  // 5
+    poke8(buf + off, 53);  off = off + 1  // 5
+    poke8(buf + off, 49);  off = off + 1  // 1
+    poke8(buf + off, 57);  off = off + 1  // 9
+    poke8(buf + off, 45);  off = off + 1  // -
+    poke8(buf + off, 115); off = off + 1  // s
+    poke8(buf + off, 104); off = off + 1  // h
+    poke8(buf + off, 97);  off = off + 1  // a
+    poke8(buf + off, 50);  off = off + 1  // 2
+    poke8(buf + off, 53);  off = off + 1  // 5
+    poke8(buf + off, 54);  off = off + 1  // 6
+
+    // server_host_key_algorithms: "ssh-ed25519" (11 bytes = 0x0000000b)
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 11);  off = off + 1
+    poke8(buf + off, 115); off = off + 1  // s
+    poke8(buf + off, 115); off = off + 1  // s
+    poke8(buf + off, 104); off = off + 1  // h
+    poke8(buf + off, 45);  off = off + 1  // -
+    poke8(buf + off, 101); off = off + 1  // e
+    poke8(buf + off, 100); off = off + 1  // d
+    poke8(buf + off, 50);  off = off + 1  // 2
+    poke8(buf + off, 53);  off = off + 1  // 5
+    poke8(buf + off, 53);  off = off + 1  // 5
+    poke8(buf + off, 49);  off = off + 1  // 1
+    poke8(buf + off, 57);  off = off + 1  // 9
+
+    // encryption_client_to_server: "chacha20-poly1305@openssh.com" (29 bytes = 0x0000001d)
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 29);  off = off + 1
+    poke8(buf + off, 99);  off = off + 1  // c
+    poke8(buf + off, 104); off = off + 1  // h
+    poke8(buf + off, 97);  off = off + 1  // a
+    poke8(buf + off, 99);  off = off + 1  // c
+    poke8(buf + off, 104); off = off + 1  // h
+    poke8(buf + off, 97);  off = off + 1  // a
+    poke8(buf + off, 50);  off = off + 1  // 2
+    poke8(buf + off, 48);  off = off + 1  // 0
+    poke8(buf + off, 45);  off = off + 1  // -
+    poke8(buf + off, 112); off = off + 1  // p
+    poke8(buf + off, 111); off = off + 1  // o
+    poke8(buf + off, 108); off = off + 1  // l
+    poke8(buf + off, 121); off = off + 1  // y
+    poke8(buf + off, 49);  off = off + 1  // 1
+    poke8(buf + off, 51);  off = off + 1  // 3
+    poke8(buf + off, 48);  off = off + 1  // 0
+    poke8(buf + off, 53);  off = off + 1  // 5
+    poke8(buf + off, 64);  off = off + 1  // @
+    poke8(buf + off, 111); off = off + 1  // o
+    poke8(buf + off, 112); off = off + 1  // p
+    poke8(buf + off, 101); off = off + 1  // e
+    poke8(buf + off, 110); off = off + 1  // n
+    poke8(buf + off, 115); off = off + 1  // s
+    poke8(buf + off, 115); off = off + 1  // s
+    poke8(buf + off, 104); off = off + 1  // h
+    poke8(buf + off, 46);  off = off + 1  // .
+    poke8(buf + off, 99);  off = off + 1  // c
+    poke8(buf + off, 111); off = off + 1  // o
+    poke8(buf + off, 109); off = off + 1  // m
+
+    // encryption_server_to_client: same (29 bytes)
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 29);  off = off + 1
+    poke8(buf + off, 99);  off = off + 1
+    poke8(buf + off, 104); off = off + 1
+    poke8(buf + off, 97);  off = off + 1
+    poke8(buf + off, 99);  off = off + 1
+    poke8(buf + off, 104); off = off + 1
+    poke8(buf + off, 97);  off = off + 1
+    poke8(buf + off, 50);  off = off + 1
+    poke8(buf + off, 48);  off = off + 1
+    poke8(buf + off, 45);  off = off + 1
+    poke8(buf + off, 112); off = off + 1
+    poke8(buf + off, 111); off = off + 1
+    poke8(buf + off, 108); off = off + 1
+    poke8(buf + off, 121); off = off + 1
+    poke8(buf + off, 49);  off = off + 1
+    poke8(buf + off, 51);  off = off + 1
+    poke8(buf + off, 48);  off = off + 1
+    poke8(buf + off, 53);  off = off + 1
+    poke8(buf + off, 64);  off = off + 1
+    poke8(buf + off, 111); off = off + 1
+    poke8(buf + off, 112); off = off + 1
+    poke8(buf + off, 101); off = off + 1
+    poke8(buf + off, 110); off = off + 1
+    poke8(buf + off, 115); off = off + 1
+    poke8(buf + off, 115); off = off + 1
+    poke8(buf + off, 104); off = off + 1
+    poke8(buf + off, 46);  off = off + 1
+    poke8(buf + off, 99);  off = off + 1
+    poke8(buf + off, 111); off = off + 1
+    poke8(buf + off, 109); off = off + 1
+
+    // mac_client_to_server: "hmac-sha2-256" (13 bytes = 0x0000000d)
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 13);  off = off + 1
+    poke8(buf + off, 104); off = off + 1  // h
+    poke8(buf + off, 109); off = off + 1  // m
+    poke8(buf + off, 97);  off = off + 1  // a
+    poke8(buf + off, 99);  off = off + 1  // c
+    poke8(buf + off, 45);  off = off + 1  // -
+    poke8(buf + off, 115); off = off + 1  // s
+    poke8(buf + off, 104); off = off + 1  // h
+    poke8(buf + off, 97);  off = off + 1  // a
+    poke8(buf + off, 50);  off = off + 1  // 2
+    poke8(buf + off, 45);  off = off + 1  // -
+    poke8(buf + off, 50);  off = off + 1  // 2
+    poke8(buf + off, 53);  off = off + 1  // 5
+    poke8(buf + off, 54);  off = off + 1  // 6
+
+    // mac_server_to_client: same (13 bytes)
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 13);  off = off + 1
+    poke8(buf + off, 104); off = off + 1
+    poke8(buf + off, 109); off = off + 1
+    poke8(buf + off, 97);  off = off + 1
+    poke8(buf + off, 99);  off = off + 1
+    poke8(buf + off, 45);  off = off + 1
+    poke8(buf + off, 115); off = off + 1
+    poke8(buf + off, 104); off = off + 1
+    poke8(buf + off, 97);  off = off + 1
+    poke8(buf + off, 50);  off = off + 1
+    poke8(buf + off, 45);  off = off + 1
+    poke8(buf + off, 50);  off = off + 1
+    poke8(buf + off, 53);  off = off + 1
+    poke8(buf + off, 54);  off = off + 1
+
+    // compression_client_to_server: "none" (4 bytes = 0x00000004)
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 4);   off = off + 1
+    poke8(buf + off, 110); off = off + 1  // n
+    poke8(buf + off, 111); off = off + 1  // o
+    poke8(buf + off, 110); off = off + 1  // n
+    poke8(buf + off, 101); off = off + 1  // e
+
+    // compression_server_to_client: "none" (4 bytes)
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 4);   off = off + 1
+    poke8(buf + off, 110); off = off + 1
+    poke8(buf + off, 111); off = off + 1
+    poke8(buf + off, 110); off = off + 1
+    poke8(buf + off, 101); off = off + 1
+
+    // languages_client_to_server: "" (0 bytes = 0x00000000)
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+
+    // languages_server_to_client: "" (0 bytes)
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+
+    // first_kex_packet_follows: 0
+    poke8(buf + off, 0)
+    off = off + 1
+
+    // reserved: uint32 = 0 (big-endian)
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+    poke8(buf + off, 0);   off = off + 1
+
+    // Total payload length
+    let total = off
+
+    // ---- print as hex ----
+    // Format: EXPECTED:<hex>\nACTUAL:<hex>\nlen:<N>\nRESULT:<PASS/FAIL>\n
+    // print("...") does NOT add newline; use print_char(10) for newline.
+    print("EXPECTED:14000102030405060708090a0b0c0d0e0f00000011637572766532353531392d7368613235360000000b7373682d656432353531390000001d63686163686132302d706f6c7931333035406f70656e7373682e636f6d0000001d63686163686132302d706f6c7931333035406f70656e7373682e636f6d0000000d686d61632d736861322d3235360000000d686d61632d736861322d323536000000046e6f6e65000000046e6f6e6500000000000000000000000000")
+    print_char(10)
+
+    // Print actual hex
+    print("ACTUAL:")
+    let mut hi = 0
+    for hi < total {
+        let b = peek8(buf + hi)
+        let hi4 = b >>> 4
+        let lo4 = b & 0x0F
+        let mut c = 0
+        if hi4 < 10 {
+            c = hi4 + 48
+        } else {
+            c = hi4 + 87
+        }
+        print_char(c)
+        c = 0
+        if lo4 < 10 {
+            c = lo4 + 48
+        } else {
+            c = lo4 + 87
+        }
+        print_char(c)
+        hi = hi + 1
+    }
+    print_char(10)
+
+    // Print length
+    print("len:")
+    print_int(total)
+    print_char(10)
+
+    // Verify against expected
+    let mut pass = true
+    if total != 182 {
+        pass = false
+    }
+    if pass {
+        print("RESULT:PASS")
+    } else {
+        print("RESULT:FAIL")
+    }
+    print_char(10)
+    0
+}

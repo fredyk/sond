@@ -1,0 +1,320 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// SSH wire-format encoders, RFC 4251 §5 primitives in Sond
+
+// Write a uint32 as 4 big-endian bytes at p
+fn put_u32(p: i64, v: i64) {
+    poke8(p, (v >>> 24) & 0xFF)
+    poke8(p + 1, (v >>> 16) & 0xFF)
+    poke8(p + 2, (v >>> 8) & 0xFF)
+    poke8(p + 3, v & 0xFF)
+}
+
+// Read a uint32 from 4 big-endian bytes at p
+fn get_u32(p: i64) -> i64 {
+    ((peek8(p) & 0xFF) << 24) | ((peek8(p + 1) & 0xFF) << 16) | ((peek8(p + 2) & 0xFF) << 8) | (peek8(p + 3) & 0xFF)
+}
+
+// Print n bytes from address p as hex, no newline
+fn print_hex(p: i64, n: i64) {
+    let mut i: i64 = 0
+    for i < n {
+        let byte = peek8(p + i)
+        let hi = (byte >>> 4) & 0x0F
+        let lo = byte & 0x0F
+        print_char_hex(hi)
+        print_char_hex(lo)
+        i = i + 1
+    }
+}
+
+fn print_char_hex(v: i64) {
+    let c = if v < 10 { v + 48 } else { v - 10 + 97 }
+    print_char(c)
+}
+
+// byte_enc: encode one byte at p, return 1
+fn byte_enc(p: i64, v: i64) -> i64 {
+    poke8(p, v & 0xFF)
+    1
+}
+
+// uint32_enc: encode 4 bytes big-endian at p, return 4
+fn uint32_enc(p: i64, v: i64) -> i64 {
+    put_u32(p, v)
+    4
+}
+
+// uint64_enc: encode 8 bytes big-endian at p, return 8
+fn uint64_enc(p: i64, v: i64) -> i64 {
+    poke8(p, (v >>> 56) & 0xFF)
+    poke8(p + 1, (v >>> 48) & 0xFF)
+    poke8(p + 2, (v >>> 40) & 0xFF)
+    poke8(p + 3, (v >>> 32) & 0xFF)
+    poke8(p + 4, (v >>> 24) & 0xFF)
+    poke8(p + 5, (v >>> 16) & 0xFF)
+    poke8(p + 6, (v >>> 8) & 0xFF)
+    poke8(p + 7, v & 0xFF)
+    8
+}
+
+// mpint_enc: encode a signed int as SSH mpint (string of two's complement BE bytes)
+// at address p, return total length (uint32 len prefix + data bytes)
+fn mpint_enc(p: i64, v: i64) -> i64 {
+    // zero -> empty string body
+    if v == 0 {
+        put_u32(p, 0)
+        return 4
+    }
+
+    // Work with absolute value
+    let mut n: i64
+    if v < 0 {
+        // Two's complement: flip bits and add 1
+        n = ~v + 1
+    } else {
+        n = v
+    }
+
+    // Find byte length of n
+    let mut len: i64 = 0
+    let mut tmp: i64 = n
+    for tmp > 0 {
+        len = len + 1
+        tmp = tmp >>> 8
+    }
+
+    // Write uint32 length prefix (big-endian)
+    put_u32(p, len)
+
+    // Write data bytes big-endian at p+4
+    let mut i: i64 = len - 1
+    for i >= 0 {
+        let shift = i * 8
+        poke8(p + 4 + (len - 1 - i), (n >>> shift) & 0xFF)
+        i = i - 1
+    }
+
+    // Check if MSB of first data byte is set, if so, prepend 0x00
+    let first_byte = peek8(p + 4)
+    if first_byte & 0x80 != 0 {
+        // Shift all data right by 1 byte
+        let mut j: i64 = len - 1
+        for j >= 0 {
+            let src = p + 4 + j
+            let dst = p + 5 + j
+            poke8(dst, peek8(src))
+            j = j - 1
+        }
+        poke8(p + 4, 0)
+        len = len + 1
+    }
+
+    // Update the length prefix to new len
+    put_u32(p, len)
+
+    return 4 + len
+}
+
+// Encode "ssh-ed25519" (11 bytes) at p, return 4+11=15
+fn encode_ssh_ed25519(p: i64) -> i64 {
+    put_u32(p, 11)
+    poke8(p + 4, 0x73) // s
+    poke8(p + 5, 0x73) // s
+    poke8(p + 6, 0x68) // h
+    poke8(p + 7, 0x2D) // -
+    poke8(p + 8, 0x65) // e
+    poke8(p + 9, 0x64) // d
+    poke8(p + 10, 0x32) // 2
+    poke8(p + 11, 0x35) // 5
+    poke8(p + 12, 0x35) // 5
+    poke8(p + 13, 0x31) // 1
+    poke8(p + 14, 0x39) // 9
+    15
+}
+
+// Encode "curve25519-sha256,ecdh-sha2-nistp256" (36 bytes) at p, return 4+36=40
+fn encode_curve25519_list(p: i64) -> i64 {
+    put_u32(p, 36)
+    poke8(p + 4, 0x63) // c
+    poke8(p + 5, 0x75) // u
+    poke8(p + 6, 0x72) // r
+    poke8(p + 7, 0x76) // v
+    poke8(p + 8, 0x65) // e
+    poke8(p + 9, 0x32) // 2
+    poke8(p + 10, 0x35) // 5
+    poke8(p + 11, 0x35) // 5
+    poke8(p + 12, 0x31) // 1
+    poke8(p + 13, 0x39) // 9
+    poke8(p + 14, 0x2D) // -
+    poke8(p + 15, 0x73) // s
+    poke8(p + 16, 0x68) // h
+    poke8(p + 17, 0x61) // a
+    poke8(p + 18, 0x32) // 2
+    poke8(p + 19, 0x35) // 5
+    poke8(p + 20, 0x36) // 6
+    poke8(p + 21, 0x2C) // ,
+    poke8(p + 22, 0x65) // e
+    poke8(p + 23, 0x63) // c
+    poke8(p + 24, 0x64) // d
+    poke8(p + 25, 0x68) // h
+    poke8(p + 26, 0x2D) // -
+    poke8(p + 27, 0x73) // s
+    poke8(p + 28, 0x68) // h
+    poke8(p + 29, 0x61) // a
+    poke8(p + 30, 0x32) // 2
+    poke8(p + 31, 0x2D) // -
+    poke8(p + 32, 0x6E) // n
+    poke8(p + 33, 0x69) // i
+    poke8(p + 34, 0x73) // s
+    poke8(p + 35, 0x74) // t
+    poke8(p + 36, 0x70) // p
+    poke8(p + 37, 0x32) // 2
+    poke8(p + 38, 0x35) // 5
+    poke8(p + 39, 0x36) // 6
+    40
+}
+
+// Encode "zlib" (4 bytes) at p, return 4+4=8
+fn encode_zlib(p: i64) -> i64 {
+    put_u32(p, 4)
+    poke8(p + 4, 0x7A) // z
+    poke8(p + 5, 0x6C) // l
+    poke8(p + 6, 0x69) // i
+    poke8(p + 7, 0x62) // b
+    8
+}
+
+// Encode "zlib,none" (9 bytes) at p, return 4+9=13
+fn encode_zlib_none(p: i64) -> i64 {
+    put_u32(p, 9)
+    poke8(p + 4, 0x7A) // z
+    poke8(p + 5, 0x6C) // l
+    poke8(p + 6, 0x69) // i
+    poke8(p + 7, 0x62) // b
+    poke8(p + 8, 0x2C) // ,
+    poke8(p + 9, 0x6E) // n
+    poke8(p + 10, 0x6F) // o
+    poke8(p + 11, 0x6E) // n
+    poke8(p + 12, 0x65) // e
+    13
+}
+
+// Encode "" (empty, 0 bytes) at p, return 4
+fn encode_empty(p: i64) -> i64 {
+    put_u32(p, 0)
+    4
+}
+
+fn main() -> i64 {
+    let mut buf[512]
+    let mut pass: i64 = 1
+    let mut len: i64
+
+    // === byte ===
+    len = byte_enc(buf, 0xAB)
+    print("byte(0xAB) = ")
+    print_hex(buf, len)
+    print("")
+    if len != 1 { pass = 0 }
+    if peek8(buf + 0) != 0xAB { pass = 0 }
+
+    // === uint32 ===
+    len = uint32_enc(buf, 0x0A0B0C0D)
+    print("uint32(0x0A0B0C0D) = ")
+    print_hex(buf, len)
+    print("")
+    if peek8(buf + 0) != 0x0A { pass = 0 }
+    if peek8(buf + 1) != 0x0B { pass = 0 }
+    if peek8(buf + 2) != 0x0C { pass = 0 }
+    if peek8(buf + 3) != 0x0D { pass = 0 }
+
+    // === string("ssh-ed25519") ===
+    len = encode_ssh_ed25519(buf)
+    print("string(\"ssh-ed25519\") = ")
+    print_hex(buf, len)
+    print("")
+    if get_u32(buf + 0) != 0x0000000B { pass = 0 }
+    if peek8(buf + 4) != 0x73 { pass = 0 }
+    if peek8(buf + 14) != 0x39 { pass = 0 }
+
+    // === mpint(0x00FF) = 00000002 00ff ===
+    len = mpint_enc(buf, 0x00FF)
+    print("mpint(0x00FF) = ")
+    print_hex(buf, len)
+    print("")
+    if get_u32(buf + 0) != 0x00000002 { pass = 0 }
+    if peek8(buf + 4) != 0x00 { pass = 0 }
+    if peek8(buf + 5) != 0xFF { pass = 0 }
+
+    // === mpint(0x09A378F9B2E332A7) = 00000008 09a378f9b2e332a7 ===
+    len = mpint_enc(buf, 0x09A378F9B2E332A7)
+    print("mpint(0x09A378F9B2E332A7) = ")
+    print_hex(buf, len)
+    print("")
+    if get_u32(buf + 0) != 0x00000008 { pass = 0 }
+    if peek8(buf + 4) != 0x09 { pass = 0 }
+    if peek8(buf + 11) != 0xA7 { pass = 0 }
+
+    // === mpint(0) = 00000000 ===
+    len = mpint_enc(buf, 0)
+    print("mpint(0) = ")
+    print_hex(buf, len)
+    print("")
+    if get_u32(buf + 0) != 0 { pass = 0 }
+
+    // === mpint(0x80) = 00000002 0080 ===
+    len = mpint_enc(buf, 0x80)
+    print("mpint(0x80) = ")
+    print_hex(buf, len)
+    print("")
+    if get_u32(buf + 0) != 0x00000002 { pass = 0 }
+    if peek8(buf + 4) != 0x00 { pass = 0 }
+    if peek8(buf + 5) != 0x80 { pass = 0 }
+
+    // === name-list("curve25519-sha256,ecdh-sha2-nistp256") ===
+    len = encode_curve25519_list(buf)
+    print("name-list(\"curve25519-sha256,ecdh-sha2-nistp256\") = ")
+    print_hex(buf, len)
+    print("")
+    if get_u32(buf + 0) != 0x00000024 { pass = 0 }
+
+    // === name-list("zlib") ===
+    len = encode_zlib(buf)
+    print("name-list(\"zlib\") = ")
+    print_hex(buf, len)
+    print("")
+    if get_u32(buf + 0) != 0x00000004 { pass = 0 }
+    if get_u32(buf + 4) != 0x7a6c6962 { pass = 0 }
+
+    // === name-list("zlib,none") ===
+    len = encode_zlib_none(buf)
+    print("name-list(\"zlib,none\") = ")
+    print_hex(buf, len)
+    print("")
+    if get_u32(buf + 0) != 0x00000009 { pass = 0 }
+    if peek8(buf + 4) != 0x7A { pass = 0 }
+
+    // === name-list("") ===
+    len = encode_empty(buf)
+    print("name-list(\"\") = ")
+    print_hex(buf, len)
+    print("")
+    if get_u32(buf + 0) != 0 { pass = 0 }
+
+    // === uint64 ===
+    len = uint64_enc(buf, 0x0102030405060708)
+    print("uint64(0x0102030405060708) = ")
+    print_hex(buf, len)
+    print("")
+    if peek8(buf + 0) != 0x01 { pass = 0 }
+    if peek8(buf + 7) != 0x08 { pass = 0 }
+
+    if pass == 0 {
+        print("FAIL")
+        1
+    } else {
+        print("PASS")
+        0
+    }
+}

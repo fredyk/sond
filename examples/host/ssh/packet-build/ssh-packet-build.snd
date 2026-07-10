@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Build well-formed SSH binary packets per RFC 4253 §6 and verify via Python oracle.
+
+// Compute padding_length: smallest value >= 4 such that
+// (4 + 1 + payload_len + padding_length) % 8 == 0
+fn compute_padding_length(payload_len: i64) -> i64 {
+    let mut pl = 4
+    for {
+        let total = 5 + payload_len + pl
+        if total % 8 == 0 {
+            return pl
+        }
+        pl = pl + 1
+    }
+}
+
+// ssh_wrap_packet writes a complete unencrypted SSH binary packet into out_ptr
+// and returns the total byte length (4 + 1 + payload_len + padding_length).
+// Layout: [packet_length:u32][padding_length:u8][payload][zero padding]
+fn ssh_wrap_packet(payload_ptr: i64, payload_len: i64, out_ptr: i64) -> i64 {
+    let mut pl = compute_padding_length(payload_len)
+    let mut packet_length = 1 + payload_len + pl
+    let mut total = 4 + 1 + payload_len + pl
+
+    // Write packet_length as big-endian uint32
+    let mut b3 = packet_length & 0xFF
+    let mut b2 = (packet_length >>> 8) & 0xFF
+    let mut b1 = (packet_length >>> 16) & 0xFF
+    let mut b0 = (packet_length >>> 24) & 0xFF
+    poke8(out_ptr, b0)
+    poke8(out_ptr + 1, b1)
+    poke8(out_ptr + 2, b2)
+    poke8(out_ptr + 3, b3)
+
+    // Write padding_length as uint8
+    poke8(out_ptr + 4, pl)
+
+    // Copy payload bytes (each Sond array element is a 8-byte word)
+    let mut i = 0
+    for i < payload_len {
+        let mut byte_val = peek64(payload_ptr + i * 8) & 0xFF
+        poke8(out_ptr + 5 + i, byte_val)
+        i = i + 1
+    }
+
+    // Write zero padding
+    let mut p = 0
+    for p < pl {
+        poke8(out_ptr + 5 + payload_len + p, 0)
+        p = p + 1
+    }
+
+    total
+}
+
+// Read a big-endian uint32 from a byte buffer
+fn read_be32(ptr: i64) -> i64 {
+    let mut b0 = peek8(ptr)
+    let mut b1 = peek8(ptr + 1)
+    let mut b2 = peek8(ptr + 2)
+    let mut b3 = peek8(ptr + 3)
+    b0 << 24 | b1 << 16 | b2 << 8 | b3
+}
+
+// Print a newline (newline() is a no-op in Sond)
+fn newline() {
+    print("
+")
+}
+
+// Convert an integer to a hex string character
+fn int_to_hex_digit(n: i64) -> i64 {
+    if n < 10 {
+        '0' + n
+    } else {
+        'a' + (n - 10)
+    }
+}
+
+// Print hex representation of a buffer
+fn print_hex(buf_ptr: i64, len: i64) {
+    let mut i = 0
+    for {
+        if i >= len {
+            return
+        }
+        let byte_val = peek8(buf_ptr + i)
+        let hi = (byte_val >>> 4) & 0xF
+        let lo = byte_val & 0xF
+        print_char(int_to_hex_digit(hi))
+        print_char(int_to_hex_digit(lo))
+        i = i + 1
+    }
+}
+
+fn main() -> i64 {
+    // --- Test 1: NEWKEYS message (1-byte payload, byte 21) ---
+    print("=== Test 1: NEWKEYS (1-byte payload = 0x15) ===")
+    newline()
+
+    let mut newkeys_payload[1] = [21]
+    let mut out_buf[128]
+
+    let mut total1 = ssh_wrap_packet(newkeys_payload, 1, out_buf)
+    let mut pkt_len1 = read_be32(out_buf)
+    let mut pad_len1 = peek8(out_buf + 4)
+
+    print("packet_length =")
+    print_int(pkt_len1)
+    newline()
+    print("padding_length =")
+    print_int(pad_len1)
+    newline()
+    print("total packet length =")
+    print_int(total1)
+    newline()
+    print("hex: ")
+    print_hex(out_buf, total1)
+    print(" - packet_length=")
+    print_int(pkt_len1)
+    print(" padding_length=")
+    print_int(pad_len1)
+    newline()
+
+    // Invariant checks
+    if total1 % 8 != 0 {
+        print("FAIL: total length not multiple of 8")
+        return 1
+    }
+    if pad_len1 < 4 {
+        print("FAIL: padding_length < 4")
+        return 1
+    }
+    print("Test 1: PASS")
+    newline()
+
+    // --- Test 2: 12-byte payload ---
+    print("=== Test 2: 12-byte payload ===")
+    newline()
+
+    let mut payload2[12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    let mut out_buf2[128]
+
+    let mut total2 = ssh_wrap_packet(payload2, 12, out_buf2)
+    let mut pkt_len2 = read_be32(out_buf2)
+    let mut pad_len2 = peek8(out_buf2 + 4)
+
+    print("packet_length =")
+    print_int(pkt_len2)
+    newline()
+    print("padding_length =")
+    print_int(pad_len2)
+    newline()
+    print("total packet length =")
+    print_int(total2)
+    newline()
+    print("hex: ")
+    print_hex(out_buf2, total2)
+    print(" - packet_length=")
+    print_int(pkt_len2)
+    print(" padding_length=")
+    print_int(pad_len2)
+    newline()
+
+    if total2 % 8 != 0 {
+        print("FAIL: total length not multiple of 8")
+        return 1
+    }
+    if pad_len2 < 4 {
+        print("FAIL: padding_length < 4")
+        return 1
+    }
+    print("Test 2: PASS")
+    newline()
+
+    // --- Test 3: 8-byte payload ---
+    print("=== Test 3: 8-byte payload ===")
+    newline()
+
+    let mut payload3[8] = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x01, 0x02]
+    let mut out_buf3[128]
+
+    let mut total3 = ssh_wrap_packet(payload3, 8, out_buf3)
+    let mut pkt_len3 = read_be32(out_buf3)
+    let mut pad_len3 = peek8(out_buf3 + 4)
+
+    print("packet_length =")
+    print_int(pkt_len3)
+    newline()
+    print("padding_length =")
+    print_int(pad_len3)
+    newline()
+    print("total packet length =")
+    print_int(total3)
+    newline()
+    print("hex: ")
+    print_hex(out_buf3, total3)
+    print(" - packet_length=")
+    print_int(pkt_len3)
+    print(" padding_length=")
+    print_int(pad_len3)
+    newline()
+
+    if total3 % 8 != 0 {
+        print("FAIL: total length not multiple of 8")
+        return 1
+    }
+    if pad_len3 < 4 {
+        print("FAIL: padding_length < 4")
+        return 1
+    }
+    print("Test 3: PASS")
+    newline()
+
+    print("ALL TESTS PASSED")
+    0
+}
