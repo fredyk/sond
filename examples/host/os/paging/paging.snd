@@ -1,0 +1,28 @@
+fn main() -> i64 {
+    let a[1]
+    let b[1]
+    let c[1]
+    let d[1]
+
+    // pte(0x2000, 0x3) = (0x2000 & 0x000FFFFFFFFFF000) | 0x3 = 0x2000 | 0x3 = 0x2003 = 8195
+    a[0] = (0x2000 & 0x000FFFFFFFFFF000) | 0x3
+    print_int(a[0])
+    print("")
+
+    // pte_addr(0x2003) = 0x2003 & 0x000FFFFFFFFFF000 = 0x2000 = 8192
+    b[0] = 0x2003 & 0x000FFFFFFFFFF000
+    print_int(b[0])
+    print("")
+
+    // is_present(0x2003) = 0x2003 & 1 = 1
+    c[0] = 0x2003 & 1
+    print_int(c[0])
+    print("")
+
+    // pte(0x400000, 0x83) = (0x400000 & 0x000FFFFFFFFFF000) | 0x83 = 0x400000 | 0x83 = 0x400083 = 4194435
+    d[0] = (0x400000 & 0x000FFFFFFFFFF000) | 0x83
+    print_int(d[0])
+    print("")
+
+    0
+}

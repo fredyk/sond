@@ -1,0 +1,30 @@
+fn pick_next(current: i64, n: i64, arr: i64) -> i64 {
+    let mut i = current + 1
+    let mut count = 0
+    for count < n {
+        let idx = i % n
+        let s = peek64(arr + idx * 8)
+        if s == 0 {
+            return idx
+        }
+        i = i + 1
+        count = count + 1
+    }
+    -1
+}
+
+fn main() -> i64 {
+    let mut state[8]
+    state[0] = 0
+    state[1] = 1
+    state[2] = 0
+    state[3] = 0
+
+    print_int(pick_next(0, 4, state))
+    print(" ")
+    print_int(pick_next(2, 4, state))
+    print(" ")
+    print_int(pick_next(3, 4, state))
+    print("")
+    0
+}

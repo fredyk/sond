@@ -1,0 +1,36 @@
+fn efi_main() -> i64 {
+    let mut a[8]
+    let mut b[16]
+    let mut i = 0
+    for i < 64 {
+        a[i / 8] = (i * 31) & 0xFF
+        i = i + 1
+    }
+    let mut row = 0
+    for row < 4 {
+        let mut col = 0
+        let mut offset = row * 16
+        for col < 16 {
+            let byte_val = a[offset / 8]
+            let hi = (byte_val >> 4) & 0xF
+            let lo = byte_val & 0xF
+            if hi < 10 {
+                serial_putc(hi + '0')
+            } else {
+                serial_putc(hi - 10 + 'A')
+            }
+            if lo < 10 {
+                serial_putc(lo + '0')
+            } else {
+                serial_putc(lo - 10 + 'A')
+            }
+            serial_putc(32)
+            col = col + 1
+        }
+        serial_putc(10)
+        row = row + 1
+    }
+    serial_print("dump done")
+    halt()
+    0
+}

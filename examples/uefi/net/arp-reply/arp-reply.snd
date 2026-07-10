@@ -1,0 +1,226 @@
+// ARP request/reply builder - RFC 826
+// Uses alloc + peek8/poke8 for byte-addressable buffers
+
+fn efi_main() -> i64 {
+    // Allocate two 42-byte buffers
+    let buf1 = alloc(42)
+    let buf2 = alloc(42)
+
+    // === Build ARP request in buf1 ===
+    // Ethernet header (14 bytes): dst MAC(6) + src MAC(6) + etherType(2)
+    poke8(buf1 + 0,  0xFF)
+    poke8(buf1 + 1,  0xFF)
+    poke8(buf1 + 2,  0xFF)
+    poke8(buf1 + 3,  0xFF)
+    poke8(buf1 + 4,  0xFF)
+    poke8(buf1 + 5,  0xFF)
+
+    poke8(buf1 + 6,  0x00)
+    poke8(buf1 + 7,  0x1A)
+    poke8(buf1 + 8,  0x2B)
+    poke8(buf1 + 9,  0x3C)
+    poke8(buf1 + 10, 0x4D)
+    poke8(buf1 + 11, 0x5E)
+
+    poke8(buf1 + 12, 0x08)
+    poke8(buf1 + 13, 0x06)
+
+    // ARP payload (28 bytes) starts at offset 14
+    // hwType = 1
+    poke8(buf1 + 14, 0x00)
+    poke8(buf1 + 15, 0x01)
+
+    // proto = 0x0800
+    poke8(buf1 + 16, 0x08)
+    poke8(buf1 + 17, 0x00)
+
+    // hln = 6, pln = 4
+    poke8(buf1 + 18, 6)
+    poke8(buf1 + 19, 4)
+
+    // oper = REQUEST (1)
+    poke8(buf1 + 20, 0x00)
+    poke8(buf1 + 21, 0x01)
+
+    // sender MAC
+    poke8(buf1 + 22, 0x00)
+    poke8(buf1 + 23, 0x1A)
+    poke8(buf1 + 24, 0x2B)
+    poke8(buf1 + 25, 0x3C)
+    poke8(buf1 + 26, 0x4D)
+    poke8(buf1 + 27, 0x5E)
+
+    // sender IP = 192.168.1.1
+    poke8(buf1 + 28, 0xC0)
+    poke8(buf1 + 29, 0xA8)
+    poke8(buf1 + 30, 0x01)
+    poke8(buf1 + 31, 0x01)
+
+    // target MAC = 00:00:00:00:00:00
+    poke8(buf1 + 32, 0x00)
+    poke8(buf1 + 33, 0x00)
+    poke8(buf1 + 34, 0x00)
+    poke8(buf1 + 35, 0x00)
+    poke8(buf1 + 36, 0x00)
+    poke8(buf1 + 37, 0x00)
+
+    // target IP = 192.168.1.1
+    poke8(buf1 + 38, 0xC0)
+    poke8(buf1 + 39, 0xA8)
+    poke8(buf1 + 40, 0x01)
+    poke8(buf1 + 41, 0x01)
+
+    // === Read oper from buf1 ===
+    let oper_hi = peek8(buf1 + 20)
+    let oper_lo = peek8(buf1 + 21)
+    let oper = oper_hi << 8 | oper_lo
+
+    // === is_arp_request_for(buf, our_ip) ===
+    // Check oper == 1 and target IP == our IP
+    let our_ip = 0xC0A80101
+    let tip1 = peek8(buf1 + 38)
+    let tip2 = peek8(buf1 + 39)
+    let tip3 = peek8(buf1 + 40)
+    let tip4 = peek8(buf1 + 41)
+    let tip = tip1 << 24 | tip2 << 16 | tip3 << 8 | tip4
+    let ip_match = tip == our_ip
+    let is_req = oper == 1
+    let matched = if is_req { if ip_match { 1 } else { 0 } } else { 0 }
+
+    // === serial_print "oper=" then serial_int(oper) ===
+    serial_print("oper=")
+    // serial_int not in language surface, emit via serial_putc
+    // Print decimal of oper (expected 1)
+    let mut n = oper
+    let mut digits[16]
+    let mut len = 0
+    if n == 0 {
+        serial_putc(48)
+    } else {
+        for n > 0 {
+            digits[len] = n % 10
+            len = len + 1
+            n = n / 10
+        }
+        let mut i = len - 1
+        for i >= 0 {
+            serial_putc(digits[i] + 48)
+            i = i - 1
+        }
+    }
+
+    serial_print(" matched=")
+    n = matched
+    len = 0
+    if n == 0 {
+        serial_putc(48)
+    } else {
+        for n > 0 {
+            digits[len] = n % 10
+            len = len + 1
+            n = n / 10
+        }
+        let mut i = len - 1
+        for i >= 0 {
+            serial_putc(digits[i] + 48)
+            i = i - 1
+        }
+    }
+
+    // === Build reply in buf2 ===
+    // Dst MAC = requester MAC (from buf1 src MAC at offset 6)
+    poke8(buf2 + 0,  0x00)
+    poke8(buf2 + 1,  0x1A)
+    poke8(buf2 + 2,  0x2B)
+    poke8(buf2 + 3,  0x3C)
+    poke8(buf2 + 4,  0x4D)
+    poke8(buf2 + 5,  0x5E)
+
+    // Src MAC = our MAC (was target in request)
+    poke8(buf2 + 6,  0xFF)
+    poke8(buf2 + 7,  0xFF)
+    poke8(buf2 + 8,  0xFF)
+    poke8(buf2 + 9,  0xFF)
+    poke8(buf2 + 10, 0xFF)
+    poke8(buf2 + 11, 0xFF)
+
+    // EtherType
+    poke8(buf2 + 12, 0x08)
+    poke8(buf2 + 13, 0x06)
+
+    // hwType = 1
+    poke8(buf2 + 14, 0x00)
+    poke8(buf2 + 15, 0x01)
+
+    // proto = 0x0800
+    poke8(buf2 + 16, 0x08)
+    poke8(buf2 + 17, 0x00)
+
+    // hln = 6, pln = 4
+    poke8(buf2 + 18, 6)
+    poke8(buf2 + 19, 4)
+
+    // oper = REPLY (2)
+    poke8(buf2 + 20, 0x00)
+    poke8(buf2 + 21, 0x02)
+
+    // sender MAC = our MAC
+    poke8(buf2 + 22, 0xFF)
+    poke8(buf2 + 23, 0xFF)
+    poke8(buf2 + 24, 0xFF)
+    poke8(buf2 + 25, 0xFF)
+    poke8(buf2 + 26, 0xFF)
+    poke8(buf2 + 27, 0xFF)
+
+    // sender IP = our IP
+    poke8(buf2 + 28, 0xC0)
+    poke8(buf2 + 29, 0xA8)
+    poke8(buf2 + 30, 0x01)
+    poke8(buf2 + 31, 0x01)
+
+    // target MAC = requester MAC (from buf1 src MAC)
+    poke8(buf2 + 32, 0x00)
+    poke8(buf2 + 33, 0x1A)
+    poke8(buf2 + 34, 0x2B)
+    poke8(buf2 + 35, 0x3C)
+    poke8(buf2 + 36, 0x4D)
+    poke8(buf2 + 37, 0x5E)
+
+    // target IP = requester IP
+    poke8(buf2 + 38, 0xC0)
+    poke8(buf2 + 39, 0xA8)
+    poke8(buf2 + 40, 0x01)
+    poke8(buf2 + 41, 0x01)
+
+    // === serial_int the reply oper ===
+    let reply_op_hi = peek8(buf2 + 20)
+    let reply_op_lo = peek8(buf2 + 21)
+    let reply_oper = reply_op_hi << 8 | reply_op_lo
+
+    serial_print(" reply_oper=")
+    n = reply_oper
+    len = 0
+    if n == 0 {
+        serial_putc(48)
+    } else {
+        for n > 0 {
+            digits[len] = n % 10
+            len = len + 1
+            n = n / 10
+        }
+        let mut i = len - 1
+        for i >= 0 {
+            serial_putc(digits[i] + 48)
+            i = i - 1
+        }
+    }
+    serial_putc(10)
+    serial_putc(13)
+
+    serial_print("arp ok")
+    serial_putc(10)
+    serial_putc(13)
+
+    halt()
+    0
+}

@@ -1,0 +1,96 @@
+// virtio virtqueue descriptor builder
+// Layout: addr(le64 @0), len(le32 @8), flags(le16 @12), next(le16 @14)
+// Each descriptor = 16 bytes
+
+// --- le helpers ---
+
+fn le64(buf: i64, off: i64, val: i64) {
+    poke8(buf + off + 0, val & 0xFF)
+    poke8(buf + off + 1, (val >> 8) & 0xFF)
+    poke8(buf + off + 2, (val >> 16) & 0xFF)
+    poke8(buf + off + 3, (val >> 24) & 0xFF)
+    poke8(buf + off + 4, (val >> 32) & 0xFF)
+    poke8(buf + off + 5, (val >> 40) & 0xFF)
+    poke8(buf + off + 6, (val >> 48) & 0xFF)
+    poke8(buf + off + 7, (val >> 56) & 0xFF)
+}
+
+fn le32(buf: i64, off: i64, val: i64) {
+    poke8(buf + off + 0, val & 0xFF)
+    poke8(buf + off + 1, (val >> 8) & 0xFF)
+    poke8(buf + off + 2, (val >> 16) & 0xFF)
+    poke8(buf + off + 3, (val >> 24) & 0xFF)
+}
+
+fn le16(buf: i64, off: i64, val: i64) {
+    poke8(buf + off + 0, val & 0xFF)
+    poke8(buf + off + 1, (val >> 8) & 0xFF)
+}
+
+// --- get helpers (little-endian read back) ---
+
+fn get_le64(buf: i64, off: i64) -> i64 {
+    let mut r: i64
+    r = peek8(buf + off + 0)
+    r = r | (peek8(buf + off + 1) << 8)
+    r = r | (peek8(buf + off + 2) << 16)
+    r = r | (peek8(buf + off + 3) << 24)
+    r = r | (peek8(buf + off + 4) << 32)
+    r = r | (peek8(buf + off + 5) << 40)
+    r = r | (peek8(buf + off + 6) << 48)
+    r = r | (peek8(buf + off + 7) << 56)
+    r
+}
+
+fn get_le32(buf: i64, off: i64) -> i64 {
+    let mut r: i64
+    r = peek8(buf + off + 0)
+    r = r | (peek8(buf + off + 1) << 8)
+    r = r | (peek8(buf + off + 2) << 16)
+    r = r | (peek8(buf + off + 3) << 24)
+    r
+}
+
+fn get_le16(buf: i64, off: i64) -> i64 {
+    let mut r: i64
+    r = peek8(buf + off + 0)
+    r = r | (peek8(buf + off + 1) << 8)
+    r
+}
+
+// --- make_desc: write one 16-byte descriptor at buf+off*16 ---
+
+fn make_desc(buf: i64, off: i64, addr: i64, len: i64, flags: i64, next: i64) {
+    le64(buf, off * 16, addr)
+    le32(buf, off * 16 + 8, len)
+    le16(buf, off * 16 + 12, flags)
+    le16(buf, off * 16 + 14, next)
+}
+
+fn main() -> i64 {
+    let mut buf[16]
+
+    // VIRTQ_DESC_F_NEXT = 1, VIRTQ_DESC_F_WRITE = 2
+    let VIRTQ_DESC_F_NEXT = 1
+    let VIRTQ_DESC_F_WRITE = 2
+
+    // Write descriptor: addr=0x5000, len=1500, flags=1, next=1
+    make_desc(buf, 0, 0x5000, 1500, VIRTQ_DESC_F_NEXT, 1)
+
+    // Read back and print
+    let addr = get_le64(buf, 0)
+    let len = get_le32(buf, 8)
+    let flags = get_le16(buf, 12)
+    let next = get_le16(buf, 14)
+
+    print_int(addr)
+    print(" ")
+    print_int(len)
+    print(" ")
+    print_int(flags)
+    print(" ")
+    print_int(next)
+    print("")
+
+    0
+}

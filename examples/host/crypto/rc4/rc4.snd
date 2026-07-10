@@ -1,0 +1,69 @@
+// RC4 keystream, Key = "Key" (0x4B, 0x65, 0x79)
+// KSA: init S[i]=i; j=0; for i 0..255: j=(j+S[i]+key[i%3])&0xFF; swap S[i],S[j]
+// PRGA: i=0,j=0; per byte: i=(i+1)&0xFF; j=(j+S[i])&0xFF; swap; out=S[(S[i]+S[j])&0xFF]
+// Known answer: 235 159 119
+
+fn main() -> i64 {
+    let mut S[256]
+    let mut key[3]
+
+    // Initialize key
+    key[0] = 0x4B
+    key[1] = 0x65
+    key[2] = 0x79
+
+    // KSA: init S[i] = i
+    let mut i = 0
+    for i < 256 {
+        S[i] = i
+        i = i + 1
+    }
+
+    // KSA: permutation
+    let mut j = 0
+    let mut i = 0
+    for i < 256 {
+        j = (j + S[i] + key[i % 3]) & 0xFF
+        // swap S[i], S[j]
+        let tmp = S[i]
+        S[i] = S[j]
+        S[j] = tmp
+        i = i + 1
+    }
+
+    // PRGA: generate 3 keystream bytes
+    let mut i = 0
+    let mut j = 0
+    let mut t = 0
+
+    // byte 0
+    i = (i + 1) & 0xFF
+    j = (j + S[i]) & 0xFF
+    let tmp = S[i]
+    S[i] = S[j]
+    S[j] = tmp
+    t = (S[i] + S[j]) & 0xFF
+    print_int(S[t])
+    print(" ")
+
+    // byte 1
+    i = (i + 1) & 0xFF
+    j = (j + S[i]) & 0xFF
+    let tmp = S[i]
+    S[i] = S[j]
+    S[j] = tmp
+    t = (S[i] + S[j]) & 0xFF
+    print_int(S[t])
+    print(" ")
+
+    // byte 2
+    i = (i + 1) & 0xFF
+    j = (j + S[i]) & 0xFF
+    let tmp = S[i]
+    S[i] = S[j]
+    S[j] = tmp
+    t = (S[i] + S[j]) & 0xFF
+    print_int(S[t])
+
+    0
+}
