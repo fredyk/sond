@@ -1,0 +1,223 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Clean-room SSH version-banner exchange over TCP/IPv4/virtio-net from RFCs
+// 4253/793/791/826. Original work; no third-party source copied.
+
+include "x86_64/drivers/net/virtio-net.snd"
+
+let MY_B0 = 10
+let MY_B1 = 0
+let MY_B2 = 2
+let MY_B3 = 15
+// Our MAC is the NIC's real hardware address, read from the device by the driver
+// (vnet_mac); hypervisors assign their own and filter inbound unicast on it.
+
+let mut sseq = 0x12345678
+let mut st = 0
+
+fn poke16b(a: i64, v: i64) {
+    poke8(a, (v >> 8) & 0xFF)
+    poke8(a + 1, v & 0xFF)
+}
+
+fn poke32b(a: i64, v: i64) {
+    poke8(a, (v >> 24) & 0xFF)
+    poke8(a + 1, (v >> 16) & 0xFF)
+    poke8(a + 2, (v >> 8) & 0xFF)
+    poke8(a + 3, v & 0xFF)
+}
+
+fn peek16b(a: i64) -> i64 {
+    (peek8(a) << 8) | peek8(a + 1)
+}
+
+fn peek32b(a: i64) -> i64 {
+    (peek8(a) << 24) | (peek8(a + 1) << 16) | (peek8(a + 2) << 8) | peek8(a + 3)
+}
+
+fn macp(a: i64, m0: i64, m1: i64, m2: i64, m3: i64, m4: i64, m5: i64) {
+    poke8(a, m0); poke8(a + 1, m1); poke8(a + 2, m2)
+    poke8(a + 3, m3); poke8(a + 4, m4); poke8(a + 5, m5)
+}
+
+fn ip4p(a: i64, b0: i64, b1: i64, b2: i64, b3: i64) {
+    poke8(a, b0); poke8(a + 1, b1); poke8(a + 2, b2); poke8(a + 3, b3)
+}
+
+fn cks16(buf: i64, len: i64) -> i64 {
+    let mut sum = 0
+    let mut i = 0
+    for i < len / 2 {
+        sum = sum + peek16b(buf + i * 2)
+        i = i + 1
+    }
+    if len & 1 == 1 {
+        sum = sum + (peek8(buf + len - 1) << 8)
+    }
+    sum = (sum & 0xFFFF) + (sum >> 16)
+    sum = (sum & 0xFFFF) + (sum >> 16)
+    ~sum & 0xFFFF
+}
+
+fn tcpcsum(ip: i64, tp: i64, tlen: i64) -> i64 {
+    let t = alloc(512)
+    ip4p(t, peek8(ip + 12), peek8(ip + 13), peek8(ip + 14), peek8(ip + 15))
+    ip4p(t + 4, peek8(ip + 16), peek8(ip + 17), peek8(ip + 18), peek8(ip + 19))
+    poke8(t + 8, 0)
+    poke8(t + 9, 6)
+    poke16b(t + 10, tlen)
+    let mut j = 0
+    for j < tlen {
+        poke8(t + 12 + j, peek8(tp + j))
+        j = j + 1
+    }
+    poke16b(t + 12 + 16, 0)
+    cks16(t, 12 + tlen)
+}
+
+fn efi_main() -> i64 {
+    // Leave the firmware BEFORE touching the network: from here on the memory comes
+    // from Sond's own heap and logs go to COM1, the NIC is driven by a kernel, not a
+    // UEFI app. The whole driver→TCP→SSH stack runs with Boot Services gone.
+    exit_boot_services()
+    let ok = vnet_init()
+    if ok == 0 {
+        print("vnet_init FAILED")
+        return 1
+    }
+    print("vnet_init ok")
+    let p = alloc(1514)
+    let r = alloc(1514)
+    macp(p, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
+    macp(p + 6, vnet_mac(0), vnet_mac(1), vnet_mac(2), vnet_mac(3), vnet_mac(4), vnet_mac(5))
+    poke16b(p + 12, 0x0806)
+    poke16b(p + 14, 1); poke16b(p + 16, 0x0800)
+    poke8(p + 18, 6); poke8(p + 19, 4)
+    poke16b(p + 20, 1)
+    macp(p + 22, vnet_mac(0), vnet_mac(1), vnet_mac(2), vnet_mac(3), vnet_mac(4), vnet_mac(5))
+    ip4p(p + 28, MY_B0, MY_B1, MY_B2, MY_B3)
+    macp(p + 32, 0, 0, 0, 0, 0, 0)
+    ip4p(p + 38, MY_B0, MY_B1, MY_B2, MY_B3)
+    tx_send(p, 42)
+
+    for {
+        let n = rx_poll(r)
+        if n > 0 {
+            let et = peek16b(r + 12)
+            if et == 0x0806 {
+                let op = peek16b(r + 20)
+                let ta0 = peek8(r + 38); let ta1 = peek8(r + 39)
+                let ta2 = peek8(r + 40); let ta3 = peek8(r + 41)
+                if op == 1 && ta0 == MY_B0 && ta1 == MY_B1 && ta2 == MY_B2 && ta3 == MY_B3 {
+                    macp(p, peek8(r + 6), peek8(r + 7), peek8(r + 8), peek8(r + 9), peek8(r + 10), peek8(r + 11))
+                    macp(p + 6, vnet_mac(0), vnet_mac(1), vnet_mac(2), vnet_mac(3), vnet_mac(4), vnet_mac(5))
+                    poke16b(p + 12, 0x0806)
+                    poke16b(p + 14, 1); poke16b(p + 16, 0x0800)
+                    poke8(p + 18, 6); poke8(p + 19, 4)
+                    poke16b(p + 20, 2)
+                    macp(p + 22, vnet_mac(0), vnet_mac(1), vnet_mac(2), vnet_mac(3), vnet_mac(4), vnet_mac(5))
+                    ip4p(p + 28, MY_B0, MY_B1, MY_B2, MY_B3)
+                    macp(p + 32, peek8(r + 22), peek8(r + 23), peek8(r + 24), peek8(r + 25), peek8(r + 26), peek8(r + 27))
+                    ip4p(p + 38, peek8(r + 28), peek8(r + 29), peek8(r + 30), peek8(r + 31))
+                    tx_send(p, 42)
+                }
+            }
+            if et == 0x0800 {
+                let vihl = peek8(r + 14)
+                if vihl == 0x45 {
+                    let pro = peek8(r + 23)
+                    if pro == 6 {
+                        let d0 = peek8(r + 30); let d1 = peek8(r + 31)
+                        let d2 = peek8(r + 32); let d3 = peek8(r + 33)
+                        if d0 == MY_B0 && d1 == MY_B1 && d2 == MY_B2 && d3 == MY_B3 {
+                            let dp = peek16b(r + 36)
+                            if dp == 22 {
+                                let fl = peek8(r + 47)
+                                let ts = peek32b(r + 38)
+                                let tl = peek16b(r + 16)
+                                let thl = (peek8(r + 46) >> 4) * 4
+                                let tcpseg = tl - 20
+                                let dlen = tcpseg - thl
+                                let cp = peek16b(r + 34)
+                                let sip0 = peek8(r + 26); let sip1 = peek8(r + 27)
+                                let sip2 = peek8(r + 28); let sip3 = peek8(r + 29)
+                                if fl & 2 == 2 && fl & 16 == 0 {
+                                    macp(p, peek8(r + 6), peek8(r + 7), peek8(r + 8), peek8(r + 9), peek8(r + 10), peek8(r + 11))
+                                    macp(p + 6, vnet_mac(0), vnet_mac(1), vnet_mac(2), vnet_mac(3), vnet_mac(4), vnet_mac(5))
+                                    poke16b(p + 12, 0x0800)
+                                    poke8(p + 14, 0x45); poke8(p + 15, 0)
+                                    poke16b(p + 16, 40); poke16b(p + 18, 0); poke16b(p + 20, 0x4000)
+                                    poke8(p + 22, 64); poke8(p + 23, 6); poke16b(p + 24, 0)
+                                    ip4p(p + 26, MY_B0, MY_B1, MY_B2, MY_B3)
+                                    ip4p(p + 30, sip0, sip1, sip2, sip3)
+                                    poke16b(p + 34, 22); poke16b(p + 36, cp)
+                                    poke32b(p + 38, sseq); poke32b(p + 42, ts + 1)
+                                    poke8(p + 46, 0x50); poke8(p + 47, 0x12)
+                                    poke16b(p + 48, 0x2000); poke16b(p + 50, 0); poke16b(p + 52, 0)
+                                    poke16b(p + 24, cks16(p + 14, 20))
+                                    poke16b(p + 50, tcpcsum(p + 14, p + 34, 20))
+                                    tx_send(p, 54)
+                                    sseq = sseq + 1
+                                    st = 1
+                                }
+                                if st == 1 && fl & 16 == 16 && fl & 2 == 0 {
+                                    st = 2
+                                    if dlen > 0 {
+                                        macp(p, peek8(r + 6), peek8(r + 7), peek8(r + 8), peek8(r + 9), peek8(r + 10), peek8(r + 11))
+                                        macp(p + 6, vnet_mac(0), vnet_mac(1), vnet_mac(2), vnet_mac(3), vnet_mac(4), vnet_mac(5))
+                                        poke16b(p + 12, 0x0800)
+                                        poke8(p + 14, 0x45); poke8(p + 15, 0)
+                                        poke16b(p + 16, 58); poke16b(p + 18, 0); poke16b(p + 20, 0x4000)
+                                        poke8(p + 22, 64); poke8(p + 23, 6); poke16b(p + 24, 0)
+                                        ip4p(p + 26, MY_B0, MY_B1, MY_B2, MY_B3)
+                                        ip4p(p + 30, sip0, sip1, sip2, sip3)
+                                        poke16b(p + 34, 22); poke16b(p + 36, cp)
+                                        poke32b(p + 38, sseq); poke32b(p + 42, ts + dlen)
+                                        poke8(p + 46, 0x50); poke8(p + 47, 0x18)
+                                        poke16b(p + 48, 0x2000); poke16b(p + 50, 0); poke16b(p + 52, 0)
+                                        poke8(p + 54, 0x53); poke8(p + 55, 0x53); poke8(p + 56, 0x48); poke8(p + 57, 0x2D)
+                                        poke8(p + 58, 0x32); poke8(p + 59, 0x2E); poke8(p + 60, 0x30); poke8(p + 61, 0x2D)
+                                        poke8(p + 62, 0x53); poke8(p + 63, 0x6F); poke8(p + 64, 0x6E); poke8(p + 65, 0x64)
+                                        poke8(p + 66, 0x5F); poke8(p + 67, 0x30); poke8(p + 68, 0x2E); poke8(p + 69, 0x31)
+                                        poke8(p + 70, 0x0D); poke8(p + 71, 0x0A)
+                                        poke16b(p + 24, cks16(p + 14, 20))
+                                        poke16b(p + 50, tcpcsum(p + 14, p + 34, 38))
+                                        tx_send(p, 72)
+                                        sseq = sseq + 18
+                                        halt()
+                                    }
+                                }
+                                if st == 2 && dlen > 0 {
+                                    macp(p, peek8(r + 6), peek8(r + 7), peek8(r + 8), peek8(r + 9), peek8(r + 10), peek8(r + 11))
+                                    macp(p + 6, vnet_mac(0), vnet_mac(1), vnet_mac(2), vnet_mac(3), vnet_mac(4), vnet_mac(5))
+                                    poke16b(p + 12, 0x0800)
+                                    poke8(p + 14, 0x45); poke8(p + 15, 0)
+                                    poke16b(p + 16, 58); poke16b(p + 18, 0); poke16b(p + 20, 0x4000)
+                                    poke8(p + 22, 64); poke8(p + 23, 6); poke16b(p + 24, 0)
+                                    ip4p(p + 26, MY_B0, MY_B1, MY_B2, MY_B3)
+                                    ip4p(p + 30, sip0, sip1, sip2, sip3)
+                                    poke16b(p + 34, 22); poke16b(p + 36, cp)
+                                    poke32b(p + 38, sseq); poke32b(p + 42, ts + dlen)
+                                    poke8(p + 46, 0x50); poke8(p + 47, 0x18)
+                                    poke16b(p + 48, 0x2000); poke16b(p + 50, 0); poke16b(p + 52, 0)
+                                    poke8(p + 54, 0x53); poke8(p + 55, 0x53); poke8(p + 56, 0x48); poke8(p + 57, 0x2D)
+                                    poke8(p + 58, 0x32); poke8(p + 59, 0x2E); poke8(p + 60, 0x30); poke8(p + 61, 0x2D)
+                                    poke8(p + 62, 0x53); poke8(p + 63, 0x6F); poke8(p + 64, 0x6E); poke8(p + 65, 0x64)
+                                    poke8(p + 66, 0x5F); poke8(p + 67, 0x30); poke8(p + 68, 0x2E); poke8(p + 69, 0x31)
+                                    poke8(p + 70, 0x0D); poke8(p + 71, 0x0A)
+                                    poke16b(p + 24, cks16(p + 14, 20))
+                                    poke16b(p + 50, tcpcsum(p + 14, p + 34, 38))
+                                    tx_send(p, 72)
+                                    sseq = sseq + 18
+                                    halt()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    0
+}
