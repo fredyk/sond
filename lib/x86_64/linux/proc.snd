@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/proc.snd, execute external commands (fork+execve+wait4).
+// The CALLER builds argv (an array of i64 pointers terminated by 0), because Sond lacks a
+// heap alloc and a local array cannot be returned (dangling pointer). No & operator: the wait4
+// status is collected in a local array and read with peek32.
+//
+// API: run(path, argv) -> child's exit code (0..255), or -1 if fork/wait fails.
+
+include "syscall-nums.snd"
+
+fn run(path: i64, argv: i64) -> i64 {
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        syscall(SYS_execve, path, argv, 0)
+        syscall(SYS_exit, 127)
+        return 127
+    }
+    if pid < 0 {
+        return -1
+    }
+    let st[1]
+    let ret = syscall(SYS_wait4, pid, st, 0, 0)
+    if ret < 0 {
+        return -1
+    }
+    (peek32(st) >>> 8) & 0xff
+}

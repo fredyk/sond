@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/io.snd, file I/O on Linux syscalls. No allocator: caller provides buffers.
+// API: open_file(path,flags,mode)->fd|-errno ; read_buf(fd,buf,n) ; write_buf(fd,buf,n) ; close_fd(fd)
+
+include "syscall-nums.snd"
+
+fn open_file(path: i64, flags: i64, mode: i64) -> i64 {
+    syscall(SYS_open, path, flags, mode)
+}
+
+fn read_buf(fd: i64, buf: i64, n: i64) -> i64 {
+    syscall(SYS_read, fd, buf, n)
+}
+
+fn write_buf(fd: i64, buf: i64, n: i64) -> i64 {
+    syscall(SYS_write, fd, buf, n)
+}
+
+fn close_fd(fd: i64) -> i64 {
+    syscall(SYS_close, fd)
+}
+
+// ── splice: zero-copy kernel forwarding (one fd must be a pipe) ──
+// the relay moves data without copying to user-space.
+
+let SPLICE_F_MOVE = 1
+let SPLICE_F_MORE = 4
+
+// splice(fd_in, NULL, fd_out, NULL, n, MOVE|MORE). Returns nbytes or -errno.
+fn splice_fd(fd_in: i64, fd_out: i64, n: i64) -> i64 {
+    syscall(SYS_splice, fd_in, 0, fd_out, 0, n, 5)
+}
+
+// Moves up to `n` bytes from fd_in→fd_out via a pipe (pipefd = [2] i32 array
+// provided by the caller, created with SYS_pipe). Returns bytes moved (>0),
+// 0 on EOF, -1 on error. fd_in/fd_out can be sockets or files.
+fn splice_pump(fd_in: i64, fd_out: i64, pipefd: i64, n: i64) -> i64 {
+    let rd = peek32(pipefd)
+    let wr = peek32(pipefd + 4)
+    let moved = splice_fd(fd_in, wr, n)
+    if moved <= 0 {
+        return moved
+    }
+    let mut out = 0
+    for out < moved {
+        let w = splice_fd(rd, fd_out, moved - out)
+        if w <= 0 {
+            return -1
+        }
+        out = out + w
+    }
+    moved
+}

@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/syscall-nums.snd, Linux x86-64 syscall numbers.
+//
+// Public API (globals, read-only):
+//   SYS_read, SYS_write, SYS_open, SYS_close, SYS_fstat, SYS_mmap,
+//   SYS_mprotect, SYS_munmap, SYS_brk, SYS_rt_sigaction, SYS_rt_sigprocmask,
+//   SYS_rt_sigreturn, SYS_ioctl, SYS_access, SYS_pipe, SYS_select,
+//   SYS_dup, SYS_getdents64, SYS_lseek, SYS_getpid, SYS_socket,
+//   SYS_connect, SYS_accept, SYS_sendto, SYS_recvfrom, SYS_sendmsg,
+//   SYS_recvmsg, SYS_shutdown, SYS_bind, SYS_listen, SYS_getsockname,
+//   SYS_getpeername, SYS_setsockopt, SYS_getsockopt, SYS_clone,
+//   SYS_fork, SYS_vfork, SYS_execve, SYS_exit, SYS_wait4, SYS_kill,
+//   SYS_uname, SYS_fcntl, SYS_truncate, SYS_getcwd, SYS_chdir,
+//   SYS_mkdir, SYS_rmdir, SYS_stat, SYS_lstat, SYS_poll, SYS_lseek,
+//   SYS_getuid, SYS_gid, SYS_geteuid, SYS_getgid, SYS_getegid,
+//   SYS_getrlimit, SYS_arch_prctl, SYS_set_tid_address, SYS_set_robust_list,
+//   SYS_futex, SYS_clock_gettime, SYS_nanosleep, SYS_splice, SYS_syscall (itself).
+
+let SYS_read = 0
+let SYS_write = 1
+let SYS_open = 2
+let SYS_close = 3
+let SYS_stat = 4
+let SYS_fstat = 5
+let SYS_lstat = 6
+let SYS_poll = 7
+let SYS_lseek = 8
+let SYS_mmap = 9
+let SYS_mprotect = 10
+let SYS_munmap = 11
+let SYS_brk = 12
+let SYS_rt_sigaction = 13
+let SYS_rt_sigprocmask = 14
+let SYS_rt_sigreturn = 15
+let SYS_ioctl = 16
+let SYS_pread64 = 17
+let SYS_pwrite64 = 18
+let SYS_readv = 19
+let SYS_writev = 20
+let SYS_access = 21
+let SYS_pipe = 22
+let SYS_select = 23
+let SYS_sched_yield = 24
+let SYS_mremap = 25
+let SYS_msync = 26
+let SYS_mincore = 27
+let SYS_madvise = 28
+let SYS_dup = 32
+let SYS_dup2 = 33
+let SYS_readlink = 89
+let SYS_getuid = 102
+let SYS_nanosleep = 35
+let SYS_getpid = 39
+let SYS_socket = 41
+let SYS_connect = 42
+let SYS_accept = 43
+let SYS_sendto = 44
+let SYS_recvfrom = 45
+let SYS_sendmsg = 46
+let SYS_recvmsg = 47
+let SYS_shutdown = 48
+let SYS_bind = 49
+let SYS_listen = 50
+let SYS_getsockname = 51
+let SYS_getpeername = 52
+let SYS_socketpair = 53
+let SYS_setsockopt = 54
+let SYS_getsockopt = 55
+let SYS_clone = 56
+let SYS_fork = 57
+let SYS_vfork = 58
+let SYS_execve = 59
+let SYS_exit = 60
+let SYS_wait4 = 61
+let SYS_kill = 62
+let SYS_uname = 63
+let SYS_fcntl = 72
+let SYS_truncate = 76
+let SYS_unlink = 87
+let SYS_setsid = 112
+let SYS_getdents64 = 217
+let SYS_splice = 275

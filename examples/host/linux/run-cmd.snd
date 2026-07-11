@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Runs /bin/true via lib/x86_64/linux (fork+execve+wait4). The program's exit code = 0.
+include "../../../lib/x86_64/linux/syscall-nums.snd"
+include "../../../lib/x86_64/linux/io.snd"
+include "../../../lib/x86_64/linux/proc.snd"
+fn main() -> i64 {
+    let path[2]
+    poke8(path+0,47) poke8(path+1,98) poke8(path+2,105) poke8(path+3,110) poke8(path+4,47)
+    poke8(path+5,116) poke8(path+6,114) poke8(path+7,117) poke8(path+8,101) poke8(path+9,0)
+    let argv[2]
+    argv[0] = path
+    argv[1] = 0
+    run(path, argv)
+}
