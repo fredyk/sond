@@ -1,0 +1,117 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/net.snd, Linux socket wrappers over syscall.
+//
+// API:
+//   sock(domain, type, proto) -> fd|-errno
+//   bind_sock(fd, addr, addrlen) -> 0|-errno
+//   connect_sock(fd, addr, addrlen) -> 0|-errno
+//   sendto_sock(fd, buf, len, flags, addr, addrlen) -> nbytes|-errno
+//   recvfrom_sock(fd, buf, len, flags, addr, alenptr) -> nbytes|-errno
+//   setsockopt_sock(fd, level, opt, val, len) -> 0|-errno
+// close_fd is available via io.snd.
+//
+// Note: The caller must build sockaddr structs (with poke8) and provide
+// their addresses. All params are i64; syscall ABI is x86-64.
+
+include "syscall-nums.snd"
+
+// Domain constants
+let AF_INET = 2
+let AF_NETLINK = 16
+
+// Type constants
+let SOCK_DGRAM = 2
+let SOCK_RAW = 3
+
+// Netlink constants
+let NETLINK_ROUTE = 0
+
+fn sock(domain: i64, type: i64, proto: i64) -> i64 {
+    syscall(SYS_socket, domain, type, proto)
+}
+
+fn bind_sock(fd: i64, addr: i64, addrlen: i64) -> i64 {
+    syscall(SYS_bind, fd, addr, addrlen)
+}
+
+fn connect_sock(fd: i64, addr: i64, addrlen: i64) -> i64 {
+    syscall(SYS_connect, fd, addr, addrlen)
+}
+
+fn sendto_sock(fd: i64, buf: i64, len: i64, flags: i64, addr: i64, addrlen: i64) -> i64 {
+    syscall(SYS_sendto, fd, buf, len, flags, addr, addrlen)
+}
+
+fn recvfrom_sock(fd: i64, buf: i64, len: i64, flags: i64, addr: i64, alenptr: i64) -> i64 {
+    syscall(SYS_recvfrom, fd, buf, len, flags, addr, alenptr)
+}
+
+fn setsockopt_sock(fd: i64, level: i64, optname: i64, val: i64, optlen: i64) -> i64 {
+    syscall(SYS_setsockopt, fd, level, optname, val, optlen)
+}
+
+// ── TCP hosted (STREAM) ──────────────────────────────────────────────
+// TCP server/client + REDIRECT.
+
+let SOCK_STREAM = 1
+let SOL_SOCKET = 1
+let SO_REUSEADDR = 2
+let SOL_IP = 0
+let SO_ORIGINAL_DST = 80
+let O_NONBLOCK = 2048
+let F_SETFL = 4
+
+fn listen_sock(fd: i64, backlog: i64) -> i64 {
+    syscall(SYS_listen, fd, backlog)
+}
+
+// accept: addr/alenptr can be 0 if the peer's address is not needed.
+fn accept_sock(fd: i64, addr: i64, alenptr: i64) -> i64 {
+    syscall(SYS_accept, fd, addr, alenptr)
+}
+
+fn set_reuseaddr(fd: i64) -> i64 {
+    let one[1]
+    poke32(one, 1)
+    setsockopt_sock(fd, SOL_SOCKET, SO_REUSEADDR, one, 4)
+}
+
+fn set_nonblock(fd: i64) -> i64 {
+    syscall(SYS_fcntl, fd, F_SETFL, O_NONBLOCK)
+}
+
+// Recovers the original destination of a redirected connection (nftables REDIRECT):
+// writes a sockaddr_in (16B) to `sa`. Returns 0 on success, <0 -errno.
+fn get_original_dst(fd: i64, sa: i64) -> i64 {
+    let len[1]
+    poke32(len, 16)
+    syscall(SYS_getsockopt, fd, SOL_IP, SO_ORIGINAL_DST, sa, len)
+}
+
+// Builds a sockaddr_in (16B) at `sa`: family AF_INET, port (host order) and
+// IPv4 (u32 host order). The port and IP are serialized big-endian (network).
+fn sockaddr_in_build(sa: i64, ip_u32: i64, port: i64) {
+    poke8(sa + 0, 2)                      // AF_INET (u16 little-endian)
+    poke8(sa + 1, 0)
+    poke8(sa + 2, (port >>> 8) & 0xff)    // port in big-endian
+    poke8(sa + 3, port & 0xff)
+    poke8(sa + 4, (ip_u32 >>> 24) & 0xff) // IPv4 big-endian
+    poke8(sa + 5, (ip_u32 >>> 16) & 0xff)
+    poke8(sa + 6, (ip_u32 >>> 8) & 0xff)
+    poke8(sa + 7, ip_u32 & 0xff)
+    let mut i = 8
+    for i < 16 {
+        poke8(sa + i, 0)
+        i = i + 1
+    }
+}
+
+fn sockaddr_in_ip(sa: i64) -> i64 {
+    (peek8(sa + 4) << 24) | (peek8(sa + 5) << 16) | (peek8(sa + 6) << 8) | peek8(sa + 7)
+}
+
+fn sockaddr_in_port(sa: i64) -> i64 {
+    (peek8(sa + 2) << 8) | peek8(sa + 3)
+}
