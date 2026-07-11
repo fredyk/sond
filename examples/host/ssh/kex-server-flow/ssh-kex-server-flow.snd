@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Server KEX flow (RFC 5656) end to end with the REAL crypto: receive a
+// KEX_ECDH_INIT, extract the client ephemeral Q_C, run server_kex() from the
+// ssh-kex library (X25519 Q_S + shared secret K + SHA-256 exchange hash H +
+// Ed25519 signature over H), and build a KEX_ECDH_REPLY carrying the real K_S,
+// Q_S and signature. Test vectors: RFC 7748 §6.1 (server = "Alice", client sends
+// "Bob"'s public) so Q_S and K are checked against the standard; H and the
+// signature are computed for real (their correctness is pinned against a Python
+// reference in ssh/kex-server). Host-verified.
+
+include "any/crypto/ssh-kex.snd"
+
+fn read_be32(p) -> i64 {
+    (peek8(p) << 24) | (peek8(p + 1) << 16) | (peek8(p + 2) << 8) | peek8(p + 3)
+}
+
+// Extract Q_C from a KEX_ECDH_INIT packet into `out`; return Q_C length or -1.
+fn parse_kex_ecdh_init(pkt, out) -> i64 {
+    let payload = pkt + 5
+    if peek8(payload) != 30 { return -1 }
+    let qc_len = read_be32(payload + 1)
+    sshkex_wcopy(out, 0, payload + 5, qc_len)
+    qc_len
+}
+
+// Build KEX_ECDH_REPLY: byte(31) string(K_S) string(Q_S) string(signature).
+// `edname` is the 11-byte "ssh-ed25519", `hpub` the 32-byte host key, `qs`/`sig`
+// the real server ephemeral public and signature. Returns the payload length.
+fn build_reply(buf, edname, hpub, qs, sig) -> i64 {
+    poke8(buf, 31)
+    let mut off = 1
+    sshkex_poke32be(buf + off, 51) off = off + 4
+    sshkex_poke32be(buf + off, 11) off = off + 4
+    off = sshkex_wcopy(buf, off, edname, 11)
+    sshkex_poke32be(buf + off, 32) off = off + 4
+    off = sshkex_wcopy(buf, off, hpub, 32)
+    sshkex_poke32be(buf + off, 32) off = off + 4
+    off = sshkex_wcopy(buf, off, qs, 32)
+    sshkex_poke32be(buf + off, 83) off = off + 4
+    sshkex_poke32be(buf + off, 11) off = off + 4
+    off = sshkex_wcopy(buf, off, edname, 11)
+    sshkex_poke32be(buf + off, 64) off = off + 4
+    off = sshkex_wcopy(buf, off, sig, 64)
+    off
+}
+
+// Write a 32-byte KEX_ECDH_INIT carrying Q_C = `qc` at `pkt`.
+fn make_init(pkt, qc) {
+    poke8(pkt + 0, 0) poke8(pkt + 1, 0) poke8(pkt + 2, 0) poke8(pkt + 3, 44)
+    poke8(pkt + 4, 6)  // padding_length
+    poke8(pkt + 5, 30) // SSH_MSG_KEX_ECDH_INIT
+    poke8(pkt + 6, 0) poke8(pkt + 7, 0) poke8(pkt + 8, 0) poke8(pkt + 9, 32)
+    sshkex_wcopy(pkt, 10, qc, 32)
+}
+
+fn any_nonzero(p, n) -> i64 {
+    let mut i = 0
+    let mut acc = 0
+    for i < n { acc = acc | peek8(p + i)  i = i + 1 }
+    acc
+}
+
+fn main() -> i64 {
+    // Server ephemeral private (RFC 7748 §6.1 "Alice").
+    let eph[4]
+    poke8(eph + 0, 0x77)  poke8(eph + 1, 0x07)  poke8(eph + 2, 0x6d)  poke8(eph + 3, 0x0a)
+    poke8(eph + 4, 0x73)  poke8(eph + 5, 0x18)  poke8(eph + 6, 0xa5)  poke8(eph + 7, 0x7d)
+    poke8(eph + 8, 0x3c)  poke8(eph + 9, 0x16)  poke8(eph + 10, 0xc1) poke8(eph + 11, 0x72)
+    poke8(eph + 12, 0x51) poke8(eph + 13, 0xb2) poke8(eph + 14, 0x66) poke8(eph + 15, 0x45)
+    poke8(eph + 16, 0xdf) poke8(eph + 17, 0x4c) poke8(eph + 18, 0x2f) poke8(eph + 19, 0x87)
+    poke8(eph + 20, 0xeb) poke8(eph + 21, 0xc0) poke8(eph + 22, 0x99) poke8(eph + 23, 0x2a)
+    poke8(eph + 24, 0xb1) poke8(eph + 25, 0x77) poke8(eph + 26, 0xfb) poke8(eph + 27, 0xa5)
+    poke8(eph + 28, 0x1d) poke8(eph + 29, 0xb9) poke8(eph + 30, 0x2c) poke8(eph + 31, 0x2a)
+
+    // Client ephemeral public Q_C (RFC 7748 §6.1 "Bob's public").
+    let qc_in[4]
+    poke8(qc_in + 0, 0xde)  poke8(qc_in + 1, 0x9e)  poke8(qc_in + 2, 0xdb)  poke8(qc_in + 3, 0x7d)
+    poke8(qc_in + 4, 0x7b)  poke8(qc_in + 5, 0x7d)  poke8(qc_in + 6, 0xc1)  poke8(qc_in + 7, 0xb4)
+    poke8(qc_in + 8, 0xd3)  poke8(qc_in + 9, 0x5b)  poke8(qc_in + 10, 0x61) poke8(qc_in + 11, 0xc2)
+    poke8(qc_in + 12, 0xec) poke8(qc_in + 13, 0xe4) poke8(qc_in + 14, 0x35) poke8(qc_in + 15, 0x37)
+    poke8(qc_in + 16, 0x3f) poke8(qc_in + 17, 0x83) poke8(qc_in + 18, 0x43) poke8(qc_in + 19, 0xc8)
+    poke8(qc_in + 20, 0x5b) poke8(qc_in + 21, 0x78) poke8(qc_in + 22, 0x67) poke8(qc_in + 23, 0x4d)
+    poke8(qc_in + 24, 0xad) poke8(qc_in + 25, 0xfc) poke8(qc_in + 26, 0x7e) poke8(qc_in + 27, 0x14)
+    poke8(qc_in + 28, 0x6f) poke8(qc_in + 29, 0x88) poke8(qc_in + 30, 0x2b) poke8(qc_in + 31, 0x4f)
+
+    // Host key + transcript fields (test values; H/sig correctness is pinned in
+    // ssh/kex-server, here they just have to compute for real).
+    let hpub[4] let hsk[4] let mut i = 0
+    for i < 32 { poke8(hpub + i, 0x20 + i)  poke8(hsk + i, i)  i = i + 1 }
+    let edname[2] // "ssh-ed25519"
+    poke8(edname+0,0x73) poke8(edname+1,0x73) poke8(edname+2,0x68) poke8(edname+3,0x2d)
+    poke8(edname+4,0x65) poke8(edname+5,0x64) poke8(edname+6,0x32) poke8(edname+7,0x35)
+    poke8(edname+8,0x35) poke8(edname+9,0x31) poke8(edname+10,0x39)
+    let vc[2] // "SSH-2.0-c"
+    poke8(vc+0,0x53) poke8(vc+1,0x53) poke8(vc+2,0x48) poke8(vc+3,0x2d) poke8(vc+4,0x32)
+    poke8(vc+5,0x2e) poke8(vc+6,0x30) poke8(vc+7,0x2d) poke8(vc+8,0x63)
+    let vs[2] // "SSH-2.0-s"
+    poke8(vs+0,0x53) poke8(vs+1,0x53) poke8(vs+2,0x48) poke8(vs+3,0x2d) poke8(vs+4,0x32)
+    poke8(vs+5,0x2e) poke8(vs+6,0x30) poke8(vs+7,0x2d) poke8(vs+8,0x73)
+    let ic[1] poke8(ic + 0, 0x14)
+    let is[1] poke8(is + 0, 0x14)
+
+    // ── Server side ──
+    let pkt[8]
+    make_init(pkt, qc_in)                    // client sends KEX_ECDH_INIT
+    let qc[4]
+    let qc_len = parse_kex_ecdh_init(pkt, qc) // extract Q_C
+
+    let QS[4] let K[4] let H[4] let SIG[8]
+    server_kex(eph, qc, hsk, hpub, vc, vs, ic, is, edname, QS, K, H, SIG) // REAL crypto
+
+    let rep[24]
+    let rlen = build_reply(rep, edname, hpub, QS, SIG) // reply carries real Q_S + sig
+
+    // Expected Q_S = Alice public, K = RFC 7748 shared secret.
+    let qs_exp[4]
+    poke8(qs_exp+0,0x85) poke8(qs_exp+1,0x20) poke8(qs_exp+2,0xf0) poke8(qs_exp+3,0x09)
+    poke8(qs_exp+4,0x89) poke8(qs_exp+5,0x30) poke8(qs_exp+6,0xa7) poke8(qs_exp+7,0x54)
+    poke8(qs_exp+8,0x74) poke8(qs_exp+9,0x8b) poke8(qs_exp+10,0x7d) poke8(qs_exp+11,0xdc)
+    poke8(qs_exp+12,0xb4) poke8(qs_exp+13,0x3e) poke8(qs_exp+14,0xf7) poke8(qs_exp+15,0x5a)
+    poke8(qs_exp+16,0x0d) poke8(qs_exp+17,0xbf) poke8(qs_exp+18,0x3a) poke8(qs_exp+19,0x0d)
+    poke8(qs_exp+20,0x26) poke8(qs_exp+21,0x38) poke8(qs_exp+22,0x1a) poke8(qs_exp+23,0xf4)
+    poke8(qs_exp+24,0xeb) poke8(qs_exp+25,0xa4) poke8(qs_exp+26,0xa9) poke8(qs_exp+27,0x8e)
+    poke8(qs_exp+28,0xaa) poke8(qs_exp+29,0x9b) poke8(qs_exp+30,0x4e) poke8(qs_exp+31,0x6a)
+    let k_exp[4]
+    poke8(k_exp+0,0x4a) poke8(k_exp+1,0x5d) poke8(k_exp+2,0x9d) poke8(k_exp+3,0x5b)
+    poke8(k_exp+4,0xa4) poke8(k_exp+5,0xce) poke8(k_exp+6,0x2d) poke8(k_exp+7,0xe1)
+    poke8(k_exp+8,0x72) poke8(k_exp+9,0x8e) poke8(k_exp+10,0x3b) poke8(k_exp+11,0xf4)
+    poke8(k_exp+12,0x80) poke8(k_exp+13,0x35) poke8(k_exp+14,0x0f) poke8(k_exp+15,0x25)
+    poke8(k_exp+16,0xe0) poke8(k_exp+17,0x7e) poke8(k_exp+18,0x21) poke8(k_exp+19,0xc9)
+    poke8(k_exp+20,0x47) poke8(k_exp+21,0xd1) poke8(k_exp+22,0x9e) poke8(k_exp+23,0x33)
+    poke8(k_exp+24,0x76) poke8(k_exp+25,0xf0) poke8(k_exp+26,0x9b) poke8(k_exp+27,0x3c)
+    poke8(k_exp+28,0x1e) poke8(k_exp+29,0x16) poke8(k_exp+30,0x17) poke8(k_exp+31,0x42)
+
+    let mut ok = 1
+    if qc_len != 32 { ok = 0 }
+    if bytes_cmp(qc, qc_in, 32) == 0 { ok = 0 }   // parsed Q_C matches what was sent
+    if bytes_cmp(QS, qs_exp, 32) == 0 { ok = 0 }  // real Q_S matches RFC 7748
+    if bytes_cmp(K, k_exp, 32) == 0 { ok = 0 }    // real K matches RFC 7748
+    if any_nonzero(H, 32) == 0 { ok = 0 }         // H computed
+    if any_nonzero(SIG, 64) == 0 { ok = 0 }       // signature computed
+    if peek8(rep) != 31 { ok = 0 }
+    if rlen != 179 { ok = 0 }
+    if bytes_cmp(rep + 60, QS, 32) == 0 { ok = 0 } // reply carries the real Q_S
+    if ok == 1 { print("PASS kex-flow: server_kex() real crypto, INIT -> KEX_ECDH_REPLY\n") }
+    else { print("FAIL kex-flow\n") }
+    0
+}

@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Real server ephemeral public key Q_S for the SSH KEX, via X25519 base-point
+// multiplication: Q_S = X25519(server_ephemeral_private, base_point). This is the
+// real crypto that replaces the placeholder Q_S in the kex-server-flow skeleton.
+// Verified against RFC 7748 §6.1 (Alice's private -> Alice's public), used here as
+// the server ephemeral pair. The library clamps the scalar internally.
+
+include "any/crypto/dh/x25519.snd"
+
+fn main() -> i64 {
+    // Server ephemeral private key (RFC 7748 §6.1 "Alice").
+    let sk[4]
+    poke8(sk + 0, 0x77)  poke8(sk + 1, 0x07)  poke8(sk + 2, 0x6d)  poke8(sk + 3, 0x0a)
+    poke8(sk + 4, 0x73)  poke8(sk + 5, 0x18)  poke8(sk + 6, 0xa5)  poke8(sk + 7, 0x7d)
+    poke8(sk + 8, 0x3c)  poke8(sk + 9, 0x16)  poke8(sk + 10, 0xc1) poke8(sk + 11, 0x72)
+    poke8(sk + 12, 0x51) poke8(sk + 13, 0xb2) poke8(sk + 14, 0x66) poke8(sk + 15, 0x45)
+    poke8(sk + 16, 0xdf) poke8(sk + 17, 0x4c) poke8(sk + 18, 0x2f) poke8(sk + 19, 0x87)
+    poke8(sk + 20, 0xeb) poke8(sk + 21, 0xc0) poke8(sk + 22, 0x99) poke8(sk + 23, 0x2a)
+    poke8(sk + 24, 0xb1) poke8(sk + 25, 0x77) poke8(sk + 26, 0xfb) poke8(sk + 27, 0xa5)
+    poke8(sk + 28, 0x1d) poke8(sk + 29, 0xb9) poke8(sk + 30, 0x2c) poke8(sk + 31, 0x2a)
+
+    // Base point u = 9 (curve25519 generator, little-endian).
+    let base[4]
+    let mut z = 0
+    for z < 32 { poke8(base + z, 0)  z = z + 1 }
+    poke8(base + 0, 9)
+
+    // Q_S = X25519(sk, base), the server's ephemeral public key.
+    let qs[4]
+    x25519(sk, base, qs)
+
+    // Expected public key (RFC 7748 §6.1 "Alice's public").
+    let exp[4]
+    poke8(exp + 0, 0x85)  poke8(exp + 1, 0x20)  poke8(exp + 2, 0xf0)  poke8(exp + 3, 0x09)
+    poke8(exp + 4, 0x89)  poke8(exp + 5, 0x30)  poke8(exp + 6, 0xa7)  poke8(exp + 7, 0x54)
+    poke8(exp + 8, 0x74)  poke8(exp + 9, 0x8b)  poke8(exp + 10, 0x7d) poke8(exp + 11, 0xdc)
+    poke8(exp + 12, 0xb4) poke8(exp + 13, 0x3e) poke8(exp + 14, 0xf7) poke8(exp + 15, 0x5a)
+    poke8(exp + 16, 0x0d) poke8(exp + 17, 0xbf) poke8(exp + 18, 0x3a) poke8(exp + 19, 0x0d)
+    poke8(exp + 20, 0x26) poke8(exp + 21, 0x38) poke8(exp + 22, 0x1a) poke8(exp + 23, 0xf4)
+    poke8(exp + 24, 0xeb) poke8(exp + 25, 0xa4) poke8(exp + 26, 0xa9) poke8(exp + 27, 0x8e)
+    poke8(exp + 28, 0xaa) poke8(exp + 29, 0x9b) poke8(exp + 30, 0x4e) poke8(exp + 31, 0x6a)
+
+    let mut ok = 1
+    let mut i = 0
+    for i < 32 {
+        if peek8(qs + i) != peek8(exp + i) { ok = 0 }
+        i = i + 1
+    }
+    if ok == 1 { print("PASS: real X25519 server ephemeral Q_S matches RFC 7748\n") }
+    else { print("FAIL: Q_S mismatch\n") }
+    0
+}
