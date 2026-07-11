@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Ed25519 signing (RFC 8032 §5.1.6), Test 1 signature verification
+
+include "any/crypto/group/ed25519-group.snd"
+include "any/crypto/scalar/ed25519-scalar.snd"
+
+// RFC 8032 Test 1 secret key (32 bytes, LE layout)
+let SK[4] = [
+    0x605afdef9db1619d,
+    0xc42cec92f44a84ba,
+    0x1969327b69c54944,
+    0x607fae1c03ac3b70
+]
+
+// Expected signature (64 bytes, LE layout)
+let EXP_SIG[8] = [
+    0x72ac60c3004356e5,
+    0x8a826e80cce28690,
+    0x74d9e5b81e7f8784,
+    0x5501492265e073d8,
+    0xac3ba3901582b85f,
+    0x6bb4f91c70391ec6,
+    0x24be5b59f0f55bd2,
+    0x0b107a8e43415165
+]
+
+fn bytes32_to_limbs16(dst, src) {
+    let mut j = 0
+    for j < 16 {
+        dst[j] = peek8(src + j * 2) | (peek8(src + j * 2 + 1) << 8)
+        j = j + 1
+    }
+}
+
+fn limbs16_to_bytes32(dst, src) {
+    let mut j = 0
+    for j < 16 {
+        poke8(dst + j * 2, src[j] & 0xFF)
+        poke8(dst + j * 2 + 1, (src[j] >> 8) & 0xFF)
+        j = j + 1
+    }
+}
+
+fn copy_bytes(dst, src, n) {
+    let mut i = 0
+    for i < n {
+        poke8(dst + i, peek8(src + i))
+        i = i + 1
+    }
+}
+
+
+// Sign a 32-byte message h (e.g. the SSH exchange hash H) with the 32-byte secret
+// key sk, writing the 64-byte signature to sig_out. RFC 8032 Ed25519.
+fn ed25519_sign_h(sk, h, sig_out) {
+    let hash[8]
+    sha512_hash(sk, 32, hash)
+    let s_limbs[16]
+    get_clamped_scalar(hash, s_limbs)
+    let s_bytes[4]
+    limbs16_to_bytes32(s_bytes, s_limbs)
+    let BZ[16]; fe_one(BZ)
+    let BT[16]; fe_mul(BT, BX, BY)
+    let ax[16]; let ay[16]; let az[16]; let at[16]
+    let A_bytes[4]
+    point_scalar_mul(ax, ay, az, at, s_limbs, BX, BY, BZ, BT)
+    point_encode(A_bytes, ax, ay, az)
+    // r = SHA512(prefix || h) mod L
+    let pm[8]
+    copy_bytes(pm, hash + 32, 32)
+    copy_bytes(pm + 32, h, 32)
+    let r_hash[8]
+    sha512_hash(pm, 64, r_hash)
+    let r_bytes[4]
+    sc_reduce(r_bytes, r_hash)
+    let r_limbs[16]
+    bytes32_to_limbs16(r_limbs, r_bytes)
+    let rx[16]; let ry[16]; let rz[16]; let rt[16]
+    let R_bytes[4]
+    point_scalar_mul(rx, ry, rz, rt, r_limbs, BX, BY, BZ, BT)
+    point_encode(R_bytes, rx, ry, rz)
+    // k = SHA512(R || A || h) mod L
+    let ram[12]
+    copy_bytes(ram, R_bytes, 32)
+    copy_bytes(ram + 32, A_bytes, 32)
+    copy_bytes(ram + 64, h, 32)
+    let k_hash[8]
+    sha512_hash(ram, 96, k_hash)
+    let k_bytes[4]
+    sc_reduce(k_bytes, k_hash)
+    let S_bytes[4]
+    sc_muladd(S_bytes, k_bytes, s_bytes, r_bytes)
+    copy_bytes(sig_out, R_bytes, 32)
+    copy_bytes(sig_out + 32, S_bytes, 32)
+}

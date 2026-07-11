@@ -1,0 +1,155 @@
+include "any/crypto/hash/sha256.snd"
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// SSH KEX key derivation (RFC 4253 §7.2) over known K,H, self-verifying test
+
+// Known shared secret K (32 bytes = 4 big-endian words)
+let KS[4] = [0x0102030405060708, 0x090a0b0c0d0e0f10, 0x1112131415161718, 0x191a1b1c1d1e1f20]
+
+// Exchange hash H (32 bytes)
+let HX[4] = [0x2122232425262728, 0x292a2b2c2d2e2f30, 0x3132333435363738, 0x393a3b3c3d3e3f40]
+
+// Expected derived keys (big-endian word arrays)
+let A_EXP[4] = [0xb5912945de22ed38, 0x2f019986f834b5da, 0xb2761d63e803d81c, 0xcf5c585045b33789]
+let B_EXP[4] = [0xbd8fad0d24e41685, 0xf531d68f22ca90b6, 0xe2aaecd743ed2b2b, 0xc61d54deee6b7df7]
+let C_EXP[8] = [0x4ca921bf4569ed82, 0xa8daafe9a663f693, 0x4d997304e3a6ac5c, 0xb72f8fe40aea7d10, 0x8f9f47854240f1d6, 0x5044ab822610679c, 0x8a1e873e0615a9cc, 0x492c047d3f7c1fe5]
+let D_EXP[8] = [0xce1c24627709e070, 0x328155bb26b07e4e, 0x9ace1da957454d37, 0xbfac0fd25fd8a6da, 0x25e96948bb426c17, 0xe9432d8d5fd0a17f, 0x73f0821a44e31581, 0x0a4cb4f37807c1be]
+
+fn word_byte(arr, idx) -> i64 {
+    let wi = idx >> 3
+    let bi = idx & 7
+    let w = arr[wi]
+    (w >>> ((7 - bi) * 8)) & 0xFF
+}
+
+fn copy_words_to_buf(dst, src, n) {
+    let mut i = 0
+    for i < n {
+        poke8(dst + i, word_byte(src, i))
+        i = i + 1
+    }
+}
+
+fn copy_buf(dst, src, n) {
+    let mut i = 0
+    for i < n {
+        poke8(dst + i, peek8(src + i))
+        i = i + 1
+    }
+}
+
+fn compare_keys(computed, exp, n) -> i64 {
+    let mut ok = 1
+    let mut i = 0
+    for i < n {
+        if peek8(computed + i) != word_byte(exp, i) {
+            ok = 0
+        }
+        i = i + 1
+    }
+    ok
+}
+
+fn hex_nibble(n) -> i64 {
+    if n < 10 { 0x30 + n } else { 0x41 + n - 10 }
+}
+
+fn print_hex(buf, n) {
+    let mut i = 0
+    for i < n {
+        let b = peek8(buf + i)
+        print_char(hex_nibble(b >> 4))
+        print_char(hex_nibble(b & 0xF))
+        i = i + 1
+    }
+}
+
+fn build_mpk(mpk) {
+    poke8(mpk, 0x00)
+    poke8(mpk + 1, 0x00)
+    poke8(mpk + 2, 0x00)
+    poke8(mpk + 3, 0x20)
+    copy_words_to_buf(mpk + 4, KS, 32)
+}
+
+fn main() -> i64 {
+    let mpk[5]
+    let ibuf[13]
+    let out[4]
+    let k1[4]
+    let store[16]
+
+    build_mpk(mpk)
+
+    let mut ok = 1
+
+    // === A: IV c->s (32 bytes) ===
+    copy_buf(ibuf, mpk, 36)
+    copy_words_to_buf(ibuf + 36, HX, 32)
+    poke8(ibuf + 68, 0x41)
+    copy_words_to_buf(ibuf + 69, HX, 32)
+    sha256_hash(ibuf, 101, store)
+    if compare_keys(store, A_EXP, 32) == 0 { ok = 0 }
+
+    // === B: IV s->c (32 bytes) ===
+    copy_buf(ibuf, mpk, 36)
+    copy_words_to_buf(ibuf + 36, HX, 32)
+    poke8(ibuf + 68, 0x42)
+    copy_words_to_buf(ibuf + 69, HX, 32)
+    sha256_hash(ibuf, 101, store + 32)
+    if compare_keys(store + 32, B_EXP, 32) == 0 { ok = 0 }
+
+    // === C: enc key c->s (64 bytes = K1 || K2) ===
+    copy_buf(ibuf, mpk, 36)
+    copy_words_to_buf(ibuf + 36, HX, 32)
+    poke8(ibuf + 68, 0x43)
+    copy_words_to_buf(ibuf + 69, HX, 32)
+    sha256_hash(ibuf, 101, store + 64)
+    copy_buf(ibuf, mpk, 36)
+    copy_words_to_buf(ibuf + 36, HX, 32)
+    copy_buf(ibuf + 68, store + 64, 32)
+    sha256_hash(ibuf, 100, store + 96)
+    if compare_keys(store + 64, C_EXP, 32) == 0 { ok = 0 }
+    if compare_keys(store + 96, C_EXP + 32, 32) == 0 { ok = 0 }
+
+    // === D: enc key s->c (64 bytes = K1 || K2) ===
+    copy_buf(ibuf, mpk, 36)
+    copy_words_to_buf(ibuf + 36, HX, 32)
+    poke8(ibuf + 68, 0x44)
+    copy_words_to_buf(ibuf + 69, HX, 32)
+    sha256_hash(ibuf, 101, out)
+    copy_buf(ibuf, mpk, 36)
+    copy_words_to_buf(ibuf + 36, HX, 32)
+    copy_buf(ibuf + 68, out, 32)
+    sha256_hash(ibuf, 100, k1)
+    if compare_keys(out, D_EXP, 32) == 0 { ok = 0 }
+    if compare_keys(k1, D_EXP + 32, 32) == 0 { ok = 0 }
+
+    // Print A (IV c->s, 32 bytes)
+    print_char(0x41); print_char(0x3a); print_char(0x20)
+    print_hex(store, 32)
+    print_char(0x0a)
+
+    // Print B (IV s->c, 32 bytes)
+    print_char(0x42); print_char(0x3a); print_char(0x20)
+    print_hex(store + 32, 32)
+    print_char(0x0a)
+
+    // Print C (enc key c->s, 64 bytes)
+    print_char(0x43); print_char(0x3a); print_char(0x20)
+    print_hex(store + 64, 64)
+    print_char(0x0a)
+
+    // Print D (enc key s->c, 64 bytes)
+    print_char(0x44); print_char(0x3a); print_char(0x20)
+    print_hex(out, 32)
+    print_hex(k1, 32)
+    print_char(0x0a)
+
+    if ok {
+        print("PASS: SSH key derivation matches expected")
+    } else {
+        print("FAIL: SSH key derivation mismatch")
+    }
+    0
+}

@@ -1,0 +1,126 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// SSH curve25519-sha256 exchange hash H, build concat, hash, verify against oracle.
+
+include "any/crypto/hash/sha256.snd"
+
+let VC[19] = ['S', 'S', 'H', '-', '2', '.', '0', '-', 't', 'e', 's', 't', '-', 'c', 'l', 'i', 'e', 'n', 't']
+let VS[19] = ['S', 'S', 'H', '-', '2', '.', '0', '-', 't', 'e', 's', 't', '-', 's', 'e', 'r', 'v', 'e', 'r']
+let IC[30] = [0x14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+let IS[30] = [0x14,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+let KS_STR[7] = ['s', 's', 'h', '-', 'r', 's', 'a']
+let EXP[32] = [0x87,0xa8,0x52,0xd1,0x98,0xd3,0x8f,0x5f,
+               0xb5,0x02,0x8d,0x22,0x9a,0x4c,0xe0,0x9c,
+               0x82,0x44,0x80,0xa1,0x0c,0x3c,0x1d,0x65,
+               0xed,0xe3,0xf9,0xf6,0xd9,0x3d,0x6b,0x3a]
+let HXD[16] = ['0','1','2','3','4','5','6','7','8','9','a','b','c','d','e','f']
+
+fn poke32be(ptr: i64, val: i64) {
+    poke8(ptr, (val >> 24) & 0xFF)
+    poke8(ptr + 1, (val >> 16) & 0xFF)
+    poke8(ptr + 2, (val >> 8) & 0xFF)
+    poke8(ptr + 3, val & 0xFF)
+}
+
+fn write_data(base: i64, off: i64, arr: i64, n: i64) -> i64 {
+    let mut i = 0
+    for i < n {
+        poke8(base + off + i, arr[i])
+        i = i + 1
+    }
+    off + n
+}
+
+fn write_seq(base: i64, off: i64, start: i64, n: i64) -> i64 {
+    let mut i = 0
+    for i < n {
+        poke8(base + off + i, start + i)
+        i = i + 1
+    }
+    off + n
+}
+
+fn main() -> i64 {
+    let buf[52]
+    let mut off = 0
+
+    poke32be(buf + off, 19)
+    off = off + 4
+    off = write_data(buf, off, VC, 19)
+
+    poke32be(buf + off, 19)
+    off = off + 4
+    off = write_data(buf, off, VS, 19)
+
+    poke32be(buf + off, 30)
+    off = off + 4
+    off = write_data(buf, off, IC, 30)
+
+    poke32be(buf + off, 30)
+    off = off + 4
+    off = write_data(buf, off, IS, 30)
+
+    poke32be(buf + off, 17)
+    off = off + 4
+    off = write_data(buf, off, KS_STR, 7)
+    poke32be(buf + off, 1)
+    poke8(buf + off + 4, 1)
+    off = off + 5
+    poke32be(buf + off, 1)
+    poke8(buf + off + 4, 1)
+    off = off + 5
+
+    poke32be(buf + off, 32)
+    off = off + 4
+    off = write_seq(buf, off, 0, 32)
+
+    poke32be(buf + off, 224)
+    off = off + 4
+    off = write_seq(buf, off, 31, 224)
+
+    poke32be(buf + off, 8)
+    poke8(buf + off + 4, 0x12)
+    poke8(buf + off + 5, 0x34)
+    poke8(buf + off + 6, 0x56)
+    poke8(buf + off + 7, 0x78)
+    poke8(buf + off + 8, 0x90)
+    poke8(buf + off + 9, 0xAB)
+    poke8(buf + off + 10, 0xCD)
+    poke8(buf + off + 11, 0xEF)
+    off = off + 12
+
+    let digest[4]
+    sha256_hash(buf, off, digest)
+
+    let mut pass = 1
+    let mut i = 0
+    for i < 32 {
+        let got = peek8(digest + i)
+        let want = EXP[i]
+        if got != want {
+            pass = 0
+        }
+        i = i + 1
+    }
+
+    print_char('H')
+    print_char('=')
+    i = 0
+    for i < 32 {
+        let b = peek8(digest + i)
+        let hi = (b >> 4) & 0xF
+        let lo = b & 0xF
+        print_char(HXD[hi])
+        print_char(HXD[lo])
+        i = i + 1
+    }
+    print_char('\n')
+
+    if pass {
+        print("PASS")
+    } else {
+        print("FAIL")
+    }
+
+    0
+}

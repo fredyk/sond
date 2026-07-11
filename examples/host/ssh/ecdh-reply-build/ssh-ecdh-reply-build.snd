@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Build SSH_MSG_KEX_ECDH_REPLY (RFC 5656 §4) with ssh-ed25519 K_S and signature
+// blobs. Self-checks the emitted structure (message type, the three string
+// lengths, total size) as an executable oracle, then prints the payload hex.
+
+let ED[11] = ['s', 's', 'h', '-', 'e', 'd', '2', '5', '5', '1', '9']
+let HXD[16] = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f']
+
+fn poke32be(p, v) {
+    poke8(p, (v >> 24) & 0xFF)
+    poke8(p + 1, (v >> 16) & 0xFF)
+    poke8(p + 2, (v >> 8) & 0xFF)
+    poke8(p + 3, v & 0xFF)
+}
+
+fn read_be32(p) -> i64 {
+    (peek8(p) << 24) | (peek8(p + 1) << 16) | (peek8(p + 2) << 8) | peek8(p + 3)
+}
+
+// write n bytes from arr at base+off; return new off
+fn wr(base, off, arr, n) {
+    let mut i = 0
+    for i < n {
+        poke8(base + off + i, arr[i])
+        i = i + 1
+    }
+    off + n
+}
+
+// write a byte sequence start, start+1, ... (n bytes); return new off
+fn wseq(base, off, start, n) {
+    let mut i = 0
+    for i < n {
+        poke8(base + off + i, (start + i) & 0xFF)
+        i = i + 1
+    }
+    off + n
+}
+
+fn main() -> i64 {
+    let buf[24]
+    let mut off = 0
+
+    // byte: SSH_MSG_KEX_ECDH_REPLY = 31
+    poke8(buf, 31)
+    off = 1
+
+    // string K_S (len 51): string("ssh-ed25519") || string(host_pubkey[32]=0x00..0x1f)
+    poke32be(buf + off, 51)
+    off = off + 4
+    poke32be(buf + off, 11)
+    off = off + 4
+    off = wr(buf, off, ED, 11)
+    poke32be(buf + off, 32)
+    off = off + 4
+    off = wseq(buf, off, 0x00, 32)
+
+    // string Q_S (32 bytes = 0x20..0x3f)
+    poke32be(buf + off, 32)
+    off = off + 4
+    off = wseq(buf, off, 0x20, 32)
+
+    // string signature (len 83): string("ssh-ed25519") || string(sig[64]=0x40..0x7f)
+    poke32be(buf + off, 83)
+    off = off + 4
+    poke32be(buf + off, 11)
+    off = off + 4
+    off = wr(buf, off, ED, 11)
+    poke32be(buf + off, 64)
+    off = off + 4
+    off = wseq(buf, off, 0x40, 64)
+
+    // Executable self-check (RFC 5656 §4): byte(31), string K_S (len 51 = name 11
+    // + key 32), string Q_S(32), string sig (len 83 = name 11 + sig 64); 179 bytes.
+    let mut ok = 1
+    if peek8(buf) != 31 { ok = 0 }
+    if read_be32(buf + 1) != 51 { ok = 0 }
+    if read_be32(buf + 5) != 11 { ok = 0 }
+    if read_be32(buf + 20) != 32 { ok = 0 }
+    if read_be32(buf + 56) != 32 { ok = 0 }
+    if read_be32(buf + 92) != 83 { ok = 0 }
+    if read_be32(buf + 96) != 11 { ok = 0 }
+    if read_be32(buf + 111) != 64 { ok = 0 }
+    if off != 179 { ok = 0 }
+    if ok == 1 { print("PASS ecdh_reply: KEX_ECDH_REPLY structure valid\n") }
+    else { print("FAIL ecdh_reply\n") }
+
+    // print length and full payload hex
+    print("len=")
+    print_int(off)
+    print("\nhex=")
+    let mut i = 0
+    for i < off {
+        let b = peek8(buf + i)
+        print_char(HXD[(b >> 4) & 0xF])
+        print_char(HXD[b & 0xF])
+        i = i + 1
+    }
+    print("")
+    0
+}
