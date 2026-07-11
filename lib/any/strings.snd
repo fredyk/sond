@@ -1,0 +1,165 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/strings.snd, string/byte manipulation helpers for C2/C3 layers.
+// All functions work on byte buffers addressed by i64 pointers.
+// No allocator in hosted mode: buffers are passed by address.
+
+// strlen(p) -> n
+//   Returns the number of bytes before the null terminator at address `p`.
+fn strlen(p: i64) -> i64 {
+    let mut n = 0
+    for peek8(p + n) != 0 {
+        n = n + 1
+    }
+    n
+}
+
+// memcpy(dst, src, n)
+//   Copies `n` bytes from src to dst.
+fn memcpy(dst: i64, src: i64, n: i64) {
+    let mut i = 0
+    for i < n {
+        poke8(dst + i, peek8(src + i))
+        i = i + 1
+    }
+}
+
+// memcmp(a, b, n) -> 0|!=0
+//   Compares n bytes at a and b. Returns 0 if equal, nonzero if different.
+fn memcmp(a: i64, b: i64, n: i64) -> i64 {
+    let mut i = 0
+    for i < n {
+        if peek8(a + i) != peek8(b + i) {
+            return 1
+        }
+        i = i + 1
+    }
+    0
+}
+
+// streq(a, b) -> 0|1
+//   Compares two null-terminated strings. Returns 1 if equal, 0 otherwise.
+fn streq(a: i64, b: i64) -> i64 {
+    let mut i = 0
+    for {
+        let ca = peek8(a + i)
+        let cb = peek8(b + i)
+        if ca == 0 && cb == 0 {
+            return 1
+        }
+        if ca != cb {
+            return 0
+        }
+        i = i + 1
+    }
+    0
+}
+
+// starts_with(p, prefix) -> 0|1
+//   Checks if the null-terminated string at p starts with the given prefix
+//   bytes (prefix must NOT contain a null terminator).
+fn starts_with(p: i64, prefix: i64) -> i64 {
+    let mut i = 0
+    for {
+        let cp = peek8(p + i)
+        let cpr = peek8(prefix + i)
+        if cpr == 0 {
+            return 1
+        }
+        if cp == 0 || cp != cpr {
+            return 0
+        }
+        i = i + 1
+    }
+    0
+}
+
+// itoa(n, buf) -> len
+//   Converts signed integer n to decimal ASCII string at buf, null-terminates.
+//   Returns the number of digit characters written (not counting the null).
+fn itoa(n: i64, buf: i64) -> i64 {
+    let mut val = n
+    let mut len = 0
+    let mut tmp = 0
+    let mut tmp_len = 0
+
+    if val < 0 {
+        val = -val
+        poke8(buf + 0, 45)
+        len = 1
+    }
+
+    if val == 0 {
+        poke8(buf + len, 48)
+        poke8(buf + len + 1, 0)
+        return 1
+    }
+
+    // Build digits in reverse order into a temp buffer.
+    let mut digits[20]
+    while val > 0 {
+        let d = val % 10
+        digits[tmp_len] = d + 48
+        tmp_len = tmp_len + 1
+        val = val / 10
+    }
+
+    // Copy in reverse (digits were built backwards).
+    let mut j = 0
+    for j < tmp_len {
+        let src_idx = tmp_len - 1 - j
+        poke8(buf + len + j, digits[src_idx])
+        j = j + 1
+    }
+    len = len + tmp_len
+
+    poke8(buf + len, 0)
+    len
+}
+
+// atoi(p) -> n
+//   Parses a null-terminated decimal string at p into a signed integer.
+//   Handles leading '-' for negative numbers.
+fn atoi(p: i64) -> i64 {
+    let mut result = 0
+    let mut neg = 0
+    let mut i = 0
+
+    let first = peek8(p + 0)
+    if first == 45 {
+        neg = 1
+        i = 1
+    }
+
+    for {
+        let c = peek8(p + i)
+        if c == 0 {
+            break
+        }
+        if c >= 48 && c <= 57 {
+            result = result * 10 + (c - 48)
+        }
+        i = i + 1
+    }
+
+    if neg == 1 {
+        -result
+    } else {
+        result
+    }
+}
+
+// find_byte(p, n, c) -> idx|-1
+//   Searches for byte value c in the range [p, p+n). Returns the index of
+//   the first match, or -1 if not found.
+fn find_byte(p: i64, n: i64, c: i64) -> i64 {
+    let mut i = 0
+    for i < n {
+        if peek8(p + i) == c {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}

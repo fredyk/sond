@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Parse a KEX_ECDH_INIT message (RFC 5656 / curve25519-sha256) and extract Q_C,
+// the client's ephemeral public key, the input the server KEX crypto needs.
+// Clean-room from the RFC wire format; no third-party source copied.
+//
+// SSH binary packet (RFC 4253 6): [packet_length:be32][padding_length:1][payload][padding]
+// KEX_ECDH_INIT payload (RFC 5656 4): byte SSH_MSG_KEX_ECDH_INIT(30), string Q_C.
+// A `string` is [length:be32][bytes]. So Q_C length sits at payload+1, Q_C at payload+5.
+
+fn read_be32(p: i64) -> i64 {
+    (peek8(p) << 24) | (peek8(p + 1) << 16) | (peek8(p + 2) << 8) | peek8(p + 3)
+}
+
+// Extract Q_C from a KEX_ECDH_INIT packet at `pkt` into `out`. Returns the Q_C
+// length, or -1 if the first payload byte is not SSH_MSG_KEX_ECDH_INIT (30).
+fn parse_kex_ecdh_init(pkt: i64, out: i64) -> i64 {
+    // payload starts after the 4-byte length and the 1-byte padding_length.
+    let payload = pkt + 5
+    if peek8(payload) != 30 { return -1 }
+    let qc_len = read_be32(payload + 1)
+    let src = payload + 5
+    let mut i = 0
+    for i < qc_len {
+        poke8(out + i, peek8(src + i))
+        i = i + 1
+    }
+    qc_len
+}
+
+fn main() -> i64 {
+    // Build a KEX_ECDH_INIT carrying Q_C = bytes 1..32 (a 32-byte X25519 key).
+    let pkt[8] // 64 bytes
+    poke8(pkt + 0, 0) poke8(pkt + 1, 0) poke8(pkt + 2, 0) poke8(pkt + 3, 44) // packet_length
+    poke8(pkt + 4, 6)  // padding_length
+    poke8(pkt + 5, 30) // SSH_MSG_KEX_ECDH_INIT
+    poke8(pkt + 6, 0) poke8(pkt + 7, 0) poke8(pkt + 8, 0) poke8(pkt + 9, 32) // Q_C length = 32
+    let mut i = 0
+    for i < 32 { poke8(pkt + 10 + i, i + 1)  i = i + 1 }
+
+    let out[4] // 32 bytes
+    let n = parse_kex_ecdh_init(pkt, out)
+
+    let mut ok = 1
+    if n != 32 { ok = 0 }
+    let mut j = 0
+    for j < 32 {
+        if peek8(out + j) != j + 1 { ok = 0 }
+        j = j + 1
+    }
+    if ok == 1 { print("PASS kex_ecdh_init: Q_C (32 bytes) extracted\n") }
+    else { print("FAIL kex_ecdh_init\n") }
+    0
+}
