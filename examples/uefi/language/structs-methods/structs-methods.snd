@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Structs and methods run on bare UEFI (no OS): the language surface that
+// landed on the hosted target is the SAME on the firmware target.
+
+struct Rect { w: i64, h: i64 }
+
+impl Rect {
+    fn area(self) -> i64 { self.w * self.h }
+}
+
+fn efi_main() -> i64 {
+    let r = Rect { w: 6, h: 7 }
+    print("sond-uefi struct+method area=")
+    print_int(r.area())
+    print("")
+    halt()
+    0
+}

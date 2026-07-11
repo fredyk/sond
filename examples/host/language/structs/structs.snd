@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Structs: declaration, literal, field access, and pass-by-reference.
+
+struct Point { x: i64, y: i64 }
+
+fn manhattan(p: Point) -> i64 {
+    p.x + p.y
+}
+
+fn main() -> i64 {
+    let a = Point { x: 40, y: 2 }
+    print_int(a.x + a.y)
+    print("")
+
+    let mut b: Point
+    b.x = 10
+    b.y = 20
+    b.x = b.x + 5
+    print_int(manhattan(b))
+    print("")
+    0
+}
