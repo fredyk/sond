@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Parse SSH Binary Packet Protocol (RFC 4253 §6), extract KEX_ECDH_INIT Q_C (RFC 5656 §4, msg 30)
+
+fn read_be32(ptr: i64) -> i64 {
+    let b0 = peek8(ptr)
+    let b1 = peek8(ptr + 1)
+    let b2 = peek8(ptr + 2)
+    let b3 = peek8(ptr + 3)
+    b0 << 24 | b1 << 16 | b2 << 8 | b3
+}
+
+fn int_to_hex_digit(n: i64) -> i64 {
+    if n < 10 {
+        '0' + n
+    } else {
+        'a' + (n - 10)
+    }
+}
+
+fn print_hex8(val) {
+    let hi = (val >>> 4) & 0xF
+    let lo = val & 0xF
+    print_char(int_to_hex_digit(hi))
+    print_char(int_to_hex_digit(lo))
+}
+
+fn main() -> i64 {
+    let mut buf[52]
+
+    // packet_length = 48 (multiple of 8), padding_length = 10
+    // Buffer layout: [pkt_len:4][pad_len:1][msg:1][str_len:4][Q_C:32][pad:10]
+
+    // bytes 0-3: packet_length = 48 big-endian
+    poke8(buf + 0, 0x00)
+    poke8(buf + 1, 0x00)
+    poke8(buf + 2, 0x00)
+    poke8(buf + 3, 48)
+
+    // byte 4: padding_length = 10
+    poke8(buf + 4, 10)
+
+    // bytes 5: SSH_MSG_KEX_ECDH_INIT = 30
+    poke8(buf + 5, 30)
+
+    // bytes 6-9: string length for Q_C = 32 big-endian
+    poke8(buf + 6, 0x00)
+    poke8(buf + 7, 0x00)
+    poke8(buf + 8, 0x00)
+    poke8(buf + 9, 32)
+
+    // bytes 10-41: Q_C = 0x00, 0x01, ..., 0x1F (32 bytes)
+    let mut i = 0
+    for i < 32 {
+        poke8(buf + 10 + i, i)
+        i = i + 1
+    }
+
+    // bytes 42-51: 10 bytes of random padding (0xAA)
+    let mut p = 0
+    for p < 10 {
+        poke8(buf + 42 + p, 0xAA)
+        p = p + 1
+    }
+
+    // ---- PARSE ----
+
+    // Read packet_length (big-endian uint32 at offset 0)
+    let packet_length = read_be32(buf)
+    let padding_length = peek8(buf + 4)
+    let payload_start = buf + 5
+    let msg = peek8(payload_start)
+
+    // Verify: payload[0] == 30 (SSH_MSG_KEX_ECDH_INIT)
+    if msg != 30 {
+        print("FAIL: not KEX_ECDH_INIT")
+        return 1
+    }
+
+    // Read string: uint32 length + data
+    let str_len = read_be32(payload_start + 1)
+    let q_c_start = payload_start + 5
+
+    if str_len != 32 {
+        print("FAIL: Q_C length != 32")
+        return 1
+    }
+
+    // Print Q_C as hex
+    print("Q_C:")
+    let mut h = 0
+    for h < str_len {
+        print_hex8(peek8(q_c_start + h))
+        h = h + 1
+    }
+    print("")
+
+    // Print parsed lengths
+    print("packet_length=")
+    print_int(packet_length)
+    print(" padding_length=")
+    print_int(padding_length)
+    print("")
+
+    // Verify encoded lengths match expected values
+    if packet_length != 48 {
+        print("FAIL: packet_length != 48")
+        return 1
+    }
+    if padding_length != 10 {
+        print("FAIL: padding_length != 10")
+        return 1
+    }
+
+    // Verify Q_C content byte by byte
+    let mut v = 0
+    for v < 32 {
+        if peek8(q_c_start + v) != v {
+            print("FAIL: Q_C byte mismatch at offset ")
+            print_int(v)
+            return 1
+        }
+        v = v + 1
+    }
+
+    print("PASS")
+    return 0
+}

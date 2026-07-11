@@ -1,0 +1,515 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Ed25519 field arithmetic over GF(2^255-19) using 16×16-bit limbs.
+
+// p = 2^255 - 19
+// representation: 16 limbs, limbs 0..14 are 16 bits, limb 15 is 15 bits
+// 2^255 ≡ 19 (mod p), so overflow from limb 15 wraps with *19 to limb 0.
+
+let MASK16 = 0xFFFF
+let MASK15 = 0x7FFF
+let P0 = 0xFFED  // 2^16 - 19
+let P1 = 0xFFFF
+let P2 = 0xFFFF
+let P3 = 0xFFFF
+let P4 = 0xFFFF
+let P5 = 0xFFFF
+let P6 = 0xFFFF
+let P7 = 0xFFFF
+let P8 = 0xFFFF
+let P9 = 0xFFFF
+let P10 = 0xFFFF
+let P11 = 0xFFFF
+let P12 = 0xFFFF
+let P13 = 0xFFFF
+let P14 = 0xFFFF
+let P15 = 0x7FFF
+
+fn carry16(r) {
+    let mut c = r[0] >> 16; r[0] = r[0] & MASK16; r[1] = r[1] + c
+    c = r[1] >> 16; r[1] = r[1] & MASK16; r[2] = r[2] + c
+    c = r[2] >> 16; r[2] = r[2] & MASK16; r[3] = r[3] + c
+    c = r[3] >> 16; r[3] = r[3] & MASK16; r[4] = r[4] + c
+    c = r[4] >> 16; r[4] = r[4] & MASK16; r[5] = r[5] + c
+    c = r[5] >> 16; r[5] = r[5] & MASK16; r[6] = r[6] + c
+    c = r[6] >> 16; r[6] = r[6] & MASK16; r[7] = r[7] + c
+    c = r[7] >> 16; r[7] = r[7] & MASK16; r[8] = r[8] + c
+    c = r[8] >> 16; r[8] = r[8] & MASK16; r[9] = r[9] + c
+    c = r[9] >> 16; r[9] = r[9] & MASK16; r[10] = r[10] + c
+    c = r[10] >> 16; r[10] = r[10] & MASK16; r[11] = r[11] + c
+    c = r[11] >> 16; r[11] = r[11] & MASK16; r[12] = r[12] + c
+    c = r[12] >> 16; r[12] = r[12] & MASK16; r[13] = r[13] + c
+    c = r[13] >> 16; r[13] = r[13] & MASK16; r[14] = r[14] + c
+    c = r[14] >> 16; r[14] = r[14] & MASK16; r[15] = r[15] + c
+    c = r[15] >> 15; r[15] = r[15] & MASK15; r[0] = r[0] + c * 19
+}
+
+fn carry16_once(r) {
+    let mut c = r[0] >> 16; r[0] = r[0] & MASK16; r[1] = r[1] + c
+    c = r[1] >> 16; r[1] = r[1] & MASK16; r[2] = r[2] + c
+    c = r[2] >> 16; r[2] = r[2] & MASK16; r[3] = r[3] + c
+    c = r[3] >> 16; r[3] = r[3] & MASK16; r[4] = r[4] + c
+    c = r[4] >> 16; r[4] = r[4] & MASK16; r[5] = r[5] + c
+    c = r[5] >> 16; r[5] = r[5] & MASK16; r[6] = r[6] + c
+    c = r[6] >> 16; r[6] = r[6] & MASK16; r[7] = r[7] + c
+    c = r[7] >> 16; r[7] = r[7] & MASK16; r[8] = r[8] + c
+    c = r[8] >> 16; r[8] = r[8] & MASK16; r[9] = r[9] + c
+    c = r[9] >> 16; r[9] = r[9] & MASK16; r[10] = r[10] + c
+    c = r[10] >> 16; r[10] = r[10] & MASK16; r[11] = r[11] + c
+    c = r[11] >> 16; r[11] = r[11] & MASK16; r[12] = r[12] + c
+    c = r[12] >> 16; r[12] = r[12] & MASK16; r[13] = r[13] + c
+    c = r[13] >> 16; r[13] = r[13] & MASK16; r[14] = r[14] + c
+    c = r[14] >> 16; r[14] = r[14] & MASK16; r[15] = r[15] + c
+    c = r[15] >> 15; r[15] = r[15] & MASK15; r[0] = r[0] + c * 19
+}
+
+fn fe_add(r, a, b) {
+    r[0] = a[0] + b[0]
+    r[1] = a[1] + b[1]
+    r[2] = a[2] + b[2]
+    r[3] = a[3] + b[3]
+    r[4] = a[4] + b[4]
+    r[5] = a[5] + b[5]
+    r[6] = a[6] + b[6]
+    r[7] = a[7] + b[7]
+    r[8] = a[8] + b[8]
+    r[9] = a[9] + b[9]
+    r[10] = a[10] + b[10]
+    r[11] = a[11] + b[11]
+    r[12] = a[12] + b[12]
+    r[13] = a[13] + b[13]
+    r[14] = a[14] + b[14]
+    r[15] = a[15] + b[15]
+    carry16(r)
+    carry16_once(r)
+}
+
+fn fe_sub(r, a, b) {
+    // add 2*p to ensure positivity
+    r[0] = a[0] - b[0] + 2 * P0
+    r[1] = a[1] - b[1] + 2 * P1
+    r[2] = a[2] - b[2] + 2 * P2
+    r[3] = a[3] - b[3] + 2 * P3
+    r[4] = a[4] - b[4] + 2 * P4
+    r[5] = a[5] - b[5] + 2 * P5
+    r[6] = a[6] - b[6] + 2 * P6
+    r[7] = a[7] - b[7] + 2 * P7
+    r[8] = a[8] - b[8] + 2 * P8
+    r[9] = a[9] - b[9] + 2 * P9
+    r[10] = a[10] - b[10] + 2 * P10
+    r[11] = a[11] - b[11] + 2 * P11
+    r[12] = a[12] - b[12] + 2 * P12
+    r[13] = a[13] - b[13] + 2 * P13
+    r[14] = a[14] - b[14] + 2 * P14
+    r[15] = a[15] - b[15] + 2 * P15
+    carry16(r)
+    carry16_once(r)
+}
+
+fn fe_mul(r, a, b) {
+    let a0 = a[0]; let a1 = a[1]; let a2 = a[2]; let a3 = a[3]; let a4 = a[4]
+    let a5 = a[5]; let a6 = a[6]; let a7 = a[7]; let a8 = a[8]; let a9 = a[9]
+    let a10 = a[10]; let a11 = a[11]; let a12 = a[12]; let a13 = a[13]; let a14 = a[14]; let a15 = a[15]
+    let b0 = b[0]; let b1 = b[1]; let b2 = b[2]; let b3 = b[3]; let b4 = b[4]
+    let b5 = b[5]; let b6 = b[6]; let b7 = b[7]; let b8 = b[8]; let b9 = b[9]
+    let b10 = b[10]; let b11 = b[11]; let b12 = b[12]; let b13 = b[13]; let b14 = b[14]; let b15 = b[15]
+    let mut t[31]
+    t[0] = a0 * b0
+    t[1] = a0 * b1 + a1 * b0
+    t[2] = a0 * b2 + a1 * b1 + a2 * b0
+    t[3] = a0 * b3 + a1 * b2 + a2 * b1 + a3 * b0
+    t[4] = a0 * b4 + a1 * b3 + a2 * b2 + a3 * b1 + a4 * b0
+    t[5] = a0 * b5 + a1 * b4 + a2 * b3 + a3 * b2 + a4 * b1 + a5 * b0
+    t[6] = a0 * b6 + a1 * b5 + a2 * b4 + a3 * b3 + a4 * b2 + a5 * b1 + a6 * b0
+    t[7] = a0 * b7 + a1 * b6 + a2 * b5 + a3 * b4 + a4 * b3 + a5 * b2 + a6 * b1 + a7 * b0
+    t[8] = a0 * b8 + a1 * b7 + a2 * b6 + a3 * b5 + a4 * b4 + a5 * b3 + a6 * b2 + a7 * b1 + a8 * b0
+    t[9] = a0 * b9 + a1 * b8 + a2 * b7 + a3 * b6 + a4 * b5 + a5 * b4 + a6 * b3 + a7 * b2 + a8 * b1 + a9 * b0
+    t[10] = a0 * b10 + a1 * b9 + a2 * b8 + a3 * b7 + a4 * b6 + a5 * b5 + a6 * b4 + a7 * b3 + a8 * b2 + a9 * b1 + a10 * b0
+    t[11] = a0 * b11 + a1 * b10 + a2 * b9 + a3 * b8 + a4 * b7 + a5 * b6 + a6 * b5 + a7 * b4 + a8 * b3 + a9 * b2 + a10 * b1 + a11 * b0
+    t[12] = a0 * b12 + a1 * b11 + a2 * b10 + a3 * b9 + a4 * b8 + a5 * b7 + a6 * b6 + a7 * b5 + a8 * b4 + a9 * b3 + a10 * b2 + a11 * b1 + a12 * b0
+    t[13] = a0 * b13 + a1 * b12 + a2 * b11 + a3 * b10 + a4 * b9 + a5 * b8 + a6 * b7 + a7 * b6 + a8 * b5 + a9 * b4 + a10 * b3 + a11 * b2 + a12 * b1 + a13 * b0
+    t[14] = a0 * b14 + a1 * b13 + a2 * b12 + a3 * b11 + a4 * b10 + a5 * b9 + a6 * b8 + a7 * b7 + a8 * b6 + a9 * b5 + a10 * b4 + a11 * b3 + a12 * b2 + a13 * b1 + a14 * b0
+    t[15] = a0 * b15 + a1 * b14 + a2 * b13 + a3 * b12 + a4 * b11 + a5 * b10 + a6 * b9 + a7 * b8 + a8 * b7 + a9 * b6 + a10 * b5 + a11 * b4 + a12 * b3 + a13 * b2 + a14 * b1 + a15 * b0
+    t[16] = a1 * b15 + a2 * b14 + a3 * b13 + a4 * b12 + a5 * b11 + a6 * b10 + a7 * b9 + a8 * b8 + a9 * b7 + a10 * b6 + a11 * b5 + a12 * b4 + a13 * b3 + a14 * b2 + a15 * b1
+    t[17] = a2 * b15 + a3 * b14 + a4 * b13 + a5 * b12 + a6 * b11 + a7 * b10 + a8 * b9 + a9 * b8 + a10 * b7 + a11 * b6 + a12 * b5 + a13 * b4 + a14 * b3 + a15 * b2
+    t[18] = a3 * b15 + a4 * b14 + a5 * b13 + a6 * b12 + a7 * b11 + a8 * b10 + a9 * b9 + a10 * b8 + a11 * b7 + a12 * b6 + a13 * b5 + a14 * b4 + a15 * b3
+    t[19] = a4 * b15 + a5 * b14 + a6 * b13 + a7 * b12 + a8 * b11 + a9 * b10 + a10 * b9 + a11 * b8 + a12 * b7 + a13 * b6 + a14 * b5 + a15 * b4
+    t[20] = a5 * b15 + a6 * b14 + a7 * b13 + a8 * b12 + a9 * b11 + a10 * b10 + a11 * b9 + a12 * b8 + a13 * b7 + a14 * b6 + a15 * b5
+    t[21] = a6 * b15 + a7 * b14 + a8 * b13 + a9 * b12 + a10 * b11 + a11 * b10 + a12 * b9 + a13 * b8 + a14 * b7 + a15 * b6
+    t[22] = a7 * b15 + a8 * b14 + a9 * b13 + a10 * b12 + a11 * b11 + a12 * b10 + a13 * b9 + a14 * b8 + a15 * b7
+    t[23] = a8 * b15 + a9 * b14 + a10 * b13 + a11 * b12 + a12 * b11 + a13 * b10 + a14 * b9 + a15 * b8
+    t[24] = a9 * b15 + a10 * b14 + a11 * b13 + a12 * b12 + a13 * b11 + a14 * b10 + a15 * b9
+    t[25] = a10 * b15 + a11 * b14 + a12 * b13 + a13 * b12 + a14 * b11 + a15 * b10
+    t[26] = a11 * b15 + a12 * b14 + a13 * b13 + a14 * b12 + a15 * b11
+    t[27] = a12 * b15 + a13 * b14 + a14 * b13 + a15 * b12
+    t[28] = a13 * b15 + a14 * b14 + a15 * b13
+    t[29] = a14 * b15 + a15 * b14
+    t[30] = a15 * b15
+    // reduce: 2^256 ≡ 38 (mod p), so c[i] += 38 * c[i+16]
+    t[0] = t[0] + 38 * t[16]
+    t[1] = t[1] + 38 * t[17]
+    t[2] = t[2] + 38 * t[18]
+    t[3] = t[3] + 38 * t[19]
+    t[4] = t[4] + 38 * t[20]
+    t[5] = t[5] + 38 * t[21]
+    t[6] = t[6] + 38 * t[22]
+    t[7] = t[7] + 38 * t[23]
+    t[8] = t[8] + 38 * t[24]
+    t[9] = t[9] + 38 * t[25]
+    t[10] = t[10] + 38 * t[26]
+    t[11] = t[11] + 38 * t[27]
+    t[12] = t[12] + 38 * t[28]
+    t[13] = t[13] + 38 * t[29]
+    t[14] = t[14] + 38 * t[30]
+    // t[15] has no high counterpart (31*16=496 => 2^496 ≡ 38*2^240, would go to t[15])
+    // t[15] 2^240 is already limb 15, so t[15] stays as is
+    r[0] = t[0]; r[1] = t[1]; r[2] = t[2]; r[3] = t[3]; r[4] = t[4]
+    r[5] = t[5]; r[6] = t[6]; r[7] = t[7]; r[8] = t[8]; r[9] = t[9]
+    r[10] = t[10]; r[11] = t[11]; r[12] = t[12]; r[13] = t[13]; r[14] = t[14]; r[15] = t[15]
+    carry16(r)
+    carry16_once(r)
+}
+
+fn fe_sq(r, a) {
+    fe_mul(r, a, a)
+}
+
+fn fe_neg(r, a) {
+    r[0] = -a[0]; r[1] = -a[1]; r[2] = -a[2]; r[3] = -a[3]; r[4] = -a[4]
+    r[5] = -a[5]; r[6] = -a[6]; r[7] = -a[7]; r[8] = -a[8]; r[9] = -a[9]
+    r[10] = -a[10]; r[11] = -a[11]; r[12] = -a[12]; r[13] = -a[13]; r[14] = -a[14]; r[15] = -a[15]
+    carry16(r)
+    carry16_once(r)
+}
+
+fn fe_cmov(r, a, b, c) {
+    // if c != 0, r = a; else r = b
+    r[0] = a[0]; r[1] = a[1]; r[2] = a[2]; r[3] = a[3]; r[4] = a[4]
+    r[5] = a[5]; r[6] = a[6]; r[7] = a[7]; r[8] = a[8]; r[9] = a[9]
+    r[10] = a[10]; r[11] = a[11]; r[12] = a[12]; r[13] = a[13]; r[14] = a[14]; r[15] = a[15]
+}
+
+fn fe_copy(r, a) {
+    r[0] = a[0]; r[1] = a[1]; r[2] = a[2]; r[3] = a[3]; r[4] = a[4]
+    r[5] = a[5]; r[6] = a[6]; r[7] = a[7]; r[8] = a[8]; r[9] = a[9]
+    r[10] = a[10]; r[11] = a[11]; r[12] = a[12]; r[13] = a[13]; r[14] = a[14]; r[15] = a[15]
+}
+
+fn fe_frombytes(r, ptr) {
+    let b0 = peek8(ptr)
+    let b1 = peek8(ptr + 1)
+    let b2 = peek8(ptr + 2)
+    let b3 = peek8(ptr + 3)
+    let b4 = peek8(ptr + 4)
+    let b5 = peek8(ptr + 5)
+    let b6 = peek8(ptr + 6)
+    let b7 = peek8(ptr + 7)
+    let b8 = peek8(ptr + 8)
+    let b9 = peek8(ptr + 9)
+    let b10 = peek8(ptr + 10)
+    let b11 = peek8(ptr + 11)
+    let b12 = peek8(ptr + 12)
+    let b13 = peek8(ptr + 13)
+    let b14 = peek8(ptr + 14)
+    let b15 = peek8(ptr + 15)
+    let b16 = peek8(ptr + 16)
+    let b17 = peek8(ptr + 17)
+    let b18 = peek8(ptr + 18)
+    let b19 = peek8(ptr + 19)
+    let b20 = peek8(ptr + 20)
+    let b21 = peek8(ptr + 21)
+    let b22 = peek8(ptr + 22)
+    let b23 = peek8(ptr + 23)
+    let b24 = peek8(ptr + 24)
+    let b25 = peek8(ptr + 25)
+    let b26 = peek8(ptr + 26)
+    let b27 = peek8(ptr + 27)
+    let b28 = peek8(ptr + 28)
+    let b29 = peek8(ptr + 29)
+    let b30 = peek8(ptr + 30)
+    let b31 = peek8(ptr + 31)
+    // pack 32 bytes LE into 16 limbs (0..14 = 16 bits, 15 = 15 bits)
+    r[0] = b0 | (b1 << 8)
+    r[1] = b2 | (b3 << 8)
+    r[2] = b4 | (b5 << 8)
+    r[3] = b6 | (b7 << 8)
+    r[4] = b8 | (b9 << 8)
+    r[5] = b10 | (b11 << 8)
+    r[6] = b12 | (b13 << 8)
+    r[7] = b14 | (b15 << 8)
+    r[8] = b16 | (b17 << 8)
+    r[9] = b18 | (b19 << 8)
+    r[10] = b20 | (b21 << 8)
+    r[11] = b22 | (b23 << 8)
+    r[12] = b24 | (b25 << 8)
+    r[13] = b26 | (b27 << 8)
+    r[14] = b28 | (b29 << 8)
+    r[15] = b30 | ((b31 & 0x7F) << 8)
+}
+
+fn fe_tobytes(ptr, a) {
+    let mut t[16]
+    fe_copy(t, a)
+    carry16(t)
+    carry16_once(t)
+    // freeze: conditional subtract p
+    fe_frozen(t, t)
+    poke8(ptr, t[0] & 0xFF)
+    poke8(ptr + 1, (t[0] >> 8) & 0xFF)
+    poke8(ptr + 2, t[1] & 0xFF)
+    poke8(ptr + 3, (t[1] >> 8) & 0xFF)
+    poke8(ptr + 4, t[2] & 0xFF)
+    poke8(ptr + 5, (t[2] >> 8) & 0xFF)
+    poke8(ptr + 6, t[3] & 0xFF)
+    poke8(ptr + 7, (t[3] >> 8) & 0xFF)
+    poke8(ptr + 8, t[4] & 0xFF)
+    poke8(ptr + 9, (t[4] >> 8) & 0xFF)
+    poke8(ptr + 10, t[5] & 0xFF)
+    poke8(ptr + 11, (t[5] >> 8) & 0xFF)
+    poke8(ptr + 12, t[6] & 0xFF)
+    poke8(ptr + 13, (t[6] >> 8) & 0xFF)
+    poke8(ptr + 14, t[7] & 0xFF)
+    poke8(ptr + 15, (t[7] >> 8) & 0xFF)
+    poke8(ptr + 16, t[8] & 0xFF)
+    poke8(ptr + 17, (t[8] >> 8) & 0xFF)
+    poke8(ptr + 18, t[9] & 0xFF)
+    poke8(ptr + 19, (t[9] >> 8) & 0xFF)
+    poke8(ptr + 20, t[10] & 0xFF)
+    poke8(ptr + 21, (t[10] >> 8) & 0xFF)
+    poke8(ptr + 22, t[11] & 0xFF)
+    poke8(ptr + 23, (t[11] >> 8) & 0xFF)
+    poke8(ptr + 24, t[12] & 0xFF)
+    poke8(ptr + 25, (t[12] >> 8) & 0xFF)
+    poke8(ptr + 26, t[13] & 0xFF)
+    poke8(ptr + 27, (t[13] >> 8) & 0xFF)
+    poke8(ptr + 28, t[14] & 0xFF)
+    poke8(ptr + 29, (t[14] >> 8) & 0xFF)
+    poke8(ptr + 30, t[15] & 0xFF)
+    poke8(ptr + 31, (t[15] >> 8) & 0x7F)
+}
+
+fn fe_frozen(r, a) {
+    // fully reduce to [0, p)
+    // subtract p; if borrow occurs, add p back
+    let mut t0 = a[0] - P0
+    let mut borrow = 0
+    if t0 < 0 {
+        t0 = t0 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t1 = a[1] - P1 - borrow
+    if t1 < 0 {
+        t1 = t1 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t2 = a[2] - P2 - borrow
+    if t2 < 0 {
+        t2 = t2 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t3 = a[3] - P3 - borrow
+    if t3 < 0 {
+        t3 = t3 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t4 = a[4] - P4 - borrow
+    if t4 < 0 {
+        t4 = t4 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t5 = a[5] - P5 - borrow
+    if t5 < 0 {
+        t5 = t5 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t6 = a[6] - P6 - borrow
+    if t6 < 0 {
+        t6 = t6 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t7 = a[7] - P7 - borrow
+    if t7 < 0 {
+        t7 = t7 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t8 = a[8] - P8 - borrow
+    if t8 < 0 {
+        t8 = t8 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t9 = a[9] - P9 - borrow
+    if t9 < 0 {
+        t9 = t9 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t10 = a[10] - P10 - borrow
+    if t10 < 0 {
+        t10 = t10 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t11 = a[11] - P11 - borrow
+    if t11 < 0 {
+        t11 = t11 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t12 = a[12] - P12 - borrow
+    if t12 < 0 {
+        t12 = t12 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t13 = a[13] - P13 - borrow
+    if t13 < 0 {
+        t13 = t13 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t14 = a[14] - P14 - borrow
+    if t14 < 0 {
+        t14 = t14 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    let mut t15 = a[15] - P15 - borrow
+    if t15 < 0 {
+        t15 = t15 + 0x10000
+        borrow = 1
+    } else {
+        borrow = 0
+    }
+    // if borrow == 0 (a >= p), use the subtracted result
+    if borrow == 0 {
+        r[0] = t0; r[1] = t1; r[2] = t2; r[3] = t3; r[4] = t4
+        r[5] = t5; r[6] = t6; r[7] = t7; r[8] = t8; r[9] = t9
+        r[10] = t10; r[11] = t11; r[12] = t12; r[13] = t13; r[14] = t14; r[15] = t15
+    } else {
+        r[0] = a[0]; r[1] = a[1]; r[2] = a[2]; r[3] = a[3]; r[4] = a[4]
+        r[5] = a[5]; r[6] = a[6]; r[7] = a[7]; r[8] = a[8]; r[9] = a[9]
+        r[10] = a[10]; r[11] = a[11]; r[12] = a[12]; r[13] = a[13]; r[14] = a[14]; r[15] = a[15]
+    }
+}
+
+fn fe_reduce(r, a) {
+    fe_copy(r, a)
+    carry16(r)
+    carry16_once(r)
+}
+
+fn fe_iszero(a) -> i64 {
+    let mut t[16]
+    fe_frozen(t, a)
+    let mut acc = t[0] | t[1] | t[2] | t[3] | t[4] | t[5] | t[6] | t[7]
+    acc = acc | t[8] | t[9] | t[10] | t[11] | t[12] | t[13] | t[14] | t[15]
+    // if acc == 0, return 1; else 0
+    if acc == 0 { 1 } else { 0 }
+}
+
+fn fe_one(r) {
+    r[0] = 1; r[1] = 0; r[2] = 0; r[3] = 0; r[4] = 0
+    r[5] = 0; r[6] = 0; r[7] = 0; r[8] = 0; r[9] = 0
+    r[10] = 0; r[11] = 0; r[12] = 0; r[13] = 0; r[14] = 0; r[15] = 0
+}
+
+fn fe_inv(r, a) {
+    // a^(p-2) = a^(2^255 - 21)
+    // p-2 = 0x7FFF...FFEB
+    // bits 254..5 = 1, bit 4 = 0, bit 3 = 1, bit 2 = 0, bit 1 = 1, bit 0 = 1
+    let mut t[16]
+    let mut s[16]
+    fe_copy(t, a)
+    // start with result = a (covers bit 254 already set)
+    // process bits 253 down to 5 (249 bits, all 1)
+    let mut i = 0
+    for i < 249 {
+        fe_sq(t, t)
+        fe_mul(t, t, a)
+        i = i + 1
+    }
+    // bit 4 = 0
+    fe_sq(t, t)
+    // bit 3 = 1
+    fe_sq(t, t)
+    fe_mul(t, t, a)
+    // bit 2 = 0
+    fe_sq(t, t)
+    // bit 1 = 1
+    fe_sq(t, t)
+    fe_mul(t, t, a)
+    // bit 0 = 1
+    fe_sq(t, t)
+    fe_mul(t, t, a)
+    fe_copy(r, t)
+}
+
+fn fe_eq(a, b) -> i64 {
+    let mut t[16]
+    let mut u[16]
+    fe_sub(t, a, b)
+    fe_frozen(t, t)
+    let mut acc = t[0] | t[1] | t[2] | t[3] | t[4] | t[5] | t[6] | t[7]
+    acc = acc | t[8] | t[9] | t[10] | t[11] | t[12] | t[13] | t[14] | t[15]
+    if acc == 0 { 1 } else { 0 }
+}
+
+fn print_fe(a) {
+    print_int(a[0])
+    print(",")
+    print_int(a[1])
+    print(",")
+    print_int(a[2])
+    print(",")
+    print_int(a[3])
+    print(",")
+    print_int(a[4])
+    print(",")
+    print_int(a[5])
+    print(",")
+    print_int(a[6])
+    print(",")
+    print_int(a[7])
+    print(",")
+    print_int(a[8])
+    print(",")
+    print_int(a[9])
+    print(",")
+    print_int(a[10])
+    print(",")
+    print_int(a[11])
+    print(",")
+    print_int(a[12])
+    print(",")
+    print_int(a[13])
+    print(",")
+    print_int(a[14])
+    print(",")
+    print_int(a[15])
+    print("")
+}
+

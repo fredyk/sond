@@ -1,0 +1,276 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+
+let K[80] = [
+    0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
+    0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
+    0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
+    0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694,
+    0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
+    0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5,
+    0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4,
+    0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70,
+    0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df,
+    0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
+    0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30,
+    0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8,
+    0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8,
+    0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3,
+    0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,
+    0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b,
+    0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178,
+    0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b,
+    0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c,
+    0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817
+]
+
+let mut H0 = 0
+let mut H1 = 0
+let mut H2 = 0
+let mut H3 = 0
+let mut H4 = 0
+let mut H5 = 0
+let mut H6 = 0
+let mut H7 = 0
+
+fn rot_r(x: i64, n: i64) -> i64 {
+    (x >>> n) | (x << (64 - n))
+}
+
+fn ch(x: i64, y: i64, z: i64) -> i64 {
+    (x & y) ^ ((~x) & z)
+}
+
+fn maj(x: i64, y: i64, z: i64) -> i64 {
+    (x & y) ^ (x & z) ^ (y & z)
+}
+
+fn sigma0(x: i64) -> i64 {
+    rot_r(x, 1) ^ rot_r(x, 8) ^ (x >>> 7)
+}
+
+fn sigma1(x: i64) -> i64 {
+    rot_r(x, 19) ^ rot_r(x, 61) ^ (x >>> 6)
+}
+
+fn Sig0(x: i64) -> i64 {
+    rot_r(x, 28) ^ rot_r(x, 34) ^ rot_r(x, 39)
+}
+
+fn Sig1(x: i64) -> i64 {
+    rot_r(x, 14) ^ rot_r(x, 18) ^ rot_r(x, 41)
+}
+
+fn be_load64(p: i64) -> i64 {
+    let b0 = peek8(p)
+    let b1 = peek8(p + 1)
+    let b2 = peek8(p + 2)
+    let b3 = peek8(p + 3)
+    let b4 = peek8(p + 4)
+    let b5 = peek8(p + 5)
+    let b6 = peek8(p + 6)
+    let b7 = peek8(p + 7)
+    (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32) | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7
+}
+
+fn be_store64(p: i64, v: i64) {
+    poke8(p, (v >> 56) & 0xFF)
+    poke8(p + 1, (v >> 48) & 0xFF)
+    poke8(p + 2, (v >> 40) & 0xFF)
+    poke8(p + 3, (v >> 32) & 0xFF)
+    poke8(p + 4, (v >> 24) & 0xFF)
+    poke8(p + 5, (v >> 16) & 0xFF)
+    poke8(p + 6, (v >> 8) & 0xFF)
+    poke8(p + 7, v & 0xFF)
+}
+
+fn hex_digit(n: i64) -> i64 {
+    if n < 10 { '0' + n } else { 'a' + n - 10 }
+}
+
+fn print_hex64(v: i64) {
+    let mut i = 60
+    for i >= 0 {
+        let d = (v >> i) & 0xF
+        print_char(hex_digit(d))
+        i = i - 4
+    }
+}
+
+fn hex_to_bytes(h: i64, out: i64) {
+    let mut i = 0
+    for i < 128 {
+        let c = peek8(h + i)
+        let mut v = 0
+        if c >= '0' && c <= '9' {
+            v = c - '0'
+        } else if c >= 'a' && c <= 'f' {
+            v = c - 'a' + 10
+        } else if c >= 'A' && c <= 'F' {
+            v = c - 'A' + 10
+        }
+        if i % 2 == 0 {
+            poke8(out + i / 2, v << 4)
+        } else {
+            poke8(out + i / 2, peek8(out + i / 2) | v)
+        }
+        i = i + 1
+    }
+}
+
+fn sha512_init() {
+    H0 = 0x6a09e667f3bcc908
+    H1 = 0xbb67ae8584caa73b
+    H2 = 0x3c6ef372fe94f82b
+    H3 = 0xa54ff53a5f1d36f1
+    H4 = 0x510e527fade682d1
+    H5 = 0x9b05688c2b3e6c1f
+    H6 = 0x1f83d9abfb41bd6b
+    H7 = 0x5be0cd19137e2179
+}
+
+fn sha512_block(block: i64) {
+    let W[80]
+    let mut t = 0
+
+    for t < 16 {
+        W[t] = be_load64(block + t * 8)
+        t = t + 1
+    }
+
+    for t < 80 {
+        W[t] = sigma1(W[t - 2]) + W[t - 7] + sigma0(W[t - 15]) + W[t - 16]
+        t = t + 1
+    }
+
+    let mut a = H0
+    let mut b = H1
+    let mut c = H2
+    let mut d = H3
+    let mut e = H4
+    let mut f = H5
+    let mut g = H6
+    let mut h_var = H7
+
+    t = 0
+    for t < 80 {
+        let T1 = h_var + Sig1(e) + ch(e, f, g) + K[t] + W[t]
+        let T2 = Sig0(a) + maj(a, b, c)
+        h_var = g
+        g = f
+        f = e
+        e = d + T1
+        d = c
+        c = b
+        b = a
+        a = T1 + T2
+        t = t + 1
+    }
+
+    H0 = H0 + a
+    H1 = H1 + b
+    H2 = H2 + c
+    H3 = H3 + d
+    H4 = H4 + e
+    H5 = H5 + f
+    H6 = H6 + g
+    H7 = H7 + h_var
+}
+
+fn sha512_hash(msg: i64, len: i64, out: i64) {
+    sha512_init()
+
+    let full = len / 128
+    let rem = len % 128
+    let mut i = 0
+
+    for i < full {
+        sha512_block(msg + i * 128)
+        i = i + 1
+    }
+
+    let buf[16]
+    i = 0
+    for i < rem {
+        poke8(buf + i, peek8(msg + full * 128 + i))
+        i = i + 1
+    }
+
+    poke8(buf + rem, 0x80)
+
+    let bit_len = len * 8
+
+    if rem < 112 {
+        i = rem + 1
+        for i < 112 {
+            poke8(buf + i, 0)
+            i = i + 1
+        }
+
+        i = 112
+        for i < 120 {
+            poke8(buf + i, 0)
+            i = i + 1
+        }
+
+        be_store64(buf + 120, bit_len)
+
+        sha512_block(buf)
+    } else {
+        i = rem + 1
+        for i < 128 {
+            poke8(buf + i, 0)
+            i = i + 1
+        }
+
+        sha512_block(buf)
+
+        let buf2[16]
+        i = 0
+        for i < 112 {
+            poke8(buf2 + i, 0)
+            i = i + 1
+        }
+        i = 112
+        for i < 120 {
+            poke8(buf2 + i, 0)
+            i = i + 1
+        }
+        be_store64(buf2 + 120, bit_len)
+
+        sha512_block(buf2)
+    }
+
+    be_store64(out, H0)
+    be_store64(out + 8, H1)
+    be_store64(out + 16, H2)
+    be_store64(out + 24, H3)
+    be_store64(out + 32, H4)
+    be_store64(out + 40, H5)
+    be_store64(out + 48, H6)
+    be_store64(out + 56, H7)
+}
+
+fn print_digest(out: i64) {
+    print_hex64(be_load64(out))
+    print_hex64(be_load64(out + 8))
+    print_hex64(be_load64(out + 16))
+    print_hex64(be_load64(out + 24))
+    print_hex64(be_load64(out + 32))
+    print_hex64(be_load64(out + 40))
+    print_hex64(be_load64(out + 48))
+    print_hex64(be_load64(out + 56))
+    print("")
+}
+
+fn hex_eq(out: i64, expected: i64) -> bool {
+    let mut i = 0
+    for i < 8 {
+        if be_load64(out + i * 8) != be_load64(expected + i * 8) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+

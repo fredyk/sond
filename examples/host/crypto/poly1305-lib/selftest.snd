@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Self-test for the Poly1305 library: includes it and checks RFC 8439 2.5.2.
+
+include "any/crypto/mac/poly1305.snd"
+
+fn main() -> i64 {
+    let key[32]
+    poke8(key, 0x85); poke8(key + 1, 0xd6); poke8(key + 2, 0xbe); poke8(key + 3, 0x78)
+    poke8(key + 4, 0x57); poke8(key + 5, 0x55); poke8(key + 6, 0x6d); poke8(key + 7, 0x33)
+    poke8(key + 8, 0x7f); poke8(key + 9, 0x44); poke8(key + 10, 0x52); poke8(key + 11, 0xfe)
+    poke8(key + 12, 0x42); poke8(key + 13, 0xd5); poke8(key + 14, 0x06); poke8(key + 15, 0xa8)
+    poke8(key + 16, 0x01); poke8(key + 17, 0x03); poke8(key + 18, 0x80); poke8(key + 19, 0x8a)
+    poke8(key + 20, 0xfb); poke8(key + 21, 0x0d); poke8(key + 22, 0xb2); poke8(key + 23, 0xfd)
+    poke8(key + 24, 0x4a); poke8(key + 25, 0xbf); poke8(key + 26, 0xf6); poke8(key + 27, 0xaf)
+    poke8(key + 28, 0x41); poke8(key + 29, 0x49); poke8(key + 30, 0xf5); poke8(key + 31, 0x1b)
+
+    let msg[34]
+    poke8(msg, 0x43); poke8(msg + 1, 0x72); poke8(msg + 2, 0x79); poke8(msg + 3, 0x70)
+    poke8(msg + 4, 0x74); poke8(msg + 5, 0x6f); poke8(msg + 6, 0x67); poke8(msg + 7, 0x72)
+    poke8(msg + 8, 0x61); poke8(msg + 9, 0x70); poke8(msg + 10, 0x68); poke8(msg + 11, 0x69)
+    poke8(msg + 12, 0x63); poke8(msg + 13, 0x20); poke8(msg + 14, 0x46); poke8(msg + 15, 0x6f)
+    poke8(msg + 16, 0x72); poke8(msg + 17, 0x75); poke8(msg + 18, 0x6d); poke8(msg + 19, 0x20)
+    poke8(msg + 20, 0x52); poke8(msg + 21, 0x65); poke8(msg + 22, 0x73); poke8(msg + 23, 0x65)
+    poke8(msg + 24, 0x61); poke8(msg + 25, 0x72); poke8(msg + 26, 0x63); poke8(msg + 27, 0x68)
+    poke8(msg + 28, 0x20); poke8(msg + 29, 0x47); poke8(msg + 30, 0x72); poke8(msg + 31, 0x6f)
+    poke8(msg + 32, 0x75); poke8(msg + 33, 0x70)
+
+    let expected_tag[16]
+    poke8(expected_tag, 0xa8); poke8(expected_tag + 1, 0x06); poke8(expected_tag + 2, 0x1d); poke8(expected_tag + 3, 0xc1)
+    poke8(expected_tag + 4, 0x30); poke8(expected_tag + 5, 0x51); poke8(expected_tag + 6, 0x36); poke8(expected_tag + 7, 0xc6)
+    poke8(expected_tag + 8, 0xc2); poke8(expected_tag + 9, 0x2b); poke8(expected_tag + 10, 0x8b); poke8(expected_tag + 11, 0xaf)
+    poke8(expected_tag + 12, 0x0c); poke8(expected_tag + 13, 0x01); poke8(expected_tag + 14, 0x27); poke8(expected_tag + 15, 0xa9)
+
+    let tag[16]
+    poly1305_mac(msg, 34, key, tag)
+
+    // Print computed tag hex
+    let mut pass = true
+    let mut ti = 0
+    for ti < 16 {
+        let mut v = peek8(tag + ti)
+        // Print as 2-digit hex
+        let mut hi = v >> 4
+        let mut lo = v & 0x0F
+        // Convert to ASCII
+        let mut c_hi = if hi < 10 { hi + 48 } else { hi - 10 + 97 }
+        let mut c_lo = if lo < 10 { lo + 48 } else { lo - 10 + 97 }
+        print_char(c_hi)
+        print_char(c_lo)
+        if ti < 15 {
+            print_char(58)  // ':'
+        }
+        // Compare against expected
+        if peek8(tag + ti) != peek8(expected_tag + ti) {
+            pass = false
+        }
+        ti = ti + 1
+    }
+
+    if pass {
+        print(" PASS")
+    } else {
+        print(" FAIL")
+    }
+    print("")
+
+    if pass { 0 } else { 1 }
+}

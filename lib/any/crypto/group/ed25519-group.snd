@@ -1,0 +1,123 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Twisted Edwards group ops and scalar mul [k]B on top of ed25519-field.snd
+
+include "any/crypto/field/ed25519-field.snd"
+include "any/crypto/hash/sha512.snd"
+
+// Curve constant d = 0x52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3 (16 limbs LE)
+let D[16] = [0x78a3, 0x1359, 0x4dca, 0x75eb, 0xd8ab, 0x4141, 0x0a4d, 0x0070, 0xe898, 0x7779, 0x4079, 0x8cc7, 0xfe73, 0x2b6f, 0x6cee, 0x5203]
+
+// Base point Bx (positive root, 16 limbs LE)
+let BX[16] = [0xd51a, 0x8f25, 0x2d60, 0xc956, 0xa7b2, 0x9525, 0xc760, 0x692c, 0xdc5c, 0xfdd6, 0xe231, 0xc0a4, 0x53fe, 0xcd6e, 0x36d3, 0x2169]
+
+// Base point By (y = 4/5 mod p, 16 limbs LE)
+let BY[16] = [0x6658, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666]
+
+// Expected public key for RFC 8032 Test 1 as 32 bytes (LE memory layout)
+let EXPECTED[4] = [0xb70ab18201985ad7, 0x3a0764c9d3fe4bd5, 0x2523a6daf372e10e, 0x1a5107f7681a02af]
+
+fn point_set_identity(x, y, z, t) {
+    x[0] = 0; x[1] = 0; x[2] = 0; x[3] = 0; x[4] = 0
+    x[5] = 0; x[6] = 0; x[7] = 0; x[8] = 0; x[9] = 0
+    x[10] = 0; x[11] = 0; x[12] = 0; x[13] = 0; x[14] = 0; x[15] = 0
+    fe_one(y)
+    fe_one(z)
+    t[0] = 0; t[1] = 0; t[2] = 0; t[3] = 0; t[4] = 0
+    t[5] = 0; t[6] = 0; t[7] = 0; t[8] = 0; t[9] = 0
+    t[10] = 0; t[11] = 0; t[12] = 0; t[13] = 0; t[14] = 0; t[15] = 0
+}
+
+fn point_add(rx, ry, rz, rt, ax, ay, az, at, bx, by, bz, bt) {
+    let Y1mX1[16]; let Y1pX1[16]
+    let Y2mX2[16]; let Y2pX2[16]
+    let A[16]; let B[16]; let C[16]; let den[16]
+    let E[16]; let F[16]; let G[16]; let H[16]
+    let d2_tmp[16]
+
+    fe_sub(Y1mX1, ay, ax)
+    fe_add(Y1pX1, ay, ax)
+    fe_sub(Y2mX2, by, bx)
+    fe_add(Y2pX2, by, bx)
+
+    fe_mul(A, Y1mX1, Y2mX2)
+    fe_mul(B, Y1pX1, Y2pX2)
+
+    fe_mul(C, at, bt)
+    fe_add(d2_tmp, D, D)
+    fe_mul(C, C, d2_tmp)
+
+    fe_add(den, az, az)
+    fe_mul(den, den, bz)
+
+    fe_sub(E, B, A)
+    fe_sub(F, den, C)
+    fe_add(G, den, C)
+    fe_add(H, B, A)
+
+    fe_mul(rx, E, F)
+    fe_mul(ry, G, H)
+    fe_mul(rz, F, G)
+    fe_mul(rt, E, H)
+}
+
+fn point_scalar_mul(rx, ry, rz, rt, sc, bx, by, bz, bt) {
+    let X[16]; let Y[16]; let Z[16]; let T[16]
+    let tmpX[16]; let tmpY[16]; let tmpZ[16]; let tmpT[16]
+
+    point_set_identity(X, Y, Z, T)
+
+    let mut i = 254
+    for i >= 0 {
+        point_add(tmpX, tmpY, tmpZ, tmpT, X, Y, Z, T, X, Y, Z, T)
+        fe_copy(X, tmpX); fe_copy(Y, tmpY); fe_copy(Z, tmpZ); fe_copy(T, tmpT)
+
+        let limb_idx = i / 16
+        let bit_pos = i % 16
+        let bit = (sc[limb_idx] >> bit_pos) & 1
+
+        if bit == 1 {
+            point_add(tmpX, tmpY, tmpZ, tmpT, X, Y, Z, T, bx, by, bz, bt)
+            fe_copy(X, tmpX); fe_copy(Y, tmpY); fe_copy(Z, tmpZ); fe_copy(T, tmpT)
+        }
+
+        i = i - 1
+    }
+
+    fe_copy(rx, X); fe_copy(ry, Y); fe_copy(rz, Z); fe_copy(rt, T)
+}
+
+fn point_encode(ptr, x, y, z) {
+    let invz[16]; let y_aff[16]; let x_aff[16]
+    fe_inv(invz, z)
+    fe_mul(y_aff, y, invz)
+    fe_mul(x_aff, x, invz)
+    fe_tobytes(ptr, y_aff)
+    let sign = x_aff[0] & 1
+    let b31 = peek8(ptr + 31)
+    poke8(ptr + 31, b31 | (sign << 7))
+}
+
+fn get_clamped_scalar(hash, sc) {
+    let mut j = 0
+    for j < 16 {
+        let byte_lo = peek8(hash + j * 2)
+        let byte_hi = peek8(hash + j * 2 + 1)
+        sc[j] = byte_lo | (byte_hi << 8)
+        j = j + 1
+    }
+    sc[0] = sc[0] & 0xFFF8
+    sc[15] = (sc[15] & 0x7FFF) | 0x4000
+}
+
+fn bytes_cmp(a, b, n) -> i64 {
+    let mut i = 0
+    for i < n {
+        if peek8(a + i) != peek8(b + i) {
+            return 0
+        }
+        i = i + 1
+    }
+    1
+}
+

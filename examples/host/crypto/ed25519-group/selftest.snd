@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Self-test for the Ed25519 group ops: [s]B == RFC 8032 Test 1 public key.
+
+include "any/crypto/group/ed25519-group.snd"
+
+fn main() -> i64 {
+    let bz[16]
+    fe_one(bz)
+
+    let bt[16]
+    fe_mul(bt, BX, BY)
+
+    // RFC 8032 Test 1 secret key (32 bytes)
+    let sk[4]
+    poke8(sk, 0x9d); poke8(sk + 1, 0x61); poke8(sk + 2, 0xb1); poke8(sk + 3, 0x9d)
+    poke8(sk + 4, 0xef); poke8(sk + 5, 0xfd); poke8(sk + 6, 0x5a); poke8(sk + 7, 0x60)
+    poke8(sk + 8, 0xba); poke8(sk + 9, 0x84); poke8(sk + 10, 0x4a); poke8(sk + 11, 0xf4)
+    poke8(sk + 12, 0x92); poke8(sk + 13, 0xec); poke8(sk + 14, 0x2c); poke8(sk + 15, 0xc4)
+    poke8(sk + 16, 0x44); poke8(sk + 17, 0x49); poke8(sk + 18, 0xc5); poke8(sk + 19, 0x69)
+    poke8(sk + 20, 0x7b); poke8(sk + 21, 0x32); poke8(sk + 22, 0x69); poke8(sk + 23, 0x19)
+    poke8(sk + 24, 0x70); poke8(sk + 25, 0x3b); poke8(sk + 26, 0xac); poke8(sk + 27, 0x03)
+    poke8(sk + 28, 0x1c); poke8(sk + 29, 0xae); poke8(sk + 30, 0x7f); poke8(sk + 31, 0x60)
+
+    let hash[8]
+    sha512_hash(sk, 32, hash)
+
+    let sc[16]
+    get_clamped_scalar(hash, sc)
+
+    let PX[16]; let PY[16]; let PZ[16]; let PT[16]
+    point_scalar_mul(PX, PY, PZ, PT, sc, BX, BY, bz, bt)
+
+    let out[4]
+    point_encode(out, PX, PY, PZ)
+
+    let ok = bytes_cmp(out, EXPECTED, 32)
+    if ok == 1 {
+        print("PASS")
+    } else {
+        print("FAIL")
+    }
+    0
+}
