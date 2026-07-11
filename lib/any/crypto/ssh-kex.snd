@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/crypto/ssh-kex.snd, the reusable server side of the SSH
+// curve25519-sha256 key exchange (RFC 5656 / RFC 4253 §8). Composes the verified
+// X25519, SHA-256 and Ed25519 primitives. A live SSH server includes this and
+// calls server_kex() with the client's ephemeral public key Q_C and its own fixed
+// host key / banners to produce the values for a KEX_ECDH_REPLY.
+// Clean-room from the RFCs; no third-party source copied.
+
+include "dh/x25519.snd"
+include "hash/sha256.snd"
+include "sign/ed25519-sign.snd"
+
+// Big-endian u32 store (SSH wire order).
+fn sshkex_poke32be(p, v) {
+    poke8(p, (v >> 24) & 0xFF); poke8(p + 1, (v >> 16) & 0xFF)
+    poke8(p + 2, (v >> 8) & 0xFF); poke8(p + 3, v & 0xFF)
+}
+
+// Copy n bytes from `src` to base+off; return the new off.
+fn sshkex_wcopy(base, off, src, n) {
+    let mut i = 0
+    for i < n { poke8(base + off + i, peek8(src + i)); i = i + 1 }
+    off + n
+}
+
+// Write an SSH `string`: u32 length then the bytes. Return the new off.
+fn sshkex_wstr(base, off, src, n) {
+    sshkex_poke32be(base + off, n)
+    sshkex_wcopy(base, off + 4, src, n)
+}
+
+// The reusable server side of the curve25519-sha256 KEX. Given the server
+// ephemeral private `eph`, the client ephemeral public `qc`, the Ed25519 host
+// secret key `hsk` and public key `hpub`, and the transcript fields
+// (vc/vs = version strings, ic/is = KEXINIT payloads, edstr = "ssh-ed25519"),
+// it computes and writes: qs_out = server ephemeral public (X25519 base-point),
+// k_out = shared secret X25519(eph, qc), h_out = exchange hash H (SHA-256 over the
+// transcript), sig_out = Ed25519 signature over H. The transcript field lengths
+// are fixed here (vc/vs=9, ic/is=1, edstr=11, hpub=32); a fully generic server
+// would parameterize them. No allocation; all buffers are caller-provided.
+fn server_kex(eph, qc, hsk, hpub, vc, vs, ic, is, edstr, qs_out, k_out, h_out, sig_out) {
+    let bp[4]
+    let mut z = 0
+    for z < 32 { poke8(bp + z, 0); z = z + 1 }
+    poke8(bp + 0, 9)
+    x25519(eph, bp, qs_out) // Q_S = server ephemeral public
+    x25519(eph, qc, k_out)  // K   = shared secret
+
+    let buf[25]
+    let mut off = 0
+    off = sshkex_wstr(buf, off, vc, 9)
+    off = sshkex_wstr(buf, off, vs, 9)
+    off = sshkex_wstr(buf, off, ic, 1)
+    off = sshkex_wstr(buf, off, is, 1)
+    sshkex_poke32be(buf + off, 51) // K_S string length (name(11) + key(32) + 2*len)
+    off = off + 4
+    off = sshkex_wstr(buf, off, edstr, 11)
+    off = sshkex_wstr(buf, off, hpub, 32)
+    off = sshkex_wstr(buf, off, qc, 32)
+    off = sshkex_wstr(buf, off, qs_out, 32)
+    off = sshkex_wstr(buf, off, k_out, 32)
+    sha256_hash(buf, off, h_out)         // H
+    ed25519_sign_h(hsk, h_out, sig_out)  // signature over H
+}
