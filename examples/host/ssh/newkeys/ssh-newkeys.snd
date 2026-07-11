@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Build SSH_MSG_NEWKEYS (message number 21), the packet the server sends right
+// after KEX_ECDH_REPLY to signal that subsequent traffic uses the newly derived
+// keys. It is a 1-byte payload wrapped in an SSH binary packet (RFC 4253 §6):
+//   [packet_length:be32][padding_length:1][payload:1][padding]
+// with the whole packet padded to a multiple of the cipher block size (8 for the
+// "none" cipher used during KEX), and padding_length in [4, 255].
+
+fn read_be32(p) -> i64 {
+    (peek8(p) << 24) | (peek8(p + 1) << 16) | (peek8(p + 2) << 8) | peek8(p + 3)
+}
+
+fn poke32be(p, v) {
+    poke8(p, (v >> 24) & 0xFF)
+    poke8(p + 1, (v >> 16) & 0xFF)
+    poke8(p + 2, (v >> 8) & 0xFF)
+    poke8(p + 3, v & 0xFF)
+}
+
+// Padding length so that 4 + 1 + payload_len + pad is a multiple of 8, pad >= 4.
+fn pad_len(payload_len) -> i64 {
+    let mut pad = 8 - ((5 + payload_len) % 8)
+    if pad < 4 { pad = pad + 8 }
+    pad
+}
+
+// Wrap the 1-byte message number `msg` into an SSH packet at `buf`. Returns the
+// total wire length. Padding is zeroed here (a real server uses random bytes).
+fn build_packet1(buf, msg) -> i64 {
+    let payload_len = 1
+    let pad = pad_len(payload_len)
+    let packet_length = 1 + payload_len + pad
+    poke32be(buf, packet_length)
+    poke8(buf + 4, pad) // padding_length
+    poke8(buf + 5, msg) // payload: the message number
+    let mut i = 0
+    for i < pad {
+        poke8(buf + 6 + i, 0)
+        i = i + 1
+    }
+    4 + packet_length
+}
+
+fn main() -> i64 {
+    let buf[2] // 16 bytes is enough for a 1-byte-payload packet
+    let total = build_packet1(buf, 21) // SSH_MSG_NEWKEYS = 21
+
+    let mut ok = 1
+    if total != 16 { ok = 0 }             // 4 + 1 + 1 + 10
+    if (total % 8) != 0 { ok = 0 }        // block-aligned
+    if read_be32(buf) != 12 { ok = 0 }    // packet_length = padlen(1)+payload(1)+pad(10)
+    if peek8(buf + 4) != 10 { ok = 0 }    // padding_length
+    if peek8(buf + 5) != 21 { ok = 0 }    // SSH_MSG_NEWKEYS
+    if ok == 1 { print("PASS newkeys: SSH_MSG_NEWKEYS packet valid (16 bytes, block-aligned)\n") }
+    else { print("FAIL newkeys\n") }
+    0
+}

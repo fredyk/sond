@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/capture_test.snd, test for run_capture. Runs /bin/echo
+// and verifies output. No allocator on Sond side.
+// Calls /bin/echo with arg "hi" and verifies output = "hi\n", nbytes = 3.
+
+include "syscall-nums.snd"
+include "capture.snd"
+
+fn main() -> i64 {
+    let buf[256]
+    let argv[3]
+    argv[0] = cstr("/bin/echo")
+    argv[1] = cstr("hi")
+    argv[2] = 0
+
+    let nbytes = run_capture(argv[0], argv, buf, 256)
+
+    if nbytes != 3 { return 1 }
+    if peek8(buf + 0) != 'h' { return 1 }
+    if peek8(buf + 1) != 'i' { return 1 }
+    if peek8(buf + 2) != '\n' { return 1 }
+    0
+}

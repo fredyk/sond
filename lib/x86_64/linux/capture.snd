@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/capture.snd, run_capture: fork+pipe+execve to capture the
+// child's stdout into a caller-provided buffer. No allocator on Sond side.
+//
+// API: run_capture(path, argv, buf, buflen) -> nbytes (0 on error/empty).
+// The caller builds argv (a 0-terminated array of i64 pointers) and buf.
+
+include "syscall-nums.snd"
+include "io.snd"
+
+fn run_capture(path: i64, argv: i64, buf: i64, buflen: i64) -> i64 {
+    let fds[1]
+    let ret = syscall(SYS_pipe, fds)
+    if ret < 0 {
+        return -1
+    }
+    let read_fd = peek32(fds)
+    let write_fd = peek32(fds + 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        syscall(SYS_dup2, write_fd, 1)
+        // Discard child stderr: run_capture captures stdout; the command's stderr
+        // (status messages, "no such file"...) must not leak to the caller's terminal.
+        let devnull = syscall(SYS_open, cstr("/dev/null"), 1, 0)
+        if devnull >= 0 {
+            syscall(SYS_dup2, devnull, 2)
+        }
+        syscall(SYS_close, read_fd)
+        syscall(SYS_close, write_fd)
+        syscall(SYS_execve, path, argv, 0)
+        syscall(SYS_exit, 127)
+        return 127
+    }
+    if pid < 0 {
+        syscall(SYS_close, read_fd)
+        syscall(SYS_close, write_fd)
+        return -1
+    }
+
+    syscall(SYS_close, write_fd)
+
+    let mut total = 0
+    for {
+        let n = read_buf(read_fd, buf + total, buflen - total)
+        if n <= 0 {
+            break
+        }
+        total = total + n
+    }
+
+    syscall(SYS_close, read_fd)
+
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+
+    total
+}
