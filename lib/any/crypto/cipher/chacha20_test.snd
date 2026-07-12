@@ -1,0 +1,58 @@
+// Test of chacha20.snd against RFC 8439 §2.4.2 encryption vector.
+// Returns 0 if ciphertext matches byte-for-byte, !=0 if not.
+
+include "x86_64/linux/io.snd"
+include "any/strings.snd"
+include "any/crypto/cipher/chacha20.snd"
+
+fn puts(s: i64) { write_buf(1, s, strlen(s)) }
+
+fn hexval(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    c - 55
+}
+fn eq_hex(buf: i64, n: i64, hexstr: i64) -> i64 {
+    let mut i = 0
+    for i < n {
+        let hi = hexval(peek8(hexstr + i * 2))
+        let lo = hexval(peek8(hexstr + i * 2 + 1))
+        if peek8(buf + i) != (hi * 16 + lo) { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+fn main() -> i64 {
+    // key = 00 01 .. 1f
+    let key[32]
+    let mut i = 0
+    for i < 32 { poke8(key + i, i) i = i + 1 }
+    // nonce = 00 00 00 00 00 00 00 4a 00 00 00 00
+    let nonce[12]
+    i = 0
+    for i < 12 { poke8(nonce + i, 0) i = i + 1 }
+    poke8(nonce + 7, 0x4a)
+
+    let pt = cstr("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.")
+    let n = strlen(pt)
+    if n != 114 { puts(cstr("FAIL plaintext len\n")) return 2 }
+
+    let ct[114]
+    chacha20_xor(key, nonce, 1, pt, ct, n)
+
+    let exp = cstr("6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d")
+    if eq_hex(ct, 114, exp) == 0 { puts(cstr("FAIL ciphertext RFC8439 2.4.2\n")) return 1 }
+
+    // inverse decryption: XOR again must recover the plaintext
+    let back[114]
+    chacha20_xor(key, nonce, 1, ct, back, n)
+    i = 0
+    for i < n {
+        if peek8(back + i) != peek8(pt + i) { puts(cstr("FAIL roundtrip\n")) return 1 }
+        i = i + 1
+    }
+
+    puts(cstr("OK chacha20 (RFC 8439 2.4.2)\n"))
+    0
+}

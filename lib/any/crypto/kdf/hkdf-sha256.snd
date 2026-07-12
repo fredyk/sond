@@ -1,0 +1,171 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// HMAC-SHA256 (RFC 2104) + HKDF-SHA256 (RFC 5869, extract + expand).
+// Uses lib/any/crypto/hash/sha256.snd for the underlying SHA-256.
+
+include "../hash/sha256.snd"
+
+// ---- HMAC-SHA256 (RFC 2104) ----
+//
+// block_size = 64 bytes (SHA-256 block size)
+// ipad = 0x36, opad = 0x5c
+//
+// If key > 64B: hash it first to get a 32B subkey.
+// Otherwise: pad key to 64B with zeros.
+//
+// hmac = H(K_opad || H(K_ipad || msg))
+
+fn hmac_sha256(key: i64, klen: i64, msg: i64, mlen: i64, out: i64) {
+    let ipad = 0x36
+    let opad = 0x5c
+
+    // K_ipad block: key XOR 0x36 padded to 64 bytes
+    let ipad_block[64]
+    let mut i = 0
+    for i < 64 {
+        if i < klen {
+            let kb = peek8(key + i)
+            poke8(ipad_block + i, kb ^ ipad)
+        } else {
+            poke8(ipad_block + i, ipad)
+        }
+        i = i + 1
+    }
+
+    // Inner hash: H(K_ipad || msg)
+    // Build buffer: ipad_block(64B) + msg(mlen)
+    let inner_buf[256]
+    i = 0
+    for i < 64 {
+        poke8(inner_buf + i, peek8(ipad_block + i))
+        i = i + 1
+    }
+    i = 0
+    for i < mlen {
+        poke8(inner_buf + 64 + i, peek8(msg + i))
+        i = i + 1
+    }
+    let inner_len = 64 + mlen
+    let inner_digest[32]
+    sha256_hash(inner_buf, inner_len, inner_digest)
+
+    // K_opad block: key XOR 0x5c padded to 64 bytes
+    let opad_block[64]
+    i = 0
+    for i < 64 {
+        if i < klen {
+            let kb = peek8(key + i)
+            poke8(opad_block + i, kb ^ opad)
+        } else {
+            poke8(opad_block + i, opad)
+        }
+        i = i + 1
+    }
+
+    // Outer hash: H(K_opad || inner_digest)
+    let outer_buf[96]
+    i = 0
+    for i < 64 {
+        poke8(outer_buf + i, peek8(opad_block + i))
+        i = i + 1
+    }
+    i = 0
+    for i < 32 {
+        poke8(outer_buf + 64 + i, peek8(inner_digest + i))
+        i = i + 1
+    }
+    sha256_hash(outer_buf, 96, out)
+}
+
+// ---- HKDF-SHA256 (RFC 5869) ----
+
+// HKDF-Extract: PRK = HMAC(salt, IKM)
+// If salt is empty (slen == 0), use a pointer to 32 zero bytes as salt.
+fn hkdf_extract(salt: i64, slen: i64, ikm: i64, ilen: i64, prk: i64) {
+    let zeros[32]
+    let mut i = 0
+    for i < 32 {
+        poke8(zeros + i, 0)
+        i = i + 1
+    }
+    let s: i64
+    if slen == 0 {
+        s = zeros
+    } else {
+        s = salt
+    }
+    hmac_sha256(s, slen, ikm, ilen, prk)
+}
+
+// HKDF-Expand: PRK + info + L -> OKM
+// T(0) = empty
+// T(1) = HMAC-Hash(PRK, T(0) || info || 0x01)
+// T(i) = HMAC-Hash(PRK, T(i-1) || info || i)
+// OKM = first L bytes of T(1) || T(2) || ...
+fn hkdf_expand(prk: i64, info: i64, ilen: i64, okm: i64, olen: i64) {
+    // n = ceil(olen / 32)
+    let mut n = olen / 32
+    if olen % 32 > 0 {
+        n = n + 1
+    }
+
+    // Buffer for all T blocks: max olen can be 255*32 but for test cases we need less.
+    // We use a large enough stack buffer. Each T block is 32 bytes.
+    // For olen up to 255*32 = 8160 bytes, we need 255*32 = 8160 bytes.
+    // But stack is limited, so we'll compute iteratively and write directly to okm.
+    // We still need to store previous T block (32 bytes) for the next iteration.
+    let prev_t[32]
+
+    let mut c = 1
+    let mut okm_written = 0
+
+    for {
+        if c > n {
+            break
+        }
+
+        // Build HMAC input: prev_T (32 bytes if c>1, else empty) || info || counter_byte
+        let input_buf[256] // max: 32 + 255 + 1 = 288, but we cap info at 255
+        let mut input_len = 0
+
+        if c > 1 {
+            // Copy previous T block (32 bytes)
+            let mut j = 0
+            for j < 32 {
+                poke8(input_buf + input_len + j, peek8(prev_t + j))
+                j = j + 1
+            }
+            input_len = input_len + 32
+        }
+
+        // Copy info
+        let mut j = 0
+        for j < ilen {
+            poke8(input_buf + input_len + j, peek8(info + j))
+            j = j + 1
+        }
+        input_len = input_len + ilen
+
+        // Counter byte
+        poke8(input_buf + input_len, c)
+        input_len = input_len + 1
+
+        // HMAC-SHA256(prk, input_buf, input_len) -> T[c-1]
+        // We write T to prev_t (reused each iteration)
+        hmac_sha256(prk, 32, input_buf, input_len, prev_t)
+
+        // Copy T into okm (up to olen bytes)
+        let to_copy = 32
+        let mut j = 0
+        for j < to_copy {
+            if okm_written + j < olen {
+                poke8(okm + okm_written + j, peek8(prev_t + j))
+            }
+            j = j + 1
+        }
+        okm_written = okm_written + to_copy
+
+        c = c + 1
+    }
+}

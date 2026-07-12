@@ -1,0 +1,109 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/net/dhcp.snd, a minimal DHCP client (RFC 2131) over the virtio-net
+// driver. dhcp_lease() performs the DISCOVER -> OFFER -> REQUEST -> ACK handshake
+// and returns 1 on success, 0 on failure. On success `dhcp_ip` holds the leased
+// IPv4 address (as a 32-bit big-endian integer).
+//
+// Why it matters: some hosts (VirtualBox NAT) only route inbound traffic /
+// port-forwards to a guest that has actually completed a DHCP lease, a hardcoded
+// static IP is never registered. Running dhcp_lease() before listening makes the
+// guest reachable. (QEMU user-net also answers DHCP, so it is safe on both.)
+// Clean-room from RFC 2131 / RFC 826 and the IPv4/UDP headers.
+
+include "../drivers/net/virtio-net.snd"
+
+let mut dhcp_ip = 0 // leased IPv4 address (big-endian), valid after a successful lease
+
+// One's-complement Internet checksum over `len` bytes at `p` (len must be even).
+fn dhcp_cksum(p: i64, len: i64) -> i64 {
+    let mut sum = 0
+    let mut i = 0
+    for i < len { sum = sum + ((peek8(p + i) << 8) | peek8(p + i + 1))  i = i + 2 }
+    for sum > 0xFFFF { sum = (sum & 0xFFFF) + (sum >>> 16) }
+    (~sum) & 0xFFFF
+}
+
+// Build a broadcast DHCP frame at `f`: Ethernet + IPv4 + UDP(68->67) + BOOTP.
+// `msgtype` 1 = DISCOVER, 3 = REQUEST. For REQUEST, `ryip`/`svip` fill options 50
+// (requested IP) and 54 (server id). Returns the total frame length.
+fn dhcp_build(f: i64, msgtype: i64, ryip: i64, svip: i64) -> i64 {
+    let mut z = 0
+    for z < 400 { poke8(f + z, 0)  z = z + 1 }
+    for z < 6 { poke8(f + z, 0xff)  z = z + 1 } // dst broadcast
+    poke8(f + 6, 0x52) poke8(f + 7, 0x54) poke8(f + 8, 0x00)
+    poke8(f + 9, 0x12) poke8(f + 10, 0x34) poke8(f + 11, 0x56) // src MAC
+    poke8(f + 12, 0x08) poke8(f + 13, 0x00) // ethertype IPv4
+    let ip = f + 14
+    poke8(ip + 0, 0x45) poke8(ip + 2, (272 >> 8) & 0xFF) poke8(ip + 3, 272 & 0xFF)
+    poke8(ip + 8, 64) poke8(ip + 9, 17) // TTL, proto UDP
+    poke8(ip + 16, 0xff) poke8(ip + 17, 0xff) poke8(ip + 18, 0xff) poke8(ip + 19, 0xff) // dst broadcast
+    let c = dhcp_cksum(ip, 20)
+    poke8(ip + 10, (c >> 8) & 0xFF) poke8(ip + 11, c & 0xFF)
+    let udp = ip + 20
+    poke8(udp + 0, 0) poke8(udp + 1, 68) poke8(udp + 2, 0) poke8(udp + 3, 67)
+    poke8(udp + 4, (252 >> 8) & 0xFF) poke8(udp + 5, 252 & 0xFF)
+    let dh = udp + 8
+    poke8(dh + 0, 1) poke8(dh + 1, 1) poke8(dh + 2, 6) // op, htype, hlen
+    poke8(dh + 4, 0x39) poke8(dh + 5, 0x03) poke8(dh + 6, 0xF3) poke8(dh + 7, 0x26) // xid
+    poke8(dh + 10, 0x80) // flags: broadcast
+    poke8(dh + 28, 0x52) poke8(dh + 29, 0x54) poke8(dh + 30, 0x00)
+    poke8(dh + 31, 0x12) poke8(dh + 32, 0x34) poke8(dh + 33, 0x56) // chaddr
+    poke8(dh + 236, 0x63) poke8(dh + 237, 0x82) poke8(dh + 238, 0x53) poke8(dh + 239, 0x63) // magic
+    poke8(dh + 240, 53) poke8(dh + 241, 1) poke8(dh + 242, msgtype)
+    if msgtype == 3 {
+        poke8(dh + 243, 50) poke8(dh + 244, 4)
+        poke8(dh + 245, (ryip >> 24) & 0xFF) poke8(dh + 246, (ryip >> 16) & 0xFF)
+        poke8(dh + 247, (ryip >> 8) & 0xFF) poke8(dh + 248, ryip & 0xFF)
+        poke8(dh + 249, 54) poke8(dh + 250, 4)
+        poke8(dh + 251, (svip >> 24) & 0xFF) poke8(dh + 252, (svip >> 16) & 0xFF)
+        poke8(dh + 253, (svip >> 8) & 0xFF) poke8(dh + 254, svip & 0xFF)
+        poke8(dh + 255, 255)
+    } else {
+        poke8(dh + 243, 255)
+    }
+    14 + 272
+}
+
+// Poll RX for a DHCP server reply (UDP src port 67) of message type `want`
+// (2 = OFFER, 5 = ACK), copying it into `out`. Returns 1 if seen, 0 on timeout.
+fn dhcp_poll(out: i64, want: i64) -> i64 {
+    let mut s = 0
+    let mut hit = 0
+    for s < 4000 {
+        let flen = rx_poll(out)
+        if flen > 0 {
+            if ((peek8(out + 12) << 8) | peek8(out + 13)) == 2048 {
+                if peek8(out + 23) == 17 {
+                    if ((peek8(out + 34) << 8) | peek8(out + 35)) == 67 {
+                        if peek8(out + 14 + 28 + 240 + 2) == want { hit = 1  s = 4000 }
+                    }
+                }
+            }
+        }
+        let mut d = 0
+        for d < 100000 { d = d + 1 }
+        s = s + 1
+    }
+    hit
+}
+
+// Perform a full DHCP lease. Returns 1 on success (dhcp_ip set), 0 on failure.
+pub fn dhcp_lease() -> i64 {
+    let f = alloc(400)
+    let out = alloc(600)
+    dhcp_build(f, 1, 0, 0)
+    tx_send(f, 14 + 272)
+    if dhcp_poll(out, 2) == 0 {
+        0
+    } else {
+        let d = out + 14 + 28
+        let yip = (peek8(d + 16) << 24) | (peek8(d + 17) << 16) | (peek8(d + 18) << 8) | peek8(d + 19)
+        let s = out + 14
+        let sip = (peek8(s + 12) << 24) | (peek8(s + 13) << 16) | (peek8(s + 14) << 8) | peek8(s + 15)
+        dhcp_build(f, 3, yip, sip)
+        tx_send(f, 14 + 272)
+        if dhcp_poll(out, 5) == 1 { dhcp_ip = yip  1 } else { 0 }
+    }
+}

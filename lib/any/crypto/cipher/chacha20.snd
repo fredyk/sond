@@ -1,0 +1,117 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/crypto/cipher/chacha20.snd, ChaCha20 stream cipher (RFC 8439).
+// Clean-room from the RFC. All in i64; u32s are kept masked to 32 bits.
+//
+// API:
+//   chacha20_block(key, nonce, counter, out)  // writes 64B keystream
+//   chacha20_xor(key, nonce, counter, in_ptr, out_ptr, n)  // encrypts/decrypts n bytes
+
+// 32-bit left rotation.
+fn cc_rotl(x: i64, n: i64) -> i64 {
+    ((x << n) | (x >>> (32 - n))) & 0xffffffff
+}
+
+// Load u32 little-endian from p+off.
+fn cc_ld32(p: i64, off: i64) -> i64 {
+    peek8(p + off) | (peek8(p + off + 1) << 8) | (peek8(p + off + 2) << 16) | (peek8(p + off + 3) << 24)
+}
+
+// Store u32 little-endian at p+off.
+fn cc_st32(p: i64, off: i64, v: i64) {
+    poke8(p + off, v & 0xff)
+    poke8(p + off + 1, (v >>> 8) & 0xff)
+    poke8(p + off + 2, (v >>> 16) & 0xff)
+    poke8(p + off + 3, (v >>> 24) & 0xff)
+}
+
+// Quarter-round over state `st` (array of 16 words i64), indices a,b,c,d.
+fn cc_qr(st: i64, a: i64, b: i64, c: i64, d: i64) {
+    let mut va = peek64(st + a * 8)
+    let mut vb = peek64(st + b * 8)
+    let mut vc = peek64(st + c * 8)
+    let mut vd = peek64(st + d * 8)
+    va = (va + vb) & 0xffffffff
+    vd = cc_rotl(vd ^ va, 16)
+    vc = (vc + vd) & 0xffffffff
+    vb = cc_rotl(vb ^ vc, 12)
+    va = (va + vb) & 0xffffffff
+    vd = cc_rotl(vd ^ va, 8)
+    vc = (vc + vd) & 0xffffffff
+    vb = cc_rotl(vb ^ vc, 7)
+    poke64(st + a * 8, va)
+    poke64(st + b * 8, vb)
+    poke64(st + c * 8, vc)
+    poke64(st + d * 8, vd)
+}
+
+// Generate 64 bytes of keystream for (key32, nonce12, counter u32) into `out`.
+fn chacha20_block(key: i64, nonce: i64, counter: i64, out: i64) {
+    let st[16]
+    // "expand 32-byte k" constants
+    poke64(st + 0 * 8, 0x61707865)
+    poke64(st + 1 * 8, 0x3320646e)
+    poke64(st + 2 * 8, 0x79622d32)
+    poke64(st + 3 * 8, 0x6b206574)
+    // Key: words 4..11.
+    let mut i = 0
+    for i < 8 {
+        poke64(st + (4 + i) * 8, cc_ld32(key, i * 4))
+        i = i + 1
+    }
+    // Counter: word 12.
+    poke64(st + 12 * 8, counter & 0xffffffff)
+    // Nonce: words 13..15.
+    i = 0
+    for i < 3 {
+        poke64(st + (13 + i) * 8, cc_ld32(nonce, i * 4))
+        i = i + 1
+    }
+    // Working copy.
+    let ws[16]
+    i = 0
+    for i < 16 {
+        poke64(ws + i * 8, peek64(st + i * 8))
+        i = i + 1
+    }
+    // 10 double rounds (columns + diagonals).
+    let mut r = 0
+    for r < 10 {
+        cc_qr(ws, 0, 4, 8, 12)
+        cc_qr(ws, 1, 5, 9, 13)
+        cc_qr(ws, 2, 6, 10, 14)
+        cc_qr(ws, 3, 7, 11, 15)
+        cc_qr(ws, 0, 5, 10, 15)
+        cc_qr(ws, 1, 6, 11, 12)
+        cc_qr(ws, 2, 7, 8, 13)
+        cc_qr(ws, 3, 4, 9, 14)
+        r = r + 1
+    }
+    // Add initial state and serialize little-endian.
+    i = 0
+    for i < 16 {
+        let v = (peek64(ws + i * 8) + peek64(st + i * 8)) & 0xffffffff
+        cc_st32(out, i * 4, v)
+        i = i + 1
+    }
+}
+
+// Encrypt/decrypt n bytes from in_ptr to out_ptr using keystream (counter starts at `counter`).
+fn chacha20_xor(key: i64, nonce: i64, counter: i64, in_ptr: i64, out_ptr: i64, n: i64) {
+    let ks[64]
+    let mut off = 0
+    let mut ctr = counter
+    for off < n {
+        chacha20_block(key, nonce, ctr, ks)
+        let mut j = 0
+        for j < 64 {
+            if off + j < n {
+                poke8(out_ptr + off + j, peek8(in_ptr + off + j) ^ peek8(ks + j))
+            }
+            j = j + 1
+        }
+        off = off + 64
+        ctr = ctr + 1
+    }
+}

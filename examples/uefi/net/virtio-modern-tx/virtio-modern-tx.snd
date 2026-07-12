@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Modern (virtio 1.0) virtio-net transmit on bare UEFI. VirtualBox presents a
+// TRANSITIONAL virtio-net (PCI device 0x1000) that exposes the virtio 1.0 MMIO
+// capability structures and IGNORES the legacy PFN register, so the queue must be
+// set up the modern way through common_cfg. This proves it works: the device
+// consumes a transmit descriptor (the TX used ring advances to 1). Clean-room from
+// the OASIS virtio 1.0 spec + the PCI spec; no third-party source copied.
+//
+// The one non-obvious trap: the 64-bit common_cfg fields (queue_desc/driver/device)
+// must be written as TWO 32-bit stores, VirtualBox's MMIO does not accept a 64-bit
+// access there and a poke64 faults.
+
+fn pci_r(b: i64, d: i64, o: i64) -> i64 {
+    outl(0xCF8, 0x80000000 | (b << 16) | (d << 11) | (o & 0xFC))
+    inl(0xCFC)
+}
+fn pci_w(b: i64, d: i64, o: i64, v: i64) {
+    outl(0xCF8, 0x80000000 | (b << 16) | (d << 11) | (o & 0xFC))
+    outl(0xCFC, v)
+}
+// Write a 64-bit value as two 32-bit stores (VirtualBox MMIO wants 32-bit access).
+fn wr64(addr: i64, v: i64) { poke32(addr, v & 0xFFFFFFFF)  poke32(addr + 4, v >>> 32) }
+
+fn efi_main() -> i64 {
+    print("modern virtio-net TX on bare UEFI:\r\n")
+
+    // Find the virtio-net device (vendor 0x1AF4, device 0x1000).
+    let mut dv = 0 let mut found = 0 let mut bus = 0
+    for bus < 4 {
+        let mut d = 0
+        for d < 32 {
+            let v = pci_r(bus, d, 0)
+            if (v & 0xFFFF) == 0x1AF4 {
+                if ((v >> 16) & 0xFFFF) == 0x1000 { if found == 0 { dv = d  found = 1 } }
+            }
+            d = d + 1
+        }
+        bus = bus + 1
+    }
+    let b = 0
+    pci_w(b, dv, 0x04, pci_r(b, dv, 0x04) | 6) // enable memory space + bus master
+
+    // Walk the PCI capability list for the virtio 1.0 structures (cap id 0x09):
+    // cfg_type 1 = common_cfg, 2 = notify (with a notify_off_multiplier at +16).
+    let mut common_off = 0 let mut notify_off = 0 let mut notify_mult = 0
+    let mut cap = pci_r(b, dv, 0x34) & 0xFF
+    let mut g = 0
+    for g < 16 {
+        if cap == 0 { g = 16 } else {
+            let w = pci_r(b, dv, cap)
+            if (w & 0xFF) == 0x09 {
+                let cfg = (w >> 24) & 0xFF
+                let off = pci_r(b, dv, cap + 8)
+                if cfg == 1 { common_off = off }
+                if cfg == 2 { notify_off = off  notify_mult = pci_r(b, dv, cap + 16) }
+            }
+            cap = (w >> 8) & 0xFF  g = g + 1
+        }
+    }
+    let bar2 = (pci_r(b, dv, 0x18) & 0xFFFFFFF0) | (pci_r(b, dv, 0x1C) << 32)
+    let common = bar2 + common_off
+    let notify_base = bar2 + notify_off
+
+    // Modern init on common_cfg: reset, ACK, DRIVER; accept VIRTIO_F_VERSION_1
+    // (feature word 1, bit 0); FEATURES_OK and confirm it stuck.
+    poke8(common + 20, 0)  poke8(common + 20, 1)  poke8(common + 20, 3)
+    poke32(common + 8, 1)  poke32(common + 12, 1)
+    poke32(common + 8, 0)  poke32(common + 12, 0)
+    poke8(common + 20, 11)
+    print("FEATURES_OK status (want 11)=") print_int(peek8(common + 20)) print("\r\n")
+
+    // Set up the TX queue (queue index 1): read its size, allocate desc/avail/used
+    // as separate zeroed buffers, publish their 64-bit addresses, enable.
+    poke16(common + 22, 1)
+    let qsz = peek16(common + 24)
+    let desc = alloc(16 * qsz)
+    let avail = alloc(6 + 2 * qsz)
+    let used = alloc(6 + 8 * qsz)
+    let mut z = 0
+    for z < 16 * qsz { poke8(desc + z, 0)  z = z + 1 }
+    z = 0
+    for z < 6 + 2 * qsz { poke8(avail + z, 0)  z = z + 1 }
+    z = 0
+    for z < 6 + 8 * qsz { poke8(used + z, 0)  z = z + 1 }
+    wr64(common + 32, desc)  wr64(common + 40, avail)  wr64(common + 48, used)
+    let qnotify = peek16(common + 30)
+    poke16(common + 28, 1) // queue_enable
+    poke8(common + 20, 15) // DRIVER_OK
+
+    // Transmit one 60-byte broadcast frame (12-byte modern virtio_net_hdr prefix).
+    let tx_buf = alloc(1600)
+    z = 0
+    for z < 12 { poke8(tx_buf + z, 0)  z = z + 1 }
+    z = 0
+    for z < 6 { poke8(tx_buf + 12 + z, 0xff)  z = z + 1 }
+    for z < 60 { poke8(tx_buf + 12 + z, 0x11)  z = z + 1 }
+    wr64(desc + 0, tx_buf)  poke32(desc + 8, 12 + 60)  poke16(desc + 12, 0)
+    poke16(avail + 4, 0)   // avail.ring[0] = descriptor 0
+    asm("mfence")
+    poke16(avail + 2, 1)   // avail.idx = 1
+    asm("mfence")
+    poke16(notify_base + qnotify * notify_mult, 1) // modern notify: write the queue index
+
+    let mut delay = 0
+    for delay < 20000000 { delay = delay + 1 }
+    let uidx = peek16(used + 2)
+    print("TX used.idx (want 1)=") print_int(uidx) print("\r\n")
+    if uidx == 1 { print("PASS: the device consumed the modern TX\r\n") }
+    else { print("FAIL: TX not consumed\r\n") }
+    halt()
+    0
+}

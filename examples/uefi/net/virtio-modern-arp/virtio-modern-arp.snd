@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// A complete network round-trip on bare UEFI through a MODERN (virtio 1.0)
+// virtio-net device: bring up RX and TX queues via common_cfg, send a broadcast
+// ARP request for the NAT gateway (10.0.2.2), and receive the ARP reply. Proves
+// both halves of the NIC operate under VirtualBox's transitional virtio-net (which
+// ignores the legacy PFN register and requires the modern MMIO queue setup).
+// Clean-room from the OASIS virtio 1.0 spec, RFC 826 (ARP) and the PCI spec.
+//
+// Trap (same as virtio-modern-tx): the 64-bit common_cfg addresses must be written
+// as two 32-bit stores, VirtualBox MMIO faults on a 64-bit access.
+
+fn pci_r(b: i64, d: i64, o: i64) -> i64 {
+    outl(0xCF8, 0x80000000 | (b << 16) | (d << 11) | (o & 0xFC))
+    inl(0xCFC)
+}
+fn pci_w(b: i64, d: i64, o: i64, v: i64) {
+    outl(0xCF8, 0x80000000 | (b << 16) | (d << 11) | (o & 0xFC))
+    outl(0xCFC, v)
+}
+fn wr64(a: i64, v: i64) { poke32(a, v & 0xFFFFFFFF)  poke32(a + 4, v >>> 32) }
+
+let mut common = 0
+let mut notify_base = 0
+let mut notify_mult = 0
+let mut QSZ = 0
+let mut rxd = 0 let mut rxa = 0 let mut rxu = 0 let mut rxn = 0
+let mut txd = 0 let mut txa = 0 let mut txu = 0 let mut txn = 0
+
+// Allocate and publish the split rings for queue `qi` (0 = RX, 1 = TX).
+fn setup_q(qi: i64) {
+    poke16(common + 22, qi)
+    QSZ = peek16(common + 24)
+    let d = alloc(16 * QSZ) let av = alloc(6 + 2 * QSZ) let us = alloc(6 + 8 * QSZ)
+    let mut z = 0
+    for z < 16 * QSZ { poke8(d + z, 0)  z = z + 1 }
+    z = 0
+    for z < 6 + 2 * QSZ { poke8(av + z, 0)  z = z + 1 }
+    z = 0
+    for z < 6 + 8 * QSZ { poke8(us + z, 0)  z = z + 1 }
+    wr64(common + 32, d) wr64(common + 40, av) wr64(common + 48, us)
+    let qn = peek16(common + 30)
+    poke16(common + 28, 1)
+    if qi == 0 { rxd = d rxa = av rxu = us rxn = qn } else { txd = d txa = av txu = us txn = qn }
+}
+
+// Post a device-writable receive buffer at avail slot `idx`.
+fn post_rx(buf: i64, idx: i64) {
+    wr64(rxd + idx * 16, buf)
+    poke32(rxd + idx * 16 + 8, 2048)
+    poke16(rxd + idx * 16 + 12, 2) // VIRTQ_DESC_F_WRITE
+    poke16(rxa + 4 + idx * 2, idx)
+}
+
+fn efi_main() -> i64 {
+    print("modern virtio-net ARP round-trip on bare UEFI:\r\n")
+
+    let mut dv = 0 let mut found = 0 let mut bus = 0
+    for bus < 4 {
+        let mut d = 0
+        for d < 32 {
+            let v = pci_r(bus, d, 0)
+            if (v & 0xFFFF) == 0x1AF4 {
+                if ((v >> 16) & 0xFFFF) == 0x1000 { if found == 0 { dv = d  found = 1 } }
+            }
+            d = d + 1
+        }
+        bus = bus + 1
+    }
+    let b = 0
+    pci_w(b, dv, 0x04, pci_r(b, dv, 0x04) | 6)
+
+    let mut co = 0 let mut no = 0 let mut cap = pci_r(b, dv, 0x34) & 0xFF let mut g = 0
+    for g < 16 {
+        if cap == 0 { g = 16 } else {
+            let w = pci_r(b, dv, cap)
+            if (w & 0xFF) == 0x09 {
+                let cf = (w >> 24) & 0xFF let of = pci_r(b, dv, cap + 8)
+                if cf == 1 { co = of }
+                if cf == 2 { no = of  notify_mult = pci_r(b, dv, cap + 16) }
+            }
+            cap = (w >> 8) & 0xFF  g = g + 1
+        }
+    }
+    let bar2 = (pci_r(b, dv, 0x18) & 0xFFFFFFF0) | (pci_r(b, dv, 0x1C) << 32)
+    common = bar2 + co  notify_base = bar2 + no
+
+    // Modern init: reset/ACK/DRIVER, accept VIRTIO_F_VERSION_1, FEATURES_OK.
+    poke8(common + 20, 0) poke8(common + 20, 1) poke8(common + 20, 3)
+    poke32(common + 8, 1) poke32(common + 12, 1) poke32(common + 8, 0) poke32(common + 12, 0)
+    poke8(common + 20, 11)
+    setup_q(0) setup_q(1)
+    poke8(common + 20, 15) // DRIVER_OK
+
+    // Post 4 RX buffers and hand them to the device.
+    let mut k = 0
+    for k < 4 { post_rx(alloc(2048), k)  k = k + 1 }
+    asm("mfence")
+    poke16(rxa + 2, 4)
+    poke16(notify_base + rxn * notify_mult, 0)
+
+    // Build an ARP request (42 bytes) after a 12-byte modern virtio_net_hdr.
+    let tb = alloc(1600)
+    let mut z = 0
+    for z < 12 { poke8(tb + z, 0)  z = z + 1 }
+    let p = tb + 12
+    for z < 6 { poke8(p + z, 0xff)  z = z + 1 } // dst = broadcast
+    poke8(p + 6, 0x52) poke8(p + 7, 0x54) poke8(p + 8, 0x00)
+    poke8(p + 9, 0x12) poke8(p + 10, 0x34) poke8(p + 11, 0x56) // src MAC
+    poke8(p + 12, 0x08) poke8(p + 13, 0x06) // ethertype = ARP
+    poke8(p + 14, 0x00) poke8(p + 15, 0x01) poke8(p + 16, 0x08) poke8(p + 17, 0x00)
+    poke8(p + 18, 0x06) poke8(p + 19, 0x04) poke8(p + 20, 0x00) poke8(p + 21, 0x01) // op = request
+    poke8(p + 22, 0x52) poke8(p + 23, 0x54) poke8(p + 24, 0x00)
+    poke8(p + 25, 0x12) poke8(p + 26, 0x34) poke8(p + 27, 0x56) // sender MAC
+    poke8(p + 28, 0x0a) poke8(p + 29, 0x00) poke8(p + 30, 0x02) poke8(p + 31, 0x0f) // sender IP 10.0.2.15
+    for z < 6 { poke8(p + 32 + z, 0x00)  z = z + 1 } // target MAC 0
+    poke8(p + 38, 0x0a) poke8(p + 39, 0x00) poke8(p + 40, 0x02) poke8(p + 41, 0x02) // target IP 10.0.2.2
+
+    // Transmit it.
+    wr64(txd + 0, tb) poke32(txd + 8, 12 + 42) poke16(txd + 12, 0)
+    poke16(txa + 4, 0)
+    asm("mfence")
+    poke16(txa + 2, 1)
+    poke16(notify_base + txn * notify_mult, 1)
+    print("ARP request sent, polling RX for the reply...\r\n")
+
+    // Poll the RX used ring for the reply.
+    let mut tries = 0 let mut got = 0
+    for tries < 40 {
+        if peek16(rxu + 2) != 0 { got = 1  tries = 40 } else {
+            let mut dl = 0
+            for dl < 2000000 { dl = dl + 1 }
+            tries = tries + 1
+        }
+    }
+    if got == 1 {
+        let bi = peek64(rxd + 0)
+        let et = (peek8(bi + 12 + 12) << 8) | peek8(bi + 12 + 13)
+        print("received a frame, ethertype=") print_int(et) print("\r\n")
+        if et == 2054 { print("PASS: got the ARP reply (0x0806), RX+TX both work\r\n") }
+        else { print("FAIL: unexpected ethertype\r\n") }
+    } else { print("FAIL: no RX frame\r\n") }
+    halt()
+    0
+}

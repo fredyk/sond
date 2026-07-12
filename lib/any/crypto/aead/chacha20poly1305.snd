@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/crypto/aead/chacha20poly1305.snd, AEAD ChaCha20-Poly1305 (RFC 8439 §2.8).
+// Composes ChaCha20 (cipher) and Poly1305 (MAC, already existing).
+//
+// API:
+//   aead_seal(key, nonce, aad, alen, pt, n, ct, tag)          // encrypt + authenticate
+//   aead_open(key, nonce, aad, alen, ct, n, tag, pt) -> i64   // 0=ok, !=0 invalid tag
+//
+// key=32B, nonce=12B, tag=16B. v1 limit: aad+n <= ~4000B per call (mac scratch
+// on stack). For larger payloads, fragment into records.
+
+include "any/crypto/cipher/chacha20.snd"
+include "any/crypto/mac/poly1305.snd"
+
+fn aead_put_u64le(dst: i64, v: i64) {
+    let mut i = 0
+    let mut x = v
+    for i < 8 {
+        poke8(dst + i, x & 0xff)
+        x = x >>> 8
+        i = i + 1
+    }
+}
+
+// Builds the MAC message: aad || pad16 || ct || pad16 || len(aad)_u64le || len(ct)_u64le.
+// Returns the total length written to `md`.
+fn aead_build_mac(md: i64, aad: i64, alen: i64, ct: i64, n: i64) -> i64 {
+    let mut p = 0
+    let mut i = 0
+    for i < alen {
+        poke8(md + p, peek8(aad + i))
+        p = p + 1
+        i = i + 1
+    }
+    while p % 16 != 0 {
+        poke8(md + p, 0)
+        p = p + 1
+    }
+    i = 0
+    for i < n {
+        poke8(md + p, peek8(ct + i))
+        p = p + 1
+        i = i + 1
+    }
+    while p % 16 != 0 {
+        poke8(md + p, 0)
+        p = p + 1
+    }
+    aead_put_u64le(md + p, alen)
+    p = p + 8
+    aead_put_u64le(md + p, n)
+    p = p + 8
+    p
+}
+
+// One-time Poly1305 key = first 32 bytes of ChaCha20 keystream with counter=0.
+fn aead_poly_key(key: i64, nonce: i64, pk: i64) {
+    let ks0[64]
+    chacha20_block(key, nonce, 0, ks0)
+    let mut i = 0
+    for i < 32 {
+        poke8(pk + i, peek8(ks0 + i))
+        i = i + 1
+    }
+}
+
+fn aead_seal(key: i64, nonce: i64, aad: i64, alen: i64, pt: i64, n: i64, ct: i64, tag: i64) {
+    let pk[32]
+    aead_poly_key(key, nonce, pk)
+    // ciphertext = ChaCha20(counter=1)
+    chacha20_xor(key, nonce, 1, pt, ct, n)
+    let md[4160]
+    let mlen = aead_build_mac(md, aad, alen, ct, n)
+    poly1305_mac(md, mlen, pk, tag)
+}
+
+fn aead_open(key: i64, nonce: i64, aad: i64, alen: i64, ct: i64, n: i64, tag: i64, pt: i64) -> i64 {
+    let pk[32]
+    aead_poly_key(key, nonce, pk)
+    let md[4160]
+    let mlen = aead_build_mac(md, aad, alen, ct, n)
+    let calc[16]
+    poly1305_mac(md, mlen, pk, calc)
+    // constant-time comparison (OR of differences, no early-return)
+    let mut d = 0
+    let mut i = 0
+    for i < 16 {
+        d = d | (peek8(calc + i) ^ peek8(tag + i))
+        i = i + 1
+    }
+    if d != 0 {
+        return 1
+    }
+    chacha20_xor(key, nonce, 1, ct, pt, n)
+    0
+}

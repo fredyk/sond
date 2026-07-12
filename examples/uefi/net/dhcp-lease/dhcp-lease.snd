@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Obtain a DHCP lease on bare UEFI through the modern virtio-net driver. Proves the
+// full RFC 2131 handshake (DISCOVER -> OFFER -> REQUEST -> ACK) completes under
+// VirtualBox NAT, which is what makes the guest reachable via a port-forward.
+
+include "x86_64/net/dhcp.snd"
+
+fn efi_main() -> i64 {
+    print("DHCP lease on bare UEFI:\r\n")
+    if vnet_init() != 1 { print("FAIL: no NIC\r\n")  halt()  return 0 }
+    if dhcp_lease() == 1 {
+        print("leased IP = 10.0.2.") print_int(dhcp_ip & 0xFF) print("\r\n")
+        print("PASS: DHCP DISCOVER/OFFER/REQUEST/ACK completed\r\n")
+    } else {
+        print("FAIL: no lease\r\n")
+    }
+    halt()
+    0
+}
