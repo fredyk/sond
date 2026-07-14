@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// print() must keep working after exit_boot_services(): ConOut is dead post-EBS, so
+// print falls back to COM1. Oracle for the loader↔kernel output seam. RED before the
+// compiler change: print after EBS hangs on the dead ConOut. GREEN: KERNEL-PRINT-OK
+// appears on serial.
+
+fn efi_main() -> i64 {
+    exit_boot_services()
+    print("KERNEL-PRINT-OK")
+    halt()
+    0
+}

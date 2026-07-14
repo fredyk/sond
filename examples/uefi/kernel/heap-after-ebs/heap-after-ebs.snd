@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// The loader↔kernel boundary: after exit_boot_services() the firmware is gone
+// (AllocatePool is dead), yet a kernel must still allocate memory. This is the
+// executable oracle for a heap that SURVIVES ExitBootServices, alloc() must serve
+// from Sond's own bump allocator over the captured UEFI memory map, not Boot
+// Services. RED before the compiler change: alloc() after EBS returns unusable
+// memory (AllocatePool undefined post-EBS) -> prints ALLOC-BAD or hangs.
+// GREEN after: ALLOC-OK.
+
+fn efi_main() -> i64 {
+    serial_print("BEFORE-EBS")
+    exit_boot_services()
+    serial_print("AFTER-EBS")
+    let p = alloc(4096)
+    poke64(p, 3735928559)          // 0xDEADBEEF
+    poke64(p + 8, 195939070)       // 0x0BADC0FE
+    let q = alloc(4096)            // a second, distinct allocation
+    poke64(q, 3405691582)          // 0xCAFEBABE
+    if peek64(p) == 3735928559 && peek64(p + 8) == 195939070 && peek64(q) == 3405691582 && q != p {
+        serial_print("ALLOC-OK")
+    } else {
+        serial_print("ALLOC-BAD")
+    }
+    halt()
+    0
+}

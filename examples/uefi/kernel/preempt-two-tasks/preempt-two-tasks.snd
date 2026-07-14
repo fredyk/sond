@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// PREEMPTIVE multitasking (interrupt B): two tasks on separate stacks, alternated by the
+// TIMER, not by a manual yield. The timer ISR performs the context switch, so a task
+// stuck in a tight loop is taken off the CPU anyway. Both tasks make progress => real
+// preemption. This is the scheduler a unix-like kernel is built on.
+
+let mut ticks = 0
+let mut current = 0        // index of the running task (0 or 1)
+let mut ca = 0             // task A (efi_main tail) progress
+let mut cb = 0             // task B progress
+let mut ctxs = 0           // alloc(16): [0]=task A saved ctx, [8]=task B saved ctx
+
+// The timer ISR: acknowledge the IRQ, then switch to the other task. The saved
+// context of a preempted task lives inside its OWN timer_isr invocation; resuming it
+// finishes that ISR (restores its registers, iretq) back to its normal code.
+interrupt fn timer_isr() {
+    ticks = ticks + 1
+    outb(0x20, 0x20)                   // EOI
+    let old = current
+    current = 1 - old
+    swtch(ctxs + old * 8, peek64(ctxs + current * 8))
+}
+
+// Task B: enable interrupts (it is first entered via swtch, not iretq, so IF is off),
+// then spin forever. Only the timer can take it off the CPU.
+fn task_b() {
+    asm("sti")
+    for { cb = cb + 1 }
+}
+
+fn set_gate(idt: i64, vec: i64, handler: i64, sel: i64) {
+    let e = idt + vec * 16
+    poke16(e, handler & 0xFFFF)
+    poke16(e + 2, sel)
+    poke8(e + 4, 0)
+    poke8(e + 5, 0x8E)
+    poke16(e + 6, (handler >> 16) & 0xFFFF)
+    poke32(e + 8, (handler >>> 32) & 0xFFFFFFFF)
+    poke32(e + 12, 0)
+}
+fn pic_remap() {
+    outb(0x20, 0x11) outb(0xA0, 0x11)
+    outb(0x21, 0x20) outb(0xA1, 0x28)
+    outb(0x21, 0x04) outb(0xA1, 0x02)
+    outb(0x21, 0x01) outb(0xA1, 0x01)
+    outb(0x21, 0xFE) outb(0xA1, 0xFF)
+}
+fn pit_init() {
+    outb(0x43, 0x36)
+    outb(0x40, 11932 & 0xFF)
+    outb(0x40, (11932 >> 8) & 0xFF)
+}
+
+fn efi_main() -> i64 {
+    exit_boot_services()
+    asm("cli")
+    ctxs = alloc(16)
+    poke64(ctxs, 0)
+    poke64(ctxs + 8, 0)
+    // bootstrap task B's stack: its entry above six callee-saved slots (swtch pops 6, ret)
+    let bstack = alloc(65536)
+    let top = bstack + 65536 - 8
+    poke64(top, addr_of(task_b))
+    poke64(ctxs + 8, top - 48)
+    // IDT + timer, exactly as the timer-interrupt example
+    let idt = alloc(4096)
+    let mut z = 0
+    for z < 4096 { poke8(idt + z, 0)  z = z + 1 }
+    set_gate(idt, 0x20, addr_of(timer_isr), read_cs())
+    let idtr = alloc(16)
+    poke16(idtr, 4095)
+    poke64(idtr + 2, idt)
+    lidt(idtr)
+    pic_remap()
+    pit_init()
+    asm("sti")
+    // Task A: spin until enough ticks have accrued, then stop and report.
+    for ticks < 60 { ca = ca + 1 }
+    asm("cli")
+    if ca > 0 && cb > 0 { serial_print("PREEMPT-OK") } else { serial_print("PREEMPT-BAD") }
+    halt()
+    0
+}

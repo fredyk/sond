@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// A REAL hardware timer interrupt (interrupt B, a real kernel). After leaving the
+// firmware, Sond installs its own IDT, remaps the 8259 PIC, programs the 8254 PIT to
+// tick at ~100 Hz, and enables interrupts. The tick counter is incremented from the
+// interrupt handler (`interrupt fn`), NOT the main loop, so a growing counter proves
+// asynchronous, hardware-driven preemption works. This is the seam a scheduler needs.
+
+let mut ticks = 0
+
+// The timer ISR: bump the tick count and acknowledge the interrupt to the PIC.
+interrupt fn timer_isr() {
+    ticks = ticks + 1
+    outb(0x20, 0x20)                   // EOI to the master PIC
+}
+
+// Write a 64-bit interrupt gate for vector `vec` pointing at `handler`.
+fn set_gate(idt: i64, vec: i64, handler: i64, sel: i64) {
+    let e = idt + vec * 16
+    poke16(e, handler & 0xFFFF)
+    poke16(e + 2, sel)
+    poke8(e + 4, 0)
+    poke8(e + 5, 0x8E)                 // present, ring0, 64-bit interrupt gate
+    poke16(e + 6, (handler >> 16) & 0xFFFF)
+    poke32(e + 8, (handler >>> 32) & 0xFFFFFFFF)
+    poke32(e + 12, 0)
+}
+
+// Remap the 8259 PIC so IRQ0..15 land on vectors 0x20..0x2F (0..0x1F are CPU
+// exceptions), then mask everything except IRQ0 (the timer).
+fn pic_remap() {
+    outb(0x20, 0x11) outb(0xA0, 0x11)  // ICW1: begin init, expect ICW4
+    outb(0x21, 0x20) outb(0xA1, 0x28)  // ICW2: master->0x20, slave->0x28
+    outb(0x21, 0x04) outb(0xA1, 0x02)  // ICW3: slave on IRQ2 / cascade identity
+    outb(0x21, 0x01) outb(0xA1, 0x01)  // ICW4: 8086 mode
+    outb(0x21, 0xFE)                   // unmask IRQ0 only on the master
+    outb(0xA1, 0xFF)                   // mask all on the slave
+}
+
+// Program PIT channel 0 as a rate generator at ~100 Hz (divisor 11932).
+fn pit_init() {
+    outb(0x43, 0x36)                   // channel 0, lo/hi, mode 3, binary
+    outb(0x40, 11932 & 0xFF)
+    outb(0x40, (11932 >> 8) & 0xFF)
+}
+
+fn efi_main() -> i64 {
+    exit_boot_services()
+    asm("cli")
+    let idt = alloc(4096)
+    let mut z = 0
+    for z < 4096 { poke8(idt + z, 0)  z = z + 1 }
+    set_gate(idt, 0x20, addr_of(timer_isr), read_cs())
+    let idtr = alloc(16)
+    poke16(idtr, 4095)
+    poke64(idtr + 2, idt)
+    lidt(idtr)
+    pic_remap()
+    pit_init()
+    asm("sti")
+    // Spin WITHOUT touching ticks: only the ISR changes it. If it grows, the timer
+    // is firing on its own.
+    let mut spin = 0
+    for spin < 200000000 {
+        if ticks >= 10 { spin = 200000000 } else { spin = spin + 1 }
+    }
+    if ticks >= 10 { serial_print("TIMER-OK") } else { serial_print("TIMER-BAD") }
+    halt()
+    0
+}
