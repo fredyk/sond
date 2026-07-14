@@ -1,0 +1,21 @@
+struct Rect { w: i64, h: i64 }
+struct Point { x: i64, y: i64 }
+
+// Receive a struct (by pointer) and read its fields.
+pub fn rect_area(r: *Rect) -> i64 { r.w * r.h }
+
+// Mutate a caller-owned struct through a pointer (the C-ABI way to "return" a struct).
+pub fn point_translate(p: *Point, dx: i64, dy: i64) {
+    p.x = p.x + dx
+    p.y = p.y + dy
+}
+
+// Take a C string (char*) and count its bytes.
+pub fn str_len(s: i64) -> i64 {
+    let mut n = 0
+    for peek8(s + n) != 0 { n = n + 1 }
+    n
+}
+
+// Return a C string (char*): a NUL-terminated byte sequence in .rodata.
+pub fn greeting() -> i64 { cstr("HELLO from Sond") }

@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// A Sond SHARED LIBRARY. Compile with `sondc math.snd --shared -o libsondmath.so`
+// and import the public functions from C, C++, Go, Rust or Python, Sond already uses
+// the System V AMD64 C ABI, so a `pub fn` is a C-callable symbol. `priv` functions are
+// hidden. Methods `impl T { fn m }` export as `T_m`.
+
+pub fn sond_add(a: i64, b: i64) -> i64 { a + b }
+pub fn sond_mul(a: i64, b: i64) -> i64 { a * b }
+
+pub fn sond_fib(n: i64) -> i64 {
+    let mut a = 0
+    let mut b = 1
+    let mut i = 0
+    for i < n { let t = a + b  a = b  b = t  i = i + 1 }
+    a
+}
+
+priv fn secret(x: i64) -> i64 { x * 42 }          // NOT exported (hidden)
+pub fn sond_answer(x: i64) -> i64 { secret(x) }   // usable internally
