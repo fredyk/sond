@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// f64, the FIRST value type in Sond distinct from i64, and the wedge that opens
+// typed codegen. Parameters and returns are System V SSE class (passed in %xmm0..),
+// arithmetic uses SSE (addsd/subsd/mulsd/divsd), integer operands are promoted with
+// cvtsi2sd. Compile `sondc floats.snd --shared -o libsondf.so` and call from Rust/Go/
+// C/Python with c_double / f64 / double.
+
+pub fn addf(a: f64, b: f64) -> f64 { a + b }
+pub fn subf(a: f64, b: f64) -> f64 { a - b }
+pub fn mulf(a: f64, b: f64) -> f64 { a * b }
+pub fn divf(a: f64, b: f64) -> f64 { a / b }
+
+// nested float arithmetic + a literal
+pub fn poly(x: f64) -> f64 { x * x + x }
+pub fn scale(x: f64) -> f64 { x * 1.5 }
+
+// int operand promoted to f64 (cvtsi2sd)
+pub fn half(n: i64) -> f64 { n / 2.0 }
+
+// float locals + a loop: Newton's method for sqrt (mutable float local `g`).
+pub fn sqrtf(x: f64) -> f64 {
+    let mut g = x
+    let mut i = 0
+    for i < 20 { g = (g + x / g) / 2.0  i = i + 1 }
+    g
+}
+
+// float comparisons: a float-valued `if`, and reassigning a float local.
+pub fn maxf(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+pub fn clamp01(x: f64) -> f64 {
+    let mut r = x
+    if r < 0.0 { r = 0.0 }
+    if r > 1.0 { r = 1.0 }
+    r
+}

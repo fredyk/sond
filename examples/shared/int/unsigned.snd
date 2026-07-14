@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// u64, an unsigned 64-bit integer, DISTINCT from the signed i64. Same C ABI (INTEGER
+// class, in %rdi../%rax), but the TYPE selects the right instruction, so the operator is
+// correct by construction, no more `>>` vs `>>>` footgun:
+//   `>>`  on u64 = logical (shr), on i64 = arithmetic (sar)
+//   `/ %` on u64 = unsigned (divq), on i64 = signed (idivq)
+//   `< > <= >=` on u64 = unsigned (setb..), on i64 = signed (setl..)
+// Import from C/Rust/Go/Python as uint64_t / u64 / c_uint64.
+
+pub fn ushr(x: u64, n: u64) -> u64 { x >> n }
+// Integer division traps on a zero divisor (CPU #DE), so Sond requires the caller to
+// prove `b != 0`, the divide-by-zero hazard is a contract, checked at compile time.
+pub fn udiv(a: u64, b: u64) -> u64 requires { b != 0 } { a / b }
+pub fn umod(a: u64, b: u64) -> u64 requires { b != 0 } { a % b }
+pub fn ult(a: u64, b: u64) -> i64 { if a < b { 1 } else { 0 } }
+
+// A rotate-right, the classic crypto primitive, now written with plain `>>`, safe
+// because `w` is u64 (the shift is logical). No `>>>` needed.
+pub fn rotr(w: u64, n: u64) -> u64 { (w >> n) | (w << (64 - n)) }
+
+// i32/u32, 32-bit integers (C `int`/`unsigned int`). Arithmetic wraps at 32 bits and
+// `>> / % < >` follow the sign, just like i64/u64. A u8/u16 come later.
+pub fn uadd32(a: u32, b: u32) -> u32 { a + b }        // wraps at 2^32
+pub fn mix32(a: u32, b: u32) -> u32 {
+    let mut h: u32 = a
+    h = h * 16777619                                  // wraps at 32 bits
+    h = h ^ b
+    h
+}
+
+// i8/u8/i16/u16, byte- and halfword-wide integers (buffers, protocols, crypto). Each
+// wraps at its width: u8 at 256, u16 at 65536. A one-byte XOR cipher step:
+pub fn xor8(byte: u8, key: u8) -> u8 { byte ^ key }
+pub fn add8(a: u8, b: u8) -> u8 { a + b }            // wraps at 256
+
+// Explicit conversions with `as`, no implicit coercion. Between any integer widths
+// (truncate/extend) and f64 (cvtsi2sd / cvttsd2si toward zero):
+pub fn byte_of(word: i64) -> u8 { word as u8 }          // take the low byte
+pub fn to_ratio(a: i64, b: i64) -> f64 { a as f64 / b as f64 }  // integer -> exact ratio
