@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// PAYLOADED SUM TYPES, the nil-safety mechanism (`Option`/`Result`).
+// A variant may CARRY a value: `Some(i64)` holds a number, `None` holds nothing.
+// The only way to READ the carried value is through `match`, which binds it:
+//
+//     match o { Some(x) => x, None => fallback }
+//
+// You physically cannot reach `x` without first handling the `None` case, so
+// "forgot to check for absence" (the billion-dollar mistake) is UNREPRESENTABLE,
+// not merely discouraged. A payloaded enum is a 2-word value {tag, payload}; it
+// passes by reference like any struct, with no new backend.
+
+enum Opt { Some(i64), None }
+
+// The payload if present, else the fallback. The `match` MUST cover both variants.
+pub fn unwrap_or(o: Opt, fallback: i64) -> i64 {
+    match o {
+        Some(x) => x,
+        None => fallback,
+    }
+}
+
+// RETURNING an Option by value, the most common use. A division that cannot divide by
+// zero returns `None` instead of crashing; the caller is FORCED to handle the absence.
+// (A small enum is returned in registers, like any ≤16-byte struct.)
+pub fn safe_div(a: i64, b: i64) -> Opt {
+    if b == 0 { None } else { Some(a / b) }
+}
+
+// 1 if the option carries a value, 0 if it is empty.
+pub fn is_some(o: Opt) -> i64 {
+    match o {
+        Some(x) => 1,
+        None => 0,
+    }
+}
+
+// A two-payload enum: the `Result` shape. Both variants carry an i64, the value on
+// success, the error code on failure. You cannot read either without handling both.
+enum Res { Ok(i64), Err(i64) }
+
+// The Ok value, or the error code offset into an error range, both cases forced.
+pub fn code_of(r: Res) -> i64 {
+    match r {
+        Ok(v) => v,
+        Err(code) => 900 + code,
+    }
+}
+
+fn main() -> i64 {
+    let some = Some(42)
+    let none = None
+    print_int(unwrap_or(some, 0))   // 42, the carried value
+    print_int(unwrap_or(none, 7))   // 7 , the fallback
+    print_int(is_some(some))        // 1
+    print_int(is_some(none))        // 0
+
+    let ok = Ok(100)
+    let err = Err(5)
+    print_int(code_of(ok))          // 100, the success value
+    print_int(code_of(err))         // 905, 900 + error code 5
+
+    let d = safe_div(84, 2)         // Some(42), returned by value
+    print_int(unwrap_or(d, 0))      // 42
+    let bad = safe_div(1, 0)        // None, no crash, absence is a value
+    print_int(unwrap_or(bad, 999))  // 999
+    0
+}
