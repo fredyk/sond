@@ -1,0 +1,28 @@
+//   sond test lib/x86_64/linux/map_test.snd
+include "x86_64/linux/map.snd"
+include "x86_64/linux/testing.snd"
+
+test "a new map has no keys" {
+    let m = map_new()
+    assert_eq(map_has(m, bytes_from_cstr(cstr("x"))), 0)
+    assert_eq(map_get(m, bytes_from_cstr(cstr("x")), 0 - 1), 0 - 1)
+}
+test "set then get" {
+    let m = map_new()
+    map_set(m, bytes_from_cstr(cstr("width")), 640)
+    map_set(m, bytes_from_cstr(cstr("height")), 480)
+    assert_eq(map_has(m, bytes_from_cstr(cstr("width"))), 1)
+    assert_eq(map_get(m, bytes_from_cstr(cstr("width")), 0), 640)
+    assert_eq(map_get(m, bytes_from_cstr(cstr("height")), 0), 480)
+}
+test "set updates an existing key in place" {
+    let m = map_new()
+    map_set(m, bytes_from_cstr(cstr("k")), 1)
+    map_set(m, bytes_from_cstr(cstr("k")), 2)
+    assert_eq(map_get(m, bytes_from_cstr(cstr("k")), 0), 2)
+}
+test "absent key returns the default" {
+    let m = map_new()
+    map_set(m, bytes_from_cstr(cstr("a")), 5)
+    assert_eq(map_get(m, bytes_from_cstr(cstr("b")), 99), 99)
+}

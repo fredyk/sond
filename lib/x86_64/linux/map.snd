@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// A string-keyed map (dictionary) over the arena, the symbol table a compiler needs, and
+// the natural home for HTTP headers. Keys are byte buffers (compared by content), values are
+// i64. Implemented as parallel arrays with linear lookup: simple and correct; a hash map is a
+// future optimization that keeps this same interface.
+
+include "x86_64/linux/vec.snd"
+include "x86_64/linux/bytes.snd"
+
+// A Map is an i64 handle to [keys_vec, vals_vec].
+pub fn map_new() -> i64 {
+    let m = heap_alloc(16)
+    poke64(m, vec_new())        // keys (Bytes handles)
+    poke64(m + 8, vec_new())    // vals (i64)
+    m
+}
+
+// Index of `key` (a Bytes buffer) in the map, or -1 if absent.
+fn map_index(m: i64, key: i64) -> i64 {
+    let keys = peek64(m)
+    let n = vec_len(keys)
+    let mut i = 0
+    for i < n {
+        if bytes_eq(vec_get(keys, i), key) == 1 {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Insert or update `key -> val`.
+pub fn map_set(m: i64, key: i64, val: i64) {
+    let idx = map_index(m, key)
+    if idx == 0 - 1 {
+        vec_push(peek64(m), key)
+        vec_push(peek64(m + 8), val)
+    } else {
+        vec_set(peek64(m + 8), idx, val)
+    }
+}
+
+// 1 if `key` is present, else 0.
+pub fn map_has(m: i64, key: i64) -> i64 {
+    if map_index(m, key) == 0 - 1 { 0 } else { 1 }
+}
+
+// The value for `key`, or `default` if absent.
+pub fn map_get(m: i64, key: i64, default: i64) -> i64 {
+    let idx = map_index(m, key)
+    if idx == 0 - 1 { default } else { vec_get(peek64(m + 8), idx) }
+}
