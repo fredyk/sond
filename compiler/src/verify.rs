@@ -73,6 +73,11 @@ struct Ctx<'a> {
     /// raised for SIGNED integer division only, a division with any unsigned operand is
     /// exempt (codegen combines types "unsigned wins").
     unsigned_vars: HashSet<String>,
+    /// The inclusive `[min, max]` range (as i128) of each integer-typed parameter's declared
+    /// type. Overflow reasoning bounds a `+`/`-`/`*` against its result type's range, `i32 + 1`
+    /// must fit in `[i32::MIN, i32::MAX]`, not merely in i64, so a narrow-width sum that leaves
+    /// its type but stays inside i64 is correctly rejected.
+    int_types: HashMap<String, (i128, i128)>,
     /// Why the evaluator left the verifiable fragment, if it did. The evaluator bails by
     /// returning `None`; this records the FIRST (deepest) reason so the diagnostic names the
     /// actual construct, `a `for` loop without an `invariant``, instead of a generic list.
@@ -133,6 +138,14 @@ fn verify_function(
             .filter(|p| matches!(&p.ty, Type::Named(n) if n == "u64"))
             .map(|p| p.name.clone())
             .collect(),
+        int_types: f
+            .params
+            .iter()
+            .filter_map(|p| match &p.ty {
+                Type::Named(n) => int_range(n).map(|r| (p.name.clone(), r)),
+                _ => None,
+            })
+            .collect(),
         bail: None,
     };
     let paths = eval_block_paths(&f.body, init, &mut ctx);
@@ -170,7 +183,7 @@ fn verify_function(
         for ob in &path.obligations {
             let mut asm = requires.clone();
             asm.extend(ob.assumptions.iter().cloned());
-            if !obligation_holds(ob, &asm) {
+            if !obligation_holds(ob, &asm, &ctx.int_types) {
                 return reject(format!(
                     "cannot prove {}{}{}",
                     ob.what,
@@ -190,7 +203,7 @@ fn verify_function(
             let Some(p) = sym_prop(e, &path.env) else {
                 return reject("cannot verify a postcondition in this form".to_string());
             };
-            match prove(&p, &assumptions) {
+            match prove(&p, &assumptions, &ctx.int_types) {
                 Outcome::Proven => {}
                 Outcome::Disproven => {
                     return reject(format!(
@@ -497,12 +510,13 @@ fn eval_loop(
     ctx: &mut Ctx,
 ) -> Option<Vec<State>> {
     let modified = modified_vars(body);
+    let int_types = ctx.int_types.clone();
     let mut out = Vec::new();
     for st in states {
         // (1) INIT: every invariant proposition holds under the current assumptions.
         for inv in invariant {
             let p = sym_prop(inv, &st.env)?;
-            if !matches!(prove(&p, &st.cons), Outcome::Proven) {
+            if !matches!(prove(&p, &st.cons, &int_types), Outcome::Proven) {
                 return ctx.bail("a loop invariant that does not hold on entry, check the `invariant { .. }`");
             }
         }
@@ -529,14 +543,14 @@ fn eval_loop(
             // Any obligation inside the body (call precondition, nonzero divisor) must hold
             // under the assumptions live where it arose.
             for ob in &bs.obligations {
-                if !obligation_holds(ob, &ob.assumptions) {
+                if !obligation_holds(ob, &ob.assumptions, &int_types) {
                     return ctx.bail("a safety obligation inside the loop body that could not be proved");
                 }
             }
             // The invariant must be re-established at the end of the iteration.
             for inv in invariant {
                 let p = sym_prop(inv, &bs.env)?;
-                if !matches!(prove(&p, &bs.cons), Outcome::Proven) {
+                if !matches!(prove(&p, &bs.cons, &int_types), Outcome::Proven) {
                     return ctx.bail("a loop invariant not preserved by the body, strengthen the `invariant { .. }`");
                 }
             }
@@ -729,12 +743,16 @@ fn expr_is_unsigned(e: &Expr, unsigned: &HashSet<String>) -> bool {
 
 /// An obligation is discharged if its primary proposition is proven, or, for a disjunctive
 /// safety obligation, its alternative is. Proving EITHER rules out the unsafe case.
-fn obligation_holds(ob: &Obligation, asm: &[SymProp]) -> bool {
-    matches!(prove(&ob.prop, asm), Outcome::Proven)
+fn obligation_holds(
+    ob: &Obligation,
+    asm: &[SymProp],
+    int_types: &HashMap<String, (i128, i128)>,
+) -> bool {
+    matches!(prove(&ob.prop, asm, int_types), Outcome::Proven)
         || ob
             .alt
             .as_ref()
-            .is_some_and(|a| matches!(prove(a, asm), Outcome::Proven))
+            .is_some_and(|a| matches!(prove(a, asm, int_types), Outcome::Proven))
 }
 
 /// The branch conditions a guard contributes: `(then-assumptions, else-assumptions)`.
@@ -848,6 +866,14 @@ impl Lin {
         Lin {
             coeffs: BTreeMap::new(),
             k: k as i128,
+        }
+    }
+    /// A bare constant given directly as i128 (a type bound such as `u64::MAX = 2^64 − 1` does
+    /// not fit in i64).
+    fn const_i128(k: i128) -> Self {
+        Lin {
+            coeffs: BTreeMap::new(),
+            k,
         }
     }
     fn var(name: &str) -> Self {
@@ -996,7 +1022,11 @@ fn holds_cons(op: &BinOp, lhs: &Lin, rhs: &Lin) -> Option<Vec<Lin>> {
     })
 }
 
-fn prove(p: &SymProp, assumptions: &[SymProp]) -> Outcome {
+fn prove(
+    p: &SymProp,
+    assumptions: &[SymProp],
+    int_types: &HashMap<String, (i128, i128)>,
+) -> Outcome {
     // Reflexivity: `e OP e` is decided structurally, for ANY expression (including non-linear
     // ones the arithmetic engine can't touch). `a == a`, `a >= a`, `a <= a` always hold;
     // `a != a`, `a > a`, `a < a` never do. Sound under wrapping too, both sides are the same
@@ -1021,7 +1051,9 @@ fn prove(p: &SymProp, assumptions: &[SymProp]) -> Outcome {
     // every `+`/`-`/`*` in the goal is proven not to overflow under the assumptions; otherwise a
     // ℤ-true relation may be false at runtime (`x + 1 > x` holds over ℤ but fails at i64::MAX).
     // The reflexive and syntactic matches above are wrapping-sound and already returned.
-    if !arith_trustworthy(&p.lhs, assumptions) || !arith_trustworthy(&p.rhs, assumptions) {
+    if !arith_trustworthy(&p.lhs, assumptions, int_types)
+        || !arith_trustworthy(&p.rhs, assumptions, int_types)
+    {
         return Outcome::Unknown;
     }
     // The assumptions as `≥ 0` constraints. A non-linear or `!=` assumption is simply
@@ -1070,14 +1102,31 @@ fn prove(p: &SymProp, assumptions: &[SymProp]) -> Outcome {
     Outcome::Unknown
 }
 
-/// Is the signed integer expression `result` guaranteed not to wrap (fits in `[i64::MIN,
-/// i64::MAX]`) under the given path assumptions? The prover reasons over ℤ, but the machine
-/// wraps: treating `a + b` as its exact mathematical value is only sound when the true value
-/// fits. This proves that bound. Every i64 variable is implicitly in `[MIN, MAX]`, so a loop
-/// counter `r + 1` under `r < n` is provably safe (`n <= MAX` forces `r <= MAX - 1`), while
-/// `x + 1` under only `x > 0` is NOT (x may be `MAX`) and is correctly reported unsafe. A
-/// non-linear result (`a * b`, two variables) can never be certified, returns `false`.
-fn overflow_safe(result: &Sym, cons: &[SymProp]) -> bool {
+/// The inclusive `[min, max]` value range of a built-in integer type (as i128), or `None` for a
+/// non-integer / unknown type name.
+fn int_range(ty: &str) -> Option<(i128, i128)> {
+    Some(match ty {
+        "i8" => (i8::MIN as i128, i8::MAX as i128),
+        "u8" => (0, u8::MAX as i128),
+        "i16" => (i16::MIN as i128, i16::MAX as i128),
+        "u16" => (0, u16::MAX as i128),
+        "i32" => (i32::MIN as i128, i32::MAX as i128),
+        "u32" => (0, u32::MAX as i128),
+        "i64" => (i64::MIN as i128, i64::MAX as i128),
+        "u64" => (0, u64::MAX as i128),
+        _ => return None,
+    })
+}
+
+/// Is the integer expression `result` guaranteed not to wrap, does its true value fit in its
+/// RESULT TYPE's range, under the given path assumptions? The prover reasons over ℤ, but the
+/// machine wraps at the type width: treating `a + b` as its exact value is only sound when the
+/// value fits the type. This proves `type_min <= e <= type_max`. Every variable is implicitly in
+/// its own declared range (from `int_types`; i64 when unknown), so a loop counter `r + 1` under
+/// `r < n` is safe (`n <= MAX` forces `r <= MAX - 1`), while `x + 1` under only `x > 0` is not,
+/// and an `i32` sum leaving `[i32::MIN, i32::MAX]` but fitting in i64 is correctly rejected. A
+/// non-linear result (`a * b`, two variables) is never certified, returns `false`.
+fn overflow_safe(result: &Sym, cons: &[SymProp], int_types: &HashMap<String, (i128, i128)>) -> bool {
     let Some(e) = lin_of_sym(result) else {
         return false; // non-linear: cannot bound it, so assume it may overflow
     };
@@ -1090,37 +1139,64 @@ fn overflow_safe(result: &Sym, cons: &[SymProp]) -> bool {
             a.extend(cs);
         }
     }
-    // Add the implicit range of every i64 variable in play, the result's and the
-    // assumptions', so the entailment can chain them (e.g. `r < n` with `n <= MAX`).
-    let (min, max) = (Lin::constant(i64::MIN), Lin::constant(i64::MAX));
+    // The declared range of a variable; i64's full range when its type is unknown (a call
+    // result, an untyped local), the widest possibility, so never an unsound tightening.
+    let range_of = |v: &str| {
+        int_types
+            .get(v)
+            .copied()
+            .unwrap_or((i64::MIN as i128, i64::MAX as i128))
+    };
+    // Add each variable's implicit range, the result's and the assumptions', so the
+    // entailment can chain them (e.g. `r < n` with `n <= MAX`).
     let mut vars: std::collections::HashSet<String> = e.coeffs.keys().cloned().collect();
     for c in &a {
         vars.extend(c.coeffs.keys().cloned());
     }
     for v in &vars {
+        let (lo, hi) = range_of(v);
         let vv = Lin::var(v);
-        let (Some(lo), Some(hi)) = (vv.sub(&min), max.sub(&vv)) else {
+        let (Some(loc), Some(hic)) = (vv.sub(&Lin::const_i128(lo)), Lin::const_i128(hi).sub(&vv))
+        else {
             return false; // i128 overflow forming a bound, conservative
         };
-        a.push(lo); // v - MIN >= 0
-        a.push(hi); // MAX - v >= 0
+        a.push(loc); // v - lo >= 0
+        a.push(hic); // hi - v >= 0
     }
-    // Prove `MIN <= e` (e - MIN >= 0) and `e <= MAX` (MAX - e >= 0).
-    let (Some(lower), Some(upper)) = (e.sub(&min), max.sub(&e)) else {
+    // The result's type range: the intersection of the ranges of the variables it is built from
+    // (a well-typed expression's operands share a width, so this is that type's range; mixed
+    // widths, a type error elsewhere, only tighten it). Default to i64 when it has no variable.
+    let (mut rlo, mut rhi) = (i64::MIN as i128, i64::MAX as i128);
+    let mut typed = false;
+    for v in e.coeffs.keys() {
+        if let Some((lo, hi)) = int_types.get(v) {
+            if typed {
+                rlo = rlo.max(*lo);
+                rhi = rhi.min(*hi);
+            } else {
+                (rlo, rhi, typed) = (*lo, *hi, true);
+            }
+        }
+    }
+    // Prove `rlo <= e` (e - rlo >= 0) and `e <= rhi` (rhi - e >= 0).
+    let (Some(lower), Some(upper)) = (e.sub(&Lin::const_i128(rlo)), Lin::const_i128(rhi).sub(&e))
+    else {
         return false;
     };
     implies_geq0(&a, &lower) && implies_geq0(&a, &upper)
 }
 
 /// May the linear engine trust the exact ℤ value of `s` under `cons`? Yes iff every `+`/`-`/`*`
-/// node in `s` is proven not to overflow, then the machine computes the same value the ℤ
-/// arithmetic assumes. A single possibly-wrapping operation anywhere makes the whole expression
+/// node in `s` is proven not to overflow its type, then the machine computes the same value the
+/// ℤ arithmetic assumes. A single possibly-wrapping operation anywhere makes the whole expression
 /// untrustworthy (a `>`/`>=`/… derived from it could be false at runtime).
-fn arith_trustworthy(s: &Sym, cons: &[SymProp]) -> bool {
+fn arith_trustworthy(s: &Sym, cons: &[SymProp], int_types: &HashMap<String, (i128, i128)>) -> bool {
     match s {
         Sym::Const(_) | Sym::Var(_) => true,
         Sym::Add(a, b) | Sym::Sub(a, b) | Sym::Mul(a, b) => {
-            arith_trustworthy(a, cons) && arith_trustworthy(b, cons) && overflow_safe(s, cons)
+            arith_trustworthy(a, cons, int_types)
+                && arith_trustworthy(b, cons, int_types)
+                && overflow_safe(s, cons, int_types)
         }
     }
 }
@@ -1439,6 +1515,26 @@ mod tests {
         // With an upper bound the add is proven not to wrap, so `r > x` is genuinely true.
         let funcs = parse(
             "fn f(x: i64) -> (r: i64) requires { x > 0; x < 100 } ensures { r > x } { x + 1 }",
+        );
+        assert!(verify(&funcs).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_proof_that_relies_on_i32_overflow() {
+        // i32::MAX = 2147483647. `x + 1` overflows i32 at x = i32::MAX (r wraps to i32::MIN, so
+        // `r > x` is false), even though the sum fits comfortably in i64. The prover must bound
+        // at the DECLARED width, not i64.
+        let funcs = parse(
+            "fn f(x: i32) -> (r: i32) requires { x > 0; x <= 2147483647 } ensures { r > x } { x + 1 }",
+        );
+        assert!(verify(&funcs).is_err());
+    }
+
+    #[test]
+    fn proves_a_bounded_i32_increment() {
+        // With x < 100 the i32 add stays well inside [i32::MIN, i32::MAX], so `r > x` holds.
+        let funcs = parse(
+            "fn f(x: i32) -> (r: i32) requires { x > 0; x < 100 } ensures { r > x } { x + 1 }",
         );
         assert!(verify(&funcs).is_ok());
     }
