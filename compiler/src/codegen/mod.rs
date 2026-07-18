@@ -183,6 +183,43 @@ pub fn emit_program_g(globals: &[Global], structs: &[StructDef], funcs: &[Functi
     cg.out
 }
 
+/// Like [`emit_program_g`], but with COVERAGE instrumentation: every statement records that
+/// it executed into a shared buffer reached through the global `__cov_ptr` (which the test
+/// harness points at an `mmap(MAP_SHARED)` region before forking each test). The total number
+/// of points is published as `__cov_total`. Used only by the `sond test` coverage build.
+pub fn emit_program_coverage_g(
+    globals: &[Global],
+    structs: &[StructDef],
+    funcs: &[Function],
+) -> String {
+    let mut cg = Codegen {
+        check_contracts: true,
+        coverage: true,
+        ..Default::default()
+    };
+    cg.set_globals(globals);
+    emit_all(&mut cg, structs, funcs, "main");
+    cg.line(".globl main");
+    cg.line("main:");
+    cg.line("    movq %rdi, sond_argc(%rip)");
+    cg.line("    movq %rsi, sond_argv(%rip)");
+    cg.line("    movq %rdx, sond_envp(%rip)");
+    cg.line("    call sond_start");
+    cg.line("    ret");
+    cg.emit_print_int_helper();
+    cg.emit_print_int_signed_helper();
+    cg.emit_globals();
+    cg.emit_rodata();
+    let total = cg.cov_points;
+    cg.line(".data");
+    cg.line("sond_argc: .quad 0");
+    cg.line("sond_argv: .quad 0");
+    cg.line("sond_envp: .quad 0");
+    cg.line("__cov_ptr: .quad 0");
+    cg.line(&format!("__cov_total: .quad {total}"));
+    cg.out
+}
+
 /// Emits a **shared library** (`.so`): every function keeps its own C-ABI name and
 /// there is no entry point. `pub fn` are exported in the dynamic symbol table (callable
 /// from C/C++/Go/Rust/Python via the System V AMD64 C ABI Sond already uses); private
@@ -489,6 +526,13 @@ struct Codegen {
     /// Whether to emit runtime contract checks (`requires`/`ensures`). On for the
     /// oracle/debug build; a release build turns it off for zero overhead.
     check_contracts: bool,
+    /// Coverage instrumentation: when on, `block()` emits a mark at each statement, recording
+    /// that the point executed into the shared `__cov_ptr` buffer. OFF for ordinary builds
+    /// (output is byte-identical), only the `sond test` coverage build sets it.
+    coverage: bool,
+    /// Running count of coverage points emitted (and the id of the next one). The total is
+    /// published as `__cov_total` so the test harness can size its shared coverage buffer.
+    cov_points: usize,
     /// Names of the module-level globals (to resolve a `Var` to a `.data` label).
     global_names: HashSet<String>,
     /// The scalar globals to emit in `.data`, as `(label, constant value)`.
@@ -815,8 +859,22 @@ impl Codegen {
 
     /// Emits a block: its statements, then its tail expression (leaving the
     /// tail's value, or the last computed value, in `%rax`).
+    /// Emits a coverage mark for the next statement, records that this point executed, into
+    /// the shared buffer via `__cov_ptr`. A no-op unless `coverage` is on (so ordinary builds
+    /// are byte-identical). Uses `%r11`, a scratch register free at a statement boundary.
+    fn cov_mark(&mut self) {
+        if !self.coverage {
+            return;
+        }
+        let id = self.cov_points;
+        self.cov_points += 1;
+        self.line("    movq __cov_ptr(%rip), %r11");
+        self.line(&format!("    movq $1, {}(%r11)", id * 8));
+    }
+
     fn block(&mut self, block: &Block) {
         for stmt in &block.stmts {
+            self.cov_mark();
             match stmt {
                 Stmt::Let {
                     name,

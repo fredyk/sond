@@ -18,6 +18,29 @@ fn emits_a_constant_return() {
 }
 
 #[test]
+fn coverage_build_instruments_each_statement() {
+    let funcs = Parser::new(tokenize("fn f() -> i64 { let x = 1\nx + 1 }")).parse_program();
+    let asm = emit_program_coverage_g(&[], &[], &funcs);
+    // Each statement records that it executed into the shared buffer via __cov_ptr.
+    assert!(
+        asm.contains("movq __cov_ptr(%rip), %r11"),
+        "coverage build marks statements"
+    );
+    // The total point count is published for the harness to size its buffer.
+    assert!(asm.contains("__cov_total:"), "publishes the total point count");
+}
+
+#[test]
+fn ordinary_build_is_uninstrumented() {
+    let funcs = Parser::new(tokenize("fn f() -> i64 { let x = 1\nx + 1 }")).parse_program();
+    let asm = emit_program_g(&[], &[], &funcs);
+    assert!(
+        !asm.contains("__cov_ptr"),
+        "an ordinary build carries no coverage marks (byte-identical to before)"
+    );
+}
+
+#[test]
 fn compiles_and_runs_arithmetic_with_precedence_on_real_x64() {
     assert_eq!(compile_and_run("fn f() -> i64 { 2 + 3 * 4 }"), 14);
     assert_eq!(compile_and_run("fn g() -> i64 { (10 - 2) * 5 }"), 40);
