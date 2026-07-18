@@ -9,7 +9,7 @@
 //!
 //! Runs BEFORE struct desugaring, so it sees the original `p.field` form.
 
-use crate::ast::{BinOp, Block, EnumDef, Expr, Function, Global, Stmt, StructDef, Type, UnOp};
+use crate::ast::{BinOp, Block, EnumDef, Expr, Function, Global, Param, Stmt, StructDef, Type, UnOp};
 
 /// Exhaustiveness: every `match` on a sum type must cover ALL of its enum's variants,
 /// use only variants that exist, and not repeat one. A missing case is a COMPILE ERROR
@@ -489,12 +489,38 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
     }
     for f in funcs {
         let mut sizes = global_sizes.clone();
-        bounds_block(&f.body, &f.name, &mut sizes)?;
+        // The function's preconditions are the facts true on every path from entry.
+        let asm: Vec<Expr> = f.requires.clone();
+        bounds_block(&f.body, &f.name, &mut sizes, &asm, &f.params)?;
     }
     Ok(())
 }
 
-fn bounds_block(b: &Block, fname: &str, sizes: &mut HashMap<String, i64>) -> Result<(), String> {
+/// The negation of a comparison guard, for the else-branch of an `if` (`i < N` -> `i >= N`), or
+/// `None` for a non-comparison condition (which contributes no usable fact).
+fn negate_cond(e: &Expr) -> Option<Expr> {
+    let Expr::Binary(op, l, r) = e else {
+        return None;
+    };
+    let nop = match op {
+        BinOp::Lt => BinOp::Ge,
+        BinOp::Le => BinOp::Gt,
+        BinOp::Gt => BinOp::Le,
+        BinOp::Ge => BinOp::Lt,
+        BinOp::Eq => BinOp::Ne,
+        BinOp::Ne => BinOp::Eq,
+        _ => return None,
+    };
+    Some(Expr::Binary(nop, l.clone(), r.clone()))
+}
+
+fn bounds_block(
+    b: &Block,
+    fname: &str,
+    sizes: &mut HashMap<String, i64>,
+    asm: &[Expr],
+    params: &[Param],
+) -> Result<(), String> {
     for s in &b.stmts {
         match s {
             Stmt::Let {
@@ -503,7 +529,7 @@ fn bounds_block(b: &Block, fname: &str, sizes: &mut HashMap<String, i64>) -> Res
                 array_len,
                 ..
             } => {
-                bounds_expr(value, fname, sizes)?;
+                bounds_expr(value, fname, sizes, asm, params)?;
                 match array_len {
                     // `let a[N]` records the known size; a scalar `let a = ..` reusing the
                     // name drops any prior size so a later index is not checked against it.
@@ -516,67 +542,92 @@ fn bounds_block(b: &Block, fname: &str, sizes: &mut HashMap<String, i64>) -> Res
                 }
             }
             Stmt::Assign { target, value } => {
-                bounds_expr(target, fname, sizes)?;
-                bounds_expr(value, fname, sizes)?;
+                bounds_expr(target, fname, sizes, asm, params)?;
+                bounds_expr(value, fname, sizes, asm, params)?;
             }
-            Stmt::Return(Some(v)) | Stmt::Expr(v) => bounds_expr(v, fname, sizes)?,
+            Stmt::Return(Some(v)) | Stmt::Expr(v) => bounds_expr(v, fname, sizes, asm, params)?,
             Stmt::For {
                 cond,
                 invariant,
                 body,
             } => {
                 if let Some(c) = cond {
-                    bounds_expr(c, fname, sizes)?;
+                    bounds_expr(c, fname, sizes, asm, params)?;
                 }
                 for inv in invariant {
-                    bounds_expr(inv, fname, sizes)?;
+                    bounds_expr(inv, fname, sizes, asm, params)?;
                 }
+                // Inside the loop body the condition and every invariant hold as facts.
+                let mut inner_asm = asm.to_vec();
+                if let Some(c) = cond {
+                    inner_asm.push(c.clone());
+                }
+                inner_asm.extend(invariant.iter().cloned());
                 // A declaration inside the loop does not escape it.
                 let mut inner = sizes.clone();
-                bounds_block(body, fname, &mut inner)?;
+                bounds_block(body, fname, &mut inner, &inner_asm, params)?;
             }
             _ => {}
         }
     }
     if let Some(t) = &b.tail {
-        bounds_expr(t, fname, sizes)?;
+        bounds_expr(t, fname, sizes, asm, params)?;
     }
     Ok(())
 }
 
-fn bounds_expr(e: &Expr, fname: &str, sizes: &HashMap<String, i64>) -> Result<(), String> {
+fn bounds_expr(
+    e: &Expr,
+    fname: &str,
+    sizes: &HashMap<String, i64>,
+    asm: &[Expr],
+    params: &[Param],
+) -> Result<(), String> {
     if let Expr::Index(base, idx) = e
         && let Expr::Var(a) = base.as_ref()
         && let Some(&n) = sizes.get(a)
-        && let Some(k) = const_index(idx)
-        && (k < 0 || k >= n)
     {
-        return Err(format!(
-            "function `{fname}`: index {k} is out of bounds for `{a}` of size {n} (valid range 0..{n})"
-        ));
+        match const_index(idx) {
+            // A compile-time-constant index outside [0, N) is a provable stack overrun.
+            Some(k) if k < 0 || k >= n => {
+                return Err(format!(
+                    "function `{fname}`: index {k} is out of bounds for `{a}` of size {n} (valid range 0..{n})"
+                ));
+            }
+            // A VARIABLE index the facts in scope force out of range is equally a provable
+            // overrun, discharged through the prover (`requires`, branch guards, loop bounds).
+            None if crate::verify::index_provably_oob(idx, n, asm, params) => {
+                return Err(format!(
+                    "function `{fname}`: this index is provably out of bounds for `{a}` of size {n} (the facts in scope force it outside 0..{n})"
+                ));
+            }
+            _ => {}
+        }
     }
     match e {
         Expr::Binary(_, l, r) | Expr::Index(l, r) => {
-            bounds_expr(l, fname, sizes)?;
-            bounds_expr(r, fname, sizes)
+            bounds_expr(l, fname, sizes, asm, params)?;
+            bounds_expr(r, fname, sizes, asm, params)
         }
-        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => bounds_expr(x, fname, sizes),
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
+            bounds_expr(x, fname, sizes, asm, params)
+        }
         Expr::Call(c, args) => {
-            bounds_expr(c, fname, sizes)?;
+            bounds_expr(c, fname, sizes, asm, params)?;
             for a in args {
-                bounds_expr(&a.value, fname, sizes)?;
+                bounds_expr(&a.value, fname, sizes, asm, params)?;
             }
             Ok(())
         }
         Expr::List(items) => {
             for it in items {
-                bounds_expr(it, fname, sizes)?;
+                bounds_expr(it, fname, sizes, asm, params)?;
             }
             Ok(())
         }
         Expr::StructLit(_, fields) => {
             for (_, v) in fields {
-                bounds_expr(v, fname, sizes)?;
+                bounds_expr(v, fname, sizes, asm, params)?;
             }
             Ok(())
         }
@@ -585,20 +636,27 @@ fn bounds_expr(e: &Expr, fname: &str, sizes: &HashMap<String, i64>) -> Result<()
             then_branch,
             else_branch,
         } => {
-            bounds_expr(cond, fname, sizes)?;
+            bounds_expr(cond, fname, sizes, asm, params)?;
+            // The guard holds in the then-branch; its negation in the else-branch.
+            let mut then_asm = asm.to_vec();
+            then_asm.push(cond.as_ref().clone());
             let mut t = sizes.clone();
-            bounds_block(then_branch, fname, &mut t)?;
+            bounds_block(then_branch, fname, &mut t, &then_asm, params)?;
             if let Some(eb) = else_branch {
+                let mut else_asm = asm.to_vec();
+                if let Some(neg) = negate_cond(cond) {
+                    else_asm.push(neg);
+                }
                 let mut e2 = sizes.clone();
-                bounds_block(eb, fname, &mut e2)?;
+                bounds_block(eb, fname, &mut e2, &else_asm, params)?;
             }
             Ok(())
         }
         Expr::Match { scrutinee, arms } => {
-            bounds_expr(scrutinee, fname, sizes)?;
+            bounds_expr(scrutinee, fname, sizes, asm, params)?;
             for a in arms {
                 let mut m = sizes.clone();
-                bounds_block(&a.body, fname, &mut m)?;
+                bounds_block(&a.body, fname, &mut m, asm, params)?;
             }
             Ok(())
         }
@@ -682,6 +740,36 @@ mod tests {
     #[test]
     fn accepts_a_constant_index_from_arithmetic_in_bounds() {
         assert!(bounds("fn f() -> i64 { let a[4]\na[2 + 1] }").is_ok());
+    }
+
+    #[test]
+    fn rejects_a_variable_index_a_precondition_forces_out_of_bounds() {
+        // `requires { i >= 4 }` makes `a[i]` into a size-4 array a provable overrun.
+        let err = bounds("fn f(i: i64) -> i64 requires { i >= 4 } { let a[4]\na[i] }").unwrap_err();
+        assert!(err.contains("provably out of bounds"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_variable_index_a_branch_guard_forces_out_of_bounds() {
+        // Indexing inside the `i >= 4` branch: the guard proves the index is out of range.
+        let err = bounds("fn f(i: i64) -> i64 { let a[4]\nif i >= 4 { a[i] } else { 0 } }")
+            .unwrap_err();
+        assert!(err.contains("provably out of bounds"), "got: {err}");
+    }
+
+    #[test]
+    fn accepts_a_variable_index_proven_in_bounds() {
+        // `0 <= i < 4`, the access is provably safe.
+        assert!(
+            bounds("fn f(i: i64) -> i64 requires { i >= 0; i < 4 } { let a[4]\na[i] }").is_ok()
+        );
+    }
+
+    #[test]
+    fn accepts_a_variable_index_with_no_information() {
+        // Non-breaking: an index that MIGHT be in range is left alone (only PROVABLE overruns
+        // are rejected, the full prove-or-error bounds await refinement types).
+        assert!(bounds("fn f(i: i64) -> i64 { let a[4]\na[i] }").is_ok());
     }
 
     #[test]

@@ -13,7 +13,7 @@
 //! and to a fuller prover (Fourier–Motzkin / SMT) later, never silently passed
 //! off as "verified".
 
-use crate::ast::{BinOp, Block, Expr, Function, Stmt, Type};
+use crate::ast::{BinOp, Block, Expr, Function, Param, Stmt, Type};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// A symbolic integer value expressed in terms of the parameters.
@@ -1199,6 +1199,44 @@ fn arith_trustworthy(s: &Sym, cons: &[SymProp], int_types: &HashMap<String, (i12
                 && overflow_safe(s, cons, int_types)
         }
     }
+}
+
+/// Is `0 <= idx < n` DISPROVEN under `assumptions`, i.e. is the index PROVABLY out of bounds
+/// for an array of size `n`, given the facts in scope (a function's `requires`, the branch guards
+/// and loop conditions on the path to the access)? This exposes the prover to the bounds check so
+/// it can reject a VARIABLE index that must be out of range, the analog of the constant-index
+/// check (`check_constant_bounds`), and the reusable core of the eventual prove-or-error bounds.
+/// SOUND and NON-BREAKING: it returns true only when the negation is entailed; an index that
+/// merely MIGHT be out of range (the common unproven case) returns false and is left alone.
+pub fn index_provably_oob(idx: &Expr, n: i64, assumptions: &[Expr], params: &[Param]) -> bool {
+    let env: HashMap<String, Sym> = params
+        .iter()
+        .map(|p| (p.name.clone(), Sym::Var(p.name.clone())))
+        .collect();
+    let Some(i) = eval_expr(idx, &env) else {
+        return false; // a non-arithmetic index (a field/call): outside the linear fragment
+    };
+    let asm: Vec<SymProp> = assumptions.iter().filter_map(|e| sym_prop(e, &env)).collect();
+    let int_types: HashMap<String, (i128, i128)> = params
+        .iter()
+        .filter_map(|p| match &p.ty {
+            Type::Named(t) => int_range(t).map(|r| (p.name.clone(), r)),
+            _ => None,
+        })
+        .collect();
+    // Reject iff the assumptions force `idx < 0` (lower bound disproven) or `idx >= n` (upper).
+    let lower = SymProp {
+        op: BinOp::Ge,
+        lhs: i.clone(),
+        rhs: Sym::Const(0),
+    };
+    let upper = SymProp {
+        op: BinOp::Lt,
+        lhs: i,
+        rhs: Sym::Const(n),
+    };
+    matches!(prove(&lower, &asm, &int_types), Outcome::Disproven)
+        || matches!(prove(&upper, &asm, &int_types), Outcome::Disproven)
 }
 
 fn is_comparison(op: &BinOp) -> bool {
