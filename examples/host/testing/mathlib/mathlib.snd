@@ -1,0 +1,44 @@
+// A small tested library, the canonical shape of a Sond module under the mandatory
+// test+coverage gate. Pure integer functions, each covered by `test` blocks. Run with:
+//     sond test examples/host/testing/mathlib/mathlib.snd
+// which requires every test to pass with >= 80% branch coverage.
+
+include "x86_64/linux/testing.snd"
+
+pub fn abs(x: i64) -> (r: i64) ensures { r >= 0 } {
+    if x >= 0 { x } else { 0 - x }
+}
+
+pub fn max(a: i64, b: i64) -> (r: i64) ensures { r >= a; r >= b } {
+    if a > b { a } else { b }
+}
+
+pub fn min(a: i64, b: i64) -> (r: i64) ensures { r <= a; r <= b } {
+    if a < b { a } else { b }
+}
+
+pub fn clamp(x: i64, lo: i64, hi: i64) -> (r: i64) requires { lo <= hi } ensures { r >= lo; r <= hi } {
+    if x < lo { lo } else { if x > hi { hi } else { x } }
+}
+
+pub fn sign(x: i64) -> i64 {
+    if x > 0 { 1 } else { if x < 0 { 0 - 1 } else { 0 } }
+}
+
+test "abs of a negative is positive" { assert_eq(abs(0 - 7), 7) }
+test "abs of a positive is itself" { assert_eq(abs(9), 9) }
+test "abs of zero is zero" { assert_eq(abs(0), 0) }
+
+test "max picks the larger" { assert_eq(max(3, 8), 8) }
+test "max picks the first when larger" { assert_eq(max(10, 2), 10) }
+
+test "min picks the smaller" { assert_eq(min(3, 8), 3) }
+test "min picks the second when smaller" { assert_eq(min(10, 2), 2) }
+
+test "clamp below the range" { assert_eq(clamp(0 - 5, 0, 10), 0) }
+test "clamp above the range" { assert_eq(clamp(15, 0, 10), 10) }
+test "clamp inside the range" { assert_eq(clamp(7, 0, 10), 7) }
+
+test "sign of positive" { assert_eq(sign(42), 1) }
+test "sign of negative" { assert_eq(sign(0 - 42), 0 - 1) }
+test "sign of zero" { assert_eq(sign(0), 0) }
