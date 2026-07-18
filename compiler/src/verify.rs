@@ -896,6 +896,17 @@ fn holds_cons(op: &BinOp, lhs: &Lin, rhs: &Lin) -> Option<Vec<Lin>> {
 }
 
 fn prove(p: &SymProp, assumptions: &[SymProp]) -> Outcome {
+    // Reflexivity: `e OP e` is decided structurally, for ANY expression (including non-linear
+    // ones the arithmetic engine can't touch). `a == a`, `a >= a`, `a <= a` always hold;
+    // `a != a`, `a > a`, `a < a` never do. Sound under wrapping too, both sides are the same
+    // value. This lets a contract restate its own body, e.g. `ensures { r == x * x }`.
+    if p.lhs == p.rhs {
+        return match p.op {
+            BinOp::Eq | BinOp::Ge | BinOp::Le => Outcome::Proven,
+            BinOp::Ne | BinOp::Gt | BinOp::Lt => Outcome::Disproven,
+            _ => Outcome::Unknown,
+        };
+    }
     // Syntactic match: an assumption identical to the goal proves it directly. This is the
     // path for `!=` facts (e.g. `b != 0` from a precondition or a negated `b == 0` guard),
     // which the linear machinery below drops because `!=` is not a conjunctive `≥ 0` fact.
@@ -1138,6 +1149,21 @@ mod tests {
 
     fn parse(src: &str) -> Vec<Function> {
         Parser::new(tokenize(src)).parse_program()
+    }
+
+    #[test]
+    fn proves_reflexive_equality_even_when_nonlinear() {
+        // `r == x * x` with body `x * x` is trivially true (a == a), but `x * x` is
+        // non-linear so the linear engine can't reason about it. Reflexivity must decide it.
+        let funcs = parse("fn sq(x: i64) -> (r: i64) ensures { r == x * x } { x * x }");
+        assert!(verify(&funcs).is_ok(), "e == e holds structurally");
+    }
+
+    #[test]
+    fn rejects_reflexive_strict_inequality() {
+        // `r > r` (here `r > x` with r bound to x) is always false, a == a means a > a is not.
+        let funcs = parse("fn f(x: i64) -> (r: i64) ensures { r > r } { x }");
+        assert!(verify(&funcs).is_err(), "a > a is never true");
     }
 
     #[test]
