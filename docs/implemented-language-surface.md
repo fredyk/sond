@@ -159,9 +159,9 @@ else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above
 - `let a[N]`, fixed-size array of N words on the stack (no allocator, every target);
   index with `a[i]`; `a.len` is the size N (`for i < a.len`). A constant index outside
   `[0, N)` is a compile error. Tables: `K[64]`.
-- **`Slice`**, built-in length-carrying array `{ptr, len}` (a fat pointer). `let s = Slice {
-  ptr: a, len: a.len }`; pass it so a fn knows the length (`fn sum(s: Slice)`); `s.len`,
-  `s[i]` / `s[i] = v` (through `.ptr`). Built in, no `struct Slice` needed.
+- **`Slice`**, built-in length-carrying array `{ptr, len}`. `let s = Slice { ptr: a, len:
+  a.len }`; pass so a fn knows the length (`fn sum(s: Slice)`); `s.len`, index `s[i]` /
+  `s[i] = v`. Sub-slice `s[lo:hi]` is a VIEW, no copy (`s[:hi]`/`s[lo:]`/`s[:]`). Built in.
 - **Structs** (all fields i64, one word each). `struct Point { x: i64, y: i64 }`;
   `let p = Point { x: 1, y: 2 }` or `let p: Point` (zeroed); read/write `p.x` / `p.x = 5`.
   **Methods**: `impl Point { fn sum(self) -> i64 { self.x + self.y } }`, called `p.sum()`.
