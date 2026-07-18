@@ -127,6 +127,25 @@ Writing this surfaced three things the earlier RFCs implied but never stated:
 3. **The memory-model sidestep is a first-class selling point, not a footnote.** "No relaxed
    memory model because races are unrepresentable" is as strong a claim as "no null", it
    should sit next to the four pillars, not be discovered here.
+4. **The allocator is the race the guarantee forgets (surfaced building the stdlib, 2026-07-18).**
+   "Races unrepresentable" presumes *all* shared mutable state flows through tracked mutable
+   capabilities (§4). But the stdlib's foundation, the bump **arena** that `Bytes`/`Vec`/`Map`
+   (and thus every crypto/HTTP/PQ program) allocate from, is a raw `i64` bump pointer in a
+   module global, mutated with `poke64`. That is *below* the capability system (registry #4 free
+   `peek/poke` + #7 mutable globals), so two Layer-B threads that both allocate race on the bump
+   pointer, and the race is **invisible** to the analysis, it is not a typed capability, so
+   nothing flags it. The guarantee has a hole at the very bottom of the tower. Why nothing breaks
+   *today*: the only shipped concurrency is **fork-per-connection** (the HTTP/secure-echo demos) -
+   separate address spaces, so each process has its own arena. Real threading (`clone`, shared
+   address space) races on the first two concurrent `alloc`s. **Direction: thread-local arenas** -
+   each Layer-B thread gets its own bump region seeded at spawn, so allocation needs no
+   synchronization and stays race-free *by construction* (no shared writable location), keeping
+   the claim true down to the allocator; a handle crosses threads only by `Channel<T>` move, which
+   must copy/relocate the bytes (or the arena is split into a shared-immutable pool + per-thread
+   scratch). The alternative, one global arena behind a lock, reintroduces a serialization point
+   on every allocation and a real (if audited) synchronized-mutable core. Either way this is a
+   **precondition** for turning on hosted threads, not an afterthought: the allocator must pick its
+   story before Layer B ships, or the headline guarantee is false at the foundation.
 
 ## 8. Honest limits
 
