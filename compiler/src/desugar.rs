@@ -16,6 +16,7 @@
 
 use crate::ast::{
     Arg, BinOp, Block, EnumDef, Expr, Function, Global, MatchArm, Param, Stmt, StructDef, Type,
+    UnOp,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -635,9 +636,27 @@ fn desugar_expr(
             // Slice indexing: `s[i]` on a `Slice`-typed value reads element i through its
             // `.ptr` field (`peek64(s.ptr + i*8)`), unlike a bare array where the name IS the
             // base address. Rewriting the base to `s.ptr` reuses the array-index codegen.
-            if let Expr::Var(name) = b.as_ref()
-                && locals.get(name).map(String::as_str) == Some(SLICE_TYPE)
-            {
+            let slice_name = match b.as_ref() {
+                Expr::Var(name) if locals.get(name).map(String::as_str) == Some(SLICE_TYPE) => {
+                    Some(name.clone())
+                }
+                _ => None,
+            };
+            if let Some(sname) = slice_name {
+                // A constant NEGATIVE index counts from the end: `s[-k]` → `s[s.len - k]`
+                // (`s.len + i` since i is negative). Only constant negatives are normalized -
+                // a variable index pays no runtime branch.
+                if is_negative_const(i) {
+                    let idx = std::mem::replace(&mut **i, Expr::Int(0));
+                    **i = Expr::Binary(
+                        BinOp::Add,
+                        Box::new(Expr::Field(
+                            Box::new(Expr::Var(sname)),
+                            "len".to_string(),
+                        )),
+                        Box::new(idx),
+                    );
+                }
                 let base = std::mem::replace(&mut **b, Expr::Int(0));
                 **b = Expr::Field(Box::new(base), "ptr".to_string());
             }
@@ -943,12 +962,36 @@ pub fn lower_slice_ranges(funcs: &mut [Function]) {
     }
 }
 
-/// Builds the `Slice { ptr, len }` view for `base[lo:hi]`.
+/// True if `e` is a compile-time-constant NEGATIVE integer, `-1` (parsed as `Unary(Neg, 1)`)
+/// or a literal `Int(n<0)`. Such an index/bound counts from the end of the slice.
+fn is_negative_const(e: &Expr) -> bool {
+    match e {
+        Expr::Int(n) => *n < 0,
+        Expr::Unary(UnOp::Neg, x) => matches!(x.as_ref(), Expr::Int(n) if *n > 0),
+        _ => false,
+    }
+}
+
+/// A range bound counted from the end when negative: `-k` → `base.len + (-k)` (= `len - k`).
+fn end_relative(bound: Expr, base: &Expr) -> Expr {
+    if is_negative_const(&bound) {
+        Expr::Binary(
+            BinOp::Add,
+            Box::new(Expr::Field(Box::new(base.clone()), "len".to_string())),
+            Box::new(bound),
+        )
+    } else {
+        bound
+    }
+}
+
+/// Builds the `Slice { ptr, len }` view for `base[lo:hi]`. A negative `lo`/`hi` counts from the
+/// end (`s[:-1]`, `s[-2:]`).
 fn slice_range_to_struct(base: Expr, lo: Option<Box<Expr>>, hi: Option<Box<Expr>>) -> Expr {
-    let lo_e = lo.map_or(Expr::Int(0), |b| *b);
+    let lo_e = lo.map_or(Expr::Int(0), |b| end_relative(*b, &base));
     let hi_e = hi.map_or_else(
         || Expr::Field(Box::new(base.clone()), "len".to_string()),
-        |b| *b,
+        |b| end_relative(*b, &base),
     );
     let ptr = Expr::Binary(
         BinOp::Add,
@@ -1147,6 +1190,45 @@ mod tests {
              }",
         );
         assert_eq!(out, "100");
+    }
+
+    #[test]
+    fn negative_slice_index_counts_from_the_end() {
+        // `s[-1]` is the last element, `s[-2]` the second-to-last.
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             let a[5]\n\
+             a[0] = 10  a[1] = 20  a[2] = 30  a[3] = 40  a[4] = 50\n\
+             let s = Slice { ptr: a, len: a.len }\n\
+             print_int(s[-1] + s[-2])\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "90"); // 50 + 40
+    }
+
+    #[test]
+    fn negative_range_bounds_count_from_the_end() {
+        // `s[:-1]` = all but last (10+20+30+40=100); `s[-2:]` = last two (40+50=90).
+        let base = "fn sum(s: Slice) -> i64 {\n\
+             let mut i = 0\n\
+             let mut acc = 0\n\
+             for i < s.len { acc = acc + s[i]  i = i + 1 }\n\
+             acc\n\
+             }\n";
+        let mk = |range: &str| {
+            format!(
+                "{base}fn main() -> i64 {{\n\
+                 let a[5]\n\
+                 a[0] = 10  a[1] = 20  a[2] = 30  a[3] = 40  a[4] = 50\n\
+                 let s = Slice {{ ptr: a, len: a.len }}\n\
+                 print_int(sum({range}))\n\
+                 0\n\
+                 }}"
+            )
+        };
+        assert_eq!(compile_and_capture(&mk("s[:-1]")), "100");
+        assert_eq!(compile_and_capture(&mk("s[-2:]")), "90");
     }
 
     #[test]
