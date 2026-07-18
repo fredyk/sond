@@ -185,20 +185,23 @@ test "positive"    { assert(dbl(1) > 0) }
 - Each test runs in its own forked process, so a failing assertion or a crash is isolated -
   the suite runs to completion and reports `N test(s), M failed` (exit code = M).
 
-### Coverage (`sond test --coverage`)
+### Tests are mandatory to build (coverage gate)
 
-`sond test --coverage <file.snd>` measures how much of the code under test the tests
-exercise (basic-block / branch coverage), and **fails if coverage is below a threshold**
-(default 80%, set with `--min-coverage=N`):
+Sond does not let you ship code that isn't tested. **`sond build <program.snd>` runs the
+program's tests and refuses to produce a binary unless every test passes AND coverage is at
+least the threshold** (default 80%, `--min-coverage=N`):
 
 ```
-sond test --coverage mylib.snd                  # gate at 80%
-sond test --coverage --min-coverage=90 mylib.snd
+sond build myprogram.snd            # runs tests + gates coverage, then builds
+sond test  mylib.snd                # same gate for a library (no main to build)
+sond build --min-coverage=90 app.snd
 ```
 
-It reports e.g. `coverage 5/5 (100%)`; below the threshold it prints `coverage below 80%
-threshold` and exits nonzero. The test bodies, the harness, and the testing library are not
-counted, only the code under test. Ordinary builds carry no instrumentation.
+Coverage is basic-block / branch coverage of the code under test (the test bodies, the
+harness, and the testing library are not counted). It reports e.g. `coverage 5/5 (100%)`;
+below the threshold it prints `coverage below 80% threshold` and no artifact is produced. A
+program with no `test` blocks is rejected up front. (`sondc` itself is the raw, ungated
+primitive used for bootstrapping, the gate lives in the `sond` toolchain driver.)
 
 ## Builtins, provided by the COMPILER itself (no `include` needed)
 
