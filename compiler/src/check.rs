@@ -9,7 +9,7 @@
 //!
 //! Runs BEFORE struct desugaring, so it sees the original `p.field` form.
 
-use crate::ast::{BinOp, Block, EnumDef, Expr, Function, Stmt, StructDef, Type, UnOp};
+use crate::ast::{BinOp, Block, EnumDef, Expr, Function, Global, Stmt, StructDef, Type, UnOp};
 
 /// Exhaustiveness: every `match` on a sum type must cover ALL of its enum's variants,
 /// use only variants that exist, and not repeat one. A missing case is a COMPILE ERROR
@@ -478,9 +478,17 @@ fn const_fold(e: &Expr, fname: &str) -> Result<Option<i64>, String> {
 /// (an off-by-one, a wrong literal). Only PROVABLE out-of-bounds are rejected; a variable index
 /// is left to the prover and the coming refinement types. Non-breaking: no valid program indexes
 /// a known-size array with a constant out of range. Mirrors `check_constant_overflow`.
-pub fn check_constant_bounds(funcs: &[Function]) -> Result<(), String> {
+pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(), String> {
+    // Module-level arrays (`.data` tables, crypto S-boxes, round constants) are in scope in
+    // every function, so seed their sizes once.
+    let mut global_sizes: HashMap<String, i64> = HashMap::new();
+    for g in globals {
+        if let Some(n) = g.array_len {
+            global_sizes.insert(g.name.clone(), n);
+        }
+    }
     for f in funcs {
-        let mut sizes: HashMap<String, i64> = HashMap::new();
+        let mut sizes = global_sizes.clone();
         bounds_block(&f.body, &f.name, &mut sizes)?;
     }
     Ok(())
@@ -638,8 +646,10 @@ mod tests {
     }
 
     fn bounds(src: &str) -> Result<(), String> {
-        let funcs = Parser::new(tokenize(src)).parse_program();
-        check_constant_bounds(&funcs)
+        let mut p = Parser::new(tokenize(src));
+        let funcs = p.parse_program();
+        let globals = p.take_globals();
+        check_constant_bounds(&funcs, &globals)
     }
 
     #[test]
@@ -684,6 +694,18 @@ mod tests {
         // A variable index is left to the prover/refinements, the (C) on-ramp rejects only
         // PROVABLE (constant) out-of-bounds, so this must NOT be rejected here.
         assert!(bounds("fn f(i: i64) -> i64 { let a[4]\na[i] }").is_ok());
+    }
+
+    #[test]
+    fn rejects_constant_index_past_a_module_level_array() {
+        // A `.data` table (crypto S-box etc.) indexed by a constant out of range is caught too.
+        let err = bounds("let K[4] = [1, 2, 3, 4]\nfn f() -> i64 { K[9] }").unwrap_err();
+        assert!(err.contains("out of bounds") && err.contains("K"), "got: {err}");
+    }
+
+    #[test]
+    fn accepts_constant_index_in_a_module_level_array() {
+        assert!(bounds("let K[4] = [1, 2, 3, 4]\nfn f() -> i64 { K[3] }").is_ok());
     }
 
     #[test]
