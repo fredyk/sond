@@ -77,7 +77,16 @@ fn main() -> ExitCode {
     } else {
         "host"
     };
-    let cache_path = build_cache_path(&src, target_tag);
+    // Test builds (`--test`, with or without `--coverage`/`--min-coverage`) are ephemeral -
+    // synthesized per invocation and run once, and their output depends on flags not in the
+    // cache key (the source alone). Never cache them, so a changed threshold or mode always
+    // rebuilds.
+    let is_test_build = args.iter().any(|a| a == "--test");
+    let cache_path = if is_test_build {
+        None
+    } else {
+        build_cache_path(&src, target_tag)
+    };
     if let Some(cp) = &cache_path
         && cp.exists()
         && std::fs::copy(cp, &output).is_ok()
@@ -116,8 +125,13 @@ fn main() -> ExitCode {
     let coverage = args.iter().any(|a| a == "--coverage");
     if test_mode {
         funcs.retain(|f| f.name != "main");
+        let min_coverage = args
+            .iter()
+            .find_map(|a| a.strip_prefix("--min-coverage="))
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(80);
         let harness = if coverage {
-            sondc::testing::synth_coverage_harness(&funcs)
+            sondc::testing::synth_coverage_harness(&funcs, min_coverage)
         } else {
             sondc::testing::synth_harness(&funcs)
         };

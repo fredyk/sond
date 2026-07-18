@@ -83,12 +83,17 @@ fn main() -> ExitCode {
     let sondc = find_sondc();
     match args[1].as_str() {
         "test" => {
-            let Some(file) = args.get(2) else {
+            // sond test [--coverage] [--min-coverage=N] <file.snd>, forward the flags to
+            // sondc --test; the file is the first non-flag argument.
+            let rest = &args[2..];
+            let Some(file) = rest.iter().find(|a| !a.starts_with('-')) else {
                 eprintln!("sond test: missing <file.snd>");
                 return ExitCode::from(2);
             };
+            let mut flags: Vec<&str> = vec!["--test"];
+            flags.extend(rest.iter().filter(|a| a.starts_with('-')).map(|s| s.as_str()));
             let out = temp_out(file, ".testbin");
-            if !compile(&sondc, file, &out, &["--test"]) {
+            if !compile(&sondc, file, &out, &flags) {
                 return ExitCode::FAILURE;
             }
             let code = run_binary(&out);

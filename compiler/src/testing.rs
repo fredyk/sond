@@ -64,7 +64,7 @@ pub fn synth_harness(funcs: &[Function]) -> Function {
 /// `__cov_total` words (so the instrumentation in the forked children accumulates into it),
 /// points `__cov_ptr` at it, runs the tests, then counts the covered points and reports the
 /// coverage. Compiled with `emit_program_coverage_g`, which instruments the code under test.
-pub fn synth_coverage_harness(funcs: &[Function]) -> Function {
+pub fn synth_coverage_harness(funcs: &[Function], min_coverage: u32) -> Function {
     let tests: Vec<&Function> = funcs.iter().filter(|f| f.is_test).collect();
     let n = tests.len();
     // PROT_READ|PROT_WRITE = 3; MAP_SHARED|MAP_ANONYMOUS = 1|32 = 33; fd = -1; offset = 0.
@@ -93,8 +93,18 @@ pub fn synth_coverage_harness(funcs: &[Function]) -> Function {
     src.push_str("    print_int(__covered)\n");
     src.push_str("    print(\"/\")\n");
     src.push_str("    print_int(__n)\n");
-    src.push_str("    print(\" statements\\n\")\n");
-    src.push_str("    __failed\n}\n");
+    src.push_str("    print(\" (\")\n");
+    src.push_str("    print_int(__covered * 100 / __n)\n");
+    src.push_str("    print(\"%)\\n\")\n");
+    // The gate: coverage below the threshold is a failure, distinct from test failures.
+    // Integer form of `covered/n < min/100` is `covered*100 < min*n`.
+    src.push_str(&format!(
+        "    let __gatefail = if __covered * 100 < {min_coverage} * __n {{ 1 }} else {{ 0 }}\n"
+    ));
+    src.push_str(&format!(
+        "    if __gatefail == 1 {{ print(\"coverage below {min_coverage}% threshold\\n\") }}\n"
+    ));
+    src.push_str("    __failed + __gatefail\n}\n");
     parse_main(&src)
 }
 
@@ -127,7 +137,7 @@ mod tests {
     #[test]
     fn coverage_harness_maps_the_buffer_and_counts() {
         let funcs = parse("test \"a\" { let x = 1 }\ntest \"b\" { let y = 2 }");
-        let main = synth_coverage_harness(&funcs);
+        let main = synth_coverage_harness(&funcs, 80);
         assert_eq!(main.name, "main");
         let src = format!("{:?}", main.body);
         // Reads the point count, mmaps a shared buffer, points __cov_ptr at it, and both
