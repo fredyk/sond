@@ -3,7 +3,7 @@
 | Field       | Value                                                                 |
 |-------------|-----------------------------------------------------------------------|
 | RFC         | 0012                                                                  |
-| Status      | Draft --- **needs one decision from JMV (§5) to unblock #3 and #2**   |
+| Status      | **DECIDED (JMV 2026-07-18): (A) checked-by-default, reached via (C) as the non-breaking on-ramp.** #3 and #2 are unblocked, staged implementation (§6). |
 | Date        | 2026-07-18                                                            |
 | Authors     | JMV + agents                                                         |
 | Motivation  | #3 (silent overflow) and #2 (unchecked `a[i]`) are the two demonstrated Class-A holes still open; both are blocked on *the same* missing mechanism, not on effort |
@@ -99,6 +99,12 @@ non-breaking on-ramp (ship constant-overflow rejection now; grow refinements tow
 type system matures). But this is the language's soul, it is yours to set. Once you pick, #3
 and #2 are no longer blocked; they are staged implementation (refinement contracts → length-
 carrying arrays → the raise-and-discharge in verify.rs, which is the div-by-zero pattern).
+
+> **DECISION (JMV 2026-07-18): (A) via (C).** Checked-by-default is the destination; ship (C)
+>, reject only *provable* (constant) overflows, now as the non-breaking first step, and grow
+> refinements toward full (A). Intended wrapping becomes explicit (`wrapping_add` / a `u64w`
+> type). Before committing to full (A), run the qwen3.6 gate on an accumulator loop and an
+> integer parser to measure the annotation burden the counterexample-guided loop must carry.
 
 ## 6. Staged implementation (after the decision)
 

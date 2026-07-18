@@ -171,6 +171,12 @@ fn main() -> ExitCode {
         eprintln!("sondc: {msg}");
         return ExitCode::FAILURE;
     }
+    // (C) on-ramp for #3 (RFC-0012): a `+`/`-`/`*` of constants that overflows i64 is a
+    // compile error, the non-breaking first step of checked-by-default arithmetic.
+    if let Err(msg) = sondc::check::check_constant_overflow(&funcs) {
+        eprintln!("sondc: {msg}");
+        return ExitCode::FAILURE;
+    }
 
     // `--emit-header`: print the module's public interface (contract, no bodies)
     // and stop. This is the `.snd` header for ~/.local/include/sond and dist/include.

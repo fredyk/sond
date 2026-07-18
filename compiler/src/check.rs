@@ -9,7 +9,7 @@
 //!
 //! Runs BEFORE struct desugaring, so it sees the original `p.field` form.
 
-use crate::ast::{Block, EnumDef, Expr, Function, Stmt, StructDef, Type};
+use crate::ast::{BinOp, Block, EnumDef, Expr, Function, Stmt, StructDef, Type};
 
 /// Exhaustiveness: every `match` on a sum type must cover ALL of its enum's variants,
 /// use only variants that exist, and not repeat one. A missing case is a COMPILE ERROR
@@ -341,6 +341,138 @@ fn mutated_base(target: &Expr) -> Option<&str> {
     }
 }
 
+/// (C) on-ramp for #3 (RFC-0012, decided (A)-via-(C)): reject a `+`/`-`/`*` whose operands are
+/// compile-time CONSTANTS and whose mathematical result overflows i64. Only PROVABLE overflows
+/// are rejected, a strict subset of full checked arithmetic, non-breaking (the corpus has no
+/// such constant; out-of-range decimal literals already fail at lexing; hex `i64::MIN` is a
+/// single token, not an operation). Shifts and division are excluded (bit patterns / handled by
+/// the divisor obligations).
+pub fn check_constant_overflow(funcs: &[Function]) -> Result<(), String> {
+    for f in funcs {
+        overflow_block(&f.body, &f.name)?;
+    }
+    Ok(())
+}
+
+fn overflow_block(b: &Block, fname: &str) -> Result<(), String> {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
+                overflow_expr(value, fname)?
+            }
+            Stmt::Assign { target, value } => {
+                overflow_expr(target, fname)?;
+                overflow_expr(value, fname)?;
+            }
+            Stmt::For {
+                cond,
+                invariant,
+                body,
+            } => {
+                if let Some(c) = cond {
+                    overflow_expr(c, fname)?;
+                }
+                for inv in invariant {
+                    overflow_expr(inv, fname)?;
+                }
+                overflow_block(body, fname)?;
+            }
+            _ => {}
+        }
+    }
+    if let Some(t) = &b.tail {
+        overflow_expr(t, fname)?;
+    }
+    Ok(())
+}
+
+fn overflow_expr(e: &Expr, fname: &str) -> Result<(), String> {
+    if let Expr::Binary(op, _, _) = e
+        && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+    {
+        const_fold(e, fname)?; // rejects a constant subtree that overflows
+    }
+    match e {
+        Expr::Binary(_, l, r) => {
+            overflow_expr(l, fname)?;
+            overflow_expr(r, fname)
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => overflow_expr(x, fname),
+        Expr::Index(a, b) => {
+            overflow_expr(a, fname)?;
+            overflow_expr(b, fname)
+        }
+        Expr::Call(c, args) => {
+            overflow_expr(c, fname)?;
+            for a in args {
+                overflow_expr(&a.value, fname)?;
+            }
+            Ok(())
+        }
+        Expr::List(items) => {
+            for it in items {
+                overflow_expr(it, fname)?;
+            }
+            Ok(())
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields {
+                overflow_expr(v, fname)?;
+            }
+            Ok(())
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            overflow_expr(cond, fname)?;
+            overflow_block(then_branch, fname)?;
+            if let Some(eb) = else_branch {
+                overflow_block(eb, fname)?;
+            }
+            Ok(())
+        }
+        Expr::Match { scrutinee, arms } => {
+            overflow_expr(scrutinee, fname)?;
+            for a in arms {
+                overflow_block(&a.body, fname)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Folds a compile-time-constant integer expression: `Ok(Some(v))` if constant, `Ok(None)` if
+/// not, `Err` if a `+`/`-`/`*` of constants overflows i64. Sub-fold errors propagate, so a
+/// constant overflow nested inside a non-constant expression is still caught.
+fn const_fold(e: &Expr, fname: &str) -> Result<Option<i64>, String> {
+    match e {
+        Expr::Int(n) => Ok(Some(*n)),
+        Expr::Binary(op, l, r) if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) => {
+            let lv = const_fold(l, fname)?;
+            let rv = const_fold(r, fname)?;
+            match (lv, rv) {
+                (Some(a), Some(b)) => {
+                    let (res, sym) = match op {
+                        BinOp::Add => (a.checked_add(b), "+"),
+                        BinOp::Sub => (a.checked_sub(b), "-"),
+                        _ => (a.checked_mul(b), "*"),
+                    };
+                    res.map(Some).ok_or_else(|| {
+                        format!(
+                            "function `{fname}`: constant integer overflow in `{a} {sym} {b}`, \
+                             the result does not fit in i64"
+                        )
+                    })
+                }
+                _ => Ok(None),
+            }
+        }
+        _ => Ok(None),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,5 +660,27 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("value struct `self`"), "self read-only: {err}");
+    }
+
+    #[test]
+    fn rejects_constant_integer_overflow() {
+        let funcs = Parser::new(tokenize(
+            "fn f() -> i64 { 9000000000000000000 + 9000000000000000000 }",
+        ))
+        .parse_program();
+        assert!(
+            check_constant_overflow(&funcs).is_err(),
+            "a constant `+` past i64::MAX must be rejected"
+        );
+    }
+
+    #[test]
+    fn accepts_constant_arithmetic_that_fits() {
+        let funcs =
+            Parser::new(tokenize("fn f() -> i64 { 1000000 * 1000 + 40 - 2 }")).parse_program();
+        assert!(
+            check_constant_overflow(&funcs).is_ok(),
+            "in-range constant arithmetic is fine"
+        );
     }
 }
