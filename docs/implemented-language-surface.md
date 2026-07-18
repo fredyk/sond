@@ -159,6 +159,9 @@ else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above
 - `let a[N]`, fixed-size array of N words on the stack (no allocator, every target);
   index with `a[i]`; `a.len` is the size N (`for i < a.len`). A constant index outside
   `[0, N)` is a compile error. Tables: `K[64]`.
+- **`Slice`**, built-in length-carrying array `{ptr, len}` (a fat pointer). `let s = Slice {
+  ptr: a, len: a.len }`; pass it so a fn knows the length (`fn sum(s: Slice)`); `s.len`,
+  `s[i]` / `s[i] = v` (through `.ptr`). Built in, no `struct Slice` needed.
 - **Structs** (all fields i64, one word each). `struct Point { x: i64, y: i64 }`;
   `let p = Point { x: 1, y: 2 }` or `let p: Point` (zeroed); read/write `p.x` / `p.x = 5`.
   **Methods**: `impl Point { fn sum(self) -> i64 { self.x + self.y } }`, called `p.sum()`.
@@ -175,12 +178,9 @@ else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above
 - `outb(port, val)` / `outw(port, val)` / `outl(port, val)`, write a byte/word/dword to an I/O PORT.
 - `inb(port) -> i64` / `inw(port) -> i64` / `inl(port) -> i64`, read a byte/word/dword from an I/O PORT.
 
-The 32-bit `outl`/`inl` are for PCI config space (write the register address to 0xCF8,
-read/write the 32-bit datum at 0xCFC).
-
-IMPORTANT: I/O ports are a SEPARATE address space from memory. For a device register
-(e.g. COM1 UART at 0x3F8) use `inb`/`outb`, NOT `peek8`/`poke8` (those hit RAM at that
-numeric address). Integer literals may be hex: `0x3F8`.
+The 32-bit `outl`/`inl` are for PCI config space (address→0xCF8, datum at 0xCFC). I/O ports
+are a SEPARATE address space: for a device register use `inb`/`outb`, NOT `peek8`/`poke8`
+(those hit RAM). Hex literals allowed: `0x3F8`.
 
 ### UEFI target only (`--uefi`)
 - `print_char(c)`, print one character (its code point) via `ConOut`.
@@ -198,15 +198,13 @@ numeric address). Integer literals may be hex: `0x3F8`.
   `asm("int $0x20")`. You own the registers. The escape hatch when no builtin covers it.
 
 ### Kernel: interrupts (`--uefi`, after `exit_boot_services`)
-- `interrupt fn name() { ... }`, an interrupt handler: codegen saves/restores every GP
-  register and returns with `iretq`. A hardware-IRQ handler must ack it (`outb(0x20, 0x20)`).
+- `interrupt fn name() { ... }`, interrupt handler: saves/restores GP regs, returns `iretq`.
+  A hardware IRQ must ack it (`outb(0x20, 0x20)`).
 - `addr_of(name) -> i64`, a function's address (IDT gates; function pointers).
 - `lidt(ptr)`, load the IDT register from a 10-byte pseudo-descriptor at `ptr`.
-- `read_cs() -> i64`, the current code-segment selector (IDT gate selector).
-  Full timer ISR: `examples/uefi/kernel/timer-interrupt/`.
-- `swtch(old_ctx_ptr, new_ctx)`, context switch: save callee-saved regs + `%rsp` to
-  `*old_ctx_ptr`, load `%rsp` from `new_ctx`, restore, return. From a timer ISR it gives
-  preemptive multitasking: `examples/uefi/kernel/preempt-two-tasks/`.
+- `read_cs() -> i64`, the current code-segment selector. ISR: `examples/uefi/kernel/timer-interrupt/`.
+- `swtch(old_ctx_ptr, new_ctx)`, context switch (save/restore callee regs + `%rsp`). From a
+  timer ISR → preemptive multitasking: `examples/uefi/kernel/preempt-two-tasks/`.
 
 ## Testing (MANDATORY, a program without tests does not build)
 
