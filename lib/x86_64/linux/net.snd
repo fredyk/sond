@@ -82,6 +82,17 @@ fn set_nonblock(fd: i64) -> i64 {
     syscall(SYS_fcntl, fd, F_SETFL, O_NONBLOCK)
 }
 
+let SO_RCVTIMEO = 20
+
+// Bound how long a blocking recv on this socket waits (whole seconds), so a kept-alive
+// connection whose peer goes idle is torn down instead of pinning its handler forever.
+fn set_rcvtimeo(fd: i64, secs: i64) -> i64 {
+    let tv[2]                       // struct timeval { i64 tv_sec; i64 tv_usec } on x86-64
+    poke64(tv, secs)
+    poke64(tv + 8, 0)
+    setsockopt_sock(fd, SOL_SOCKET, SO_RCVTIMEO, tv, 16)
+}
+
 // Recovers the original destination of a redirected connection (nftables REDIRECT):
 // writes a sockaddr_in (16B) to `sa`. Returns 0 on success, <0 -errno.
 fn get_original_dst(fd: i64, sa: i64) -> i64 {

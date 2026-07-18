@@ -71,14 +71,14 @@ test "http_serve_file streams a 200 and 404s a missing file" {
     let a1 = accept_sock(sfd, 0, 0)
     let rb1[128]
     read_buf(a1, rb1, 128)
-    http_serve_file(a1, bytes_from_cstr(cstr("__httptest.txt")), cstr("text/plain"))
-    close_fd(a1)
+    http_serve_file_cc(a1, bytes_from_cstr(cstr("__httptest.txt")), cstr("text/plain"), cstr("no-store"))
+    http_finish(a1)
 
     let a2 = accept_sock(sfd, 0, 0)
     let rb2[128]
     read_buf(a2, rb2, 128)
     http_serve_file(a2, bytes_from_cstr(cstr("__no_such_file__")), cstr("text/plain"))
-    close_fd(a2)
+    http_finish(a2)
 
     close_fd(sfd)
     let st[1]

@@ -14,11 +14,16 @@ pub fn http_method(req: i64) -> i64 {
     bytes_slice(req, 0, sp)
 }
 
-// The request PATH: the bytes between the first and second space of the request line.
+// The request PATH: the bytes between the first and second space of the request line, with any
+// `?query` stripped, routing keys on the path alone, and the query string is free for callers to
+// use as a cache-buster (e.g. ?v=<content-hash>) without breaking a path-safety check.
 pub fn http_path(req: i64) -> i64 {
     let sp1 = bytes_index_of(req, 32)
     let sp2 = bytes_index_of_from(req, 32, sp1 + 1)
-    bytes_slice(req, sp1 + 1, sp2)
+    let q = bytes_index_of_from(req, 63, sp1 + 1)      // '?'
+    let mut end = sp2
+    if q >= 0 && q < sp2 { end = q }
+    bytes_slice(req, sp1 + 1, end)
 }
 
 // Build a complete HTTP/1.1 response buffer: status line + Content-Length + body.

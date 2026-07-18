@@ -48,6 +48,27 @@ fn http_file_size(fd: i64) -> i64 {
     sz
 }
 
+let SHUT_WR = 1
+
+// Gracefully close an accepted connection after the response has been written. Closing a socket
+// while unread request bytes are still queued makes Linux reset the connection (RST) instead of
+// finishing it (FIN); an upstream proxy such as Cloudflare reports that reset as a 502 to the
+// client, intermittently, whenever a request carried more bytes than the handler read (extra
+// headers, a body, pipelined data). So: send our FIN with shutdown(SHUT_WR), switch the socket
+// to non-blocking and drain whatever is still queued, then close, turning every teardown into a
+// clean FIN. Non-blocking drain never hangs on a peer that keeps the connection open.
+fn http_finish(afd: i64) -> i64 {
+    syscall(SYS_shutdown, afd, SHUT_WR)
+    set_nonblock(afd)
+    let drain[256]
+    for {
+        let n = read_buf(afd, drain, 2048)
+        if n <= 0 { break }
+    }
+    close_fd(afd)
+    0
+}
+
 // Send a bodyless HTTP response with the given status line (e.g. cstr("404 Not Found")).
 fn http_send_status(afd: i64, status: i64) {
     let body = bytes_new()
@@ -57,7 +78,11 @@ fn http_send_status(afd: i64, status: i64) {
 
 // Open the file at `path` (a `bytes` handle holding a filesystem path) and stream it to `afd`
 // as a 200 with `Content-Type: <ctype>` (a cstr); send 404 if it cannot be opened. Returns 0.
-fn http_serve_file(afd: i64, path: i64, ctype: i64) -> i64 {
+// As http_serve_file, but also emit `Cache-Control: <cc>` (a cstr) when `cc` is non-zero. Pass a
+// value like cstr("no-store") for artifacts a CDN must never cache, a reproducible release
+// tarball served against a freshly-generated checksum desyncs (and every install fails) the
+// moment a stale copy lingers at the edge, so releases opt out of caching entirely.
+fn http_serve_file_cc(afd: i64, path: i64, ctype: i64, cc: i64) -> i64 {
     let p = bytes_new()
     bytes_append(p, path)
     bytes_push(p, 0)                                   // NUL-terminate for open
@@ -72,7 +97,11 @@ fn http_serve_file(afd: i64, path: i64, ctype: i64) -> i64 {
     bytes_append_cstr(h, ctype)
     bytes_append_cstr(h, cstr("\r\nContent-Length: "))
     bytes_append_int(h, sz)
-    bytes_append_cstr(h, cstr("\r\nConnection: close\r\n\r\n"))
+    if cc != 0 {
+        bytes_append_cstr(h, cstr("\r\nCache-Control: "))
+        bytes_append_cstr(h, cc)
+    }
+    bytes_append_cstr(h, cstr("\r\nConnection: keep-alive\r\n\r\n"))
     write_buf(afd, peek64(h), bytes_len(h))
     let buf[2048]
     for {
@@ -82,4 +111,10 @@ fn http_serve_file(afd: i64, path: i64, ctype: i64) -> i64 {
     }
     close_fd(fd)
     0
+}
+
+// Stream a file at `path` to `afd` as a 200 with `Content-Type: <ctype>`, no Cache-Control; 404 if
+// it cannot be opened. Returns 0.
+fn http_serve_file(afd: i64, path: i64, ctype: i64) -> i64 {
+    http_serve_file_cc(afd, path, ctype, 0)
 }
