@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// A growable array of i64 words over the arena allocator, the collection a compiler lives
+// on (token lists, work stacks, symbol slots). A Vec is an i64 HANDLE to a [data, len, cap]
+// header; the handle stays valid across growth. Elements are 8-byte words.
+
+include "x86_64/linux/heap.snd"
+
+pub fn vec_new() -> i64 {
+    let h = heap_alloc(24)
+    let cap = 8
+    poke64(h, heap_alloc(cap * 8))    // data
+    poke64(h + 8, 0)                  // len
+    poke64(h + 16, cap)               // cap
+    h
+}
+
+pub fn vec_len(v: i64) -> i64 {
+    peek64(v + 8)
+}
+
+pub fn vec_get(v: i64, i: i64) -> i64 {
+    peek64(peek64(v) + i * 8)
+}
+
+pub fn vec_set(v: i64, i: i64, x: i64) {
+    poke64(peek64(v) + i * 8, x)
+}
+
+pub fn vec_push(v: i64, x: i64) {
+    let len = peek64(v + 8)
+    let cap = peek64(v + 16)
+    if len >= cap {
+        let ncap = cap * 2
+        let ndata = heap_alloc(ncap * 8)
+        let src = peek64(v)
+        let mut i = 0
+        for i < len {
+            poke64(ndata + i * 8, peek64(src + i * 8))
+            i = i + 1
+        }
+        poke64(v, ndata)
+        poke64(v + 16, ncap)
+    }
+    poke64(peek64(v) + len * 8, x)
+    poke64(v + 8, len + 1)
+}
