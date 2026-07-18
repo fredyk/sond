@@ -1017,6 +1017,13 @@ fn prove(p: &SymProp, assumptions: &[SymProp]) -> Outcome {
     {
         return Outcome::Proven;
     }
+    // The linear engine reasons over ℤ, but signed machine arithmetic WRAPS. Only trust it when
+    // every `+`/`-`/`*` in the goal is proven not to overflow under the assumptions; otherwise a
+    // ℤ-true relation may be false at runtime (`x + 1 > x` holds over ℤ but fails at i64::MAX).
+    // The reflexive and syntactic matches above are wrapping-sound and already returned.
+    if !arith_trustworthy(&p.lhs, assumptions) || !arith_trustworthy(&p.rhs, assumptions) {
+        return Outcome::Unknown;
+    }
     // The assumptions as `≥ 0` constraints. A non-linear or `!=` assumption is simply
     // dropped: fewer facts can only make proving harder (never wrongly succeed) and, since
     // dropping constraints preserves unsatisfiability, cannot cause a wrong "disproven".
@@ -1061,6 +1068,61 @@ fn prove(p: &SymProp, assumptions: &[SymProp]) -> Outcome {
         return Outcome::Disproven;
     }
     Outcome::Unknown
+}
+
+/// Is the signed integer expression `result` guaranteed not to wrap (fits in `[i64::MIN,
+/// i64::MAX]`) under the given path assumptions? The prover reasons over ℤ, but the machine
+/// wraps: treating `a + b` as its exact mathematical value is only sound when the true value
+/// fits. This proves that bound. Every i64 variable is implicitly in `[MIN, MAX]`, so a loop
+/// counter `r + 1` under `r < n` is provably safe (`n <= MAX` forces `r <= MAX - 1`), while
+/// `x + 1` under only `x > 0` is NOT (x may be `MAX`) and is correctly reported unsafe. A
+/// non-linear result (`a * b`, two variables) can never be certified, returns `false`.
+fn overflow_safe(result: &Sym, cons: &[SymProp]) -> bool {
+    let Some(e) = lin_of_sym(result) else {
+        return false; // non-linear: cannot bound it, so assume it may overflow
+    };
+    // The assumptions as `>= 0` constraints (the same lowering `prove` uses).
+    let mut a: Vec<Lin> = Vec::new();
+    for ap in cons {
+        if let (Some(l), Some(r)) = (lin_of_sym(&ap.lhs), lin_of_sym(&ap.rhs))
+            && let Some(cs) = holds_cons(&ap.op, &l, &r)
+        {
+            a.extend(cs);
+        }
+    }
+    // Add the implicit range of every i64 variable in play, the result's and the
+    // assumptions', so the entailment can chain them (e.g. `r < n` with `n <= MAX`).
+    let (min, max) = (Lin::constant(i64::MIN), Lin::constant(i64::MAX));
+    let mut vars: std::collections::HashSet<String> = e.coeffs.keys().cloned().collect();
+    for c in &a {
+        vars.extend(c.coeffs.keys().cloned());
+    }
+    for v in &vars {
+        let vv = Lin::var(v);
+        let (Some(lo), Some(hi)) = (vv.sub(&min), max.sub(&vv)) else {
+            return false; // i128 overflow forming a bound, conservative
+        };
+        a.push(lo); // v - MIN >= 0
+        a.push(hi); // MAX - v >= 0
+    }
+    // Prove `MIN <= e` (e - MIN >= 0) and `e <= MAX` (MAX - e >= 0).
+    let (Some(lower), Some(upper)) = (e.sub(&min), max.sub(&e)) else {
+        return false;
+    };
+    implies_geq0(&a, &lower) && implies_geq0(&a, &upper)
+}
+
+/// May the linear engine trust the exact ℤ value of `s` under `cons`? Yes iff every `+`/`-`/`*`
+/// node in `s` is proven not to overflow, then the machine computes the same value the ℤ
+/// arithmetic assumes. A single possibly-wrapping operation anywhere makes the whole expression
+/// untrustworthy (a `>`/`>=`/… derived from it could be false at runtime).
+fn arith_trustworthy(s: &Sym, cons: &[SymProp]) -> bool {
+    match s {
+        Sym::Const(_) | Sym::Var(_) => true,
+        Sym::Add(a, b) | Sym::Sub(a, b) | Sym::Mul(a, b) => {
+            arith_trustworthy(a, cons) && arith_trustworthy(b, cons) && overflow_safe(s, cons)
+        }
+    }
 }
 
 fn is_comparison(op: &BinOp) -> bool {
@@ -1343,10 +1405,41 @@ mod tests {
 
     #[test]
     fn proves_a_shifted_bound_from_a_precondition() {
-        // x > 0 entails x + 1 > 1, the linear prover must shift a bound, which the
-        // exact-match prover could not do.
+        // 0 < x < 1000 entails x + 1 > 1, the linear prover must shift a bound, which the
+        // exact-match prover could not do. The upper bound is needed for soundness: `x + 1`
+        // must be proven not to overflow (an unbounded `x > 0` alone is rejected, see
+        // `rejects_a_proof_that_relies_on_signed_overflow`).
+        let funcs = parse(
+            "fn f(x: i64) -> (r: i64) requires { x > 0; x < 1000 } ensures { r > 1 } { x + 1 }",
+        );
+        assert!(verify(&funcs).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_proof_that_relies_on_signed_overflow() {
+        // `x + 1 > x` is true over ℤ but FALSE at `x = i64::MAX` (x+1 wraps to i64::MIN). The
+        // prover must not certify a postcondition that a wrapping add makes false, it treats
+        // the possibly-overflowing `x + 1` as opaque, so `r > x` cannot be proven. (Compare
+        // the bounded `proves_a_shifted_bound_from_a_precondition`, which IS accepted.)
         let funcs =
-            parse("fn f(x: i64) -> (r: i64) requires { x > 0 } ensures { r > 1 } { x + 1 }");
+            parse("fn f(x: i64) -> (r: i64) requires { x > 0 } ensures { r > x } { x + 1 }");
+        assert!(verify(&funcs).is_err());
+    }
+
+    #[test]
+    fn rejects_a_proof_that_relies_on_signed_multiply_overflow() {
+        // Same class via a linear multiply: `x * 2 > x` holds over ℤ but wraps at `x = MAX`.
+        let funcs =
+            parse("fn f(x: i64) -> (r: i64) requires { x > 0 } ensures { r > x } { x * 2 }");
+        assert!(verify(&funcs).is_err());
+    }
+
+    #[test]
+    fn proves_an_increment_that_cannot_overflow() {
+        // With an upper bound the add is proven not to wrap, so `r > x` is genuinely true.
+        let funcs = parse(
+            "fn f(x: i64) -> (r: i64) requires { x > 0; x < 100 } ensures { r > x } { x + 1 }",
+        );
         assert!(verify(&funcs).is_ok());
     }
 
@@ -1371,9 +1464,10 @@ mod tests {
 
     #[test]
     fn proves_a_sum_of_two_lower_bounds() {
-        // a >= 3 and b >= 4 entail a + b >= 7 (a genuine linear combination).
+        // a >= 3 and b >= 4 entail a + b >= 7 (a genuine linear combination). Upper bounds keep
+        // the sum from overflowing so the prover may use its exact value.
         let funcs = parse(
-            "fn f(a: i64, b: i64) -> (r: i64) requires { a >= 3; b >= 4 } ensures { r >= 7 } { a + b }",
+            "fn f(a: i64, b: i64) -> (r: i64) requires { a >= 3; a < 1000; b >= 4; b < 1000 } ensures { r >= 7 } { a + b }",
         );
         assert!(verify(&funcs).is_ok());
     }
@@ -1567,7 +1661,7 @@ mod tests {
         // `nonneg` guarantees a result >= 0; the caller relies on that CONTRACT (not the
         // body) to prove its own postcondition, modular, inter-procedural reasoning.
         let funcs = parse(
-            "fn nonneg(x: i64) -> (r: i64) ensures { r >= 0 } { if x >= 0 { x } else { 0 - x } }\n\
+            "fn nonneg(x: i64) -> (r: i64) ensures { r >= 0 } { if x >= 0 { x } else { 0 } }\n\
              fn use_it(y: i64) -> (r: i64) ensures { r >= 0 } { nonneg(y) }",
         );
         assert!(verify(&funcs).is_ok());

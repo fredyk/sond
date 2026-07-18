@@ -5,7 +5,11 @@
 
 include "x86_64/linux/testing.snd"
 
-pub fn abs(x: i64) -> (r: i64) ensures { r >= 0 } {
+// `0 - x` overflows at x = i64::MIN (its negation is not representable), so `abs(i64::MIN)`
+// would be negative, the contract excludes it with `x > i64::MIN` (written as x >= MIN+1, and
+// MIN+1 = -(i64::MAX) since i64::MAX fits as a positive literal). The prover proves `0 - x` does
+// not overflow under this precondition.
+pub fn abs(x: i64) -> (r: i64) requires { x >= 0 - 9223372036854775807 } ensures { r >= 0 } {
     if x >= 0 { x } else { 0 - x }
 }
 
