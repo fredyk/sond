@@ -17,3 +17,9 @@ test "parse a POST with a root path" {
     assert_eq(bytes_eq(http_method(req), bytes_from_cstr(cstr("POST"))), 1)
     assert_eq(bytes_eq(http_path(req), bytes_from_cstr(cstr("/"))), 1)
 }
+
+test "build a 200 response" {
+    let resp = http_response(cstr("200 OK"), bytes_from_cstr(cstr("Hi")))
+    let want = bytes_from_cstr(cstr("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nHi"))
+    assert_eq(bytes_eq(resp, want), 1)
+}

@@ -19,3 +19,16 @@ pub fn http_path(req: i64) -> i64 {
     let sp2 = bytes_index_of_from(req, 32, sp1 + 1)
     bytes_slice(req, sp1 + 1, sp2)
 }
+
+// Build a complete HTTP/1.1 response buffer: status line + Content-Length + body.
+// `status` is a cstr like "200 OK"; `body` is a byte buffer.
+pub fn http_response(status: i64, body: i64) -> i64 {
+    let r = bytes_new()
+    bytes_append_cstr(r, cstr("HTTP/1.1 "))
+    bytes_append_cstr(r, status)
+    bytes_append_cstr(r, cstr("\r\nContent-Length: "))
+    bytes_append_int(r, bytes_len(body))
+    bytes_append_cstr(r, cstr("\r\n\r\n"))
+    bytes_append(r, body)
+    r
+}
