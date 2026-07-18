@@ -177,6 +177,9 @@ fn main() -> ExitCode {
     // checks so `a[a.len]` is seen as `a[N]` (a provable out-of-bounds) and `for i < a.len`
     // as `for i < N`.
     sondc::desugar::lower_array_len(&mut funcs, &globals);
+    // A slice range `s[lo:hi]` lowers to a sub-`Slice` view. After `a.len` (so an array's
+    // `.len` is a constant), before the constant checks and struct lowering.
+    sondc::desugar::lower_slice_ranges(&mut funcs);
     // (C) on-ramp for #3 (RFC-0012): a `+`/`-`/`*` of constants that overflows i64 is a
     // compile error, the non-breaking first step of checked-by-default arithmetic.
     if let Err(msg) = sondc::check::check_constant_overflow(&funcs) {

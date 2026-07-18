@@ -41,12 +41,28 @@ impl Parser {
                     lhs = Expr::Call(Box::new(lhs), self.parse_arg_list());
                     continue;
                 }
-                // Word-array indexing `base[index]` (8-byte elements).
+                // Word-array indexing `base[index]`, or a slice range `base[lo:hi]`
+                // (Python-style, bounds optional: `[:hi]`, `[lo:]`, `[:]`).
                 Some(Token::LBracket) => {
                     self.advance();
-                    let index = self.parse_expr();
-                    self.expect(Token::RBracket);
-                    lhs = Expr::Index(Box::new(lhs), Box::new(index));
+                    let lo = if self.peek() == Some(&Token::Colon) {
+                        None
+                    } else {
+                        Some(Box::new(self.parse_expr()))
+                    };
+                    if self.eat(Token::Colon) {
+                        let hi = if self.peek() == Some(&Token::RBracket) {
+                            None
+                        } else {
+                            Some(Box::new(self.parse_expr()))
+                        };
+                        self.expect(Token::RBracket);
+                        lhs = Expr::SliceRange(Box::new(lhs), lo, hi);
+                    } else {
+                        self.expect(Token::RBracket);
+                        // No colon → a plain index; `lo` is the index expression.
+                        lhs = Expr::Index(Box::new(lhs), lo.expect("index expression"));
+                    }
                     continue;
                 }
                 // `expr as Type`, an explicit conversion; binds tighter than infix.

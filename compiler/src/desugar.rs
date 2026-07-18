@@ -707,6 +707,17 @@ fn desugar_expr(
             }
         }
         Expr::Cast(inner, _) => desugar_expr(inner, fields, sizes, locals, methods),
+        // A `SliceRange` is lowered to a `Slice { .. }` literal by `lower_slice_ranges` (which
+        // runs earlier), so it should not reach here; recurse defensively if it does.
+        Expr::SliceRange(base, lo, hi) => {
+            desugar_expr(base, fields, sizes, locals, methods);
+            if let Some(l) = lo {
+                desugar_expr(l, fields, sizes, locals, methods);
+            }
+            if let Some(h) = hi {
+                desugar_expr(h, fields, sizes, locals, methods);
+            }
+        }
         Expr::Int(_) | Expr::Decimal(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Var(_) => {}
     }
 }
@@ -921,6 +932,120 @@ fn len_expr(e: &mut Expr, sizes: &HashMap<String, i64>) {
     }
 }
 
+/// Lowers a slice range `base[lo:hi]` (Python-style) to a sub-`Slice` VIEW, no copy, over the
+/// same backing store: `Slice { ptr: base.ptr + lo*8, len: hi - lo }`. Omitted bounds default to
+/// `lo = 0` and `hi = base.len`. Runs before struct lowering + hoisting, so the produced
+/// `Slice { .. }` literal is hoisted and lowered like any other. Ranges apply to a `Slice` base
+/// (indexing through its `.ptr`); a bare array is sliced by wrapping it in a `Slice` first.
+pub fn lower_slice_ranges(funcs: &mut [Function]) {
+    for f in funcs {
+        sr_block(&mut f.body);
+    }
+}
+
+/// Builds the `Slice { ptr, len }` view for `base[lo:hi]`.
+fn slice_range_to_struct(base: Expr, lo: Option<Box<Expr>>, hi: Option<Box<Expr>>) -> Expr {
+    let lo_e = lo.map_or(Expr::Int(0), |b| *b);
+    let hi_e = hi.map_or_else(
+        || Expr::Field(Box::new(base.clone()), "len".to_string()),
+        |b| *b,
+    );
+    let ptr = Expr::Binary(
+        BinOp::Add,
+        Box::new(Expr::Field(Box::new(base), "ptr".to_string())),
+        Box::new(Expr::Binary(
+            BinOp::Mul,
+            Box::new(lo_e.clone()),
+            Box::new(Expr::Int(8)),
+        )),
+    );
+    let len = Expr::Binary(BinOp::Sub, Box::new(hi_e), Box::new(lo_e));
+    Expr::StructLit(
+        SLICE_TYPE.to_string(),
+        vec![
+            ("ptr".to_string(), Box::new(ptr)),
+            ("len".to_string(), Box::new(len)),
+        ],
+    )
+}
+
+fn sr_block(b: &mut Block) {
+    for s in &mut b.stmts {
+        match s {
+            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
+                sr_expr(value)
+            }
+            Stmt::Assign { target, value } => {
+                sr_expr(target);
+                sr_expr(value);
+            }
+            Stmt::For {
+                cond, invariant, body, ..
+            } => {
+                if let Some(c) = cond {
+                    sr_expr(c);
+                }
+                for inv in invariant.iter_mut() {
+                    sr_expr(inv);
+                }
+                sr_block(body);
+            }
+            _ => {}
+        }
+    }
+    if let Some(t) = &mut b.tail {
+        sr_expr(t);
+    }
+}
+
+fn sr_expr(e: &mut Expr) {
+    match e {
+        Expr::SliceRange(base, lo, hi) => {
+            // Lower children first, then this node (bottom-up: a nested `s[a:b][c:d]` works).
+            sr_expr(base);
+            if let Some(l) = lo {
+                sr_expr(l);
+            }
+            if let Some(h) = hi {
+                sr_expr(h);
+            }
+            let base_e = std::mem::replace(base.as_mut(), Expr::Int(0));
+            *e = slice_range_to_struct(base_e, lo.take(), hi.take());
+        }
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            sr_expr(l);
+            sr_expr(r);
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => sr_expr(x),
+        Expr::Call(c, args) => {
+            sr_expr(c);
+            for a in args.iter_mut() {
+                sr_expr(&mut a.value);
+            }
+        }
+        Expr::List(items) => items.iter_mut().for_each(sr_expr),
+        Expr::StructLit(_, fields) => fields.iter_mut().for_each(|(_, v)| sr_expr(v)),
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            sr_expr(cond);
+            sr_block(then_branch);
+            if let Some(eb) = else_branch {
+                sr_block(eb);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            sr_expr(scrutinee);
+            for a in arms.iter_mut() {
+                sr_block(&mut a.body);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,6 +1064,7 @@ mod tests {
         inject_builtin_structs(&mut structs);
         // `a.len` on a fixed-size array lowers to its constant size (before the other passes).
         lower_array_len(&mut funcs, &[]);
+        lower_slice_ranges(&mut funcs);
         // Payloaded enums synthesize `{__tag, __payload}` structs; lower enums first,
         // then feed those structs into the struct pass, exactly the driver's order.
         let synth = desugar_enums(&mut funcs, &enums);
@@ -1021,6 +1147,77 @@ mod tests {
              }",
         );
         assert_eq!(out, "100");
+    }
+
+    #[test]
+    fn slice_range_is_a_view_over_the_backing_store() {
+        // `s[1:4]` is a sub-slice view: elements 20,30,40, summed = 90. No copy, it points
+        // into the same array.
+        let out = compile_and_capture(
+            "fn sum(s: Slice) -> i64 {\n\
+             let mut i = 0\n\
+             let mut acc = 0\n\
+             for i < s.len { acc = acc + s[i]  i = i + 1 }\n\
+             acc\n\
+             }\n\
+             fn main() -> i64 {\n\
+             let a[5]\n\
+             a[0] = 10  a[1] = 20  a[2] = 30  a[3] = 40  a[4] = 50\n\
+             let s = Slice { ptr: a, len: a.len }\n\
+             let mid = s[1:4]\n\
+             print_int(sum(mid))\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "90");
+    }
+
+    #[test]
+    fn slice_range_default_bounds() {
+        // `s[:2]` (lo=0), `s[2:]` (hi=len), `s[:]` (whole). Sums: 10+20=30, 30+40+50=120, all=150.
+        let base = "fn sum(s: Slice) -> i64 {\n\
+             let mut i = 0\n\
+             let mut acc = 0\n\
+             for i < s.len { acc = acc + s[i]  i = i + 1 }\n\
+             acc\n\
+             }\n";
+        let mk = |range: &str| {
+            format!(
+                "{base}fn main() -> i64 {{\n\
+                 let a[5]\n\
+                 a[0] = 10  a[1] = 20  a[2] = 30  a[3] = 40  a[4] = 50\n\
+                 let s = Slice {{ ptr: a, len: a.len }}\n\
+                 print_int(sum({range}))\n\
+                 0\n\
+                 }}"
+            )
+        };
+        assert_eq!(compile_and_capture(&mk("s[:2]")), "30");
+        assert_eq!(compile_and_capture(&mk("s[2:]")), "120");
+        assert_eq!(compile_and_capture(&mk("s[:]")), "150");
+    }
+
+    #[test]
+    fn slice_of_a_slice_composes() {
+        // `s[1:5][1:3]`, a view of a view. s[1:5]=20,30,40,50; then [1:3]=30,40; sum=70.
+        let out = compile_and_capture(
+            "fn sum(s: Slice) -> i64 {\n\
+             let mut i = 0\n\
+             let mut acc = 0\n\
+             for i < s.len { acc = acc + s[i]  i = i + 1 }\n\
+             acc\n\
+             }\n\
+             fn main() -> i64 {\n\
+             let a[6]\n\
+             a[0] = 10  a[1] = 20  a[2] = 30  a[3] = 40  a[4] = 50  a[5] = 60\n\
+             let s = Slice { ptr: a, len: a.len }\n\
+             let inner = s[1:5]\n\
+             let inner2 = inner[1:3]\n\
+             print_int(sum(inner2))\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "70");
     }
 
     #[test]

@@ -199,6 +199,10 @@ pub enum Expr {
     List(Vec<Expr>),
     /// Word-array indexing `base[index]` (8-byte elements): base + index*8.
     Index(Box<Expr>, Box<Expr>),
+    /// A slice range `base[lo:hi]` (Python-style): a sub-`Slice` VIEW over `base`, no copy.
+    /// `lo`/`hi` are optional (`base[:hi]`, `base[lo:]`, `base[:]`); lowered by `desugar` to
+    /// `Slice { ptr: base.ptr + lo*8, len: hi - lo }`.
+    SliceRange(Box<Expr>, Option<Box<Expr>>, Option<Box<Expr>>),
     /// A struct literal `Name { field: value, ... }`. Lowered by `desugar` to a
     /// word array plus one assignment per field; only valid as a `let` initializer
     /// for now. Not parsed in condition position (avoids the `if x { }` ambiguity).

@@ -150,6 +150,10 @@ fn expr_to_source(e: &Expr) -> String {
         Expr::Var(name) => name.clone(),
         Expr::Field(base, name) => format!("{}.{name}", expr_to_source(base)),
         Expr::Index(base, idx) => format!("{}[{}]", expr_to_source(base), expr_to_source(idx)),
+        Expr::SliceRange(base, lo, hi) => {
+            let s = |o: &Option<Box<Expr>>| o.as_ref().map(|e| expr_to_source(e)).unwrap_or_default();
+            format!("{}[{}:{}]", expr_to_source(base), s(lo), s(hi))
+        }
         Expr::List(items) => format!(
             "[{}]",
             items
