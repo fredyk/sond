@@ -7,3 +7,4 @@ oc-*.log
 *.out
 tools/vscode-sond/node_modules/
 tools/sprint/
+/dist/

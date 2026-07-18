@@ -20,8 +20,10 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 DOCS="$REPO/docs"
-OUT_DIR="$HOME/.local/share/sond"
-OUT="$OUT_DIR/Sond.md"
+# Output path: ~/.local/share/sond/Sond.md by default; override with SOND_MD_OUT (the release
+# packager points it at a staging dir).
+OUT="${SOND_MD_OUT:-$HOME/.local/share/sond/Sond.md}"
+OUT_DIR="$(dirname "$OUT")"
 BUDGET=12000 # bytes; Sond.md must stay under this
 mkdir -p "$OUT_DIR"
 
