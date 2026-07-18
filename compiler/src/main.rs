@@ -83,6 +83,11 @@ fn main() -> ExitCode {
         }
     };
 
+    // `test "..." { .. }` blocks are inert in an ordinary compile, only `sond test`
+    // gathers and runs them. Drop them here so a source file may carry its tests
+    // without pulling test-only calls (assert, ...) into the shipped program.
+    funcs.retain(|f| !f.is_test);
+
     // Value/pointer struct rules: a value struct received as a parameter is
     // read-only (only its creator may mutate it). Reject field mutation of a
     // value-struct param before lowering, declare it `*Point` to mutate.
