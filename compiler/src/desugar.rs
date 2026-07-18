@@ -15,7 +15,7 @@
 //! rules are follow-ups.
 
 use crate::ast::{
-    Arg, BinOp, Block, EnumDef, Expr, Function, MatchArm, Param, Stmt, StructDef, Type,
+    Arg, BinOp, Block, EnumDef, Expr, Function, Global, MatchArm, Param, Stmt, StructDef, Type,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -702,6 +702,179 @@ fn desugar_expr(
     }
 }
 
+/// Lowers `a.len` on a fixed-size array `let a[N]` (or a module-level `let K[N] = ..`) to the
+/// compile-time constant `N`. An array's length is statically known, arrays are fixed-size
+/// frame/`.data` regions, so `.len` is pure front-end sugar, resolved here (before every check
+/// and codegen) exactly like struct field access. This gives refactor-safe iteration
+/// (`for i < a.len`) and lets the constant-bounds check fold `a[a.len - 1]`. A future
+/// length-carrying slice type would make `.len` a runtime field; for these fixed arrays it is
+/// the known constant. A struct with a field literally named `len` is unaffected: only names
+/// known to be arrays are rewritten.
+pub fn lower_array_len(funcs: &mut [Function], globals: &[Global]) {
+    let mut global_sizes: HashMap<String, i64> = HashMap::new();
+    for g in globals {
+        if let Some(n) = g.array_len {
+            global_sizes.insert(g.name.clone(), n);
+        }
+    }
+    for f in funcs {
+        let mut sizes = global_sizes.clone();
+        collect_array_sizes_block(&f.body, &mut sizes);
+        len_block(&mut f.body, &sizes);
+    }
+}
+
+/// Collects every `let name[N]` array size reachable in a body (function-scoped, matching the
+/// codegen frame model where each array, including one declared inside a branch or loop, gets
+/// its own reserved slot).
+fn collect_array_sizes_block(b: &Block, out: &mut HashMap<String, i64>) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let {
+                name,
+                array_len: Some(n),
+                value,
+                ..
+            } => {
+                out.insert(name.clone(), *n);
+                collect_array_sizes_expr(value, out);
+            }
+            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
+                collect_array_sizes_expr(value, out)
+            }
+            Stmt::Assign { target, value } => {
+                collect_array_sizes_expr(target, out);
+                collect_array_sizes_expr(value, out);
+            }
+            Stmt::For {
+                cond, invariant, body, ..
+            } => {
+                if let Some(c) = cond {
+                    collect_array_sizes_expr(c, out);
+                }
+                for inv in invariant {
+                    collect_array_sizes_expr(inv, out);
+                }
+                collect_array_sizes_block(body, out);
+            }
+            _ => {}
+        }
+    }
+    if let Some(t) = &b.tail {
+        collect_array_sizes_expr(t, out);
+    }
+}
+
+fn collect_array_sizes_expr(e: &Expr, out: &mut HashMap<String, i64>) {
+    match e {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_array_sizes_expr(cond, out);
+            collect_array_sizes_block(then_branch, out);
+            if let Some(eb) = else_branch {
+                collect_array_sizes_block(eb, out);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            collect_array_sizes_expr(scrutinee, out);
+            for a in arms {
+                collect_array_sizes_block(&a.body, out);
+            }
+        }
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            collect_array_sizes_expr(l, out);
+            collect_array_sizes_expr(r, out);
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
+            collect_array_sizes_expr(x, out)
+        }
+        Expr::Call(c, args) => {
+            collect_array_sizes_expr(c, out);
+            for a in args {
+                collect_array_sizes_expr(&a.value, out);
+            }
+        }
+        Expr::List(items) => items.iter().for_each(|it| collect_array_sizes_expr(it, out)),
+        _ => {}
+    }
+}
+
+fn len_block(b: &mut Block, sizes: &HashMap<String, i64>) {
+    for s in &mut b.stmts {
+        match s {
+            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
+                len_expr(value, sizes)
+            }
+            Stmt::Assign { target, value } => {
+                len_expr(target, sizes);
+                len_expr(value, sizes);
+            }
+            Stmt::For {
+                cond, invariant, body, ..
+            } => {
+                if let Some(c) = cond {
+                    len_expr(c, sizes);
+                }
+                for inv in invariant.iter_mut() {
+                    len_expr(inv, sizes);
+                }
+                len_block(body, sizes);
+            }
+            _ => {}
+        }
+    }
+    if let Some(t) = &mut b.tail {
+        len_expr(t, sizes);
+    }
+}
+
+fn len_expr(e: &mut Expr, sizes: &HashMap<String, i64>) {
+    // `a.len` where `a` is a known fixed-size array → the constant size.
+    if let Expr::Field(base, field) = e
+        && field == "len"
+        && let Expr::Var(name) = base.as_ref()
+        && let Some(&n) = sizes.get(name)
+    {
+        *e = Expr::Int(n);
+        return;
+    }
+    match e {
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            len_expr(l, sizes);
+            len_expr(r, sizes);
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => len_expr(x, sizes),
+        Expr::Call(c, args) => {
+            len_expr(c, sizes);
+            for a in args.iter_mut() {
+                len_expr(&mut a.value, sizes);
+            }
+        }
+        Expr::List(items) => items.iter_mut().for_each(|it| len_expr(it, sizes)),
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            len_expr(cond, sizes);
+            len_block(then_branch, sizes);
+            if let Some(eb) = else_branch {
+                len_block(eb, sizes);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            len_expr(scrutinee, sizes);
+            for a in arms.iter_mut() {
+                len_block(&mut a.body, sizes);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,6 +890,8 @@ mod tests {
         let mut funcs = p.parse_program();
         let mut structs = p.take_structs();
         let enums = p.take_enums();
+        // `a.len` on a fixed-size array lowers to its constant size (before the other passes).
+        lower_array_len(&mut funcs, &[]);
         // Payloaded enums synthesize `{__tag, __payload}` structs; lower enums first,
         // then feed those structs into the struct pass, exactly the driver's order.
         let synth = desugar_enums(&mut funcs, &enums);
@@ -746,6 +921,37 @@ mod tests {
         let _ = std::fs::remove_file(&asm_path);
         let _ = std::fs::remove_file(&bin_path);
         String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[test]
+    fn array_len_lowers_to_the_constant_size() {
+        // `a.len` on `let a[8]` is the compile-time constant 8.
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             let a[8]\n\
+             print_int(a.len)\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "8");
+    }
+
+    #[test]
+    fn array_len_drives_a_refactor_safe_loop() {
+        // The idiomatic use: iterate to `a.len` rather than a hardcoded size.
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             let a[4]\n\
+             let mut i = 0\n\
+             for i < a.len { a[i] = i * 10  i = i + 1 }\n\
+             let mut s = 0\n\
+             i = 0\n\
+             for i < a.len { s = s + a[i]  i = i + 1 }\n\
+             print_int(s)\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "60");
     }
 
     #[test]

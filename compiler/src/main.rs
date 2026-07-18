@@ -171,6 +171,10 @@ fn main() -> ExitCode {
         eprintln!("sondc: {msg}");
         return ExitCode::FAILURE;
     }
+    // `a.len` on a fixed-size array lowers to its constant size. Done before the constant
+    // checks so `a[a.len]` is seen as `a[N]` (a provable out-of-bounds) and `for i < a.len`
+    // as `for i < N`.
+    sondc::desugar::lower_array_len(&mut funcs, &globals);
     // (C) on-ramp for #3 (RFC-0012): a `+`/`-`/`*` of constants that overflows i64 is a
     // compile error, the non-breaking first step of checked-by-default arithmetic.
     if let Err(msg) = sondc::check::check_constant_overflow(&funcs) {
