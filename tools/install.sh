@@ -34,8 +34,9 @@ rm -rf "$HOME/.local/include/sond"
 mkdir -p "$HOME/.local/include/sond"
 cp -r "$DIST/." "$HOME/.local/include/sond/" 2>/dev/null || true
 
-mkdir -p "$HOME/.local/share/sond"
-install -m 644 "$REPO/docs/Sond.md" "$HOME/.local/share/sond/Sond.md"
+# Generate the compact language reference (never hand-written) into
+# ~/.local/share/sond/Sond.md from the marked SOND-MD regions of the design docs.
+"$REPO/tools/build-docs.sh"
 
 mkdir -p "$HOME/.local/share/man/man1"
 install -m 644 "$REPO/docs/man/sondc.1" "$HOME/.local/share/man/man1/sondc.1"

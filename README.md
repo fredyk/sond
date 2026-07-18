@@ -97,7 +97,7 @@ limits); UEFI binaries are booted in QEMU/OVMF via `tools/boot-uefi.sh`.
 - `sondc` → `~/.local/bin/sondc` (on `PATH`)
 - the standard library → `~/.local/lib/sond/` (a **copy** of `lib/`, not a symlink)
 - header interfaces → `~/.local/include/sond/`
-- the language reference `Sond.md` → `~/.local/share/sond/Sond.md`
+- the language reference `Sond.md` → `~/.local/share/sond/Sond.md` (generated at install)
 
 An `include` is resolved in order: relative to the including file → a `lib/` root found by
 walking up the tree → the system library `~/.local/lib/sond/`. So an external program
@@ -107,8 +107,10 @@ copy, with no path back to this repository.
 **Pinning:** the installed copy *is* the pinned version. To move to a specific Sond
 version, re-run `install.sh` from the desired commit/tag (formal versioning is ahead).
 
-**[`Sond.md`](docs/Sond.md)** is the compact language reference, the single document an
-AI (or human) needs to write correct Sond. Point your model or editor at it.
+**`Sond.md`** is the compact language reference, the single document an AI (or human)
+needs to write correct Sond. It is **generated** (never hand-written) by `tools/build-docs.sh`
+from the marked `SOND-MD` regions of the design docs, capped at 12 KB, and installed to
+`~/.local/share/sond/Sond.md`. Point your model or editor at it.
 
 ## Testing
 
