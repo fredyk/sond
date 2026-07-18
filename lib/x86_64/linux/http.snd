@@ -6,6 +6,7 @@
 // A request buffer looks like `METHOD SP PATH SP HTTP/1.1 CRLF headers... CRLF CRLF`.
 
 include "x86_64/linux/bytes.snd"
+include "x86_64/linux/map.snd"
 
 // The request METHOD: the bytes before the first space of the request line.
 pub fn http_method(req: i64) -> i64 {
@@ -31,4 +32,22 @@ pub fn http_response(status: i64, body: i64) -> i64 {
     bytes_append_cstr(r, cstr("\r\n\r\n"))
     bytes_append(r, body)
     r
+}
+
+// Parse the request's headers into a map of name -> value (both byte buffers). Assumes the
+// standard `Name: value CRLF` shape; stops at the blank line that ends the header block.
+pub fn http_headers(req: i64) -> i64 {
+    let h = map_new()
+    let n = bytes_len(req)
+    let mut cur = bytes_index_of(req, 13) + 2      // skip the request line's CRLF
+    for cur < n {
+        let line_end = bytes_index_of_from(req, 13, cur)
+        if line_end == cur {
+            return h                                // blank line: end of headers
+        }
+        let colon = bytes_index_of_from(req, 58, cur)
+        map_set(h, bytes_slice(req, cur, colon), bytes_slice(req, colon + 2, line_end))
+        cur = line_end + 2
+    }
+    h
 }
