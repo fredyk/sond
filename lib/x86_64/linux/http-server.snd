@@ -69,6 +69,17 @@ fn http_finish(afd: i64) -> i64 {
     0
 }
 
+// Send a 301 Moved Permanently to `location` (a cstr, e.g. cstr("https://example.org/")). Used
+// to point one host at another, a technical host redirecting its human-facing root to the
+// marketing site. Bodyless and keep-alive, so a pooled connection stays reusable.
+fn http_send_redirect(afd: i64, location: i64) {
+    let h = bytes_new()
+    bytes_append_cstr(h, cstr("HTTP/1.1 301 Moved Permanently\r\nLocation: "))
+    bytes_append_cstr(h, location)
+    bytes_append_cstr(h, cstr("\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"))
+    write_buf(afd, peek64(h), bytes_len(h))
+}
+
 // Send a bodyless HTTP response with the given status line (e.g. cstr("404 Not Found")).
 fn http_send_status(afd: i64, status: i64) {
     let body = bytes_new()

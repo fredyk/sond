@@ -21,6 +21,22 @@ test "http_safe_path allows names and subdirs, rejects traversal and bad chars" 
     assert_eq(http_safe_path(bytes_from_cstr(cstr(""))), 0)
 }
 
+test "http_send_redirect writes a 301 with the Location header" {
+    // Self-contained: write the redirect into a pipe and read it back (no socket needed).
+    let fds[1]                                   // two ints: read fd, write fd
+    syscall(SYS_pipe, fds)
+    let rfd = peek32(fds + 0)
+    let wfd = peek32(fds + 4)
+    http_send_redirect(wfd, cstr("https://sondlang.org/"))
+    close_fd(wfd)
+    let buf[64]
+    let n = read_buf(rfd, buf, 512)
+    close_fd(rfd)
+    let resp = bytes_from_raw(buf, n)
+    let want = bytes_from_cstr(cstr("HTTP/1.1 301 Moved Permanently\r\nLocation: https://sondlang.org/"))
+    assert_eq(bytes_eq(bytes_slice(resp, 0, bytes_len(want)), want), 1)
+}
+
 // Integration: over a real loopback socket, http_serve_file streams a file as 200 (covering
 // http_file_size), and a missing file falls to http_send_status's 404.
 test "http_serve_file streams a 200 and 404s a missing file" {
