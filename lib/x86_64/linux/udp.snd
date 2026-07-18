@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/udp.snd, UDP datagram sockets with ancillary-data (cmsg) support, for a
+// transparent proxy / relay. On top of net.snd it adds:
+//   - a DGRAM socket + the IP-level options a TPROXY relay needs (IP_TRANSPARENT, IP_FREEBIND,
+//     IP_RECVORIGDSTADDR);
+//   - msghdr / iovec builders and thin recvmsg / sendmsg wrappers;
+//   - a cmsg walker that recovers the ORIGINAL destination of a redirected datagram
+//     (IP_ORIGDSTADDR), so a relay can learn where the client was really talking to and later
+//     reinject a reply with that address spoofed as the source.
+//
+// All buffers are caller-provided (stack arrays); this module never allocates. Byte offsets are
+// the x86-64 System V layout of `struct msghdr`, `struct iovec` and `struct cmsghdr`.
+
+include "syscall-nums.snd"
+include "net.snd"
+
+// IP-level socket options / cmsg types (uapi/linux/in.h). IP_ORIGDSTADDR (the cmsg_type carried
+// back by recvmsg) and IP_RECVORIGDSTADDR (the setsockopt that asks for it) share the value 20.
+let IPPROTO_UDP = 17
+let IP_PKTINFO = 8
+let IP_FREEBIND = 15
+let IP_TRANSPARENT = 19
+let IP_RECVORIGDSTADDR = 20
+let IP_ORIGDSTADDR = 20
+
+// A DGRAM/UDP socket over AF_INET; fd or -errno.
+fn udp_socket() -> i64 {
+    sock(AF_INET, SOCK_DGRAM, 0)
+}
+
+// Enable an integer-valued IP-level option (sets it to 1). Returns 0 or -errno. IP_TRANSPARENT
+// requires CAP_NET_ADMIN; IP_FREEBIND and IP_RECVORIGDSTADDR do not.
+fn ip_setopt_on(fd: i64, opt: i64) -> i64 {
+    let one[1]
+    poke32(one, 1)
+    setsockopt_sock(fd, SOL_IP, opt, one, 4)
+}
+
+fn ip_set_transparent(fd: i64) -> i64 {
+    ip_setopt_on(fd, IP_TRANSPARENT)
+}
+
+fn ip_set_freebind(fd: i64) -> i64 {
+    ip_setopt_on(fd, IP_FREEBIND)
+}
+
+// Ask the kernel to attach the original destination address of each received datagram as an
+// IP_ORIGDSTADDR control message (recovered later with `udp_origdst`).
+fn ip_set_recvorigdstaddr(fd: i64) -> i64 {
+    ip_setopt_on(fd, IP_RECVORIGDSTADDR)
+}
+
+// Fill a `struct iovec` (16 bytes) at `io` with a single (base, len) buffer.
+fn iovec_build(io: i64, base: i64, len: i64) {
+    poke64(io + 0, base)   // iov_base
+    poke64(io + 8, len)    // iov_len
+}
+
+// Fill a `struct msghdr` (56 bytes) at `mh`. `iov` points at `iovlen` iovecs; `name`/`namelen`
+// are the peer address slot (0 to omit); `control`/`controllen` are the ancillary-data buffer.
+fn msghdr_build(mh: i64, name: i64, namelen: i64, iov: i64, iovlen: i64, control: i64, controllen: i64) {
+    poke64(mh + 0, name)         // msg_name
+    poke32(mh + 8, namelen)      // msg_namelen (int) ...
+    poke32(mh + 12, 0)           // ... + padding
+    poke64(mh + 16, iov)         // msg_iov
+    poke64(mh + 24, iovlen)      // msg_iovlen
+    poke64(mh + 32, control)     // msg_control
+    poke64(mh + 40, controllen)  // msg_controllen
+    poke64(mh + 48, 0)           // msg_flags (int) + padding
+}
+
+// The control-buffer length the kernel actually filled in (valid after recvmsg): recvmsg
+// overwrites msg_controllen with the number of ancillary bytes received.
+fn msghdr_controllen(mh: i64) -> i64 {
+    peek64(mh + 40)
+}
+
+fn recvmsg_sock(fd: i64, mh: i64, flags: i64) -> i64 {
+    syscall(SYS_recvmsg, fd, mh, flags)
+}
+
+fn sendmsg_sock(fd: i64, mh: i64, flags: i64) -> i64 {
+    syscall(SYS_sendmsg, fd, mh, flags)
+}
+
+// Walk a received control buffer for the first cmsg matching (level, type) and return a pointer
+// to its data (CMSG_DATA), or 0 if absent/malformed. `struct cmsghdr` is { size_t cmsg_len;
+// int cmsg_level; int cmsg_type; }, a 16-byte, 8-aligned header; the next header starts at
+// cmsg_len rounded up to a multiple of 8.
+fn cmsg_find(control: i64, controllen: i64, level: i64, ctype: i64) -> i64 {
+    let mut off = 0
+    for off + 16 <= controllen {
+        let cur = control + off
+        let clen = peek64(cur + 0)          // cmsg_len (header + data)
+        if clen < 16 { return 0 }           // malformed: a header cannot be shorter than 16
+        if peek32(cur + 8) == level && peek32(cur + 12) == ctype {
+            return cur + 16                 // CMSG_DATA (header is 16 bytes, already 8-aligned)
+        }
+        off = off + ((clen + 7) / 8) * 8    // advance to the next 8-aligned cmsg
+    }
+    0
+}
+
+// The original destination (a `struct sockaddr_in`) of a redirected datagram, from its control
+// buffer, or 0 if the IP_ORIGDSTADDR cmsg is absent. Requires ip_set_recvorigdstaddr on the fd.
+fn udp_origdst(control: i64, controllen: i64) -> i64 {
+    cmsg_find(control, controllen, SOL_IP, IP_ORIGDSTADDR)
+}

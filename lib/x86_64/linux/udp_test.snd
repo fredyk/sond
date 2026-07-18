@@ -1,0 +1,97 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for udp.snd: the cmsg walker and struct builders are checked as pure functions over
+// hand-crafted buffers (no privilege needed), and the recvmsg/sendmsg wrappers over a real
+// loopback datagram round-trip.
+//   sond test lib/x86_64/linux/udp_test.snd
+
+include "x86_64/linux/udp.snd"
+include "x86_64/linux/testing.snd"
+
+test "cmsg_find matches, skips a non-match, and rejects a malformed header" {
+    // Two control messages back to back: #1 (type IP_PKTINFO) is skipped, #2 (IP_ORIGDSTADDR)
+    // is the match. cmsg #1 len=24 (16 header + 8 data), cmsg #2 at offset 24, len=32.
+    let ctl[7]                       // 56 bytes
+    poke64(ctl + 0, 24)              // cmsg#1 cmsg_len
+    poke32(ctl + 8, 0)               // cmsg_level = SOL_IP
+    poke32(ctl + 12, IP_PKTINFO)     // cmsg_type (not wanted)
+    poke64(ctl + 24, 32)             // cmsg#2 cmsg_len
+    poke32(ctl + 32, 0)              // SOL_IP
+    poke32(ctl + 36, IP_ORIGDSTADDR) // wanted
+    assert_eq(udp_origdst(ctl, 56), ctl + 40)         // data of cmsg#2
+    assert_eq(cmsg_find(ctl, 56, 0, IP_PKTINFO), ctl + 16) // data of cmsg#1
+    assert_eq(cmsg_find(ctl, 56, 99, IP_ORIGDSTADDR), 0)   // wrong level: absent
+    assert_eq(cmsg_find(ctl, 10, 0, IP_ORIGDSTADDR), 0)    // controllen too short for a header
+
+    poke64(ctl + 0, 8)               // corrupt cmsg#1 length (< 16) -> malformed, stop
+    assert_eq(cmsg_find(ctl, 56, 0, IP_ORIGDSTADDR), 0)
+}
+
+test "msghdr_build and iovec_build lay out the structs; controllen reads back" {
+    let iov[2]
+    iovec_build(iov, 0x1000, 42)
+    assert_eq(peek64(iov + 0), 0x1000)
+    assert_eq(peek64(iov + 8), 42)
+
+    let mh[7]
+    msghdr_build(mh, 0xAA, 16, iov, 1, 0xBB, 64)
+    assert_eq(peek64(mh + 0), 0xAA)   // msg_name
+    assert_eq(peek32(mh + 8), 16)     // msg_namelen
+    assert_eq(peek64(mh + 16), iov)   // msg_iov
+    assert_eq(peek64(mh + 24), 1)     // msg_iovlen
+    assert_eq(peek64(mh + 32), 0xBB)  // msg_control
+    assert_eq(msghdr_controllen(mh), 64)
+}
+
+test "ip options are applied to a udp socket" {
+    let fd = udp_socket()
+    assert_eq(fd >= 0, 1)
+    assert_eq(ip_set_recvorigdstaddr(fd), 0)  // unprivileged: succeeds
+    // IP_TRANSPARENT needs CAP_NET_ADMIN and IP_FREEBIND may be restricted; just exercise them
+    // (each returns 0 or a negative errno, never positive).
+    assert_eq(ip_set_transparent(fd) <= 0, 1)
+    assert_eq(ip_set_freebind(fd) <= 0, 1)
+}
+
+test "udp sendmsg/recvmsg round-trip over loopback" {
+    let port = 47311
+    let ip = 0x7f000001
+    let rfd = udp_socket()
+    set_reuseaddr(rfd)
+    let ra[2]
+    sockaddr_in_build(ra, ip, port)
+    bind_sock(rfd, ra, 16)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        // CHILD: send one 4-byte datagram ("SOND") via sendmsg.
+        let sfd = udp_socket()
+        let da[2]
+        sockaddr_in_build(da, ip, port)
+        let payload[1]
+        poke8(payload + 0, 83)   // 'S'
+        poke8(payload + 1, 79)   // 'O'
+        poke8(payload + 2, 78)   // 'N'
+        poke8(payload + 3, 68)   // 'D'
+        let iov[2]
+        iovec_build(iov, payload, 4)
+        let mh[7]
+        msghdr_build(mh, da, 16, iov, 1, 0, 0)
+        sendmsg_sock(sfd, mh, 0)
+        syscall(SYS_exit, 0)
+    }
+    // PARENT: receive it via recvmsg, with a control buffer wired up.
+    let rbuf[2]
+    let iov[2]
+    iovec_build(iov, rbuf, 16)
+    let ctl[8]
+    let mh[7]
+    msghdr_build(mh, 0, 0, iov, 1, ctl, 64)
+    let n = recvmsg_sock(rfd, mh, 0)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    assert_eq(n, 4)
+    assert_eq(peek8(rbuf + 0), 83)   // 'S'
+    assert_eq(peek8(rbuf + 3), 68)   // 'D'
+}
