@@ -157,16 +157,16 @@ else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above
 - `poke64/32/16/8(ptr, val)`, store the low 64/32/16/8 bits of `val` at `ptr`. Sized forms
   are for packed hardware structures (a device ring: 32-bit length, 16-bit flags).
 - `let a[N]`, fixed-size array of N words on the stack (no allocator, every target);
-  index with `a[i]`. Great for tables (`K[64]`).
+  index with `a[i]`; `a.len` is the size N (`for i < a.len`). A constant index outside
+  `[0, N)` is a compile error. Tables: `K[64]`.
 - **Structs** (all fields i64, one word each). `struct Point { x: i64, y: i64 }`;
   `let p = Point { x: 1, y: 2 }` or `let p: Point` (zeroed); read/write `p.x` / `p.x = 5`.
   **Methods**: `impl Point { fn sum(self) -> i64 { self.x + self.y } }`, called `p.sum()`.
   **Value vs pointer**: a value struct is read-only once passed to a function; to let a
   callee mutate, declare a pointer `*Point` (no `&`): `fn inc(c: *Point) { c.x = c.x + 1 }`.
   Mutating a value-struct PARAMETER is a compile error.
-- `let a[N] = [e0, e1, ...]` INITIALIZES the words in order (a constant table, e.g.
-  `let k[64] = [0x428a2f98, ...]`, may span many lines). At MODULE level it is the shared
-  crypto table (`K[64]`, S-boxes) placed in `.data`, readable everywhere.
+- `let a[N] = [e0, e1, ...]` INITIALIZES the words in order. At MODULE level it is the shared
+  crypto table (`K[64]`, S-boxes) in `.data`, readable everywhere.
 - `a[i]` reads / `a[i] = v` writes the 8-byte WORD at `a + i*8` (sugar over peek64/poke64);
   for BYTE buffers keep peek8/poke8. `a` is any address.
 - `write(fd, "literal") -> i64`, raw `write` syscall (hosted/freestanding only).
