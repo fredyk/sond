@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// A growable byte buffer over the arena allocator, the workhorse for parsing and building
+// wire data (HTTP requests/responses, tokens, output) and the basis for dynamic strings.
+//
+// A `Bytes` is a HANDLE: an i64 pointing at a 3-word header in the arena, [data, len, cap].
+// `data` points at the backing buffer (also in the arena); `len` is bytes used; `cap` is the
+// buffer's capacity. The handle stays valid across growth (only the header's `data` field is
+// repointed), so callers hold a stable i64. There is no free (the arena reclaims in bulk).
+
+include "x86_64/linux/heap.snd"
+
+// A fresh, empty buffer with a small initial capacity.
+pub fn bytes_new() -> i64 {
+    let h = heap_alloc(24)            // header: data, len, cap
+    let cap = 16
+    poke64(h, heap_alloc(cap))        // data
+    poke64(h + 8, 0)                  // len
+    poke64(h + 16, cap)               // cap
+    h
+}
+
+// Number of bytes in the buffer.
+pub fn bytes_len(b: i64) -> i64 {
+    peek64(b + 8)
+}
+
+// The byte at index `i` (0-based). Caller ensures `i < bytes_len(b)`.
+pub fn bytes_get(b: i64, i: i64) -> i64 {
+    peek8(peek64(b) + i)
+}
+
+// Append one byte, doubling the backing buffer (copying the old bytes) when full.
+pub fn bytes_push(b: i64, byte: i64) {
+    let len = peek64(b + 8)
+    let cap = peek64(b + 16)
+    if len >= cap {
+        let ncap = cap * 2
+        let ndata = heap_alloc(ncap)
+        let src = peek64(b)
+        let mut i = 0
+        for i < len {
+            poke8(ndata + i, peek8(src + i))
+            i = i + 1
+        }
+        poke64(b, ndata)
+        poke64(b + 16, ncap)
+    }
+    poke8(peek64(b) + len, byte)
+    poke64(b + 8, len + 1)
+}
