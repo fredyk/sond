@@ -145,12 +145,18 @@ fn verify_function(
             let mut asm = requires.clone();
             asm.extend(ob.assumptions.iter().cloned());
             if !matches!(prove(&ob.prop, &asm), Outcome::Proven) {
-                return reject(format!("cannot prove {}", ob.what));
+                return reject(format!(
+                    "cannot prove {}{}",
+                    ob.what,
+                    path_where(&ob.assumptions)
+                ));
             }
         }
         // Prove every postcondition on this path (if the function has any): the precondition
         // plus the path's branch conditions are the assumptions, the return value binds the
-        // named return.
+        // named return. Capture the path's branch conditions first, they name the case the
+        // proof fails on (the red→green loop needs WHICH path, not just which contract).
+        let where_clause = path_where(&path.cons);
         let mut assumptions = requires.clone();
         assumptions.extend(path.cons);
         for e in &f.ensures {
@@ -160,13 +166,18 @@ fn verify_function(
             match prove(&p, &assumptions) {
                 Outcome::Proven => {}
                 Outcome::Disproven => {
-                    return reject(format!("postcondition `{}` is false", show_prop(&p)));
+                    return reject(format!(
+                        "postcondition `{}` is false{}",
+                        show_prop(&p),
+                        where_clause
+                    ));
                 }
                 Outcome::Unknown => {
                     return reject(format!(
-                        "cannot prove postcondition `{}`, Sond rejects a contract it \
+                        "cannot prove postcondition `{}`{}, Sond rejects a contract it \
                          cannot verify (add the assumptions it needs, or strengthen the prover)",
-                        show_prop(&p)
+                        show_prop(&p),
+                        where_clause
                     ));
                 }
             }
@@ -937,6 +948,18 @@ fn show_prop(p: &SymProp) -> String {
     format!("{} {} {}", show_sym(&p.lhs), op, show_sym(&p.rhs))
 }
 
+/// Renders a path's branch conditions as a human-readable " on the path where `c1` and `c2`"
+/// suffix, the exact case under which a proof failed. Empty for a straight-line path (no
+/// branches), so a linear body's diagnostic carries no spurious clause. This is what lets the
+/// red→green loop see WHICH case to fix, not merely that a contract failed.
+fn path_where(cons: &[SymProp]) -> String {
+    if cons.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = cons.iter().map(|c| format!("`{}`", show_prop(c))).collect();
+    format!(" on the path where {}", parts.join(" and "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,6 +1095,35 @@ mod tests {
             "fn f(x: i64) -> (r: i64) ensures { r >= 0 } { if x >= 0 { x } else { 0 - 1 } }",
         );
         assert!(verify(&funcs).is_err());
+    }
+
+    #[test]
+    fn names_the_failing_path_in_the_diagnostic() {
+        // The else-branch (reached when `x < 0`) returns -1, breaking `r >= 0`. A good
+        // diagnostic must name the PATH under which the proof fails, so the red→green
+        // loop knows WHICH case to fix, not merely that the postcondition failed.
+        let funcs = parse(
+            "fn f(x: i64) -> (r: i64) ensures { r >= 0 } { if x >= 0 { x } else { 0 - 1 } }",
+        );
+        let err = verify(&funcs).expect_err("must reject the broken else-branch");
+        assert!(
+            err.message.contains("x < 0"),
+            "diagnostic should name the failing path (`x < 0`); got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn straight_line_diagnostic_has_no_spurious_path_clause() {
+        // A function with no branches has no path condition to report, the diagnostic
+        // must NOT invent an empty "on the path where" clause.
+        let funcs = parse("fn f(x: i64) -> (r: i64) ensures { r >= 0 } { x }");
+        let err = verify(&funcs).expect_err("must reject: x may be negative");
+        assert!(
+            !err.message.contains("on the path where"),
+            "straight-line function should have no path clause; got: {}",
+            err.message
+        );
     }
 
     #[test]
