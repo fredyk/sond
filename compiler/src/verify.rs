@@ -188,7 +188,7 @@ fn verify_function(
                     "cannot prove {}{}{}",
                     ob.what,
                     path_where(&ob.assumptions),
-                    counterexample_clause_alt(&ob.prop, ob.alt.as_ref(), &asm)
+                    counterexample_clause_alt(&ob.prop, ob.alt.as_ref(), &asm, &ctx.int_types)
                 ));
             }
         }
@@ -210,7 +210,7 @@ fn verify_function(
                         "postcondition `{}` is false{}{}",
                         show_prop(&p),
                         where_clause,
-                        counterexample_clause(&p, &assumptions)
+                        counterexample_clause(&p, &assumptions, &ctx.int_types)
                     ));
                 }
                 Outcome::Unknown => {
@@ -219,7 +219,7 @@ fn verify_function(
                          cannot verify (add the assumptions it needs, or strengthen the prover)",
                         show_prop(&p),
                         where_clause,
-                        counterexample_clause(&p, &assumptions)
+                        counterexample_clause(&p, &assumptions, &ctx.int_types)
                     ));
                 }
             }
@@ -1243,21 +1243,62 @@ fn path_where(cons: &[SymProp]) -> String {
     format!(" on the path where {}", parts.join(" and "))
 }
 
-/// Evaluates a symbolic value under a concrete assignment, using WRAPPING i64 arithmetic -
-/// the machine's real semantics, so a witness is faithful to how the compiled code runs.
-fn eval_sym(s: &Sym, env: &BTreeMap<String, i64>) -> Option<i64> {
+/// The signed bit-width of the type whose range is `[lo, hi]`, for a NARROW signed type
+/// (i8/i16/i32); `None` for i64, unsigned, or any non-standard range. Used to wrap an
+/// intermediate result at its real width so a witness reflects the machine.
+fn signed_range_width(lo: i128, hi: i128) -> Option<u32> {
+    [8u32, 16, 32]
+        .into_iter()
+        .find(|&w| lo == -(1i128 << (w - 1)) && hi == (1i128 << (w - 1)) - 1)
+}
+
+/// Sign-extend the low `w` bits of `v`, i.e. wrap `v` into a signed `w`-bit type, exactly as
+/// the machine's narrow arithmetic does.
+fn canon_signed(v: i64, w: u32) -> i64 {
+    let s = 64 - w;
+    (v << s) >> s
+}
+
+/// The width at which an arithmetic NODE's result wraps: the common narrow signed width of all
+/// its variables, or `None` (evaluate at full i64, no canonicalization) when it has no typed
+/// variable, an i64/unsigned one, or a mix of widths. Conservative: only canonicalizes when the
+/// width is certain, so it never fabricates a false witness.
+fn node_signed_width(s: &Sym, int_types: &HashMap<String, (i128, i128)>) -> Option<u32> {
+    let mut vars = BTreeSet::new();
+    collect_sym_vars(s, &mut vars);
+    let mut width = None;
+    for v in &vars {
+        let (lo, hi) = int_types.get(v)?;
+        let w = signed_range_width(*lo, *hi)?;
+        match width {
+            None => width = Some(w),
+            Some(x) if x == w => {}
+            _ => return None, // mixed widths, a type error elsewhere; do not canonicalize
+        }
+    }
+    width
+}
+
+/// Evaluates a symbolic value under a concrete assignment, using WRAPPING arithmetic at each
+/// operation's real type width, the machine's semantics, so a witness is faithful to how the
+/// compiled code runs (an `i32 + 1` at `i32::MAX` wraps to `i32::MIN`, not 2^31).
+fn eval_sym(s: &Sym, env: &BTreeMap<String, i64>, int_types: &HashMap<String, (i128, i128)>) -> Option<i64> {
+    let narrow = |raw: i64| match node_signed_width(s, int_types) {
+        Some(w) => canon_signed(raw, w),
+        None => raw,
+    };
     Some(match s {
         Sym::Const(n) => *n,
         Sym::Var(v) => *env.get(v)?,
-        Sym::Add(a, b) => eval_sym(a, env)?.wrapping_add(eval_sym(b, env)?),
-        Sym::Sub(a, b) => eval_sym(a, env)?.wrapping_sub(eval_sym(b, env)?),
-        Sym::Mul(a, b) => eval_sym(a, env)?.wrapping_mul(eval_sym(b, env)?),
+        Sym::Add(a, b) => narrow(eval_sym(a, env, int_types)?.wrapping_add(eval_sym(b, env, int_types)?)),
+        Sym::Sub(a, b) => narrow(eval_sym(a, env, int_types)?.wrapping_sub(eval_sym(b, env, int_types)?)),
+        Sym::Mul(a, b) => narrow(eval_sym(a, env, int_types)?.wrapping_mul(eval_sym(b, env, int_types)?)),
     })
 }
 
 /// Evaluates a comparison under a concrete assignment (`None` if a variable is unbound).
-fn eval_prop(p: &SymProp, env: &BTreeMap<String, i64>) -> Option<bool> {
-    let (l, r) = (eval_sym(&p.lhs, env)?, eval_sym(&p.rhs, env)?);
+fn eval_prop(p: &SymProp, env: &BTreeMap<String, i64>, int_types: &HashMap<String, (i128, i128)>) -> Option<bool> {
+    let (l, r) = (eval_sym(&p.lhs, env, int_types)?, eval_sym(&p.rhs, env, int_types)?);
     Some(match p.op {
         BinOp::Eq => l == r,
         BinOp::Ne => l != r,
@@ -1301,7 +1342,11 @@ fn collect_consts(s: &Sym, out: &mut BTreeSet<i64>) {
 /// constants in play plus the type's extremes; returns `None` (and the diagnostic simply
 /// omits a counterexample) rather than overclaim when none is found in budget. A returned
 /// witness is never a false positive, it is checked to actually violate the goal.
-fn find_counterexample(goal: &SymProp, assumptions: &[SymProp]) -> Option<BTreeMap<String, i64>> {
+fn find_counterexample(
+    goal: &SymProp,
+    assumptions: &[SymProp],
+    int_types: &HashMap<String, (i128, i128)>,
+) -> Option<BTreeMap<String, i64>> {
     let mut vars = BTreeSet::new();
     collect_sym_vars(&goal.lhs, &mut vars);
     collect_sym_vars(&goal.rhs, &mut vars);
@@ -1351,8 +1396,10 @@ fn find_counterexample(goal: &SymProp, assumptions: &[SymProp]) -> Option<BTreeM
             .enumerate()
             .map(|(i, v)| (v.clone(), cands[idx[i]]))
             .collect();
-        let assumptions_hold = assumptions.iter().all(|a| eval_prop(a, &env) == Some(true));
-        if assumptions_hold && eval_prop(goal, &env) == Some(false) {
+        let assumptions_hold = assumptions
+            .iter()
+            .all(|a| eval_prop(a, &env, int_types) == Some(true));
+        if assumptions_hold && eval_prop(goal, &env, int_types) == Some(false) {
             return Some(env);
         }
         // Odometer increment over the candidate indices.
@@ -1373,8 +1420,12 @@ fn find_counterexample(goal: &SymProp, assumptions: &[SymProp]) -> Option<BTreeM
 
 /// A human-readable " (counterexample: `x = -1`, `b = 0`)" clause, or "" if none was found
 /// in budget, the actionable input the Prime Directive's feedback mandate asks for.
-fn counterexample_clause(goal: &SymProp, assumptions: &[SymProp]) -> String {
-    match find_counterexample(goal, assumptions) {
+fn counterexample_clause(
+    goal: &SymProp,
+    assumptions: &[SymProp],
+    int_types: &HashMap<String, (i128, i128)>,
+) -> String {
+    match find_counterexample(goal, assumptions, int_types) {
         Some(env) => {
             let parts: Vec<String> = env.iter().map(|(v, n)| format!("{v} = {n}")).collect();
             format!(" (counterexample: {})", parts.join(", "))
@@ -1387,13 +1438,18 @@ fn counterexample_clause(goal: &SymProp, assumptions: &[SymProp]) -> String {
 /// witness that breaks `prop`. A disjunctive one (`prop` OR `alt`) needs a witness that
 /// breaks BOTH, so it is sought against `prop` with `¬alt` added to the assumptions, an
 /// assignment satisfying `asm ∧ ¬alt ∧ ¬prop` (e.g. `x = i64::MIN, y = -1`).
-fn counterexample_clause_alt(prop: &SymProp, alt: Option<&SymProp>, asm: &[SymProp]) -> String {
+fn counterexample_clause_alt(
+    prop: &SymProp,
+    alt: Option<&SymProp>,
+    asm: &[SymProp],
+    int_types: &HashMap<String, (i128, i128)>,
+) -> String {
     match alt {
-        None => counterexample_clause(prop, asm),
+        None => counterexample_clause(prop, asm, int_types),
         Some(a) => {
             let mut asm2 = asm.to_vec();
             asm2.push(negate_prop(a));
-            counterexample_clause(prop, &asm2)
+            counterexample_clause(prop, &asm2, int_types)
         }
     }
 }
@@ -1537,6 +1593,21 @@ mod tests {
             "fn f(x: i32) -> (r: i32) requires { x > 0; x < 100 } ensures { r > x } { x + 1 }",
         );
         assert!(verify(&funcs).is_ok());
+    }
+
+    #[test]
+    fn i32_overflow_rejection_exhibits_the_counterexample() {
+        // The witness search must wrap `x + 1` at i32 width (not i64) to see the break, so the
+        // diagnostic names the exact input: x = i32::MAX = 2147483647.
+        let funcs = parse(
+            "fn f(x: i32) -> (r: i32) requires { x > 0; x <= 2147483647 } ensures { r > x } { x + 1 }",
+        );
+        let err = verify(&funcs).unwrap_err();
+        assert!(
+            err.message.contains("counterexample") && err.message.contains("2147483647"),
+            "expected an i32::MAX counterexample, got: {}",
+            err.message
+        );
     }
 
     #[test]
