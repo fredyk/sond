@@ -182,6 +182,23 @@ test "positive"    { assert(dbl(1) > 0) }
   wrong (expected vs actual) and aborts the test; the run's exit code is nonzero.
 - `test` blocks are **inert in an ordinary compile** (`sondc file.snd` drops them), only
   `sond test` gathers and runs them, so a source file may carry its own tests.
+- Each test runs in its own forked process, so a failing assertion or a crash is isolated -
+  the suite runs to completion and reports `N test(s), M failed` (exit code = M).
+
+### Coverage (`sond test --coverage`)
+
+`sond test --coverage <file.snd>` measures how much of the code under test the tests
+exercise (basic-block / branch coverage), and **fails if coverage is below a threshold**
+(default 80%, set with `--min-coverage=N`):
+
+```
+sond test --coverage mylib.snd                  # gate at 80%
+sond test --coverage --min-coverage=90 mylib.snd
+```
+
+It reports e.g. `coverage 5/5 (100%)`; below the threshold it prints `coverage below 80%
+threshold` and exits nonzero. The test bodies, the harness, and the testing library are not
+counted, only the code under test. Ordinary builds carry no instrumentation.
 
 ## Builtins, provided by the COMPILER itself (no `include` needed)
 

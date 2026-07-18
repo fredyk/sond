@@ -121,7 +121,15 @@ sond test mylib.snd      # builds the file's test blocks and runs them
 
 Test blocks are inert in an ordinary compile (`sondc mylib.snd` ignores them). The testing
 library provides `assert` / `assert_eq` / `assert_ne`; a failing assertion prints expected
-vs actual and the run exits nonzero.
+vs actual and the run exits nonzero. Each test runs in its own forked process, so a failing
+assertion or a crash is isolated and the suite still reports a full pass/fail tally.
+
+**Coverage gate.** `sond test --coverage mylib.snd` measures branch coverage of the code
+under test and fails if it is below a threshold (default 80%, `--min-coverage=N`):
+
+```
+sond test --coverage mylib.snd      # coverage 5/5 (100%), or fails under 80%
+```
 
 ## Status
 
