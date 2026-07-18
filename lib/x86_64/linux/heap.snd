@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// A hosted ARENA (bump) allocator over anonymous mmap, the foundation the dynamic parts of
+// the standard library (growable buffers, strings, collections) build on, since the hosted
+// target has no `alloc` builtin (that one is UEFI-only).
+//
+// An arena is exactly the right shape for short-lived, allocation-heavy programs such as a
+// compiler: allocate freely for the whole run, then let the OS reclaim everything at exit
+// (or call `heap_reset` to reclaim in bulk between phases). There is no per-object free.
+
+include "x86_64/linux/syscall-nums.snd"
+
+let mut __arena_ptr = 0    // next free byte (0 until the first allocation)
+let mut __arena_end = 0    // one past the end of the current mmap block
+let mut __arena_total = 0  // total bytes handed out, across all blocks
+
+// Map a fresh block big enough for `need` bytes (at least 16 MiB) and bump into it. Called on
+// first use and whenever the current block is exhausted.
+fn __arena_grow(need: i64) {
+    let block = 16777216                       // 16 MiB
+    let size = if need > block { need } else { block }
+    // PROT_READ|PROT_WRITE = 3; MAP_PRIVATE|MAP_ANONYMOUS = 2|32 = 34; fd = -1; offset = 0.
+    let base = syscall(SYS_mmap, 0, size, 3, 34, 0 - 1, 0)
+    __arena_ptr = base
+    __arena_end = base + size
+}
+
+// Allocate `n` bytes from the arena, 8-byte aligned, zero-filled (mmap gives zeroed pages).
+// Grows the arena on demand, so it never returns null for a reasonable request.
+pub fn heap_alloc(n: i64) -> i64 {
+    let aligned = (n + 7) & (0 - 8)
+    if __arena_ptr + aligned > __arena_end {
+        __arena_grow(aligned)
+    }
+    let p = __arena_ptr
+    __arena_ptr = __arena_ptr + aligned
+    __arena_total = __arena_total + aligned
+    p
+}
+
+// Total bytes handed out so far, across every block (for diagnostics/tests).
+pub fn heap_used() -> i64 {
+    __arena_total
+}

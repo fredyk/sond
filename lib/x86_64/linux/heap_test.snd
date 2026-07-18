@@ -1,0 +1,44 @@
+// Tests for the hosted arena allocator (lib/x86_64/linux/heap.snd). Run with:
+//   sond test lib/x86_64/linux/heap_test.snd
+include "x86_64/linux/heap.snd"
+include "x86_64/linux/testing.snd"
+
+test "distinct allocations do not overlap" {
+    let a = heap_alloc(16)
+    let b = heap_alloc(16)
+    poke64(a, 111)
+    poke64(b, 222)
+    assert_eq(peek64(a), 111)
+    assert_eq(peek64(b), 222)
+    assert_ne(a, b)
+}
+
+test "allocations are 8-byte aligned and packed" {
+    let a = heap_alloc(1)
+    let b = heap_alloc(1)
+    assert_eq(b - a, 8)
+}
+
+test "a large allocation is fully writable" {
+    let big = heap_alloc(2000000)
+    poke64(big, 42)
+    poke64(big + 1999992, 99)
+    assert_eq(peek64(big), 42)
+    assert_eq(peek64(big + 1999992), 99)
+}
+
+test "heap_used tracks total bytes allocated" {
+    assert_eq(heap_used(), 0)
+    let a = heap_alloc(24)
+    assert_eq(heap_used(), 24)
+    let b = heap_alloc(8)
+    assert_eq(heap_used(), 32)
+}
+
+test "an allocation larger than a block grows the arena" {
+    let huge = heap_alloc(20000000)
+    poke64(huge, 7)
+    poke64(huge + 19999992, 9)
+    assert_eq(peek64(huge), 7)
+    assert_eq(peek64(huge + 19999992), 9)
+}
