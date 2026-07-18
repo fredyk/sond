@@ -156,10 +156,19 @@ fn main() -> ExitCode {
             }
         }
         "run" => {
-            let Some(file) = args.get(2) else {
+            // sond run <program.snd>, same mandatory gate as build, then run the program.
+            let rest = &args[2..];
+            let Some(file) = rest.iter().find(|a| !a.starts_with('-')) else {
                 eprintln!("sond run: missing <file.snd>");
                 return ExitCode::from(2);
             };
+            if !run_gated_tests(&sondc, file, min_coverage(&args)) {
+                eprintln!(
+                    "sond: run blocked, the program's tests must pass with at least {}% coverage",
+                    min_coverage(&args)
+                );
+                return ExitCode::FAILURE;
+            }
             let out = temp_out(file, ".runbin");
             if !compile(&sondc, file, &out, &[]) {
                 return ExitCode::FAILURE;
