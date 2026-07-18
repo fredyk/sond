@@ -78,6 +78,9 @@ struct Ctx<'a> {
     /// must fit in `[i32::MIN, i32::MAX]`, not merely in i64, so a narrow-width sum that leaves
     /// its type but stays inside i64 is correctly rejected.
     int_types: HashMap<String, (i128, i128)>,
+    /// The function's preconditions as constraints, available to reasoning done during symbolic
+    /// evaluation (e.g. the div/mod sign bounds), which the per-path `cons` does not yet carry.
+    requires: Vec<SymProp>,
     /// Why the evaluator left the verifiable fragment, if it did. The evaluator bails by
     /// returning `None`; this records the FIRST (deepest) reason so the diagnostic names the
     /// actual construct, `a `for` loop without an `invariant``, instead of a generic list.
@@ -118,6 +121,16 @@ fn verify_function(
         .iter()
         .map(|p| (p.name.clone(), Sym::Var(p.name.clone())))
         .collect();
+    // The preconditions, as constraints. Held in the Ctx so reasoning DONE DURING symbolic
+    // evaluation can use them (e.g. deciding a divisor is positive, so `a / b` and `a % b` gain
+    // their sign/range bounds), not only when the postcondition is discharged afterwards. They
+    // are deliberately NOT seeded into the path constraints, so an obligation's recorded
+    // assumptions stay the branch conditions alone (a clean diagnostic path clause).
+    let requires: Vec<SymProp> = f
+        .requires
+        .iter()
+        .filter_map(|e| sym_prop(e, &env))
+        .collect();
     let init = State {
         env: env.clone(),
         cons: Vec::new(),
@@ -146,6 +159,7 @@ fn verify_function(
                 _ => None,
             })
             .collect(),
+        requires: requires.clone(),
         bail: None,
     };
     let paths = eval_block_paths(&f.body, init, &mut ctx);
@@ -167,13 +181,6 @@ fn verify_function(
              cannot verify."
         ));
     };
-    // The precondition holds on EVERY path (it constrains the inputs). Evaluate it in the
-    // parameter-only environment so a later `let` cannot shadow a precondition variable.
-    let requires: Vec<SymProp> = f
-        .requires
-        .iter()
-        .filter_map(|e| sym_prop(e, &env))
-        .collect();
     for mut path in paths {
         if let Some(rn) = &f.ret_name {
             path.env.insert(rn.clone(), path.ret.clone());
@@ -456,7 +463,42 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
                             BinOp::Div => a.wrapping_div(*b),
                             _ => a.wrapping_rem(*b),
                         }),
-                        _ => ctx.fresh_var(), // non-linear result: opaque
+                        _ => {
+                            // The result is opaque (division is non-linear), BUT integer `/` and
+                            // `%` carry provable sign/magnitude bounds. When the divisor is
+                            // positive and the dividend non-negative, teach the prover them:
+                            // `0 <= a / b <= a` and `0 <= a % b < b`. Sound for truncated integer
+                            // arithmetic, and only ADDS facts (never rejects), this is what lets
+                            // `i / k` stay non-negative and `i % n` be a valid index into a
+                            // size-n array.
+                            let q = ctx.fresh_var();
+                            let cmp = |op, lhs: &Sym, rhs: Sym| SymProp {
+                                op,
+                                lhs: lhs.clone(),
+                                rhs,
+                            };
+                            // The facts in scope: the preconditions plus this path's branch
+                            // conditions (the per-path `cons` does not carry the preconditions).
+                            let mut asm = ctx.requires.clone();
+                            asm.extend(s2.cons.iter().cloned());
+                            let pos_divisor = matches!(
+                                prove(&cmp(BinOp::Gt, &rv, Sym::Const(0)), &asm, &ctx.int_types),
+                                Outcome::Proven
+                            );
+                            let nonneg_dividend = matches!(
+                                prove(&cmp(BinOp::Ge, &lv, Sym::Const(0)), &asm, &ctx.int_types),
+                                Outcome::Proven
+                            );
+                            if pos_divisor && nonneg_dividend {
+                                s2.cons.push(cmp(BinOp::Ge, &q, Sym::Const(0)));
+                                if matches!(op, BinOp::Div) {
+                                    s2.cons.push(cmp(BinOp::Le, &q, lv.clone())); // a/b <= a
+                                } else {
+                                    s2.cons.push(cmp(BinOp::Lt, &q, rv.clone())); // a%b < b
+                                }
+                            }
+                            q
+                        }
                     };
                     out.push((s2, value));
                 }
@@ -1611,6 +1653,25 @@ mod tests {
             "fn f(x: i64) -> (r: i64) requires { x > 0; x < 100 } ensures { r > x } { x + 1 }",
         );
         assert!(verify(&funcs).is_ok());
+    }
+
+    #[test]
+    fn proves_sign_and_magnitude_bounds_of_division_and_modulo() {
+        // `i / 2` keeps a non-negative dividend non-negative.
+        let d = parse("fn f(i: i64 where i >= 0) -> (r: i64) ensures { r >= 0 } { i / 2 }");
+        assert!(verify(&d).is_ok());
+        // `i % n` lands in [0, n) when i >= 0 and n > 0, the safe-index bound.
+        let m = parse(
+            "fn f(i: i64 where i >= 0, n: i64 where n > 0) -> (r: i64) ensures { r >= 0; r < n } { i % n }",
+        );
+        assert!(verify(&m).is_ok());
+    }
+
+    #[test]
+    fn does_not_prove_a_division_bound_without_the_sign() {
+        // Without `i >= 0`, `i / 2 >= 0` is false for negative i, must NOT be proven.
+        let d = parse("fn f(i: i64) -> (r: i64) ensures { r >= 0 } { i / 2 }");
+        assert!(verify(&d).is_err());
     }
 
     #[test]
