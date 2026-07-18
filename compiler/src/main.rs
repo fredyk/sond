@@ -24,7 +24,29 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let input = &args[1];
+    // The input is the first positional argument, skip flags (`--test`, `-o`, ...) and
+    // the value that follows `-o`, so the source file may appear in any order.
+    let mut input: Option<&String> = None;
+    let mut skip_next = false;
+    for a in &args[1..] {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a == "-o" {
+            skip_next = true;
+            continue;
+        }
+        if a.starts_with('-') {
+            continue;
+        }
+        input = Some(a);
+        break;
+    }
+    let Some(input) = input else {
+        eprintln!("usage: sondc <input.snd> [-o <output>] [--test | --freestanding | --uefi | --shared]");
+        return ExitCode::from(2);
+    };
     let output = parse_output_flag(&args).unwrap_or_else(|| default_output(input));
     let freestanding = args.iter().any(|a| a == "--freestanding");
     let uefi = args.iter().any(|a| a == "--uefi");
@@ -84,9 +106,18 @@ fn main() -> ExitCode {
     };
 
     // `test "..." { .. }` blocks are inert in an ordinary compile, only `sond test`
-    // gathers and runs them. Drop them here so a source file may carry its tests
-    // without pulling test-only calls (assert, ...) into the shipped program.
-    funcs.retain(|f| !f.is_test);
+    // gathers and runs them. In `--test` mode, keep the tests, drop the file's own
+    // `main`, and synthesize a harness `main` that runs each test; otherwise drop the
+    // tests so a source file may carry them without pulling test-only calls (assert, ...)
+    // into the shipped program.
+    let test_mode = args.iter().any(|a| a == "--test");
+    if test_mode {
+        funcs.retain(|f| f.name != "main");
+        let harness = sondc::testing::synth_harness(&funcs);
+        funcs.push(harness);
+    } else {
+        funcs.retain(|f| !f.is_test);
+    }
 
     // Value/pointer struct rules: a value struct received as a parameter is
     // read-only (only its creator may mutate it). Reject field mutation of a

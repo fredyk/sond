@@ -14,6 +14,7 @@ pub mod header;
 pub mod lexer;
 pub mod parser;
 pub mod resolve;
+pub mod testing;
 pub mod token;
 pub mod typeck;
 pub mod verify;
