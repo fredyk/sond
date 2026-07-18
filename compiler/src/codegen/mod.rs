@@ -191,10 +191,12 @@ pub fn emit_program_coverage_g(
     globals: &[Global],
     structs: &[StructDef],
     funcs: &[Function],
+    scope: &HashSet<String>,
 ) -> String {
     let mut cg = Codegen {
         check_contracts: true,
         coverage: true,
+        cov_scope: scope.clone(),
         ..Default::default()
     };
     cg.set_globals(globals);
@@ -560,6 +562,9 @@ struct Codegen {
     /// Per-instrumented-function coverage ranges: `(name, first_point_id, point_count)`. Emitted
     /// as `__cov_fn_table` so the harness can name which functions are not fully covered.
     cov_fns: Vec<(String, usize, usize)>,
+    /// The function names coverage is scoped to (the code the entry is responsible for). Empty
+    /// = cover every non-skipped function (used when no scope is supplied).
+    cov_scope: HashSet<String>,
     /// Names of the module-level globals (to resolve a `Var` to a `.data` label).
     global_names: HashSet<String>,
     /// The scalar globals to emit in `.data`, as `(label, constant value)`.
@@ -608,8 +613,10 @@ impl Codegen {
         self.var_types.clear();
         // Instrument only the code under test: skip the harness, the test bodies, and the
         // testing library (measuring those is noise, and the harness must run its `__cov_ptr`
-        // setup before any mark fires).
-        self.cov_active = self.coverage && !should_skip_coverage(func);
+        // setup before any mark fires); and, when a coverage scope is set, only functions in
+        // it (the entry's own code, not already-tested transitive dependencies).
+        let in_scope = self.cov_scope.is_empty() || self.cov_scope.contains(&func.name);
+        self.cov_active = self.coverage && !should_skip_coverage(func) && in_scope;
         // Does this function return a small struct/enum by value? If so, the body leaves
         // its base ADDRESS in %rax; the return point expands that to the value in RAX:RDX.
         self.cur_ret_struct = self.ret_struct_words(&func.ret);

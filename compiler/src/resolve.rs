@@ -15,13 +15,33 @@ use std::path::{Path, PathBuf};
 /// Reads `entry` and inlines every `include "..."` it (transitively) names, returning
 /// the combined source ready for the lexer.
 pub fn resolve_includes(entry: &Path) -> std::io::Result<String> {
-    let mut seen = HashSet::new();
-    let mut out = String::new();
-    resolve_into(entry, &mut seen, &mut out)?;
-    Ok(out)
+    Ok(resolve_includes_scoped(entry)?.0)
 }
 
-fn resolve_into(path: &Path, seen: &mut HashSet<PathBuf>, out: &mut String) -> std::io::Result<()> {
+/// Like [`resolve_includes`], but also returns the set of function names that COVERAGE should
+/// measure, the code the entry is responsible for testing. If the entry defines functions of
+/// its own (a program), those are the scope; if it only holds `test` blocks (a library's test
+/// file), the scope is the functions of its DIRECT includes (the library under test). Deeper,
+/// transitively-included dependencies are assumed tested by their own suites, so they do not
+/// drag down the entry's coverage. (The testing library is filtered out downstream.)
+pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet<String>)> {
+    let mut seen = HashSet::new();
+    let mut out = String::new();
+    let mut depth0 = HashSet::new();
+    let mut depth1 = HashSet::new();
+    resolve_into(entry, &mut seen, &mut out, 0, &mut depth0, &mut depth1)?;
+    let scope = if depth0.is_empty() { depth1 } else { depth0 };
+    Ok((out, scope))
+}
+
+fn resolve_into(
+    path: &Path,
+    seen: &mut HashSet<PathBuf>,
+    out: &mut String,
+    depth: usize,
+    depth0: &mut HashSet<String>,
+    depth1: &mut HashSet<String>,
+) -> std::io::Result<()> {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !seen.insert(canon) {
         return Ok(()); // already included, skip to avoid duplicate definitions
@@ -30,14 +50,42 @@ fn resolve_into(path: &Path, seen: &mut HashSet<PathBuf>, out: &mut String) -> s
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     for line in src.lines() {
         match parse_include(line.trim()) {
-            Some(rel) => resolve_into(&resolve_target(dir, rel), seen, out)?,
+            Some(rel) => resolve_into(&resolve_target(dir, rel), seen, out, depth + 1, depth0, depth1)?,
             None => {
+                if let Some(name) = extract_fn_name(line) {
+                    match depth {
+                        0 => {
+                            depth0.insert(name);
+                        }
+                        1 => {
+                            depth1.insert(name);
+                        }
+                        _ => {}
+                    }
+                }
                 out.push_str(line);
                 out.push('\n');
             }
         }
     }
     Ok(())
+}
+
+/// The name declared by a top-level `fn`/`pub fn`/`priv fn` line, if any (methods and
+/// `test` blocks are not free functions and are ignored, the coverage scope of a library is
+/// its free functions).
+fn extract_fn_name(line: &str) -> Option<String> {
+    let t = line.trim_start();
+    let t = t
+        .strip_prefix("pub ")
+        .or_else(|| t.strip_prefix("priv "))
+        .unwrap_or(t);
+    let rest = t.strip_prefix("fn ")?;
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
 }
 
 /// Resolves an include path, in order: relative to the including file, then a `lib/`

@@ -14,7 +14,6 @@ use sondc::codegen::{
 };
 use sondc::lexer::tokenize;
 use sondc::parser::Parser;
-use sondc::resolve::resolve_includes;
 use sondc::verify::verify;
 use std::path::Path;
 use std::process::{Command, ExitCode};
@@ -56,8 +55,11 @@ fn main() -> ExitCode {
     let emit_header = args.iter().any(|a| a == "--emit-header");
 
     // Resolve `include "lib.snd"` directives (source-level, deduped) so multi-file
-    // programs, a reusable library and the code that uses it, compile as one.
-    let src = match resolve_includes(std::path::Path::new(input)) {
+    // programs, a reusable library and the code that uses it, compile as one. `cov_scope`
+    // is the set of functions coverage should measure (the entry's own code, not its
+    // already-tested transitive dependencies).
+    let (src, cov_scope) = match sondc::resolve::resolve_includes_scoped(std::path::Path::new(input))
+    {
         Ok(s) => s,
         Err(e) => {
             eprintln!("sondc: cannot read {input}: {e}");
@@ -216,7 +218,7 @@ fn main() -> ExitCode {
         } else if shared {
             emit_shared_g(&globals, &structs, &funcs)
         } else if coverage {
-            emit_program_coverage_g(&globals, &structs, &funcs)
+            emit_program_coverage_g(&globals, &structs, &funcs, &cov_scope)
         } else {
             emit_program_g(&globals, &structs, &funcs)
         }
