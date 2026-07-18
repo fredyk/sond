@@ -177,6 +177,12 @@ fn main() -> ExitCode {
         eprintln!("sondc: {msg}");
         return ExitCode::FAILURE;
     }
+    // (C) on-ramp for #2 (RFC-0012): a constant index outside a known array's bounds is a
+    // compile error, the non-breaking first step of checked array access.
+    if let Err(msg) = sondc::check::check_constant_bounds(&funcs) {
+        eprintln!("sondc: {msg}");
+        return ExitCode::FAILURE;
+    }
 
     // `--emit-header`: print the module's public interface (contract, no bodies)
     // and stop. This is the `.snd` header for ~/.local/include/sond and dist/include.

@@ -9,7 +9,7 @@
 //!
 //! Runs BEFORE struct desugaring, so it sees the original `p.field` form.
 
-use crate::ast::{BinOp, Block, EnumDef, Expr, Function, Stmt, StructDef, Type};
+use crate::ast::{BinOp, Block, EnumDef, Expr, Function, Stmt, StructDef, Type, UnOp};
 
 /// Exhaustiveness: every `match` on a sum type must cover ALL of its enum's variants,
 /// use only variants that exist, and not repeat one. A missing case is a COMPILE ERROR
@@ -473,6 +473,150 @@ fn const_fold(e: &Expr, fname: &str) -> Result<Option<i64>, String> {
         _ => Ok(None),
     }
 }
+/// (C) on-ramp for #2 (unchecked `a[i]`, RFC-0012 §6): reject `a[K]` into a fixed-size array
+/// `let a[N]` when K is a COMPILE-TIME CONSTANT outside `[0, N)`, a provable stack overrun
+/// (an off-by-one, a wrong literal). Only PROVABLE out-of-bounds are rejected; a variable index
+/// is left to the prover and the coming refinement types. Non-breaking: no valid program indexes
+/// a known-size array with a constant out of range. Mirrors `check_constant_overflow`.
+pub fn check_constant_bounds(funcs: &[Function]) -> Result<(), String> {
+    for f in funcs {
+        let mut sizes: HashMap<String, i64> = HashMap::new();
+        bounds_block(&f.body, &f.name, &mut sizes)?;
+    }
+    Ok(())
+}
+
+fn bounds_block(b: &Block, fname: &str, sizes: &mut HashMap<String, i64>) -> Result<(), String> {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let {
+                name,
+                value,
+                array_len,
+                ..
+            } => {
+                bounds_expr(value, fname, sizes)?;
+                match array_len {
+                    // `let a[N]` records the known size; a scalar `let a = ..` reusing the
+                    // name drops any prior size so a later index is not checked against it.
+                    Some(n) => {
+                        sizes.insert(name.clone(), *n);
+                    }
+                    None => {
+                        sizes.remove(name);
+                    }
+                }
+            }
+            Stmt::Assign { target, value } => {
+                bounds_expr(target, fname, sizes)?;
+                bounds_expr(value, fname, sizes)?;
+            }
+            Stmt::Return(Some(v)) | Stmt::Expr(v) => bounds_expr(v, fname, sizes)?,
+            Stmt::For {
+                cond,
+                invariant,
+                body,
+            } => {
+                if let Some(c) = cond {
+                    bounds_expr(c, fname, sizes)?;
+                }
+                for inv in invariant {
+                    bounds_expr(inv, fname, sizes)?;
+                }
+                // A declaration inside the loop does not escape it.
+                let mut inner = sizes.clone();
+                bounds_block(body, fname, &mut inner)?;
+            }
+            _ => {}
+        }
+    }
+    if let Some(t) = &b.tail {
+        bounds_expr(t, fname, sizes)?;
+    }
+    Ok(())
+}
+
+fn bounds_expr(e: &Expr, fname: &str, sizes: &HashMap<String, i64>) -> Result<(), String> {
+    if let Expr::Index(base, idx) = e
+        && let Expr::Var(a) = base.as_ref()
+        && let Some(&n) = sizes.get(a)
+        && let Some(k) = const_index(idx)
+        && (k < 0 || k >= n)
+    {
+        return Err(format!(
+            "function `{fname}`: index {k} is out of bounds for `{a}` of size {n} (valid range 0..{n})"
+        ));
+    }
+    match e {
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            bounds_expr(l, fname, sizes)?;
+            bounds_expr(r, fname, sizes)
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => bounds_expr(x, fname, sizes),
+        Expr::Call(c, args) => {
+            bounds_expr(c, fname, sizes)?;
+            for a in args {
+                bounds_expr(&a.value, fname, sizes)?;
+            }
+            Ok(())
+        }
+        Expr::List(items) => {
+            for it in items {
+                bounds_expr(it, fname, sizes)?;
+            }
+            Ok(())
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields {
+                bounds_expr(v, fname, sizes)?;
+            }
+            Ok(())
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            bounds_expr(cond, fname, sizes)?;
+            let mut t = sizes.clone();
+            bounds_block(then_branch, fname, &mut t)?;
+            if let Some(eb) = else_branch {
+                let mut e2 = sizes.clone();
+                bounds_block(eb, fname, &mut e2)?;
+            }
+            Ok(())
+        }
+        Expr::Match { scrutinee, arms } => {
+            bounds_expr(scrutinee, fname, sizes)?;
+            for a in arms {
+                let mut m = sizes.clone();
+                bounds_block(&a.body, fname, &mut m)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Folds a compile-time-constant integer index, `Int`, unary negation, and `+`/`-`/`*` of
+/// constants, or `None` if it is not constant. Overflow is not our concern (it is caught by
+/// `check_constant_overflow`), so folding wraps and always yields a value.
+fn const_index(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Int(n) => Some(*n),
+        Expr::Unary(UnOp::Neg, x) => Some(const_index(x)?.wrapping_neg()),
+        Expr::Binary(op, l, r) if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) => {
+            let (a, b) = (const_index(l)?, const_index(r)?);
+            Some(match op {
+                BinOp::Add => a.wrapping_add(b),
+                BinOp::Sub => a.wrapping_sub(b),
+                _ => a.wrapping_mul(b),
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +635,55 @@ mod tests {
         let funcs = p.parse_program();
         let enums = p.take_enums();
         check_enum_matches(&funcs, &enums)
+    }
+
+    fn bounds(src: &str) -> Result<(), String> {
+        let funcs = Parser::new(tokenize(src)).parse_program();
+        check_constant_bounds(&funcs)
+    }
+
+    #[test]
+    fn rejects_constant_index_past_a_known_array_size() {
+        // `a[5]` into a 4-element array is a provable out-of-bounds (a stack overrun), reject.
+        let err = bounds("fn f() -> i64 { let a[4]\na[5] = 0\na[0] }").unwrap_err();
+        assert!(
+            err.contains("out of bounds") && err.contains("5"),
+            "should name the constant index and the size; got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_negative_constant_index() {
+        let err = bounds("fn f() -> i64 { let a[4]\na[0 - 1] }").unwrap_err();
+        assert!(err.contains("out of bounds"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_index_equal_to_the_size() {
+        // Off-by-one: valid indices are 0..N, so `a[N]` is out of range.
+        assert!(bounds("fn f() -> i64 { let a[8]\na[8] }").is_err());
+    }
+
+    #[test]
+    fn accepts_a_constant_index_in_bounds() {
+        assert!(bounds("fn f() -> i64 { let a[4]\na[3] = 7\na[0] }").is_ok());
+    }
+
+    #[test]
+    fn accepts_a_constant_index_from_arithmetic_in_bounds() {
+        assert!(bounds("fn f() -> i64 { let a[4]\na[2 + 1] }").is_ok());
+    }
+
+    #[test]
+    fn rejects_a_constant_index_from_arithmetic_out_of_bounds() {
+        assert!(bounds("fn f() -> i64 { let a[4]\na[2 + 3] }").is_err());
+    }
+
+    #[test]
+    fn accepts_a_variable_index_unchecked() {
+        // A variable index is left to the prover/refinements, the (C) on-ramp rejects only
+        // PROVABLE (constant) out-of-bounds, so this must NOT be rejected here.
+        assert!(bounds("fn f(i: i64) -> i64 { let a[4]\na[i] }").is_ok());
     }
 
     #[test]
