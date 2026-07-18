@@ -1,0 +1,232 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/crypto/noise/noise-ik.snd, handshake Noise IK, suite
+// Noise_IK_25519_ChaChaPoly_SHA256 (Noise Protocol Framework rev 34).
+// Authenticates client(initiator)+relay(responder), provides forward secrecy, and hides the
+// client's static identity from observers. Composes X25519 + SHA-256 +
+// HKDF + ChaCha20-Poly1305 (all verified).
+//
+// IK: the initiator transmits its static ("I") and knows in advance the
+// responder's ("K"). Messages:  → e, es, s, ss    ← e, ee, se
+//
+// State `st`: 320B buffer reserved by caller (let st[40]).
+
+include "any/crypto/dh/x25519.snd"
+include "any/crypto/hash/sha256.snd"
+include "any/crypto/kdf/hkdf-sha256.snd"
+include "any/crypto/aead/chacha20poly1305.snd"
+include "any/strings.snd"
+
+// Layout of `st` (offsets in bytes).
+let NS_CK = 0        // chaining key (32)
+let NS_H = 32        // handshake hash (32)
+let NS_TK = 64       //     temp key for current AEAD (32)
+let NS_N = 96        // nonce counter (8, i64)
+let NS_EPRIV = 104   // ephemeral priv (32)
+let NS_EPUB = 136    // ephemeral pub (32)
+let NS_SPRIV = 168   // static priv (32)
+let NS_SPUB = 200    // static pub (32)
+let NS_RS = 232      // peer static pub (32)
+let NS_RE = 264      // peer ephemeral pub (32)
+
+fn ns_basepoint(bp: i64) {
+    poke8(bp, 9)
+    let mut i = 1
+    for i < 32 {
+        poke8(bp + i, 0)
+        i = i + 1
+    }
+}
+
+// h = SHA256(h || data)
+fn ns_mixhash(st: i64, data: i64, dlen: i64) {
+    let buf[512]
+    memcpy(buf, st + NS_H, 32)
+    memcpy(buf + 32, data, dlen)
+    sha256_hash(buf, 32 + dlen, st + NS_H)
+}
+
+// ck, temp_k = HKDF(ck, input, 2); nonce n = 0
+fn ns_mixkey(st: i64, input: i64, ilen: i64) {
+    let prk[32]
+    hkdf_extract(st + NS_CK, 32, input, ilen, prk)
+    let out64[64]
+    hkdf_expand(prk, 0, 0, out64, 64)
+    memcpy(st + NS_CK, out64, 32)
+    memcpy(st + NS_TK, out64 + 32, 32)
+    poke64(st + NS_N, 0)
+}
+
+// 12B nonce = 4 zero bytes + 8B counter n (little-endian).
+fn ns_nonce(st: i64, nbuf: i64) {
+    let mut i = 0
+    for i < 4 {
+        poke8(nbuf + i, 0)
+        i = i + 1
+    }
+    let mut c = peek64(st + NS_N)
+    i = 0
+    for i < 8 {
+        poke8(nbuf + 4 + i, c & 0xff)
+        c = c >>> 8
+        i = i + 1
+    }
+}
+
+// c = AEAD_enc(tk, nonce, ad=h, pt); MixHash(c); n++. Returns len(c)=ptlen+16.
+fn ns_encrypt_and_hash(st: i64, pt: i64, ptlen: i64, out: i64) -> i64 {
+    let nb[12]
+    ns_nonce(st, nb)
+    aead_seal(st + NS_TK, nb, st + NS_H, 32, pt, ptlen, out, out + ptlen)
+    let clen = ptlen + 16
+    ns_mixhash(st, out, clen)
+    poke64(st + NS_N, peek64(st + NS_N) + 1)
+    clen
+}
+
+// p = AEAD_dec(tk, nonce, ad=h, c); MixHash(c); n++. Returns ptlen, or -1 if tag fails.
+fn ns_decrypt_and_hash(st: i64, in_ptr: i64, clen: i64, out: i64) -> i64 {
+    let nb[12]
+    ns_nonce(st, nb)
+    let ptlen = clen - 16
+    let r = aead_open(st + NS_TK, nb, st + NS_H, 32, in_ptr, ptlen, in_ptr + ptlen, out)
+    if r != 0 {
+        return -1
+    }
+    ns_mixhash(st, in_ptr, clen)
+    poke64(st + NS_N, peek64(st + NS_N) + 1)
+    ptlen
+}
+
+// InitializeSymmetric + MixHash(empty prologue).
+fn ns_init(st: i64) {
+    let name = cstr("Noise_IK_25519_ChaChaPoly_SHA256")   // 32 bytes exactly
+    memcpy(st + NS_H, name, 32)
+    memcpy(st + NS_CK, name, 32)
+    poke64(st + NS_N, 0)
+    ns_mixhash(st, 0, 0)   // MixHash(prologue = "")
+}
+
+// ── Client (initiator) ──────────────────────────────────────────────
+fn noise_ik_client_init(st: i64, s_priv: i64, s_relay_pub: i64, e_priv: i64) {
+    ns_init(st)
+    let bp[32]
+    ns_basepoint(bp)
+    memcpy(st + NS_SPRIV, s_priv, 32)
+    x25519(s_priv, bp, st + NS_SPUB)
+    memcpy(st + NS_RS, s_relay_pub, 32)
+    memcpy(st + NS_EPRIV, e_priv, 32)
+    x25519(e_priv, bp, st + NS_EPUB)
+    ns_mixhash(st, st + NS_RS, 32)   // pre-message: responder's static key
+}
+
+// msg1: -> e, es, s, ss, (empty payload). Returns len (96).
+fn noise_ik_client_msg1(st: i64, out: i64) -> i64 {
+    let dh[32]
+    // e
+    memcpy(out, st + NS_EPUB, 32)
+    ns_mixhash(st, st + NS_EPUB, 32)
+    let mut p = 32
+    // es
+    x25519(st + NS_EPRIV, st + NS_RS, dh)
+    ns_mixkey(st, dh, 32)
+    // s (client static key, encrypted → 48B)
+    let clen = ns_encrypt_and_hash(st, st + NS_SPUB, 32, out + p)
+    p = p + clen
+    // ss
+    x25519(st + NS_SPRIV, st + NS_RS, dh)
+    ns_mixkey(st, dh, 32)
+    // empty payload (handshake tag, 16B)
+    let tlen = ns_encrypt_and_hash(st, out, 0, out + p)
+    p = p + tlen
+    p
+}
+
+// Read msg2: e, ee, se, payload. 0 ok, !=0 error.
+fn noise_ik_client_msg2(st: i64, msg2: i64, len: i64) -> i64 {
+    let dh[32]
+    // e
+    memcpy(st + NS_RE, msg2, 32)
+    ns_mixhash(st, st + NS_RE, 32)
+    // ee
+    x25519(st + NS_EPRIV, st + NS_RE, dh)
+    ns_mixkey(st, dh, 32)
+    // se: DH(initiator static, responder ephemeral)
+    x25519(st + NS_SPRIV, st + NS_RE, dh)
+ns_mixkey(st, dh, 32)
+    // empty payload
+    let tmp[16]
+    if ns_decrypt_and_hash(st, msg2 + 32, 16, tmp) != 0 {
+        return 1
+    }
+    0
+}
+
+// ── Server (responder) ─────────────────────────────────────────────
+fn noise_ik_server_init(st: i64, s_priv: i64, e_priv: i64) {
+    ns_init(st)
+    let bp[32]
+    ns_basepoint(bp)
+    memcpy(st + NS_SPRIV, s_priv, 32)
+    x25519(s_priv, bp, st + NS_SPUB)
+    memcpy(st + NS_EPRIV, e_priv, 32)
+    x25519(e_priv, bp, st + NS_EPUB)
+    ns_mixhash(st, st + NS_SPUB, 32)   // pre-message: own static key
+}
+
+// Read msg1: e, es, s, ss, payload. Writes the client's static key. 0 ok, !=0 error.
+fn noise_ik_server_msg1(st: i64, msg1: i64, len: i64, s_client_pub_out: i64) -> i64 {
+    let dh[32]
+    // e
+    memcpy(st + NS_RE, msg1, 32)
+    ns_mixhash(st, st + NS_RE, 32)
+    // es
+    x25519(st + NS_SPRIV, st + NS_RE, dh)
+    ns_mixkey(st, dh, 32)
+    // s: decrypt client's static key (48B → 32B)
+    let rsi[32]
+    if ns_decrypt_and_hash(st, msg1 + 32, 48, rsi) != 32 {
+        return 1
+    }
+    memcpy(st + NS_RS, rsi, 32)
+    memcpy(s_client_pub_out, rsi, 32)
+    // ss
+    x25519(st + NS_SPRIV, st + NS_RS, dh)
+    ns_mixkey(st, dh, 32)
+    // empty payload
+    let tmp[16]
+    if ns_decrypt_and_hash(st, msg1 + 80, 16, tmp) != 0 {
+        return 1
+    }
+    0
+}
+
+// msg2: <- e, ee, se, empty payload. Returns len (48).
+fn noise_ik_server_msg2(st: i64, out: i64) -> i64 {
+    let dh[32]
+    // e
+    memcpy(out, st + NS_EPUB, 32)
+    ns_mixhash(st, st + NS_EPUB, 32)
+    let mut p = 32
+    // ee
+    x25519(st + NS_EPRIV, st + NS_RE, dh)
+    ns_mixkey(st, dh, 32)
+    // se: DH(responder ephemeral, initiator static)
+    x25519(st + NS_EPRIV, st + NS_RS, dh)
+    ns_mixkey(st, dh, 32)
+    // empty payload (handshake tag)
+    let tlen = ns_encrypt_and_hash(st, out, 0, out + p)
+    p = p + tlen
+    p
+}
+
+// Split(): k_c2s (client→relay) and k_s2c (relay→client), 32B each.
+fn noise_ik_session_keys(st: i64, k_c2s: i64, k_s2c: i64) {
+    let prk[32]
+    hkdf_extract(st + NS_CK, 32, 0, 0, prk)
+    let out64[64]
+    hkdf_expand(prk, 0, 0, out64, 64)
+    memcpy(k_c2s, out64, 32)
+    memcpy(k_s2c, out64 + 32, 32)
+}

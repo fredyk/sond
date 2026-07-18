@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/poll.snd, fd multiplexing with poll(2).
+// the client/relay monitors multiple fds at once.
+//
+// pollfd = 8 bytes: { i32 fd, i16 events, i16 revents }.
+
+include "syscall-nums.snd"
+
+let POLLIN = 1
+let POLLOUT = 4
+let POLLERR = 8
+let POLLHUP = 16
+
+// Writes entry i of the pollfd array: fd + events, revents to 0.
+fn pollfd_set(arr: i64, i: i64, fd: i64, events: i64) {
+    poke32(arr + i * 8, fd)
+    poke16(arr + i * 8 + 4, events)
+    poke16(arr + i * 8 + 6, 0)
+}
+
+// Reads revents (u16) from entry i.
+fn pollfd_revents(arr: i64, i: i64) -> i64 {
+    peek16(arr + i * 8 + 6)
+}
+
+// poll(arr, nfds, timeout_ms). Returns # of fds with events, 0 on timeout, <0 on error.
+fn poll_fds(arr: i64, nfds: i64, timeout_ms: i64) -> i64 {
+    syscall(SYS_poll, arr, nfds, timeout_ms)
+}

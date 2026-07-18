@@ -1,0 +1,33 @@
+// Test of poll.snd: a pipe with data must report POLLIN; an empty pipe must not.
+// exit 0 if the behavior is correct.
+
+include "x86_64/linux/io.snd"
+include "any/strings.snd"
+include "x86_64/linux/poll.snd"
+
+fn puts(s: i64) { write_buf(1, s, strlen(s)) }
+
+fn main() -> i64 {
+    let p[1]
+    if syscall(SYS_pipe, p) < 0 { puts(cstr("FAIL pipe\n")) return 1 }
+    let rd = peek32(p)
+    let wr = peek32(p + 4)
+
+    let pfd[1]   // one pollfd entry (8B)
+
+    // empty: poll with short timeout must NOT report POLLIN
+    pollfd_set(pfd, 0, rd, POLLIN)
+    if poll_fds(pfd, 1, 50) != 0 { puts(cstr("FAIL empty should timeout\n")) return 1 }
+
+    // with data: poll must report POLLIN
+    write_buf(wr, cstr("x"), 1)
+    pollfd_set(pfd, 0, rd, POLLIN)
+    let r = poll_fds(pfd, 1, 1000)
+    if r < 1 { puts(cstr("FAIL poll no event\n")) return 1 }
+    if (pollfd_revents(pfd, 0) & POLLIN) == 0 { puts(cstr("FAIL revents no POLLIN\n")) return 1 }
+
+    close_fd(rd)
+    close_fd(wr)
+    puts(cstr("OK poll\n"))
+    0
+}

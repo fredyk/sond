@@ -1,0 +1,75 @@
+// Noise IK handshake test: client and server in the same process must
+// (a) complete the handshake, (b) derive the SAME session keys,
+// (c) the server recovers the client's real static public key.
+
+include "x86_64/linux/io.snd"
+include "any/strings.snd"
+include "any/crypto/noise/noise-ik.snd"
+
+fn puts(s: i64) { write_buf(1, s, strlen(s)) }
+
+fn eq32(a: i64, b: i64) -> i64 {
+    let mut i = 0
+    for i < 32 {
+        if peek8(a + i) != peek8(b + i) { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+fn main() -> i64 {
+    // test private keys (distinct from each other)
+    let cs_priv[32]
+    let ce_priv[32]
+    let ss_priv[32]
+    let se_priv[32]
+    let mut i = 0
+    for i < 32 { poke8(cs_priv + i, 0x11 + i) i = i + 1 }
+    i = 0
+    for i < 32 { poke8(ce_priv + i, 0x22 + i) i = i + 1 }
+    i = 0
+    for i < 32 { poke8(ss_priv + i, 0x33 + i) i = i + 1 }
+    i = 0
+    for i < 32 { poke8(se_priv + i, 0x44 + i) i = i + 1 }
+
+    let bp[32]
+    ns_basepoint(bp)
+    let ss_pub[32]
+    x25519(ss_priv, bp, ss_pub)   // relay's static key, known by the client
+    let cs_pub[32]
+    x25519(cs_priv, bp, cs_pub)   // client's static key (for comparison)
+
+    let cst[40]
+    let sst[40]
+    noise_ik_client_init(cst, cs_priv, ss_pub, ce_priv)
+    noise_ik_server_init(sst, ss_priv, se_priv)
+
+    // msg1: client -> server
+    let m1[128]
+    let l1 = noise_ik_client_msg1(cst, m1)
+    if l1 != 96 { puts(cstr("FAIL msg1 len\n")) return 1 }
+    let got_cs[32]
+    if noise_ik_server_msg1(sst, m1, l1, got_cs) != 0 { puts(cstr("FAIL server reads msg1\n")) return 1 }
+    if eq32(got_cs, cs_pub) == 0 { puts(cstr("FAIL server recovers client static\n")) return 1 }
+
+    // msg2: server -> client
+    let m2[128]
+    let l2 = noise_ik_server_msg2(sst, m2)
+    if l2 != 48 { puts(cstr("FAIL msg2 len\n")) return 1 }
+    if noise_ik_client_msg2(cst, m2, l2) != 0 { puts(cstr("FAIL client reads msg2\n")) return 1 }
+
+    // session keys: must match on both sides
+    let ck1[32]
+    let ck2[32]
+    let sk1[32]
+    let sk2[32]
+    noise_ik_session_keys(cst, ck1, ck2)
+    noise_ik_session_keys(sst, sk1, sk2)
+    if eq32(ck1, sk1) == 0 { puts(cstr("FAIL k_c2s mismatch\n")) return 1 }
+    if eq32(ck2, sk2) == 0 { puts(cstr("FAIL k_s2c mismatch\n")) return 1 }
+    // the two directions must be distinct keys
+    if eq32(ck1, ck2) == 1 { puts(cstr("FAIL keys not distinct\n")) return 1 }
+
+    puts(cstr("OK noise-ik (handshake + session keys)\n"))
+    0
+}
