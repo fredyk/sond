@@ -1,0 +1,47 @@
+//   sond test lib/x86_64/linux/lexer_test.snd
+include "x86_64/linux/lexer.snd"
+include "x86_64/linux/testing.snd"
+
+test "lex a number" {
+    let t = lex(bytes_from_cstr(cstr("42")))
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), TK_INT)
+    assert_eq(tok_val(t, 0), 42)
+}
+test "lex a lowercase identifier with digit and underscore" {
+    let t = lex(bytes_from_cstr(cstr("count_9")))
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), TK_IDENT)
+    assert_eq(bytes_eq(tok_val(t, 0), bytes_from_cstr(cstr("count_9"))), 1)
+}
+test "lex an uppercase identifier" {
+    let t = lex(bytes_from_cstr(cstr("Point")))
+    assert_eq(tok_kind(t, 0), TK_IDENT)
+    assert_eq(bytes_eq(tok_val(t, 0), bytes_from_cstr(cstr("Point"))), 1)
+}
+test "lex a mixed expression with spaces" {
+    let t = lex(bytes_from_cstr(cstr("x + 42 * (y - 1)")))
+    assert_eq(tok_count(t), 9)
+    assert_eq(tok_kind(t, 0), TK_IDENT)
+    assert_eq(tok_kind(t, 1), TK_PLUS)
+    assert_eq(tok_kind(t, 2), TK_INT)
+    assert_eq(tok_val(t, 2), 42)
+    assert_eq(tok_kind(t, 3), TK_STAR)
+    assert_eq(tok_kind(t, 4), TK_LPAREN)
+    assert_eq(tok_kind(t, 5), TK_IDENT)
+    assert_eq(tok_kind(t, 6), TK_MINUS)
+    assert_eq(tok_kind(t, 7), TK_INT)
+    assert_eq(tok_kind(t, 8), TK_RPAREN)
+}
+test "lex slash punctuation" {
+    let t = lex(bytes_from_cstr(cstr("8/2")))
+    assert_eq(tok_kind(t, 1), TK_SLASH)
+}
+test "non-alpha bytes above A are not identifier starts" {
+    // '[' (91, in the A-Z..a-z gap) and '~' (126, above z) exercise lx_is_alpha's
+    // defensive branches, neither begins an identifier.
+    let t = lex(bytes_from_cstr(cstr("[~")))
+    assert_eq(tok_count(t), 2)
+    assert_eq(tok_kind(t, 0) != TK_IDENT, 1)
+    assert_eq(tok_kind(t, 1) != TK_IDENT, 1)
+}
