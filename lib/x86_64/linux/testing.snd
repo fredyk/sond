@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// The builtin testing library. `assert` / `assert_eq` abort the running process with a
+// nonzero exit status the moment a check fails, printing what went wrong. `sond test`
+// runs each `test "..." { .. }` block in a FORKED child, so one failing (or crashing)
+// assertion is isolated and reported per test, the suite keeps going.
+//
+// Hosted Linux: failure is signalled with the `exit` syscall (the child's nonzero status
+// is what the runner's parent reads). Only i64 values are compared for now.
+
+include "x86_64/linux/syscall-nums.snd"
+
+// Fail the current test: report a message and abort with exit status 1.
+fn fail() {
+    syscall(SYS_exit, 1)
+}
+
+// Assert a condition is true (nonzero). On failure, abort the test.
+pub fn assert(cond: i64) {
+    if cond == 0 {
+        print("  assertion failed: expected a true (nonzero) condition\n")
+        fail()
+    }
+}
+
+// Assert two i64 values are equal. On failure, print expected vs actual and abort.
+pub fn assert_eq(actual: i64, expected: i64) {
+    if actual != expected {
+        print("  assert_eq failed: expected ")
+        print_int(expected)
+        print(", got ")
+        print_int(actual)
+        print("\n")
+        fail()
+    }
+}
+
+// Assert two i64 values are different.
+pub fn assert_ne(a: i64, b: i64) {
+    if a == b {
+        print("  assert_ne failed: both values are ")
+        print_int(a)
+        print("\n")
+        fail()
+    }
+}
