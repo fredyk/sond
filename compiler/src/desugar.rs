@@ -798,6 +798,9 @@ fn collect_array_sizes_expr(e: &Expr, out: &mut HashMap<String, i64>) {
             }
         }
         Expr::List(items) => items.iter().for_each(|it| collect_array_sizes_expr(it, out)),
+        Expr::StructLit(_, fields) => {
+            fields.iter().for_each(|(_, v)| collect_array_sizes_expr(v, out))
+        }
         _ => {}
     }
 }
@@ -854,6 +857,9 @@ fn len_expr(e: &mut Expr, sizes: &HashMap<String, i64>) {
             }
         }
         Expr::List(items) => items.iter_mut().for_each(|it| len_expr(it, sizes)),
+        Expr::StructLit(_, fields) => {
+            fields.iter_mut().for_each(|(_, v)| len_expr(v, sizes))
+        }
         Expr::If {
             cond,
             then_branch,
@@ -952,6 +958,22 @@ mod tests {
              }",
         );
         assert_eq!(out, "60");
+    }
+
+    #[test]
+    fn array_len_lowers_inside_a_struct_literal() {
+        // `a.len` used as a struct-literal field value must lower too (the fat-pointer idiom
+        // `Slice { ptr: a, len: a.len }`).
+        let out = compile_and_capture(
+            "struct Slice { ptr: i64, len: i64 }\n\
+             fn main() -> i64 {\n\
+             let a[7]\n\
+             let s = Slice { ptr: a, len: a.len }\n\
+             print_int(s.len)\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "7");
     }
 
     #[test]
