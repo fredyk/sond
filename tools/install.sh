@@ -35,6 +35,10 @@ cp -r "$DIST/." "$HOME/.local/include/sond/" 2>/dev/null || true
 mkdir -p "$HOME/.local/share/sond"
 install -m 644 "$REPO/docs/Sond.md" "$HOME/.local/share/sond/Sond.md"
 
+mkdir -p "$HOME/.local/share/man/man1"
+install -m 644 "$REPO/docs/man/sondc.1" "$HOME/.local/share/man/man1/sondc.1"
+install -m 644 "$REPO/docs/man/sond.1" "$HOME/.local/share/man/man1/sond.1"
+
 echo "installed: $HOME/.local/bin/sondc"
 echo "  libs (source):  $HOME/.local/lib/sond  (copy of lib/)"
 echo "  headers:        $HOME/.local/include/sond  (+ repo dist/include/)"

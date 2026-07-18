@@ -1,0 +1,51 @@
+.TH SOND 1 "2026-07" "Sond" "Sond Language Manual"
+.SH NAME
+sond \- a programming language optimized for verifiability in the AI era
+.SH DESCRIPTION
+.B Sond
+is a language written by AI and used by AI. Its aim is a language in which it is
+.I almost impossible
+to make a programming or logic error: extremely hard for a human to write, yet
+extraordinarily hard for an AI to be wrong. Every function may carry a contract
+.RB ( requires / ensures );
+the compiler
+.BR sondc (1)
+.I proves
+those contracts at compile time and rejects any it cannot verify, so a wrong body
+does not compile.
+.PP
+Sond programs are written in
+.I .snd
+files and compiled with
+.BR sondc (1)
+to hosted executables, freestanding kernels, UEFI applications, or C\-ABI shared
+objects. There is no interpreter; the artifact is native x86\-64.
+.SH LANGUAGE REFERENCE
+The complete, current reference \(em the one document needed to write correct Sond \(em
+is
+.IR Sond.md ,
+installed at
+.IR ~/.local/share/sond/Sond.md .
+Point an AI model or an editor at it.
+.SH USAGE
+.nf
+sondc hello.snd -o hello   # compile
+./hello                     # run (exit code = the entry function's value)
+.fi
+.SH USING SOND AS A TOOLCHAIN
+.B tools/install.sh
+installs Sond like a self\-contained toolchain (in the spirit of Go's
+.B go
++
+.BR GOROOT ):
+.BR sondc (1)
+onto
+.IR PATH ,
+the standard library as a versioned copy at
+.IR ~/.local/lib/sond/ ,
+and this reference at
+.IR ~/.local/share/sond/Sond.md .
+An external project then depends on the installed Sond, not on the compiler's
+source tree, and includes standard\-library modules by their canonical path.
+.SH SEE ALSO
+.BR sondc (1)

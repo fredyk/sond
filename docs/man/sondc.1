@@ -1,0 +1,90 @@
+.TH SONDC 1 "2026-07" "Sond" "Sond Compiler Manual"
+.SH NAME
+sondc \- compile a Sond source file to a native x86-64 program
+.SH SYNOPSIS
+.B sondc
+.I input.snd
+.RB [ \-o
+.IR output ]
+.RB [ \-\-freestanding " | " \-\-uefi " | " \-\-shared ]
+.RB [ \-\-emit\-header ]
+.SH DESCRIPTION
+.B sondc
+compiles a single Sond source file to a native Linux/amd64 artifact. Before
+emitting any code it runs the oracle: every function contract
+.RB ( requires / ensures )
+is proven at compile time, and a contract the prover cannot verify is a compile
+error \(em the program is rejected, not run. Divide\-by\-zero is likewise a compile
+error unless the divisor is proven non\-zero.
+.PP
+.RB "\(bu " include " \fB\(dq...\(dq\fR"
+directives are resolved (recursively, deduplicated) so a multi\-file program \(em a
+reusable library plus the code that uses it \(em compiles as one unit.
+.PP
+Successful compiles are cached under
+.IR ~/.cache/sond/build ,
+keyed on the resolved source, the target, and a fingerprint of the compiler.
+.SH OPTIONS
+.TP
+.BI \-o " output"
+Write the artifact to
+.IR output
+(default: the input's base name).
+.TP
+.B \-\-freestanding
+Link a static, libc\-free binary with its own
+.B _start
+that exits via a raw syscall \(em the shape of an initramfs
+.IR /init .
+.TP
+.B \-\-uefi
+Emit a UEFI application (PE32+/EFI, Microsoft x64 ABI) that firmware loads and runs
+on bare hardware. Linked with a PE toolchain as
+.IR BOOTX64.EFI .
+.TP
+.B \-\-shared
+Emit a C\-ABI shared object
+.RI ( .so ),
+position\-independent and libc\-free, with each
+.B pub fn
+exported in the dynamic symbol table \(em importable from C/C++/Go/Rust/Python.
+.TP
+.B \-\-emit\-header
+Print the module's public interface \(em the
+.B pub
+declarations with their contracts, bodies stripped \(em and exit.
+.SH DEFAULT TARGET
+With no target flag, the output is a hosted executable linked with the C runtime;
+the entry function's value becomes the process exit code.
+.SH INCLUDE RESOLUTION
+An
+.B include
+path is resolved in order: relative to the including file, then a
+.I lib/
+root found by walking up the tree, then the system library
+.IR ~/.local/lib/sond/ .
+So an external program writes
+.B include \(dqany/crypto/cipher/chacha20.snd\(dq
+and it resolves from the installed standard library.
+.SH FILES
+.TP
+.I ~/.local/bin/sondc
+The compiler binary (installed by
+.IR tools/install.sh ).
+.TP
+.I ~/.local/lib/sond/
+The standard library (a copy of the repository's
+.IR lib/ ).
+.TP
+.I ~/.local/include/sond/
+Generated header interfaces.
+.TP
+.I ~/.cache/sond/build/
+Compilation cache.
+.SH EXIT STATUS
+.B 0
+on success; non\-zero on a parse error, a contract violation, or a failed link.
+.SH SEE ALSO
+.BR sond (1),
+and the language reference
+.IR ~/.local/share/sond/Sond.md .
