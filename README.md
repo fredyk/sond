@@ -68,6 +68,8 @@ ICMP/TCP/DHCP/DNS), and bit-exact checksums/crypto (CRC-32, Adler-32, FNV-1a, ..
 ## Documentation
 
 - [RFC-0000: Language vision](docs/rfc-0000-vision.md), the foundational design.
+- [RFC-0008: The graph core](docs/rfc-0008-graph-dataflow-core.md), a program as a proven
+  dependency graph (the AI-native, non-sequential direction).
 - [Implemented language surface](docs/implemented-language-surface.md), what `sondc`
   accepts today.
 - Further RFCs (grammar, Go idiom, target profiles, package format, FFI) under `docs/`.
