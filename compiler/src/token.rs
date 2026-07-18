@@ -30,6 +30,7 @@ pub enum Token {
     Interrupt,
     /// `struct`
     Struct,
+    Test,
     /// `enum`, a sum type (closed set of variants).
     Enum,
     /// `as`, an explicit numeric conversion (`x as u8`, `n as f64`).

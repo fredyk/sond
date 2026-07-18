@@ -84,6 +84,12 @@ pub struct Function {
     /// `interrupt fn`: an interrupt handler, codegen saves every GP register on
     /// entry, restores them on exit, and returns with `iretq` instead of `ret`.
     pub is_interrupt: bool,
+    /// `test "name" { .. }`: a test block, lowered to a niladic function. It is NOT
+    /// compiled into an ordinary program (only `sond test` gathers and runs them).
+    pub is_test: bool,
+    /// The human-readable name of a `test` block (the string after `test`), for the
+    /// runner's report. `None` for ordinary functions.
+    pub test_name: Option<String>,
     /// The function body.
     pub body: Block,
 }

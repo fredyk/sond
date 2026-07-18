@@ -11,6 +11,32 @@ fn named(t: &str) -> Type {
 }
 
 #[test]
+fn parses_a_test_block() {
+    // `test "name" { .. }` is a named test block, lowered to a niladic function marked
+    // `is_test` with the human-readable name kept for the runner's report.
+    let mut p = Parser::new(tokenize("test \"abs is non-negative\" { let x = 1 }"));
+    let funcs = p.parse_program();
+    assert_eq!(funcs.len(), 1, "the test block is one top-level item");
+    assert!(funcs[0].is_test, "should be marked as a test");
+    assert_eq!(
+        funcs[0].test_name.as_deref(),
+        Some("abs is non-negative"),
+        "keeps the readable test name"
+    );
+}
+
+#[test]
+fn parses_multiple_tests_with_distinct_names() {
+    let mut p = Parser::new(tokenize(
+        "test \"one\" { let a = 1 }\ntest \"two\" { let b = 2 }",
+    ));
+    let funcs = p.parse_program();
+    assert_eq!(funcs.len(), 2);
+    assert_ne!(funcs[0].name, funcs[1].name, "each test gets a distinct symbol");
+    assert!(funcs.iter().all(|f| f.is_test));
+}
+
+#[test]
 fn parses_pub_and_priv_visibility() {
     // `pub` exports a declaration; the default (unmarked) is private. This is the
     // surface a generated header will expose (only the `pub` items), and the

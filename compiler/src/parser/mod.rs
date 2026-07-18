@@ -52,6 +52,7 @@ impl Parser {
                     | Token::Pub
                     | Token::Priv
                     | Token::Impl
+                    | Token::Test
             )
         ) {
             // `impl Type { fn m(self, ..) { .. } }`, methods become free functions
@@ -80,6 +81,10 @@ impl Parser {
                 Some(Token::Enum) => {
                     let e = self.parse_enum();
                     self.enums.push(e);
+                }
+                Some(Token::Test) => {
+                    let t = self.parse_test(funcs.len());
+                    funcs.push(t);
                 }
                 // A global `let`: consume the visibility here, then the binding.
                 _ => {
@@ -280,6 +285,8 @@ impl Parser {
             ensures,
             effects,
             is_interrupt,
+            is_test: false,
+            test_name: None,
             body,
         }
     }
@@ -287,6 +294,24 @@ impl Parser {
     /// Parses a `{ ... }` block: a sequence of statements plus an optional tail
     /// expression (the block's value). See the design note on `ast::Block`: the
     /// last bare expression before `}` is the tail, despite the implicit `;`.
+    /// Parses `test "name" { .. }` into a niladic function marked `is_test`, keeping the
+    /// readable name for the runner. `idx` makes the generated symbol unique across a file.
+    fn parse_test(&mut self, idx: usize) -> Function {
+        self.expect(Token::Test);
+        let name = match self.advance() {
+            Token::Str(s) => s,
+            other => panic!("expected a test name string after `test`, got {other:?}"),
+        };
+        let body = self.parse_block();
+        Function {
+            name: format!("__test_{idx}"),
+            is_test: true,
+            test_name: Some(name),
+            body,
+            ..Default::default()
+        }
+    }
+
     fn parse_block(&mut self) -> Block {
         self.expect(Token::LBrace);
         self.skip_semicolons();
