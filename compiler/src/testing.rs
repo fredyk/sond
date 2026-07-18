@@ -20,6 +20,29 @@ fn escape(name: &str) -> String {
     name.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// The per-test block: announce it, fork, run it in the child (which exits, so a failing
+/// assertion or crash is isolated), wait, and fold the outcome into `__failed`. Shared by the
+/// plain and coverage harnesses.
+fn fork_test_block(k: usize, sym: &str, label: &str) -> String {
+    format!(
+        "    print(\"test {label} ... \")\n\
+         \x20   let __p{k} = syscall(SYS_fork)\n\
+         \x20   if __p{k} == 0 {{ {sym}() syscall(SYS_exit, 0) }}\n\
+         \x20   let __s{k}[1]\n\
+         \x20   syscall(SYS_wait4, __p{k}, __s{k}, 0, 0)\n\
+         \x20   __failed = __test_report(__s{k}[0] & 0xffffffff, __failed)\n"
+    )
+}
+
+/// Parses a synthesized `fn main() { .. }` source into a Function (always well-formed, since
+/// it goes through the ordinary parser).
+fn parse_main(src: &str) -> Function {
+    Parser::new(tokenize(src))
+        .parse_program()
+        .pop()
+        .expect("synthesized harness must parse to one function")
+}
+
 /// Builds the `main` that `sond test` runs. It forks each test into its own child, waits,
 /// tallies failures, and exits with that count. Returns a `main` Function.
 pub fn synth_harness(funcs: &[Function]) -> Function {
@@ -28,29 +51,51 @@ pub fn synth_harness(funcs: &[Function]) -> Function {
     let mut src = String::from("fn main() -> i64 {\n    let mut __failed = 0\n");
     for (k, t) in tests.iter().enumerate() {
         let label = escape(t.test_name.as_deref().unwrap_or(&t.name));
-        let sym = &t.name;
-        src.push_str(&format!("    print(\"test {label} ... \")\n"));
-        src.push_str(&format!("    let __p{k} = syscall(SYS_fork)\n"));
-        src.push_str(&format!(
-            "    if __p{k} == 0 {{ {sym}() syscall(SYS_exit, 0) }}\n"
-        ));
-        src.push_str(&format!("    let __s{k}[1]\n"));
-        src.push_str(&format!("    syscall(SYS_wait4, __p{k}, __s{k}, 0, 0)\n"));
-        // wait4 writes a 32-bit int status into the 8-byte slot; mask off the high 4 bytes
-        // of stack garbage before testing it (0 == the child exited cleanly = the test passed).
-        src.push_str(&format!(
-            "    __failed = __test_report(__s{k}[0] & 0xffffffff, __failed)\n"
-        ));
+        src.push_str(&fork_test_block(k, &t.name, &label));
     }
     src.push_str(&format!("    print(\"\\n{n} test(s), \")\n"));
     src.push_str("    print_int(__failed)\n");
     src.push_str("    print(\" failed\\n\")\n");
     src.push_str("    __failed\n}\n");
+    parse_main(&src)
+}
 
-    let mut parsed = Parser::new(tokenize(&src)).parse_program();
-    parsed
-        .pop()
-        .expect("synthesized harness must parse to one function")
+/// Like [`synth_harness`], but the harness first mmaps a SHARED coverage buffer of
+/// `__cov_total` words (so the instrumentation in the forked children accumulates into it),
+/// points `__cov_ptr` at it, runs the tests, then counts the covered points and reports the
+/// coverage. Compiled with `emit_program_coverage_g`, which instruments the code under test.
+pub fn synth_coverage_harness(funcs: &[Function]) -> Function {
+    let tests: Vec<&Function> = funcs.iter().filter(|f| f.is_test).collect();
+    let n = tests.len();
+    // PROT_READ|PROT_WRITE = 3; MAP_SHARED|MAP_ANONYMOUS = 1|32 = 33; fd = -1; offset = 0.
+    let mut src = String::from(
+        "fn main() -> i64 {\n\
+         \x20   let __n = __cov_total\n\
+         \x20   let __buf = syscall(SYS_mmap, 0, __n * 8, 3, 33, 0 - 1, 0)\n\
+         \x20   __cov_ptr = __buf\n\
+         \x20   let mut __failed = 0\n",
+    );
+    for (k, t) in tests.iter().enumerate() {
+        let label = escape(t.test_name.as_deref().unwrap_or(&t.name));
+        src.push_str(&fork_test_block(k, &t.name, &label));
+    }
+    src.push_str(
+        "    let mut __covered = 0\n\
+         \x20   let mut __i = 0\n\
+         \x20   for __i < __n {\n\
+         \x20       if peek64(__buf + __i * 8) != 0 { __covered = __covered + 1 }\n\
+         \x20       __i = __i + 1\n\
+         \x20   }\n",
+    );
+    src.push_str(&format!("    print(\"\\n{n} test(s), \")\n"));
+    src.push_str("    print_int(__failed)\n");
+    src.push_str("    print(\" failed | coverage \")\n");
+    src.push_str("    print_int(__covered)\n");
+    src.push_str("    print(\"/\")\n");
+    src.push_str("    print_int(__n)\n");
+    src.push_str("    print(\" statements\\n\")\n");
+    src.push_str("    __failed\n}\n");
+    parse_main(&src)
 }
 
 #[cfg(test)]
@@ -77,6 +122,20 @@ mod tests {
     fn harness_with_no_tests_still_parses_to_main() {
         let main = synth_harness(&parse("fn f() -> i64 { 0 }"));
         assert_eq!(main.name, "main");
+    }
+
+    #[test]
+    fn coverage_harness_maps_the_buffer_and_counts() {
+        let funcs = parse("test \"a\" { let x = 1 }\ntest \"b\" { let y = 2 }");
+        let main = synth_coverage_harness(&funcs);
+        assert_eq!(main.name, "main");
+        let src = format!("{:?}", main.body);
+        // Reads the point count, mmaps a shared buffer, points __cov_ptr at it, and both
+        // tests are driven.
+        assert!(src.contains("__cov_total"), "reads the total point count");
+        assert!(src.contains("SYS_mmap"), "mmaps a shared coverage buffer");
+        assert!(src.contains("__cov_ptr"), "points the instrumentation buffer at the mmap");
+        assert!(src.contains("__test_0") && src.contains("__test_1"), "runs both tests");
     }
 
     #[test]

@@ -198,6 +198,10 @@ pub fn emit_program_coverage_g(
         ..Default::default()
     };
     cg.set_globals(globals);
+    // The harness reads `__cov_total` and writes `__cov_ptr`; register them so those `Var`s
+    // resolve to the `.data` symbols emitted below.
+    cg.global_names.insert("__cov_ptr".to_string());
+    cg.global_names.insert("__cov_total".to_string());
     emit_all(&mut cg, structs, funcs, "main");
     cg.line(".globl main");
     cg.line("main:");
@@ -533,6 +537,10 @@ struct Codegen {
     /// Running count of coverage points emitted (and the id of the next one). The total is
     /// published as `__cov_total` so the test harness can size its shared coverage buffer.
     cov_points: usize,
+    /// Whether the function CURRENTLY being emitted is instrumented. Coverage measures the
+    /// code UNDER TEST, so the synthesized harness, the test bodies, and the testing library
+    /// are skipped (also avoids the harness marking through a not-yet-set `__cov_ptr`).
+    cov_active: bool,
     /// Names of the module-level globals (to resolve a `Var` to a `.data` label).
     global_names: HashSet<String>,
     /// The scalar globals to emit in `.data`, as `(label, constant value)`.
@@ -560,6 +568,18 @@ struct Codegen {
     float_consts: Vec<(String, u64)>,
 }
 
+/// Functions excluded from coverage instrumentation: the synthesized `sond test` harness
+/// (`main`), the test bodies themselves (always run, and their coverage is uninteresting),
+/// and the testing library. Coverage measures the code under test, not the test scaffold.
+fn should_skip_coverage(func: &Function) -> bool {
+    func.is_test
+        || func.name == "main"
+        || matches!(
+            func.name.as_str(),
+            "assert" | "assert_eq" | "assert_ne" | "fail" | "__test_report"
+        )
+}
+
 impl Codegen {
     /// Emits the function itself: label, prologue, body, epilogue. Shared by the
     /// hosted and freestanding entry points.
@@ -567,6 +587,10 @@ impl Codegen {
         // Fresh per-function state (locals map + a unique return label).
         self.locals.clear();
         self.var_types.clear();
+        // Instrument only the code under test: skip the harness, the test bodies, and the
+        // testing library (measuring those is noise, and the harness must run its `__cov_ptr`
+        // setup before any mark fires).
+        self.cov_active = self.coverage && !should_skip_coverage(func);
         // Does this function return a small struct/enum by value? If so, the body leaves
         // its base ADDRESS in %rax; the return point expands that to the value in RAX:RDX.
         self.cur_ret_struct = self.ret_struct_words(&func.ret);
@@ -863,7 +887,7 @@ impl Codegen {
     /// the shared buffer via `__cov_ptr`. A no-op unless `coverage` is on (so ordinary builds
     /// are byte-identical). Uses `%r11`, a scratch register free at a statement boundary.
     fn cov_mark(&mut self) {
-        if !self.coverage {
+        if !self.cov_active {
             return;
         }
         let id = self.cov_points;
@@ -873,8 +897,12 @@ impl Codegen {
     }
 
     fn block(&mut self, block: &Block) {
+        // One coverage mark per BASIC BLOCK (this block's entry). A block runs all-or-nothing;
+        // each `if`/`match` branch is emitted as its own block (recursive `block()` call) and
+        // gets its own mark, so this is branch-level coverage, and it captures expression-
+        // bodied blocks (a tail with no statements) that per-statement marking would miss.
+        self.cov_mark();
         for stmt in &block.stmts {
-            self.cov_mark();
             match stmt {
                 Stmt::Let {
                     name,

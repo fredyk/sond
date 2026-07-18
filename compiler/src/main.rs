@@ -9,7 +9,9 @@
 //! (the `kernel` profile). This is the tangible x86-64 compiler; it grows
 //! alongside the backend.
 
-use sondc::codegen::{emit_freestanding_g, emit_program_g, emit_shared_g, emit_uefi_g};
+use sondc::codegen::{
+    emit_freestanding_g, emit_program_coverage_g, emit_program_g, emit_shared_g, emit_uefi_g,
+};
 use sondc::lexer::tokenize;
 use sondc::parser::Parser;
 use sondc::resolve::resolve_includes;
@@ -111,9 +113,14 @@ fn main() -> ExitCode {
     // tests so a source file may carry them without pulling test-only calls (assert, ...)
     // into the shipped program.
     let test_mode = args.iter().any(|a| a == "--test");
+    let coverage = args.iter().any(|a| a == "--coverage");
     if test_mode {
         funcs.retain(|f| f.name != "main");
-        let harness = sondc::testing::synth_harness(&funcs);
+        let harness = if coverage {
+            sondc::testing::synth_coverage_harness(&funcs)
+        } else {
+            sondc::testing::synth_harness(&funcs)
+        };
         funcs.push(harness);
     } else {
         funcs.retain(|f| !f.is_test);
@@ -186,6 +193,8 @@ fn main() -> ExitCode {
             emit_freestanding_g(&globals, &structs, &funcs)
         } else if shared {
             emit_shared_g(&globals, &structs, &funcs)
+        } else if coverage {
+            emit_program_coverage_g(&globals, &structs, &funcs)
         } else {
             emit_program_g(&globals, &structs, &funcs)
         }
