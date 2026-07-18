@@ -68,6 +68,11 @@ struct Ctx<'a> {
     /// the divide-by-zero obligation is raised for INTEGER division only, a divisor known
     /// to be a float is exempt.
     float_vars: HashSet<String>,
+    /// Parameters typed `u64`. Division/modulo of unsigned operands emits `divq` (never
+    /// `idivq`), which cannot overflow the quotient, so the `i64::MIN / -1` obligation is
+    /// raised for SIGNED integer division only, a division with any unsigned operand is
+    /// exempt (codegen combines types "unsigned wins").
+    unsigned_vars: HashSet<String>,
     /// Why the evaluator left the verifiable fragment, if it did. The evaluator bails by
     /// returning `None`; this records the FIRST (deepest) reason so the diagnostic names the
     /// actual construct, `a `for` loop without an `invariant``, instead of a generic list.
@@ -122,6 +127,12 @@ fn verify_function(
             .filter(|p| matches!(&p.ty, Type::Named(n) if n == "f64"))
             .map(|p| p.name.clone())
             .collect(),
+        unsigned_vars: f
+            .params
+            .iter()
+            .filter(|p| matches!(&p.ty, Type::Named(n) if n == "u64"))
+            .map(|p| p.name.clone())
+            .collect(),
         bail: None,
     };
     let paths = eval_block_paths(&f.body, init, &mut ctx);
@@ -159,12 +170,12 @@ fn verify_function(
         for ob in &path.obligations {
             let mut asm = requires.clone();
             asm.extend(ob.assumptions.iter().cloned());
-            if !matches!(prove(&ob.prop, &asm), Outcome::Proven) {
+            if !obligation_holds(ob, &asm) {
                 return reject(format!(
                     "cannot prove {}{}{}",
                     ob.what,
                     path_where(&ob.assumptions),
-                    counterexample_clause(&ob.prop, &asm)
+                    counterexample_clause_alt(&ob.prop, ob.alt.as_ref(), &asm)
                 ));
             }
         }
@@ -211,6 +222,12 @@ fn verify_function(
 struct Obligation {
     assumptions: Vec<SymProp>,
     prop: SymProp,
+    /// An ALTERNATIVE proposition: proving EITHER `prop` or `alt` discharges the obligation.
+    /// This expresses a disjunctive safety condition. The signed-division overflow guard
+    /// (`i64::MIN / -1`) is safe when `divisor != -1` OR `dividend != i64::MIN`, so `prop`
+    /// is the first and `alt` the second; proving either rules the overflow out. `None` for
+    /// the plain single-condition obligations (a nonzero divisor, a callee precondition).
+    alt: Option<SymProp>,
     what: String,
 }
 
@@ -374,6 +391,12 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
         Expr::Binary(op, l, r) if matches!(op, BinOp::Div | BinOp::Mod) => {
             // IEEE-754 float division never traps, only integer division must be guarded.
             let is_float = expr_is_float(r, &ctx.float_vars);
+            // Signed integer division (`idivq`) also traps on `i64::MIN / -1` (quotient
+            // overflow, #DE). It is UNSIGNED, and so exempt, when either operand is `u64`
+            // (codegen combines types "unsigned wins"); float is exempt too.
+            let is_signed_int = !is_float
+                && !expr_is_unsigned(l, &ctx.unsigned_vars)
+                && !expr_is_unsigned(r, &ctx.unsigned_vars);
             let mut out = Vec::new();
             for (s1, lv) in eval_expr_paths(l, state, ctx)? {
                 for (mut s2, rv) in eval_expr_paths(r, s1, ctx)? {
@@ -386,7 +409,33 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
                                 lhs: rv.clone(),
                                 rhs: Sym::Const(0),
                             },
+                            alt: None,
                             what: format!("the divisor `{}` is nonzero", show_sym(&rv)),
+                        });
+                    }
+                    if is_signed_int {
+                        // Overflow guard: `i64::MIN / -1` overflows the quotient. Safe when
+                        // the divisor is not -1 OR the dividend is not i64::MIN, proving
+                        // either discharges it.
+                        s2.obligations.push(Obligation {
+                            assumptions: s2.cons.clone(),
+                            prop: SymProp {
+                                op: BinOp::Ne,
+                                lhs: rv.clone(),
+                                rhs: Sym::Const(-1),
+                            },
+                            alt: Some(SymProp {
+                                op: BinOp::Ne,
+                                lhs: lv.clone(),
+                                rhs: Sym::Const(i64::MIN),
+                            }),
+                            what: format!(
+                                "the signed division `{} {} {}` does not overflow (i64::MIN {} -1)",
+                                show_sym(&lv),
+                                if matches!(op, BinOp::Div) { "/" } else { "%" },
+                                show_sym(&rv),
+                                if matches!(op, BinOp::Div) { "/" } else { "%" },
+                            ),
                         });
                     }
                     let value = match (&lv, &rv) {
@@ -480,7 +529,7 @@ fn eval_loop(
             // Any obligation inside the body (call precondition, nonzero divisor) must hold
             // under the assumptions live where it arose.
             for ob in &bs.obligations {
-                if !matches!(prove(&ob.prop, &ob.assumptions), Outcome::Proven) {
+                if !obligation_holds(ob, &ob.assumptions) {
                     return ctx.bail("a safety obligation inside the loop body that could not be proved");
                 }
             }
@@ -631,6 +680,7 @@ fn eval_call(
                     show_prop(&op)
                 ),
                 prop: op,
+                alt: None,
             });
         }
         // The callee's postcondition constrains the result: add it as an assumption. One
@@ -659,6 +709,32 @@ fn expr_is_float(e: &Expr, floats: &HashSet<String>) -> bool {
         Expr::Cast(_, ty) => matches!(ty, Type::Named(n) if n == "f64"),
         _ => false,
     }
+}
+
+/// Whether an expression is of unsigned (`u64`) type, best-effort from the known unsigned
+/// variables (`u64` parameters), `as u64` casts, and propagation through arithmetic (codegen
+/// combines "unsigned wins"). Used to exempt unsigned division from the signed-overflow
+/// (`i64::MIN / -1`) obligation. Sound-leaning: it never marks a purely signed expression as
+/// unsigned, so no signed division escapes the check (at worst it over-raises, a safe
+/// rejection, on an unsigned value it fails to recognize).
+fn expr_is_unsigned(e: &Expr, unsigned: &HashSet<String>) -> bool {
+    match e {
+        Expr::Var(v) => unsigned.contains(v),
+        Expr::Binary(_, l, r) => expr_is_unsigned(l, unsigned) || expr_is_unsigned(r, unsigned),
+        Expr::Unary(_, x) => expr_is_unsigned(x, unsigned),
+        Expr::Cast(_, ty) => matches!(ty, Type::Named(n) if n == "u64"),
+        _ => false,
+    }
+}
+
+/// An obligation is discharged if its primary proposition is proven, or, for a disjunctive
+/// safety obligation, its alternative is. Proving EITHER rules out the unsafe case.
+fn obligation_holds(ob: &Obligation, asm: &[SymProp]) -> bool {
+    matches!(prove(&ob.prop, asm), Outcome::Proven)
+        || ob
+            .alt
+            .as_ref()
+            .is_some_and(|a| matches!(prove(a, asm), Outcome::Proven))
 }
 
 /// The branch conditions a guard contributes: `(then-assumptions, else-assumptions)`.
@@ -756,16 +832,22 @@ fn sym_prop(e: &Expr, env: &HashMap<String, Sym>) -> Option<SymProp> {
 /// A linear expression `Σ coeff·var + k` over the parameters. A constraint is a `Lin`
 /// read as `Lin ≥ 0`. This is the normal form the decision procedure works in.
 #[derive(Clone, Debug)]
+// The linear engine works in `i128`, not `i64`: it reasons over ℤ, and program constants
+// span the full i64 range, so an i64-level computation like `i64::MIN * -1` (which a signed
+// division must reason about) overflows i64, panicking in debug, wrapping to a WRONG (and
+// unsound) answer in release. i128 gives 64 bits of headroom over any i64-derived value;
+// arithmetic that would exceed even i128 returns `None` so the caller bails conservatively
+// (an aborted proof is sound; a wrapped one is not).
 struct Lin {
-    coeffs: BTreeMap<String, i64>,
-    k: i64,
+    coeffs: BTreeMap<String, i128>,
+    k: i128,
 }
 
 impl Lin {
     fn constant(k: i64) -> Self {
         Lin {
             coeffs: BTreeMap::new(),
-            k,
+            k: k as i128,
         }
     }
     fn var(name: &str) -> Self {
@@ -774,7 +856,7 @@ impl Lin {
         Lin { coeffs, k: 0 }
     }
     /// If this is a bare constant (no variables), its value.
-    fn as_const(&self) -> Option<i64> {
+    fn as_const(&self) -> Option<i128> {
         self.coeffs.values().all(|&c| c == 0).then_some(self.k)
     }
     /// Drops variables whose coefficient has become zero (keeps the map canonical).
@@ -782,25 +864,34 @@ impl Lin {
         self.coeffs.retain(|_, &mut c| c != 0);
         self
     }
-    fn scale(&self, f: i64) -> Lin {
-        Lin {
-            coeffs: self.coeffs.iter().map(|(v, c)| (v.clone(), c * f)).collect(),
-            k: self.k * f,
+    /// Scale by `f`, or `None` on i128 overflow (the caller then bails conservatively -
+    /// never wrapping into a wrong answer).
+    fn scale(&self, f: i128) -> Option<Lin> {
+        let mut coeffs = BTreeMap::new();
+        for (v, c) in &self.coeffs {
+            coeffs.insert(v.clone(), c.checked_mul(f)?);
         }
+        Some(Lin {
+            coeffs,
+            k: self.k.checked_mul(f)?,
+        })
     }
-    fn add(&self, o: &Lin) -> Lin {
+    fn add(&self, o: &Lin) -> Option<Lin> {
         let mut coeffs = self.coeffs.clone();
         for (v, c) in &o.coeffs {
-            *coeffs.entry(v.clone()).or_insert(0) += c;
+            let e = coeffs.entry(v.clone()).or_insert(0);
+            *e = e.checked_add(*c)?;
         }
-        Lin {
-            coeffs,
-            k: self.k + o.k,
-        }
-        .pruned()
+        Some(
+            Lin {
+                coeffs,
+                k: self.k.checked_add(o.k)?,
+            }
+            .pruned(),
+        )
     }
-    fn sub(&self, o: &Lin) -> Lin {
-        self.add(&o.scale(-1))
+    fn sub(&self, o: &Lin) -> Option<Lin> {
+        self.add(&o.scale(-1)?)
     }
 }
 
@@ -810,13 +901,13 @@ fn lin_of_sym(s: &Sym) -> Option<Lin> {
     match s {
         Sym::Const(n) => Some(Lin::constant(*n)),
         Sym::Var(v) => Some(Lin::var(v)),
-        Sym::Add(a, b) => Some(lin_of_sym(a)?.add(&lin_of_sym(b)?)),
-        Sym::Sub(a, b) => Some(lin_of_sym(a)?.sub(&lin_of_sym(b)?)),
+        Sym::Add(a, b) => lin_of_sym(a)?.add(&lin_of_sym(b)?),
+        Sym::Sub(a, b) => lin_of_sym(a)?.sub(&lin_of_sym(b)?),
         Sym::Mul(a, b) => {
             let (la, lb) = (lin_of_sym(a)?, lin_of_sym(b)?);
             match (la.as_const(), lb.as_const()) {
-                (Some(c), _) => Some(lb.scale(c)),
-                (_, Some(c)) => Some(la.scale(c)),
+                (Some(c), _) => lb.scale(c),
+                (_, Some(c)) => la.scale(c),
                 _ => None, // var*var, non-linear, out of fragment
             }
         }
@@ -854,8 +945,16 @@ fn unsat(mut cons: Vec<Lin>) -> bool {
         for p in &pos {
             for n in &neg {
                 let a = p.coeffs[&x];
-                let b = -n.coeffs[&x];
-                next.push(p.scale(b).add(&n.scale(a)));
+                let Some(b) = n.coeffs[&x].checked_neg() else {
+                    return false; // overflow, conservative bail (never a false "unsat")
+                };
+                let combined = p
+                    .scale(b)
+                    .and_then(|ps| n.scale(a).and_then(|ns| ps.add(&ns)));
+                let Some(combined) = combined else {
+                    return false; // overflow in the x-free combination, bail
+                };
+                next.push(combined);
             }
         }
         if next.len() > CAP {
@@ -869,7 +968,9 @@ fn unsat(mut cons: Vec<Lin>) -> bool {
 /// integer negation `e ≤ -1` (i.e. `-e - 1 ≥ 0`) makes the system unsatisfiable.
 fn implies_geq0(assumptions: &[Lin], e: &Lin) -> bool {
     let mut sys = assumptions.to_vec();
-    let mut neg = e.scale(-1);
+    let Some(mut neg) = e.scale(-1) else {
+        return false; // overflow negating the goal, can't show entailment (conservative)
+    };
     neg.k -= 1; // -e - 1 ≥ 0  ==  e ≤ -1  ==  ¬(e ≥ 0) over ℤ
     sys.push(neg);
     unsat(sys)
@@ -880,7 +981,7 @@ fn implies_geq0(assumptions: &[Lin], e: &Lin) -> bool {
 /// (`a > b` ⟺ `a - b - 1 ≥ 0`); `==` yields both directions; `!=` has no conjunctive
 /// form (`None`).
 fn holds_cons(op: &BinOp, lhs: &Lin, rhs: &Lin) -> Option<Vec<Lin>> {
-    let diff = lhs.sub(rhs); // a - b
+    let diff = lhs.sub(rhs)?; // a - b
     let tighten = |mut e: Lin| {
         e.k -= 1;
         e
@@ -888,9 +989,9 @@ fn holds_cons(op: &BinOp, lhs: &Lin, rhs: &Lin) -> Option<Vec<Lin>> {
     Some(match op {
         BinOp::Ge => vec![diff],
         BinOp::Gt => vec![tighten(diff)],
-        BinOp::Le => vec![rhs.sub(lhs)],
-        BinOp::Lt => vec![tighten(rhs.sub(lhs))],
-        BinOp::Eq => vec![diff.clone(), rhs.sub(lhs)],
+        BinOp::Le => vec![rhs.sub(lhs)?],
+        BinOp::Lt => vec![tighten(rhs.sub(lhs)?)],
+        BinOp::Eq => vec![diff.clone(), rhs.sub(lhs)?],
         _ => return None, // Ne, not a conjunction of ≥ 0 facts
     })
 }
@@ -933,9 +1034,12 @@ fn prove(p: &SymProp, assumptions: &[SymProp]) -> Outcome {
     // `!=` is the odd one out (its truth is a disjunction): the goal holds iff the two
     // sides are forced apart, i.e. equality is unsatisfiable under the assumptions.
     if p.op == BinOp::Ne {
+        let (Some(lr), Some(rl)) = (l.sub(&r), r.sub(&l)) else {
+            return Outcome::Unknown; // overflow forming the equality system, conservative
+        };
         let mut eq_sys = a.clone();
-        eq_sys.push(l.sub(&r));
-        eq_sys.push(r.sub(&l));
+        eq_sys.push(lr);
+        eq_sys.push(rl);
         return if unsat(eq_sys) {
             Outcome::Proven
         } else {
@@ -1138,6 +1242,21 @@ fn counterexample_clause(goal: &SymProp, assumptions: &[SymProp]) -> String {
             format!(" (counterexample: {})", parts.join(", "))
         }
         None => String::new(),
+    }
+}
+
+/// Counterexample clause for a possibly-disjunctive obligation. A plain obligation wants a
+/// witness that breaks `prop`. A disjunctive one (`prop` OR `alt`) needs a witness that
+/// breaks BOTH, so it is sought against `prop` with `¬alt` added to the assumptions, an
+/// assignment satisfying `asm ∧ ¬alt ∧ ¬prop` (e.g. `x = i64::MIN, y = -1`).
+fn counterexample_clause_alt(prop: &SymProp, alt: Option<&SymProp>, asm: &[SymProp]) -> String {
+    match alt {
+        None => counterexample_clause(prop, asm),
+        Some(a) => {
+            let mut asm2 = asm.to_vec();
+            asm2.push(negate_prop(a));
+            counterexample_clause(prop, &asm2)
+        }
     }
 }
 
@@ -1376,6 +1495,55 @@ mod tests {
     }
 
     #[test]
+    fn rejects_signed_min_div_minus_one() {
+        // `divisor != 0` is not enough for SIGNED division: `i64::MIN / -1` overflows the
+        // quotient and traps (#DE / SIGFPE). A `requires { y != 0 }` proves nonzero but not
+        // the overflow case, so the function must be REJECTED, not compiled.
+        let funcs =
+            parse("fn q(x: i64, y: i64) -> (r: i64) requires { y != 0 } { x / y }");
+        let err = verify(&funcs).expect_err("MIN / -1 overflows even with y != 0");
+        assert!(
+            err.message.contains("overflow"),
+            "should name the signed-division overflow; got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn signed_mod_min_minus_one_also_rejected() {
+        // `i64::MIN % -1` traps the same way as the division.
+        let funcs =
+            parse("fn r(x: i64, y: i64) -> (r: i64) requires { y != 0 } { x % y }");
+        assert!(verify(&funcs).is_err(), "MIN % -1 overflows too");
+    }
+
+    #[test]
+    fn accepts_signed_div_when_divisor_positive() {
+        // `y > 0` proves BOTH obligations: y != 0 (nonzero) and y != -1 (no MIN/-1 overflow).
+        let funcs =
+            parse("fn q(x: i64, y: i64) -> (r: i64) requires { y > 0 } { x / y }");
+        assert!(verify(&funcs).is_ok(), "y > 0 excludes both 0 and -1");
+    }
+
+    #[test]
+    fn accepts_signed_div_when_dividend_above_min() {
+        // Excluding the dividend from i64::MIN also discharges the overflow obligation.
+        let funcs = parse(
+            "fn q(x: i64, y: i64) -> (r: i64) requires { y != 0; x > 0 } { x / y }",
+        );
+        assert!(verify(&funcs).is_ok(), "x > 0 means x != i64::MIN");
+    }
+
+    #[test]
+    fn unsigned_div_needs_only_nonzero() {
+        // Unsigned division (`divq`) never has the MIN/-1 overflow, so `y != 0` suffices -
+        // the overflow obligation must NOT be raised for u64.
+        let funcs =
+            parse("fn q(x: u64, y: u64) -> (r: u64) requires { y != 0 } { x / y }");
+        assert!(verify(&funcs).is_ok(), "unsigned division only needs a nonzero divisor");
+    }
+
+    #[test]
     fn bail_diagnostic_names_an_unsupported_expression() {
         // A comparison used as a value (`let b = x > 0`) is outside the fragment. The
         // diagnostic must point at the expression, not at loops it does not contain.
@@ -1485,15 +1653,27 @@ mod tests {
 
     #[test]
     fn accepts_a_division_guarded_by_a_precondition() {
-        // `requires { b != 0 }` discharges the divisor obligation directly.
-        let funcs = parse("fn d(a: i64, b: i64) -> i64 requires { b != 0 } { a / b }");
+        // `requires { b > 0 }` discharges BOTH obligations of a signed division: the divisor
+        // is nonzero and (b != -1) it cannot overflow. (`b != 0` alone is no longer enough -
+        // see `rejects_signed_min_div_minus_one`.)
+        let funcs = parse("fn d(a: i64, b: i64) -> i64 requires { b > 0 } { a / b }");
         assert!(verify(&funcs).is_ok());
     }
 
     #[test]
     fn accepts_a_division_guarded_by_a_branch() {
-        // The safe_div shape: in the else-branch `b != 0` is known from the negated guard.
-        let funcs = parse("fn sd(a: i64, b: i64) -> i64 { if b == 0 { 0 } else { a / b } }");
+        // A signed division whose then-branch establishes `b > 0` proves both obligations
+        // (nonzero and, since b >= 1 > -1, no MIN/-1 overflow) from the branch guard.
+        let funcs =
+            parse("fn sd(a: i64, b: i64) -> i64 { if b > 0 { a / b } else { 0 } }");
+        assert!(verify(&funcs).is_ok());
+    }
+
+    #[test]
+    fn unsigned_division_guarded_by_a_branch_needs_no_min_guard() {
+        // For unsigned division the negated `b == 0` guard alone suffices, no overflow case.
+        let funcs =
+            parse("fn sd(a: u64, b: u64) -> u64 { if b == 0 { 0 } else { a / b } }");
         assert!(verify(&funcs).is_ok());
     }
 
