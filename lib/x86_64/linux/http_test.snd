@@ -1,0 +1,19 @@
+//   sond test lib/x86_64/linux/http_test.snd
+include "x86_64/linux/http.snd"
+include "x86_64/linux/testing.snd"
+
+test "parse the method" {
+    let req = bytes_from_cstr(cstr("GET /index.html HTTP/1.1"))
+    assert_eq(bytes_eq(http_method(req), bytes_from_cstr(cstr("GET"))), 1)
+}
+
+test "parse the path" {
+    let req = bytes_from_cstr(cstr("GET /index.html HTTP/1.1"))
+    assert_eq(bytes_eq(http_path(req), bytes_from_cstr(cstr("/index.html"))), 1)
+}
+
+test "parse a POST with a root path" {
+    let req = bytes_from_cstr(cstr("POST / HTTP/1.1"))
+    assert_eq(bytes_eq(http_method(req), bytes_from_cstr(cstr("POST"))), 1)
+    assert_eq(bytes_eq(http_path(req), bytes_from_cstr(cstr("/"))), 1)
+}

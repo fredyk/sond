@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Minimal HTTP/1.x request parsing over the byte buffer, the application layer that will
+// sit on top of the TCP wrappers (lib/x86_64/linux/net.snd) toward the HTTPS litmus test.
+// A request buffer looks like `METHOD SP PATH SP HTTP/1.1 CRLF headers... CRLF CRLF`.
+
+include "x86_64/linux/bytes.snd"
+
+// The request METHOD: the bytes before the first space of the request line.
+pub fn http_method(req: i64) -> i64 {
+    let sp = bytes_index_of(req, 32)
+    bytes_slice(req, 0, sp)
+}
+
+// The request PATH: the bytes between the first and second space of the request line.
+pub fn http_path(req: i64) -> i64 {
+    let sp1 = bytes_index_of(req, 32)
+    let sp2 = bytes_index_of_from(req, 32, sp1 + 1)
+    bytes_slice(req, sp1 + 1, sp2)
+}
