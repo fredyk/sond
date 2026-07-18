@@ -26,11 +26,17 @@ include "mathlib.snd"          // brings in square()
 fn main() -> i64 { square(6) }
 ```
 
-Libraries shipped in `lib/` (include by relative path): crypto `any/crypto/{dh/x25519,
-hash/sha256, hash/sha512, sign/ed25519-sign, mac/poly1305, cipher/xor, ssh-kex}.snd`;
-`any/strings.snd` (strlen/memcpy/streq/itoa/atoi); Linux `x86_64/linux/{syscall-nums,
-io, proc, capture, net}.snd`; networking `x86_64/net/tcp-server.snd`,
-`x86_64/drivers/net/virtio-net.snd`.
+Libraries shipped in `lib/` (include by relative path):
+- **crypto** `any/crypto/`: `cipher/{chacha20,xor}`, `mac/poly1305`, `aead/chacha20poly1305`,
+  `hash/{sha256,sha512}`, `kdf/hkdf-sha256`, `dh/x25519`, `sign/ed25519-sign`,
+  `noise/noise-ik`, `ssh-kex`.
+- **collections & wire** (hosted, over an arena allocator) `x86_64/linux/`: `heap` (arena
+  `heap_alloc`), `bytes` (growable buffer + ops), `vec` (i64 array), `map` (string→i64 dict),
+  `http` (request/response), `lexer` (tokenizer), `calc` (expr evaluator).
+- **testing** `x86_64/linux/testing.snd` (`assert`/`assert_eq`/`assert_ne` for `test` blocks).
+- **strings** `any/strings.snd` (strlen/memcpy/streq/itoa/atoi).
+- **Linux** `x86_64/linux/{syscall-nums,io,proc,capture,net,poll}.snd`.
+- **networking/drivers** `x86_64/net/{tcp-server,dhcp}.snd`, `x86_64/drivers/net/virtio-net.snd`.
 
 ## Program shape
 
