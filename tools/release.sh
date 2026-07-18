@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Build the Sond release tarball served at sond.dev/release/<channel>/:
-#   sond-x86_64-linux.tgz         , the whole toolchain in the ~/.local layout
-#                                    (bin/sondc, bin/sond, lib/sond/, share/sond/Sond.md)
-#   sond-x86_64-linux.tgz.sha256  , its checksum (what install.sh verifies)
+#   sond-x86_64-linux.tar.gz         , the whole toolchain in the ~/.local layout
+#                                       (bin/sondc, bin/sond, lib/sond/, share/sond/Sond.md)
+#   sond-x86_64-linux.tar.gz.sha256  , its checksum (what install.sh verifies)
+#
+# Note: the extension is .tar.gz, not .tgz, on purpose, the deploy bundler excludes *.tgz as a
+# build artifact, so the tarball must not match that glob to reach the sond.dev container.
 #
 # Usage: tools/release.sh [out-dir]   (default: dist/release/)
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$REPO/dist/release}"
 PLAT="x86_64-linux"
-TGZ="sond-$PLAT.tgz"
+TGZ="sond-$PLAT.tar.gz"
 
 echo "==> building release binaries (sondc + sond)"
 cargo build --release --manifest-path "$REPO/compiler/Cargo.toml"
@@ -24,9 +27,14 @@ cp -r "$REPO/lib/." "$STAGE/lib/sond/"
 echo "==> generating the language reference"
 SOND_MD_OUT="$STAGE/share/sond/Sond.md" "$REPO/tools/build-docs.sh"
 
-echo "==> packaging $TGZ"
+echo "==> packaging $TGZ (reproducible)"
 mkdir -p "$OUT"
-tar -czf "$OUT/$TGZ" -C "$STAGE" bin lib share
+# Deterministic archive: same toolchain -> byte-identical tarball -> identical sha256. Fixed sort
+# order, mtimes and ownership in tar; `gzip -n` drops the name+timestamp from the gzip header.
+# Without this the hash changes every build, so a CDN can serve a stale tarball against a fresh
+# checksum and every install fails with "checksum mismatch".
+tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+    -C "$STAGE" -cf - bin lib share | gzip -n -9 > "$OUT/$TGZ"
 ( cd "$OUT" && sha256sum "$TGZ" > "$TGZ.sha256" )
 echo "==> done:"
 ls -la "$OUT/$TGZ" "$OUT/$TGZ.sha256" | awk '{print "   "$5, $9}'
