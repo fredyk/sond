@@ -109,7 +109,32 @@ carrying arrays → the raise-and-discharge in verify.rs, which is the div-by-ze
 ## 6. Staged implementation (after the decision)
 
 1. **Length-carrying arrays** (`{ptr, len}` fat pointer + `a.len`), closes #2's representation
-   gap and gives refinements something to mention. New surface → qwen3.6 gate.
+   gap and gives refinements something to mention. New surface → qwen3.6 gate. **✅ SHIPPED
+   (2026-07-18):** `a.len` on fixed arrays (the constant N) and the built-in `Slice { ptr, len }`
+   (construct `Slice { ptr: a, len: a.len }`, pass so a fn carries the length, `s.len`, `s[i]`
+   through `.ptr`), riding the struct machinery, no new backend. Passed the qwen3.6 gate.
+
+### 6a. Rich slice operations (JMV's request, Python-style ergonomics on `Slice`)
+
+The `Slice` foundation makes these staged, each a self-contained increment (parser + a desugar
+that produces a sub-`Slice` view, no copy, over the same backing store):
+
+- **Sub-slice ranges** `s[lo:hi]` → `Slice { ptr: s.ptr + lo*8, len: hi - lo }` (a *view*, no
+  allocation). Omitted bounds default: `s[:hi]` (lo=0), `s[lo:]` (hi=`s.len`), `s[:]` (whole).
+  Parser: accept `:` inside `[ ]`; a new `Expr::SliceRange(base, lo?, hi?)`. **← next increment.**
+- **Negative indices** `s[-1]` = last element, `s[-k]` = `s[s.len - k]`, from the end. Applies
+  to both `s[i]` and range bounds. Constant `-k` folds; a variable negative lowers to a runtime
+  `i < 0 ? i + s.len : i` normalization. (A future bounds obligation then proves `0 ≤ i < len`.)
+- **Step / reverse** `s[::-1]`, `s[lo:hi:step]`, a strided view. Needs `Slice` to gain a `step`
+  (a 3-word `{ptr, len, step}`, or a reversed materialization for `[::-1]`). More semantics
+  (negative stride, iteration order) → its own design + gate.
+- **Comprehensions** `[expr for x in src if cond]`, build a new `Slice` by iterating `src`,
+  filtering by `cond`, mapping by `expr`. Needs a growable backing store (an arena/`alloc`, or a
+  two-pass count-then-fill into a fixed buffer). The richest step; lowers to a loop + append.
+
+The bounds obligation (step 3 below) then applies to slice indexing too: `s[i]` raises
+`0 ≤ i < s.len`, discharged from a guard/precondition or a compile error, closing #2's variable
+case for slices without a separate `len` argument to reason about.
 2. **`where` refinement clauses on `let`/params**, parsed, lowered to prover assumptions (reuse
    the contract path). Flow refinement from branch guards is *already* in the path evaluator.
 3. **The bounds obligation** for `a[i]`, raise `0 ≤ i < a.len`, discharge like div-by-zero.
