@@ -147,3 +147,14 @@ pub fn bytes_append_int(b: i64, n: i64) {
         }
     }
 }
+
+// Build a buffer by copying `n` raw bytes from address `ptr` (e.g. a read() buffer).
+pub fn bytes_from_raw(ptr: i64, n: i64) -> i64 {
+    let b = bytes_new()
+    let mut i = 0
+    for i < n {
+        bytes_push(b, peek8(ptr + i))
+        i = i + 1
+    }
+    b
+}

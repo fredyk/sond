@@ -93,3 +93,12 @@ test "bytes_append_int: multi-digit" {
     bytes_append_int(b, 1234)
     assert_eq(bytes_eq(b, bytes_from_cstr(cstr("1234"))), 1)
 }
+
+test "bytes_from_raw copies a raw region" {
+    let mem[2]
+    poke8(mem, 65)
+    poke8(mem + 1, 66)
+    poke8(mem + 2, 67)
+    let b = bytes_from_raw(mem, 3)
+    assert_eq(bytes_eq(b, bytes_from_cstr(cstr("ABC"))), 1)
+}
