@@ -121,10 +121,12 @@ that produces a sub-`Slice` view, no copy, over the same backing store):
 
 - **Sub-slice ranges** `s[lo:hi]` → `Slice { ptr: s.ptr + lo*8, len: hi - lo }` (a *view*, no
   allocation). Omitted bounds default: `s[:hi]` (lo=0), `s[lo:]` (hi=`s.len`), `s[:]` (whole).
-  Parser: accept `:` inside `[ ]`; a new `Expr::SliceRange(base, lo?, hi?)`. **← next increment.**
-- **Negative indices** `s[-1]` = last element, `s[-k]` = `s[s.len - k]`, from the end. Applies
-  to both `s[i]` and range bounds. Constant `-k` folds; a variable negative lowers to a runtime
-  `i < 0 ? i + s.len : i` normalization. (A future bounds obligation then proves `0 ≤ i < len`.)
+  **✅ SHIPPED (2026-07-18):** `Expr::SliceRange(base, lo?, hi?)` + a `lower_slice_ranges` pass;
+  composes (`s[1:5][1:3]`), works in argument position. Passed the qwen3.6 gate.
+- **Negative indices** `s[-1]` = last element, `s[-k]` = `s[s.len - k]`, from the end. **✅
+  SHIPPED (2026-07-18):** constant negatives fold to `s.len + i`, for both `s[i]` and range
+  bounds (`s[:-1]`, `s[-2:]`); a variable index pays no runtime branch (a future bounds
+  obligation proves `0 ≤ i < len`).
 - **Step / reverse** `s[::-1]`, `s[lo:hi:step]`, a strided view. Needs `Slice` to gain a `step`
   (a 3-word `{ptr, len, step}`, or a reversed materialization for `[::-1]`). More semantics
   (negative stride, iteration order) → its own design + gate.
