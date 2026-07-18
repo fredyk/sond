@@ -104,6 +104,25 @@ version, re-run `install.sh` from the desired commit/tag (formal versioning is a
 **[`Sond.md`](docs/Sond.md)** is the compact language reference, the single document an
 AI (or human) needs to write correct Sond. Point your model or editor at it.
 
+## Testing
+
+Contracts cover what the compiler can prove; `test` blocks are the executable oracle for
+the rest. Write named tests next to the code and run them with the `sond` driver:
+
+```
+include "x86_64/linux/testing.snd"
+
+test "dbl doubles" { assert_eq(dbl(21), 42) }
+```
+
+```
+sond test mylib.snd      # builds the file's test blocks and runs them
+```
+
+Test blocks are inert in an ordinary compile (`sondc mylib.snd` ignores them). The testing
+library provides `assert` / `assert_eq` / `assert_ne`; a failing assertion prints expected
+vs actual and the run exits nonzero.
+
 ## Status
 
 **Working compiler, active development.** The language and its native backend are

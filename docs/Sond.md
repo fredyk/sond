@@ -161,6 +161,28 @@ Syntax: `fn f(x: i64) -> (q: i64) requires { x >= 0 } ensures { q >= 0 } { x }`.
 - The named return `-> (name: Type)` binds the result so `ensures` can name it.
   Parameters are in scope in both; the result name only in `ensures`.
 
+## Testing (`test` blocks + `sond test`)
+
+Contracts prove what can be proven statically; tests are the *executable oracle* for the
+rest (algorithm results against known answers). A test is a named block:
+
+```
+include "x86_64/linux/testing.snd"   // assert / assert_eq / assert_ne
+
+fn dbl(x: i64) -> i64 { x + x }
+
+test "dbl doubles" { assert_eq(dbl(21), 42) }
+test "positive"    { assert(dbl(1) > 0) }
+```
+
+- `test "name" { .. }` is a named block, run by `sond test <file.snd>`. Its name is a
+  readable label for the report.
+- The testing library (`include "x86_64/linux/testing.snd"`) provides `assert(cond)`,
+  `assert_eq(actual, expected)`, `assert_ne(a, b)`. A failing assertion prints what went
+  wrong (expected vs actual) and aborts the test; the run's exit code is nonzero.
+- `test` blocks are **inert in an ordinary compile** (`sondc file.snd` drops them), only
+  `sond test` gathers and runs them, so a source file may carry its own tests.
+
 ## Builtins, provided by the COMPILER itself (no `include` needed)
 
 Everything below is emitted by the compiler directly and is ALWAYS available.
