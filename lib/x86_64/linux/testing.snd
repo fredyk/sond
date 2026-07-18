@@ -45,3 +45,10 @@ pub fn assert_ne(a: i64, b: i64) {
         fail()
     }
 }
+
+// Report one test's wait4 status word (0 == the forked child exited cleanly = the test
+// passed; anything else = a failed assertion or a crash). Prints the outcome and returns
+// the updated failure count. Used by the `sond test` harness, not user-facing.
+pub fn __test_report(status: i64, failed: i64) -> i64 {
+    if status == 0 { print("ok\n") failed } else { print("FAILED\n") failed + 1 }
+}
