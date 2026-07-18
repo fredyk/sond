@@ -68,6 +68,10 @@ struct Ctx<'a> {
     /// the divide-by-zero obligation is raised for INTEGER division only, a divisor known
     /// to be a float is exempt.
     float_vars: HashSet<String>,
+    /// Why the evaluator left the verifiable fragment, if it did. The evaluator bails by
+    /// returning `None`; this records the FIRST (deepest) reason so the diagnostic names the
+    /// actual construct, `a `for` loop without an `invariant``, instead of a generic list.
+    bail: Option<String>,
 }
 
 impl Ctx<'_> {
@@ -76,6 +80,16 @@ impl Ctx<'_> {
     fn fresh_var(&mut self) -> Sym {
         self.fresh += 1;
         Sym::Var(format!("__call{}", self.fresh))
+    }
+
+    /// Records why the body left the verifiable fragment and returns `None` to bail. The
+    /// first reason wins (it is the deepest, most specific construct); propagated `None`s up
+    /// the call stack do not overwrite it.
+    fn bail<T>(&mut self, reason: &str) -> Option<T> {
+        if self.bail.is_none() {
+            self.bail = Some(reason.to_string());
+        }
+        None
     }
 }
 
@@ -108,6 +122,7 @@ fn verify_function(
             .filter(|p| matches!(&p.ty, Type::Named(n) if n == "f64"))
             .map(|p| p.name.clone())
             .collect(),
+        bail: None,
     };
     let paths = eval_block_paths(&f.body, init, &mut ctx);
     // Every function is checked for its safety obligations (nonzero divisors, callee
@@ -120,13 +135,13 @@ fn verify_function(
         if f.ensures.is_empty() {
             return Ok(());
         }
-        return reject(
-            "cannot prove its contract, either a loop invariant could not be established \
-             or preserved (strengthen the `invariant { .. }`), or the body uses a construct \
-             the verifier does not support yet (early return, or a call to a function \
-             without a usable contract). Sond does not accept a contract it cannot verify."
-                .to_string(),
-        );
+        let detail = ctx.bail.clone().unwrap_or_else(|| {
+            "the body uses a construct the verifier does not support yet".to_string()
+        });
+        return reject(format!(
+            "cannot prove its contract, {detail}. Sond does not accept a contract it \
+             cannot verify."
+        ));
     };
     // The precondition holds on EVERY path (it constrains the inputs). Evaluate it in the
     // parameter-only environment so a later `let` cannot shadow a precondition variable.
@@ -226,7 +241,9 @@ fn eval_block_paths(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<Pa
     let states = eval_stmts(block, state, ctx)?;
     // The tail expression is the block's value; evaluate it on every state, forking again
     // if it is itself a branch. A value block must have a tail.
-    let tail = block.tail.as_ref()?;
+    let Some(tail) = block.tail.as_ref() else {
+        return ctx.bail("a block used as a value with no tail expression");
+    };
     let mut paths = Vec::new();
     for st in states {
         for (st2, ret) in eval_expr_paths(tail, st, ctx)? {
@@ -237,7 +254,7 @@ fn eval_block_paths(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<Pa
                 ret,
             });
             if paths.len() > MAX_PATHS {
-                return None;
+                return ctx.bail("too many branch paths (the body exceeds the analysis cap)");
             }
         }
     }
@@ -261,7 +278,9 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
                 states = fork_bind(states, name, value, ctx)?;
             }
             // A field assignment or non-variable target is undecidable here.
-            Stmt::Assign { .. } => return None,
+            Stmt::Assign { .. } => {
+                return ctx.bail("an assignment to a field or non-variable target");
+            }
             Stmt::Expr(_) => {} // a discarded side effect does not change the result
             // A loop is verified via its invariant (init + preservation), then continues
             // with (invariant ∧ ¬condition). Without an invariant it is unverifiable.
@@ -272,10 +291,15 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
             } if !invariant.is_empty() => {
                 states = eval_loop(states, cond.as_ref(), invariant, body, ctx)?;
             }
-            Stmt::For { .. } | Stmt::Return(_) | Stmt::Break | Stmt::Continue => return None,
+            Stmt::For { .. } => {
+                return ctx.bail("a `for` loop without an `invariant { .. }` clause");
+            }
+            Stmt::Return(_) => return ctx.bail("an early `return`"),
+            Stmt::Break => return ctx.bail("a `break`"),
+            Stmt::Continue => return ctx.bail("a `continue`"),
         }
         if states.len() > MAX_PATHS {
-            return None;
+            return ctx.bail("too many branch paths (the body exceeds the analysis cap)");
         }
     }
     Some(states)
@@ -380,7 +404,9 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
             else_branch,
         } => {
             // A value `if` needs both arms (a missing else has no value to reason about).
-            let else_b = else_branch.as_ref()?;
+            let Some(else_b) = else_branch.as_ref() else {
+                return ctx.bail("an `if` used as a value without an `else` branch");
+            };
             let (then_props, else_props) = cond_props(cond, &state.env);
             let mut out = Vec::new();
             for (branch, props) in [(then_branch.as_ref(), then_props), (else_b, else_props)] {
@@ -400,7 +426,8 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
             Some(out)
         }
         Expr::Call(callee, args) => eval_call(callee, args, state, ctx),
-        _ => None, // comparisons-as-values, field/index reads, etc.: out of the fragment
+        // comparisons-as-values, field/index reads, etc.: out of the fragment.
+        _ => ctx.bail("an unsupported expression (a comparison used as a value, or a field/index read)"),
     }
 }
 
@@ -424,7 +451,7 @@ fn eval_loop(
         for inv in invariant {
             let p = sym_prop(inv, &st.env)?;
             if !matches!(prove(&p, &st.cons), Outcome::Proven) {
-                return None;
+                return ctx.bail("a loop invariant that does not hold on entry, check the `invariant { .. }`");
             }
         }
         // (2) PRESERVATION: havoc the modified variables to arbitrary values, assume the
@@ -435,7 +462,7 @@ fn eval_loop(
         }
         let inv_here: Vec<SymProp> = invariant.iter().filter_map(|e| sym_prop(e, &henv)).collect();
         if inv_here.len() != invariant.len() {
-            return None; // an invariant proposition is outside the fragment
+            return ctx.bail("a loop invariant proposition outside the verifiable fragment");
         }
         let mut pres_cons = inv_here;
         if let Some(c) = cond {
@@ -451,14 +478,14 @@ fn eval_loop(
             // under the assumptions live where it arose.
             for ob in &bs.obligations {
                 if !matches!(prove(&ob.prop, &ob.assumptions), Outcome::Proven) {
-                    return None;
+                    return ctx.bail("a safety obligation inside the loop body that could not be proved");
                 }
             }
             // The invariant must be re-established at the end of the iteration.
             for inv in invariant {
                 let p = sym_prop(inv, &bs.env)?;
                 if !matches!(prove(&p, &bs.cons), Outcome::Proven) {
-                    return None;
+                    return ctx.bail("a loop invariant not preserved by the body, strengthen the `invariant { .. }`");
                 }
             }
         }
@@ -1122,6 +1149,46 @@ mod tests {
         assert!(
             !err.message.contains("on the path where"),
             "straight-line function should have no path clause; got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn bail_diagnostic_names_the_loop_not_a_laundry_list() {
+        // A `for` loop without an `invariant { .. }` leaves the verifiable fragment. The
+        // diagnostic must name THAT specific construct, not enumerate every construct it
+        // could have been (early return, uncontracted call), which tells qwen nothing.
+        let funcs = parse(
+            "fn count(n: i64) -> (r: i64) ensures { r >= 0 } { let mut r = 0\nfor r < n { r = r + 1 }\nr }",
+        );
+        let err = verify(&funcs).expect_err("a loop without an invariant is unverifiable");
+        assert!(
+            err.message.contains("invariant"),
+            "should name the missing loop invariant; got: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("early return"),
+            "should not list unrelated constructs; got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn bail_diagnostic_names_an_unsupported_expression() {
+        // A comparison used as a value (`let b = x > 0`) is outside the fragment. The
+        // diagnostic must point at the expression, not at loops it does not contain.
+        let funcs =
+            parse("fn f(x: i64) -> (r: i64) ensures { r >= 0 } { let b = x > 0\n0 }");
+        let err = verify(&funcs).expect_err("a comparison-as-value is unsupported");
+        assert!(
+            err.message.contains("expression"),
+            "should name the unsupported expression; got: {}",
+            err.message
+        );
+        assert!(
+            !err.message.contains("loop"),
+            "should not mention loops it is not about; got: {}",
             err.message
         );
     }
