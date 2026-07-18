@@ -14,7 +14,7 @@
 //! off as "verified".
 
 use crate::ast::{BinOp, Block, Expr, Function, Stmt, Type};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// A symbolic integer value expressed in terms of the parameters.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -161,9 +161,10 @@ fn verify_function(
             asm.extend(ob.assumptions.iter().cloned());
             if !matches!(prove(&ob.prop, &asm), Outcome::Proven) {
                 return reject(format!(
-                    "cannot prove {}{}",
+                    "cannot prove {}{}{}",
                     ob.what,
-                    path_where(&ob.assumptions)
+                    path_where(&ob.assumptions),
+                    counterexample_clause(&ob.prop, &asm)
                 ));
             }
         }
@@ -182,17 +183,19 @@ fn verify_function(
                 Outcome::Proven => {}
                 Outcome::Disproven => {
                     return reject(format!(
-                        "postcondition `{}` is false{}",
+                        "postcondition `{}` is false{}{}",
                         show_prop(&p),
-                        where_clause
+                        where_clause,
+                        counterexample_clause(&p, &assumptions)
                     ));
                 }
                 Outcome::Unknown => {
                     return reject(format!(
-                        "cannot prove postcondition `{}`{}, Sond rejects a contract it \
+                        "cannot prove postcondition `{}`{}{}, Sond rejects a contract it \
                          cannot verify (add the assumptions it needs, or strengthen the prover)",
                         show_prop(&p),
-                        where_clause
+                        where_clause,
+                        counterexample_clause(&p, &assumptions)
                     ));
                 }
             }
@@ -987,6 +990,146 @@ fn path_where(cons: &[SymProp]) -> String {
     format!(" on the path where {}", parts.join(" and "))
 }
 
+/// Evaluates a symbolic value under a concrete assignment, using WRAPPING i64 arithmetic -
+/// the machine's real semantics, so a witness is faithful to how the compiled code runs.
+fn eval_sym(s: &Sym, env: &BTreeMap<String, i64>) -> Option<i64> {
+    Some(match s {
+        Sym::Const(n) => *n,
+        Sym::Var(v) => *env.get(v)?,
+        Sym::Add(a, b) => eval_sym(a, env)?.wrapping_add(eval_sym(b, env)?),
+        Sym::Sub(a, b) => eval_sym(a, env)?.wrapping_sub(eval_sym(b, env)?),
+        Sym::Mul(a, b) => eval_sym(a, env)?.wrapping_mul(eval_sym(b, env)?),
+    })
+}
+
+/// Evaluates a comparison under a concrete assignment (`None` if a variable is unbound).
+fn eval_prop(p: &SymProp, env: &BTreeMap<String, i64>) -> Option<bool> {
+    let (l, r) = (eval_sym(&p.lhs, env)?, eval_sym(&p.rhs, env)?);
+    Some(match p.op {
+        BinOp::Eq => l == r,
+        BinOp::Ne => l != r,
+        BinOp::Lt => l < r,
+        BinOp::Gt => l > r,
+        BinOp::Le => l <= r,
+        BinOp::Ge => l >= r,
+        _ => return None,
+    })
+}
+
+fn collect_sym_vars(s: &Sym, out: &mut BTreeSet<String>) {
+    match s {
+        Sym::Const(_) => {}
+        Sym::Var(v) => {
+            out.insert(v.clone());
+        }
+        Sym::Add(a, b) | Sym::Sub(a, b) | Sym::Mul(a, b) => {
+            collect_sym_vars(a, out);
+            collect_sym_vars(b, out);
+        }
+    }
+}
+
+fn collect_consts(s: &Sym, out: &mut BTreeSet<i64>) {
+    match s {
+        Sym::Const(n) => {
+            out.insert(*n);
+        }
+        Sym::Var(_) => {}
+        Sym::Add(a, b) | Sym::Sub(a, b) | Sym::Mul(a, b) => {
+            collect_consts(a, out);
+            collect_consts(b, out);
+        }
+    }
+}
+
+/// Searches for a concrete input that satisfies every assumption yet breaks `goal`, a real,
+/// VERIFIED counterexample (evaluated with wrapping i64, so it is exactly what the machine
+/// does). Bounded: only up to 3 free variables, over a small candidate set seeded from the
+/// constants in play plus the type's extremes; returns `None` (and the diagnostic simply
+/// omits a counterexample) rather than overclaim when none is found in budget. A returned
+/// witness is never a false positive, it is checked to actually violate the goal.
+fn find_counterexample(goal: &SymProp, assumptions: &[SymProp]) -> Option<BTreeMap<String, i64>> {
+    let mut vars = BTreeSet::new();
+    collect_sym_vars(&goal.lhs, &mut vars);
+    collect_sym_vars(&goal.rhs, &mut vars);
+    for a in assumptions {
+        collect_sym_vars(&a.lhs, &mut vars);
+        collect_sym_vars(&a.rhs, &mut vars);
+    }
+    let vars: Vec<String> = vars.into_iter().collect();
+    if vars.is_empty() || vars.len() > 3 {
+        return None;
+    }
+    // Candidate values: the type's extremes and small magnitudes, plus each literal in the
+    // props and its ±1 neighbours (the interesting points are next to the constants).
+    let mut consts = BTreeSet::new();
+    collect_consts(&goal.lhs, &mut consts);
+    collect_consts(&goal.rhs, &mut consts);
+    for a in assumptions {
+        collect_consts(&a.lhs, &mut consts);
+        collect_consts(&a.rhs, &mut consts);
+    }
+    // Ordered so the FRIENDLIEST witness is found first: small magnitudes, then the
+    // literals in play and their neighbours, then the type's extremes (which still catch
+    // overflow-shaped breakage). Dedup preserves this preference order.
+    let mut cands: Vec<i64> = Vec::new();
+    let mut seen = BTreeSet::new();
+    let push = |v: i64, cands: &mut Vec<i64>, seen: &mut BTreeSet<i64>| {
+        if seen.insert(v) {
+            cands.push(v);
+        }
+    };
+    for v in [0, 1, -1, 2, -2] {
+        push(v, &mut cands, &mut seen);
+    }
+    for c in consts {
+        for v in [c, c.wrapping_sub(1), c.wrapping_add(1)] {
+            push(v, &mut cands, &mut seen);
+        }
+    }
+    for v in [i64::MIN, i64::MAX] {
+        push(v, &mut cands, &mut seen);
+    }
+    // Enumerate the (bounded) cartesian product of candidate assignments.
+    let mut idx = vec![0usize; vars.len()];
+    loop {
+        let env: BTreeMap<String, i64> = vars
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (v.clone(), cands[idx[i]]))
+            .collect();
+        let assumptions_hold = assumptions.iter().all(|a| eval_prop(a, &env) == Some(true));
+        if assumptions_hold && eval_prop(goal, &env) == Some(false) {
+            return Some(env);
+        }
+        // Odometer increment over the candidate indices.
+        let mut i = 0;
+        loop {
+            if i == vars.len() {
+                return None;
+            }
+            idx[i] += 1;
+            if idx[i] < cands.len() {
+                break;
+            }
+            idx[i] = 0;
+            i += 1;
+        }
+    }
+}
+
+/// A human-readable " (counterexample: `x = -1`, `b = 0`)" clause, or "" if none was found
+/// in budget, the actionable input the Prime Directive's feedback mandate asks for.
+fn counterexample_clause(goal: &SymProp, assumptions: &[SymProp]) -> String {
+    match find_counterexample(goal, assumptions) {
+        Some(env) => {
+            let parts: Vec<String> = env.iter().map(|(v, n)| format!("{v} = {n}")).collect();
+            format!(" (counterexample: {})", parts.join(", "))
+        }
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1170,6 +1313,38 @@ mod tests {
         assert!(
             !err.message.contains("early return"),
             "should not list unrelated constructs; got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn rejection_shows_a_concrete_counterexample() {
+        // `r >= 0` with r = x and no precondition is unprovable. Per the Prime Directive
+        // (feedback mandate: "actionable, a counterexample input"), the diagnostic must
+        // exhibit a concrete input that breaks the contract, not just say it failed.
+        let funcs = parse("fn f(x: i64) -> (r: i64) ensures { r >= 0 } { x }");
+        let err = verify(&funcs).expect_err("x may be negative");
+        assert!(
+            err.message.contains("counterexample"),
+            "should give a counterexample; got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("x ="),
+            "should name the offending input; got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn divisor_rejection_shows_a_zero_counterexample() {
+        // An unguarded divisor: the counterexample that breaks the nonzero obligation is
+        // `b = 0`, and the diagnostic must show it.
+        let funcs = parse("fn d(a: i64, b: i64) -> i64 { a / b }");
+        let err = verify(&funcs).expect_err("b may be zero");
+        assert!(
+            err.message.contains("b = 0"),
+            "should show the divisor counterexample b = 0; got: {}",
             err.message
         );
     }
