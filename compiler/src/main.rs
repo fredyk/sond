@@ -123,6 +123,14 @@ fn main() -> ExitCode {
     // into the shipped program.
     let test_mode = args.iter().any(|a| a == "--test");
     let coverage = args.iter().any(|a| a == "--coverage");
+    if test_mode && !funcs.iter().any(|f| f.is_test) {
+        eprintln!(
+            "sondc: no `test` blocks found, Sond requires tests giving at least 80% coverage \
+             to build. Add `test \"...\" {{ ... }}` blocks (and `include \
+             \"x86_64/linux/testing.snd\"`)."
+        );
+        return ExitCode::FAILURE;
+    }
     if test_mode {
         funcs.retain(|f| f.name != "main");
         let min_coverage = args

@@ -75,6 +75,33 @@ fn temp_out(file: &str, suffix: &str) -> PathBuf {
     env::temp_dir().join(format!("{stem}{suffix}"))
 }
 
+/// The coverage threshold from `--min-coverage=N` (default 80).
+fn min_coverage(args: &[String]) -> u32 {
+    args.iter()
+        .find_map(|a| a.strip_prefix("--min-coverage="))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(80)
+}
+
+/// Mandatory gate: compile the file's `test` blocks with coverage instrumentation and run
+/// them. Returns true iff every test passed AND coverage met the threshold. The run's output
+/// (per-test results + the coverage line) goes to the user. This is what makes tests a
+/// compilation requirement, no artifact is produced unless it holds.
+fn run_gated_tests(sondc: &PathBuf, file: &str, min_cov: u32) -> bool {
+    let testbin = temp_out(file, ".gatebin");
+    let min = format!("--min-coverage={min_cov}");
+    let flags = ["--test", "--coverage", min.as_str()];
+    if !compile(sondc, file, &testbin, &flags) {
+        return false;
+    }
+    let ok = Command::new(&testbin)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let _ = std::fs::remove_file(&testbin);
+    ok
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -85,28 +112,41 @@ fn main() -> ExitCode {
         "test" => {
             // sond test [--coverage] [--min-coverage=N] <file.snd>, forward the flags to
             // sondc --test; the file is the first non-flag argument.
+            // sond test <lib.snd>, run a file's tests with the mandatory coverage gate.
+            // This is for LIBRARIES (no `main` to build into an executable); the same gate
+            // runs inside `sond build` for programs. Coverage is always measured and enforced.
             let rest = &args[2..];
             let Some(file) = rest.iter().find(|a| !a.starts_with('-')) else {
                 eprintln!("sond test: missing <file.snd>");
                 return ExitCode::from(2);
             };
-            let mut flags: Vec<&str> = vec!["--test"];
-            flags.extend(rest.iter().filter(|a| a.starts_with('-')).map(|s| s.as_str()));
-            let out = temp_out(file, ".testbin");
-            if !compile(&sondc, file, &out, &flags) {
-                return ExitCode::FAILURE;
+            if run_gated_tests(&sondc, file, min_coverage(&args)) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
             }
-            let code = run_binary(&out);
-            let _ = std::fs::remove_file(&out);
-            code
         }
         "build" => {
-            let Some(file) = args.get(2) else {
+            // sond build <program.snd> [out], MANDATORY tests: the program's `test` blocks
+            // must pass with >= the coverage threshold, or no binary is produced. Only then is
+            // the real (uninstrumented) binary emitted. This is Sond's rule that you cannot
+            // ship code that isn't tested.
+            let rest = &args[2..];
+            let mut positional = rest.iter().filter(|a| !a.starts_with('-'));
+            let Some(file) = positional.next() else {
                 eprintln!("sond build: missing <file.snd>");
                 return ExitCode::from(2);
             };
-            let out = args
-                .get(3)
+            if !run_gated_tests(&sondc, file, min_coverage(&args)) {
+                eprintln!(
+                    "sond: build blocked, the program's tests must pass with at least {}% coverage \
+                     before it can be built",
+                    min_coverage(&args)
+                );
+                return ExitCode::FAILURE;
+            }
+            let out = positional
+                .next()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(std::path::Path::new(file).file_stem().unwrap()));
             if compile(&sondc, file, &out, &[]) {
