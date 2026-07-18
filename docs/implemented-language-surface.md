@@ -93,6 +93,9 @@ for i < 10 {        // while-style loop
     i = i + 1
 }
 
+for i in 0..10 { .. }   // counting loop (half-open: 0..9)
+for x in s { .. }       // foreach over a Slice/array element by element
+
 for {               // infinite loop
     if done { break }
     continue
@@ -103,11 +106,9 @@ return 0            // early return
 
 `if` is also an expression: `let m = if a > b { a } else { b }`; chains work (`else if`).
 
-### Constraints (common gotchas, save yourself the iteration)
-- **Functions are TOP-LEVEL only**, you CANNOT define a `fn` inside another `fn`.
-  Factor helpers out to the top level (they can call each other freely).
-- **Parameters are IMMUTABLE**, you cannot write `fn f(mut x: ...)` nor assign to a
-  parameter. To mutate, copy it into a local: `fn f(x: i64) { let mut v = x  v = v + 1 ... }`.
+### Constraints (common gotchas)
+- **Functions are TOP-LEVEL only**, no `fn` inside another `fn`; factor helpers out.
+- **Parameters are IMMUTABLE**, to mutate, copy into a local: `let mut v = x`.
 - A stack array `let a[N]` is written with `a[i] = ...`, it needs NO `let mut` (the
   name is an address). Only scalar bindings you reassign need `let mut`.
 - No `println`, use `print`, `print_int`, `print_char`, `serial_print`.
