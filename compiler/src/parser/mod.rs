@@ -339,34 +339,72 @@ impl Parser {
                     {
                         let var = self.expect_ident();
                         self.expect(Token::In);
-                        let start = self.parse_expr();
-                        self.expect(Token::DotDot);
-                        let end = self.parse_expr();
-                        let mut body = self.parse_block();
-                        stmts.push(Stmt::Let {
-                            mutable: true,
-                            name: var.clone(),
-                            ty: None,
-                            value: start,
-                            array_len: None,
-                        });
-                        body.stmts.push(Stmt::Assign {
-                            target: Expr::Var(var.clone()),
-                            value: Expr::Binary(
-                                BinOp::Add,
-                                Box::new(Expr::Var(var.clone())),
-                                Box::new(Expr::Int(1)),
-                            ),
-                        });
-                        stmts.push(Stmt::For {
-                            cond: Some(Expr::Binary(
-                                BinOp::Lt,
-                                Box::new(Expr::Var(var)),
-                                Box::new(end),
-                            )),
-                            invariant: Vec::new(),
-                            body,
-                        });
+                        // The range start / collection: a following `{` is the loop body,
+                        // not a struct literal.
+                        let saved = self.no_struct_lit;
+                        self.no_struct_lit = true;
+                        let first = self.parse_expr();
+                        self.no_struct_lit = saved;
+                        if self.eat(Token::DotDot) {
+                            // Counting form `for i in a..b`: i = a; while i < b; i += 1.
+                            let end = self.parse_expr();
+                            let mut body = self.parse_block();
+                            stmts.push(Stmt::Let {
+                                mutable: true,
+                                name: var.clone(),
+                                ty: None,
+                                value: first,
+                                array_len: None,
+                            });
+                            sink_tail(&mut body); // increment must run AFTER the body, not before
+                            body.stmts.push(assign_inc(&var));
+                            stmts.push(Stmt::For {
+                                cond: Some(Expr::Binary(
+                                    BinOp::Lt,
+                                    Box::new(Expr::Var(var)),
+                                    Box::new(end),
+                                )),
+                                invariant: Vec::new(),
+                                body,
+                            });
+                        } else {
+                            // Foreach `for x in coll { body }`: iterate a slice/array's elements.
+                            // `x` is bound to `coll[i]` each turn; `i` is a hidden counter,
+                            // named by token position so nested loops never collide.
+                            let idx = format!("__fe{}", self.pos);
+                            let mut body = self.parse_block();
+                            body.stmts.insert(
+                                0,
+                                Stmt::Let {
+                                    mutable: false,
+                                    name: var,
+                                    ty: None,
+                                    value: Expr::Index(
+                                        Box::new(first.clone()),
+                                        Box::new(Expr::Var(idx.clone())),
+                                    ),
+                                    array_len: None,
+                                },
+                            );
+                            sink_tail(&mut body);
+                            body.stmts.push(assign_inc(&idx));
+                            stmts.push(Stmt::Let {
+                                mutable: true,
+                                name: idx.clone(),
+                                ty: None,
+                                value: Expr::Int(0),
+                                array_len: None,
+                            });
+                            stmts.push(Stmt::For {
+                                cond: Some(Expr::Binary(
+                                    BinOp::Lt,
+                                    Box::new(Expr::Var(idx)),
+                                    Box::new(Expr::Field(Box::new(first), "len".to_string())),
+                                )),
+                                invariant: Vec::new(),
+                                body,
+                            });
+                        }
                         self.skip_semicolons();
                     } else {
                         let cond = if self.peek() == Some(&Token::LBrace) {
@@ -547,6 +585,27 @@ impl Parser {
             return Type::Named("i64".to_string());
         }
         Type::Named(self.expect_ident())
+    }
+}
+
+/// `name = name + 1`, a loop-counter increment statement.
+fn assign_inc(name: &str) -> Stmt {
+    Stmt::Assign {
+        target: Expr::Var(name.to_string()),
+        value: Expr::Binary(
+            BinOp::Add,
+            Box::new(Expr::Var(name.to_string())),
+            Box::new(Expr::Int(1)),
+        ),
+    }
+}
+
+/// Sinks a block's tail expression into its statement list (as a discarded expression), so a
+/// loop-counter increment appended afterwards runs AFTER the body's last expression, not before
+/// it (`for i in 0..3 { print(i) }` must print 0,1,2, the increment cannot precede the tail).
+fn sink_tail(body: &mut Block) {
+    if let Some(t) = body.tail.take() {
+        body.stmts.push(Stmt::Expr(*t));
     }
 }
 
