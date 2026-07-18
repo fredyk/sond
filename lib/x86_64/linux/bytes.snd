@@ -108,3 +108,42 @@ pub fn bytes_slice(b: i64, start: i64, end: i64) -> i64 {
     }
     out
 }
+
+// Append every byte of a NUL-terminated C string to `b`.
+pub fn bytes_append_cstr(b: i64, s: i64) {
+    let mut i = 0
+    for peek8(s + i) != 0 {
+        bytes_push(b, peek8(s + i))
+        i = i + 1
+    }
+}
+
+// Append every byte of buffer `src` to `b`.
+pub fn bytes_append(b: i64, src: i64) {
+    let n = bytes_len(src)
+    let mut i = 0
+    for i < n {
+        bytes_push(b, bytes_get(src, i))
+        i = i + 1
+    }
+}
+
+// Append the decimal ASCII of a non-negative integer to `b` (e.g. 0 -> "0", 42 -> "42").
+pub fn bytes_append_int(b: i64, n: i64) {
+    if n == 0 {
+        bytes_push(b, 48)
+    } else {
+        // Push digits least-significant first into a temp buffer, then reverse into `b`.
+        let tmp = bytes_new()
+        let mut v = n
+        for v > 0 {
+            bytes_push(tmp, 48 + (v % 10))
+            v = v / 10
+        }
+        let mut i = bytes_len(tmp)
+        for i > 0 {
+            bytes_push(b, bytes_get(tmp, i - 1))
+            i = i - 1
+        }
+    }
+}

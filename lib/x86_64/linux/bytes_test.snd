@@ -68,3 +68,28 @@ test "bytes_slice extracts a subrange" {
     assert_eq(bytes_get(path, 0), 47)
     assert_eq(bytes_get(path, 1), 120)
 }
+
+test "bytes_append_cstr appends a literal" {
+    let b = bytes_from_cstr(cstr("AB"))
+    bytes_append_cstr(b, cstr("CD"))
+    assert_eq(bytes_len(b), 4)
+    assert_eq(bytes_get(b, 3), 68)
+}
+
+test "bytes_append concatenates buffers" {
+    let a = bytes_from_cstr(cstr("foo"))
+    bytes_append(a, bytes_from_cstr(cstr("bar")))
+    assert_eq(bytes_eq(a, bytes_from_cstr(cstr("foobar"))), 1)
+}
+
+test "bytes_append_int: zero" {
+    let b = bytes_new()
+    bytes_append_int(b, 0)
+    assert_eq(bytes_eq(b, bytes_from_cstr(cstr("0"))), 1)
+}
+
+test "bytes_append_int: multi-digit" {
+    let b = bytes_new()
+    bytes_append_int(b, 1234)
+    assert_eq(bytes_eq(b, bytes_from_cstr(cstr("1234"))), 1)
+}
