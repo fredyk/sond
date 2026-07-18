@@ -202,6 +202,9 @@ pub fn emit_program_coverage_g(
     // resolve to the `.data` symbols emitted below.
     cg.global_names.insert("__cov_ptr".to_string());
     cg.global_names.insert("__cov_total".to_string());
+    cg.global_names.insert("__cov_nfns".to_string());
+    // The harness indexes `__cov_fn_table` by address, so it resolves like an array global.
+    cg.global_arrays.insert("__cov_fn_table".to_string());
     emit_all(&mut cg, structs, funcs, "main");
     cg.line(".globl main");
     cg.line("main:");
@@ -213,14 +216,27 @@ pub fn emit_program_coverage_g(
     cg.emit_print_int_helper();
     cg.emit_print_int_signed_helper();
     cg.emit_globals();
+    // Intern each instrumented function's name (before rodata is emitted) so the table can
+    // point at the string. Each entry is [name_ptr, name_len, first_point_id, point_count].
+    let cov_fns = cg.cov_fns.clone();
+    let table: Vec<(String, usize, usize, usize)> = cov_fns
+        .iter()
+        .map(|(name, start, count)| (cg.intern_string(name), name.len(), *start, *count))
+        .collect();
     cg.emit_rodata();
     let total = cg.cov_points;
+    let nfns = table.len();
     cg.line(".data");
     cg.line("sond_argc: .quad 0");
     cg.line("sond_argv: .quad 0");
     cg.line("sond_envp: .quad 0");
     cg.line("__cov_ptr: .quad 0");
     cg.line(&format!("__cov_total: .quad {total}"));
+    cg.line(&format!("__cov_nfns: .quad {nfns}"));
+    cg.line("__cov_fn_table:");
+    for (label, len, start, count) in table {
+        cg.line(&format!("    .quad {label}, {len}, {start}, {count}"));
+    }
     cg.out
 }
 
@@ -541,6 +557,9 @@ struct Codegen {
     /// code UNDER TEST, so the synthesized harness, the test bodies, and the testing library
     /// are skipped (also avoids the harness marking through a not-yet-set `__cov_ptr`).
     cov_active: bool,
+    /// Per-instrumented-function coverage ranges: `(name, first_point_id, point_count)`. Emitted
+    /// as `__cov_fn_table` so the harness can name which functions are not fully covered.
+    cov_fns: Vec<(String, usize, usize)>,
     /// Names of the module-level globals (to resolve a `Var` to a `.data` label).
     global_names: HashSet<String>,
     /// The scalar globals to emit in `.data`, as `(label, constant value)`.
@@ -700,7 +719,12 @@ impl Codegen {
         // Preconditions: checked on entry, with the parameters in scope.
         self.emit_contract_guard(&func.requires);
 
+        let cov_start = self.cov_points;
         self.block(&func.body); // leaves the function's value in %rax
+        if self.cov_active {
+            self.cov_fns
+                .push((func.name.clone(), cov_start, self.cov_points - cov_start));
+        }
 
         self.line(&format!("{}:", self.ret_label.clone()));
         // Postconditions: checked at every exit, with the return value bound to
