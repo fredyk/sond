@@ -171,6 +171,8 @@ fn main() -> ExitCode {
         eprintln!("sondc: {msg}");
         return ExitCode::FAILURE;
     }
+    // The built-in `Slice { ptr, len }` fat pointer is available to every program.
+    sondc::desugar::inject_builtin_structs(&mut structs);
     // `a.len` on a fixed-size array lowers to its constant size. Done before the constant
     // checks so `a[a.len]` is seen as `a[N]` (a provable out-of-bounds) and `for i < a.len`
     // as `for i < N`.

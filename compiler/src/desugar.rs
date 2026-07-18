@@ -632,6 +632,15 @@ fn desugar_expr(
             desugar_expr(r, fields, sizes, locals, methods);
         }
         Expr::Index(b, i) => {
+            // Slice indexing: `s[i]` on a `Slice`-typed value reads element i through its
+            // `.ptr` field (`peek64(s.ptr + i*8)`), unlike a bare array where the name IS the
+            // base address. Rewriting the base to `s.ptr` reuses the array-index codegen.
+            if let Expr::Var(name) = b.as_ref()
+                && locals.get(name).map(String::as_str) == Some(SLICE_TYPE)
+            {
+                let base = std::mem::replace(&mut **b, Expr::Int(0));
+                **b = Expr::Field(Box::new(base), "ptr".to_string());
+            }
             desugar_expr(b, fields, sizes, locals, methods);
             desugar_expr(i, fields, sizes, locals, methods);
         }
@@ -701,6 +710,37 @@ fn desugar_expr(
         Expr::Int(_) | Expr::Decimal(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Var(_) => {}
     }
 }
+
+/// The built-in `Slice { ptr, len }` fat pointer, a data pointer plus a runtime length, the
+/// length-carrying array (RFC-0012 §6). Injected before struct lowering so `s: Slice` params,
+/// `s.ptr`/`s.len` field access, and slice indexing `s[i]` all resolve through the existing
+/// struct machinery (a 2-word block passed by reference / returned in RAX:RDX). A user
+/// definition of `Slice`, if present, is left untouched.
+pub fn inject_builtin_structs(structs: &mut Vec<StructDef>) {
+    if structs.iter().any(|s| s.name == SLICE_TYPE) {
+        return;
+    }
+    let i64t = || Type::Named("i64".to_string());
+    structs.push(StructDef {
+        vis: crate::ast::Visibility::Pub,
+        name: SLICE_TYPE.to_string(),
+        fields: vec![
+            Param {
+                name: "ptr".to_string(),
+                ty: i64t(),
+            },
+            Param {
+                name: "len".to_string(),
+                ty: i64t(),
+            },
+        ],
+    });
+}
+
+/// The name of the built-in fat-pointer type. Indexing `s[i]` on a value of this type reads
+/// through its `.ptr` field (element i is `peek64(s.ptr + i*8)`), unlike a bare array where the
+/// name itself is the base address.
+const SLICE_TYPE: &str = "Slice";
 
 /// Lowers `a.len` on a fixed-size array `let a[N]` (or a module-level `let K[N] = ..`) to the
 /// compile-time constant `N`. An array's length is statically known, arrays are fixed-size
@@ -896,6 +936,7 @@ mod tests {
         let mut funcs = p.parse_program();
         let mut structs = p.take_structs();
         let enums = p.take_enums();
+        inject_builtin_structs(&mut structs);
         // `a.len` on a fixed-size array lowers to its constant size (before the other passes).
         lower_array_len(&mut funcs, &[]);
         // Payloaded enums synthesize `{__tag, __payload}` structs; lower enums first,
@@ -958,6 +999,43 @@ mod tests {
              }",
         );
         assert_eq!(out, "60");
+    }
+
+    #[test]
+    fn builtin_slice_carries_length_across_a_call_and_indexes_through_ptr() {
+        // No `struct Slice` is declared, it is built in. The length travels IN the slice,
+        // and `s[i]` reads element i through `.ptr` (not the struct block itself).
+        let out = compile_and_capture(
+            "fn sum(s: Slice) -> i64 {\n\
+             let mut i = 0\n\
+             let mut acc = 0\n\
+             for i < s.len { acc = acc + s[i]  i = i + 1 }\n\
+             acc\n\
+             }\n\
+             fn main() -> i64 {\n\
+             let a[4]\n\
+             a[0] = 10  a[1] = 20  a[2] = 30  a[3] = 40\n\
+             let s = Slice { ptr: a, len: a.len }\n\
+             print_int(sum(s))\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "100");
+    }
+
+    #[test]
+    fn slice_element_write_goes_through_ptr() {
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             let a[3]\n\
+             let s = Slice { ptr: a, len: a.len }\n\
+             let mut i = 0\n\
+             for i < s.len { s[i] = i + 1  i = i + 1 }\n\
+             print_int(a[0] + a[1] + a[2])\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "6");
     }
 
     #[test]
