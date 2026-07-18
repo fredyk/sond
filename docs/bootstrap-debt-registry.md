@@ -93,6 +93,27 @@ This is debt item #9, and it is the highest-leverage contradiction of all.
   a compile error (memory doc 09). Release carries zero runtime contract checks. *(Today it
   is already gated on `check_contracts`; this registry fixes the intent so it stays that way.)*
 
+## Design tension to resolve: the coverage gate undervalues proof (2026-07-18)
+
+The mandatory ≥80% **coverage gate** (`sond build/run/test` refuse to build under-tested code)
+counts *basic blocks executed by tests*. But Sond ranks its two correctness mechanisms
+unequally: a **proof** (a discharged `ensures`, true for ALL inputs) is strictly stronger than a
+**test** (one example). The gate ignores that ranking, a fully *proven* function with no test
+drags coverage down and can **block the build**, even though it is the most trustworthy code in
+the file. Left as-is this creates a perverse incentive: to clear the gate, an author pads
+coverage with vacuous tests, or **deletes a contract** the prover was checking so the function
+reads as ordinary (uncovered-but-not-special) code, i.e. the gate can push toward *weaker*
+correctness, a directive violation of the same kind this registry guards against.
+
+**Direction (to decide):** coverage should be satisfied by **proof OR test**, composing
+additively, a basic block inside a function with a discharged postcondition that pins its
+result counts as covered without a test (the proof *is* the coverage; it dominates any test).
+Concretely, either exclude proven blocks from the denominator or auto-credit them in the
+numerator. Latent today (the prover only fully proves straight-line integer bodies, so few
+functions qualify, Class B), but the gate's definition must be set coherently NOW so it never
+normalizes "tested-only" as if proof did not count. New surface only in the driver's coverage
+accounting → no language change; runs against the existing example suite.
+
 ## What is already directive-aligned and implemented (the seeds)
 - Contracts are proven at compile time; unprovable ⇒ **does not compile** (never a runtime
   surprise)., the core of the directive, already live.

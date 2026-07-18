@@ -129,7 +129,47 @@ carrying arrays → the raise-and-discharge in verify.rs, which is the div-by-ze
    refinement is discharged at compile time or is a compile error (never a runtime check),
    consistent with "release carries zero runtime contract checks" (registry).
 4. **Wrapping opt-in surface**, if (A)/(C), what is the ergonomic escape for genuinely-wanted
-   wrapping (a hash, a CRC)? `wrapping_add`, a `wrap { }` region, or a `u64w` type?
+   wrapping (a hash, a CRC)? `wrapping_add`, a `wrap { }` region, or a `u64w` type? See §8 -
+   the crypto stdlib turns this from a corner case into a blocker for (A).
+
+## 8. The wrapping substrate: crypto is not a corner case (overlooked when deciding §5)
+
+The §5 decision (A-via-C) framed genuine wrapping as a rare escape hatch, "a hash, a CRC."
+Building out the stdlib shows that framing is wrong, and it changes what (A) must ship with.
+
+**The evidence.** The crypto/hash tower, ChaCha20, Poly1305, SHA-256/512, **SHA-3/SHAKE
+(Keccak-f[1600])**, X25519, Ed25519, is built *entirely* on intentional mod-2⁶⁴ (and mod-2³²)
+arithmetic. Every `+`, `*`, `<<` and rotation in Keccak's θ/ρ/π/χ, in ChaCha's quarter-round,
+in Poly1305's accumulator, is *defined* to wrap; overflow is not a bug there, it is the
+specification. A single `keccak_f` round has ~100 wrapping operations. This is not a handful
+of CRCs, it is an entire subsystem, and it is the subsystem the PQ layer (ML-KEM/ML-DSA, all
+SHAKE-based) and the whole secure-channel stack sit on.
+
+**Why this matters for (A).** Under (C) (shipped) variable overflow still wraps, so this code
+compiles today. Under the *destination* (A), every one of those thousands of operations becomes
+a compile error unless individually proven bounded (they are not, they genuinely overflow) or
+individually rewritten as `wrapping_add`/`wrapping_mul`/`wrapping_shl`. Annotating per-operation
+would (a) triple the size of already dense crypto, (b) bury the *one* place a non-wrapping bug
+could hide under thousands of "yes I meant to wrap" tokens, destroying the signal (A) exists to
+create, and (c) be exactly the kind of pervasive-annotation burden §5 flagged as (A)'s risk to
+the qwen ceiling.
+
+**The design consequence.** (A) cannot land with only a per-operation `wrapping_*` surface. The
+wrapping context must be declarable **once over a region**, so an entire crypto module reads as
+ordinary arithmetic and the *checked* default is what is unusual there, the inverse of the
+default elsewhere. Concretely, prefer a **lexical `wrap { … }` region** and/or a **module-level
+`#![wrapping]` attribute**, under which `+ - * << >>` are the wrapping ops and the *checked*
+forms are the ones you name (`checked_add`). A `u64w` *type* is the weaker option: it colours
+values, but mixed-width crypto (u32 lanes packed into u64 state, byte↔word) forces constant
+casts, re-introducing the noise. The region/attribute keeps the type system out of it and maps
+cleanly onto how the code is already organised (one file = one primitive).
+
+**Sequencing.** This means the staged plan (§6) gains a step-0 that is a *precondition* for
+step-4 (the overflow obligation): **define and implement the wrapping region/attribute first**,
+migrate the crypto stdlib into it (a no-op under (C): the region just documents intent), and only
+then turn on checked-by-default outside such regions. Without step-0, flipping to (A) breaks the
+entire crypto/PQ tower on the same day it lands. New surface (`wrap {}` / `#![wrapping]`) → runs
+the qwen3.6 gate. Recorded here so the §5 decision is not mistaken for "just add `wrapping_add`."
 
 ---
 
