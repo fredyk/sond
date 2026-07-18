@@ -28,3 +28,30 @@ test "growing past the initial capacity preserves the data" {
     assert_eq(bytes_get(b, 50), 50)
     assert_eq(bytes_get(b, 99), 99)
 }
+
+test "bytes_from_cstr copies a string literal" {
+    let b = bytes_from_cstr(cstr("Hi!"))
+    assert_eq(bytes_len(b), 3)
+    assert_eq(bytes_get(b, 0), 72)
+    assert_eq(bytes_get(b, 2), 33)
+}
+
+test "bytes_eq: equal buffers" {
+    assert_eq(bytes_eq(bytes_from_cstr(cstr("GET")), bytes_from_cstr(cstr("GET"))), 1)
+}
+
+test "bytes_eq: different length" {
+    assert_eq(bytes_eq(bytes_from_cstr(cstr("GET")), bytes_from_cstr(cstr("POST"))), 0)
+}
+
+test "bytes_eq: same length, different bytes" {
+    assert_eq(bytes_eq(bytes_from_cstr(cstr("GET")), bytes_from_cstr(cstr("PUT"))), 0)
+}
+
+test "bytes_index_of: found" {
+    assert_eq(bytes_index_of(bytes_from_cstr(cstr("a/b")), 47), 1)
+}
+
+test "bytes_index_of: not found" {
+    assert_eq(bytes_index_of(bytes_from_cstr(cstr("abc")), 47), 0 - 1)
+}

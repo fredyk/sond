@@ -50,3 +50,45 @@ pub fn bytes_push(b: i64, byte: i64) {
     poke8(peek64(b) + len, byte)
     poke64(b + 8, len + 1)
 }
+
+// Build a buffer from a NUL-terminated C string (e.g. a `cstr("...")` literal).
+pub fn bytes_from_cstr(s: i64) -> i64 {
+    let b = bytes_new()
+    let mut i = 0
+    for peek8(s + i) != 0 {
+        bytes_push(b, peek8(s + i))
+        i = i + 1
+    }
+    b
+}
+
+// 1 if two buffers have the same length and the same bytes, else 0.
+pub fn bytes_eq(a: i64, b: i64) -> i64 {
+    let n = bytes_len(a)
+    if n != bytes_len(b) {
+        0
+    } else {
+        let mut i = 0
+        let mut same = 1
+        for i < n {
+            if bytes_get(a, i) != bytes_get(b, i) {
+                same = 0
+            }
+            i = i + 1
+        }
+        same
+    }
+}
+
+// First index of `byte` in the buffer, or -1 if it does not occur.
+pub fn bytes_index_of(b: i64, byte: i64) -> i64 {
+    let n = bytes_len(b)
+    let mut i = 0
+    for i < n {
+        if bytes_get(b, i) == byte {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
