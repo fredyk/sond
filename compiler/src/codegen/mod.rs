@@ -299,6 +299,16 @@ pub fn emit_freestanding_g(globals: &[Global], structs: &[StructDef], funcs: &[F
     emit_all(&mut cg, structs, funcs, "main");
     cg.line(".globl _start");
     cg.line("_start:");
+    // The kernel lays out the initial stack at process entry: argc at (%rsp), then argv[0..argc],
+    // a NULL, then envp[]. With no libc to do it, `_start` stashes them itself so the
+    // argc()/argv()/envp() builtins work (the bug: freestanding left these undefined).
+    cg.line("    movq (%rsp), %rax"); // argc
+    cg.line("    movq %rax, sond_argc(%rip)");
+    cg.line("    leaq 8(%rsp), %rcx"); // &argv[0]
+    cg.line("    movq %rcx, sond_argv(%rip)");
+    // envp begins after argv's NULL terminator: rsp + 8 (skip argc) + (argc+1)*8 = rsp + 16 + argc*8.
+    cg.line("    leaq 16(%rsp,%rax,8), %rcx");
+    cg.line("    movq %rcx, sond_envp(%rip)");
     cg.line("    call sond_start");
     cg.line("    movq %rax, %rdi"); // exit code = the entry's value
     cg.line("    movq $60, %rax"); // sys_exit
@@ -307,6 +317,10 @@ pub fn emit_freestanding_g(globals: &[Global], structs: &[StructDef], funcs: &[F
     cg.emit_print_int_signed_helper();
     cg.emit_globals();
     cg.emit_rodata();
+    cg.line(".data");
+    cg.line("sond_argc: .quad 0");
+    cg.line("sond_argv: .quad 0");
+    cg.line("sond_envp: .quad 0");
     cg.out
 }
 

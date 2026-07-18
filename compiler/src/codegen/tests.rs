@@ -173,6 +173,15 @@ fn compiles_and_runs_a_freestanding_static_binary() {
 }
 
 #[test]
+fn freestanding_argc_reads_the_process_arguments() {
+    // A freestanding `_start` must stash argc/argv/envp from the stack (there is no libc to
+    // do it), and the globals must be declared, else `argc()` fails to link. Run with no
+    // args, argc is 1 (the program name).
+    let (code, _) = compile_and_run_freestanding("fn main() -> i64 { argc() }");
+    assert_eq!(code, 1, "argc() should be 1 when run with no extra arguments");
+}
+
+#[test]
 fn uefi_print_int_lowers_to_the_utf16_helper() {
     // On UEFI, print_int(n) calls the UTF-16 helper (divide-by-10 -> ConOut, buffer in .data).
     let asm = emit_uefi(
