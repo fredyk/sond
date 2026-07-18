@@ -55,3 +55,16 @@ test "bytes_index_of: found" {
 test "bytes_index_of: not found" {
     assert_eq(bytes_index_of(bytes_from_cstr(cstr("abc")), 47), 0 - 1)
 }
+
+test "bytes_index_of_from starts at the offset" {
+    let b = bytes_from_cstr(cstr("a b c"))
+    assert_eq(bytes_index_of_from(b, 32, 2), 3)
+}
+
+test "bytes_slice extracts a subrange" {
+    let b = bytes_from_cstr(cstr("GET /x"))
+    let path = bytes_slice(b, 4, 6)
+    assert_eq(bytes_len(path), 2)
+    assert_eq(bytes_get(path, 0), 47)
+    assert_eq(bytes_get(path, 1), 120)
+}
