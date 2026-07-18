@@ -282,3 +282,13 @@ test "x25519: fe_invert limbs" {
     x25_fe_invert(r, x25_A_LIMBS)
     assert_eq(bytes32_eq(r, x25_INV_EXP), 1)
 }
+
+// Exercise the not-equal path of the comparison helper (every other test compares
+// equal arrays, so without this the `return 0` branch is never covered).
+test "x25519: bytes32_eq detects a difference" {
+    let a[4]; let b[4]
+    let mut i = 0
+    for i < 32 { poke8(a + i, i); poke8(b + i, i); i = i + 1 }
+    poke8(b + 5, 0x63)
+    assert_eq(bytes32_eq(a, b), 0)
+}
