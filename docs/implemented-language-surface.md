@@ -136,13 +136,14 @@ Rules of thumb that WILL verify:
 - constant results: `ensures { r == 42 } { 6 * 7 }`;
 - arithmetic identities: `ensures { r == x + x } { x + x }`;
 - passing a precondition through: `requires { x > 0 } ensures { r > 0 } { x }`.
-A contract with a loop, or needing reasoning the prover lacks, is rejected, omit it for
-loop-based programs for now.
 
 Syntax: `fn f(x: i64) -> (q: i64) requires { x >= 0 } ensures { q >= 0 } { x }`.
 `requires`/`ensures` hold propositions (newline/`;` separated, implicit AND); each is a
 SINGLE comparison (no `&&` yet, write several). `-> (name: Type)` binds the result so
 `ensures` can name it; parameters are in scope in both.
+
+A parameter can carry a **`where` refinement**: `fn get(i: i64 where 0 <= i && i < 10)`
+is a `requires` on that param (`&&` splits into conjuncts), proves bounds/overflow.
 
 ## Builtins, provided by the COMPILER itself (no `include` needed)
 

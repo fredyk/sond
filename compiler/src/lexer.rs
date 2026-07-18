@@ -347,6 +347,7 @@ fn keyword_or_ident(word: String) -> Token {
         "pub" => Token::Pub,
         "priv" => Token::Priv,
         "requires" => Token::Requires,
+        "where" => Token::Where,
         "ensures" => Token::Ensures,
         "invariant" => Token::Invariant,
         "effects" => Token::Effects,

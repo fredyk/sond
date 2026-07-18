@@ -47,6 +47,8 @@ pub enum Token {
     Priv,
     /// `requires`
     Requires,
+    /// `where`, a refinement predicate on a parameter's type (`i: i64 where 0 <= i`)
+    Where,
     /// `ensures`
     Ensures,
     /// `invariant`

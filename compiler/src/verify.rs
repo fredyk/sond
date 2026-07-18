@@ -1614,6 +1614,18 @@ mod tests {
     }
 
     #[test]
+    fn a_where_refinement_discharges_like_a_precondition() {
+        // `where x > 0` on the parameter proves the postcondition, exactly as a `requires` would.
+        let funcs = parse("fn f(x: i64 where x > 0) -> (r: i64) ensures { r > 0 } { x }");
+        assert!(verify(&funcs).is_ok());
+        // A `&&` refinement contributes both bounds, so `x + 1` is proven not to overflow.
+        let funcs2 = parse(
+            "fn f(x: i64 where x > 0 && x < 100) -> (r: i64) ensures { r > x } { x + 1 }",
+        );
+        assert!(verify(&funcs2).is_ok());
+    }
+
+    #[test]
     fn rejects_a_proof_that_relies_on_i32_overflow() {
         // i32::MAX = 2147483647. `x + 1` overflows i32 at x = i32::MAX (r wraps to i32::MIN, so
         // `r > x` is false), even though the sum fits comfortably in i64. The prover must bound

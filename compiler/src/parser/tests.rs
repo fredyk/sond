@@ -177,6 +177,16 @@ fn parses_the_fiscal_function_signature_and_requires() {
     assert!(matches!(f.requires[2], Expr::Binary(BinOp::Implies, _, _)));
 }
 
+#[test]
+fn parses_where_refinements_on_a_parameter_into_requires() {
+    // `where 0 <= i && i < 10` on the parameter desugars to two preconditions.
+    let f = parse_fn("fn get(i: i64 where 0 <= i && i < 10) -> i64 { i }");
+    assert_eq!(f.params.len(), 1);
+    assert_eq!(f.requires.len(), 2);
+    assert_eq!(f.requires[0], bin(BinOp::Le, Expr::Int(0), var("i")));
+    assert_eq!(f.requires[1], bin(BinOp::Lt, var("i"), Expr::Int(10)));
+}
+
 // --- body / statement tests ---
 
 #[test]

@@ -23,6 +23,18 @@ pub struct Parser {
     no_struct_lit: bool,
 }
 
+/// Flattens a `&&` chain into its conjuncts, appending each to `out`; a non-`&&` expression
+/// contributes itself. Lets a `where a && b` refinement enter `requires` as two single
+/// comparisons, which is what the linear prover can reason about.
+fn split_conjuncts(e: Expr, out: &mut Vec<Expr>) {
+    if let Expr::Binary(BinOp::And, l, r) = e {
+        split_conjuncts(*l, out);
+        split_conjuncts(*r, out);
+    } else {
+        out.push(e);
+    }
+}
+
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
         Parser {
@@ -232,7 +244,7 @@ impl Parser {
         self.expect(Token::Fn);
         let name = self.expect_ident();
         self.expect(Token::LParen);
-        let params = self.parse_params();
+        let (params, param_refinements) = self.parse_params();
         self.expect(Token::RParen);
 
         // Return type: `-> Type` or named `-> (name: Type)`.
@@ -253,11 +265,14 @@ impl Parser {
         // Implicit `;` may follow the signature line; the contract clauses,
         // the effects clause and the body may each be separated by them.
         self.skip_semicolons();
-        let requires = if self.eat(Token::Requires) {
+        let mut requires = if self.eat(Token::Requires) {
             self.parse_prop_block()
         } else {
             vec![]
         };
+        // Parameter `where` refinements are preconditions too, fold them in so verification and
+        // call-site checking treat them identically to a `requires` clause.
+        requires.extend(param_refinements);
 
         self.skip_semicolons();
         let ensures = if self.eat(Token::Ensures) {
@@ -546,8 +561,13 @@ impl Parser {
 
     /// Parses a comma-separated parameter list, up to (but not consuming) the
     /// closing `)`. Allows a trailing comma (gofmt style).
-    fn parse_params(&mut self) -> Vec<Param> {
+    /// Parses the parameter list, returning the params and any refinement predicates written as
+    /// `where` clauses on them. A `where` on a parameter (`i: i64 where 0 <= i && i < n`) is a
+    /// precondition attached to the value; each is desugared into the function's `requires` so
+    /// the prover uses it exactly like a hand-written precondition (and a caller must satisfy it).
+    fn parse_params(&mut self) -> (Vec<Param>, Vec<Expr>) {
         let mut params = Vec::new();
+        let mut refinements = Vec::new();
         while self.peek() != Some(&Token::RParen) {
             // Optional `mut`: params are already assignable locals, so just accept it.
             self.eat(Token::Ident("mut".to_string()));
@@ -559,12 +579,17 @@ impl Parser {
             } else {
                 Type::Named("i64".to_string())
             };
+            // A `where <predicate>` refines the parameter. A `&&` chain contributes each conjunct
+            // separately (so each is a single comparison the linear prover can use).
+            if self.eat(Token::Where) {
+                split_conjuncts(self.parse_expr(), &mut refinements);
+            }
             params.push(Param { name, ty });
             if !self.eat(Token::Comma) {
                 break;
             }
         }
-        params
+        (params, refinements)
     }
 
     /// Parses an expression (used in bodies and contract propositions).
