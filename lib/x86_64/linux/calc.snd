@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// A recursive-descent arithmetic evaluator over the byte buffer, a miniature language
+// processor written in Sond (recursion + a shared cursor + operator precedence), a step
+// toward a self-hosted front end. Grammar (standard precedence, left-associative):
+//   expr   = term  (('+' | '-') term)*
+//   term   = factor (('*' | '/') factor)*
+//   factor = number | '(' expr ')'
+// The cursor is a 1-word cell `pos` passed by pointer, shared across the recursive calls.
+
+include "x86_64/linux/bytes.snd"
+
+fn calc_skip_spaces(s: i64, pos: i64) {
+    for peek64(pos) < bytes_len(s) {
+        if bytes_get(s, peek64(pos)) == 32 {
+            poke64(pos, peek64(pos) + 1)
+        } else {
+            return
+        }
+    }
+}
+
+fn calc_number(s: i64, pos: i64) -> i64 {
+    let mut acc = 0
+    for peek64(pos) < bytes_len(s) {
+        let c = bytes_get(s, peek64(pos))
+        if c < 48 { return acc }
+        if c > 57 { return acc }
+        acc = acc * 10 + (c - 48)
+        poke64(pos, peek64(pos) + 1)
+    }
+    acc
+}
+
+fn calc_factor(s: i64, pos: i64) -> i64 {
+    calc_skip_spaces(s, pos)
+    if bytes_get(s, peek64(pos)) == 40 {          // '('
+        poke64(pos, peek64(pos) + 1)              // consume '('
+        let v = calc_expr(s, pos)
+        calc_skip_spaces(s, pos)
+        poke64(pos, peek64(pos) + 1)              // consume ')'
+        v
+    } else {
+        calc_number(s, pos)
+    }
+}
+
+fn calc_term(s: i64, pos: i64) -> i64 {
+    let mut acc = calc_factor(s, pos)
+    for peek64(pos) < bytes_len(s) {
+        calc_skip_spaces(s, pos)
+        let c = bytes_get(s, peek64(pos))
+        if c == 42 {                              // '*'
+            poke64(pos, peek64(pos) + 1)
+            acc = acc * calc_factor(s, pos)
+        } else {
+            if c == 47 {                          // '/'
+                poke64(pos, peek64(pos) + 1)
+                let d = calc_factor(s, pos)
+                if d == 0 { acc = 0 } else { acc = acc / d }
+            } else {
+                return acc
+            }
+        }
+    }
+    acc
+}
+
+fn calc_expr(s: i64, pos: i64) -> i64 {
+    let mut acc = calc_term(s, pos)
+    for peek64(pos) < bytes_len(s) {
+        calc_skip_spaces(s, pos)
+        let c = bytes_get(s, peek64(pos))
+        if c == 43 {                              // '+'
+            poke64(pos, peek64(pos) + 1)
+            acc = acc + calc_term(s, pos)
+        } else {
+            if c == 45 {                          // '-'
+                poke64(pos, peek64(pos) + 1)
+                acc = acc - calc_term(s, pos)
+            } else {
+                return acc
+            }
+        }
+    }
+    acc
+}
+
+// Evaluate an arithmetic expression held in the byte buffer `s`.
+pub fn calc_eval(s: i64) -> i64 {
+    let posmem[1]
+    poke64(posmem, 0)
+    calc_expr(s, posmem)
+}
