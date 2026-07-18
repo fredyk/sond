@@ -7,6 +7,8 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
   cargo build --release --manifest-path "$REPO/compiler/Cargo.toml"
 mkdir -p "$HOME/.local/bin"
 install -m 755 "$REPO/compiler/target/release/sondc" "$HOME/.local/bin/sondc"
+# The `sond` toolchain driver (sond test / build / run) alongside the compiler.
+install -m 755 "$REPO/compiler/target/release/sond" "$HOME/.local/bin/sond"
 # Publish the .snd libraries at a stable system path (a symlink to lib/), so
 # isolated programs can `include "any/..."` them without seeing the compiler source.
 # COPY (not symlink) the .snd libraries so an isolated worker can include them
