@@ -1,2 +1,3 @@
 // Auto-generated Sond header, public interface only. Do not edit.
 
+pub struct Slice { ptr: i64, len: i64 }

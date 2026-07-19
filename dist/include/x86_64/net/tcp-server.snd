@@ -1,5 +1,7 @@
 // Auto-generated Sond header, public interface only. Do not edit.
 
+pub struct Slice { ptr: i64, len: i64 }
+
 // Hint the device to (re-)scan the RX available ring. A conformant device notices
 // posted buffers on its own, but some (VirtualBox's transitional device) only pull
 // from the RX queue when kicked; calling this in an idle poll loop keeps RX armed.

@@ -28,6 +28,9 @@ pub enum Token {
     /// `interrupt`, qualifier for an interrupt handler function (ISR): saves all
     /// GP registers and returns with `iretq` instead of `ret`.
     Interrupt,
+    /// `wrapping fn`, a function whose integer arithmetic is defined to wrap mod 2^N (the crypto
+    /// substrate), exempt from the overflow-checking that is a compile error elsewhere.
+    Wrapping,
     /// `struct`
     Struct,
     Test,

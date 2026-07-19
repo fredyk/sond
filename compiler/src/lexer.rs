@@ -338,6 +338,7 @@ fn keyword_or_ident(word: String) -> Token {
         "let" => Token::Let,
         "fn" => Token::Fn,
         "interrupt" => Token::Interrupt,
+        "wrapping" => Token::Wrapping,
         "struct" => Token::Struct,
         "test" => Token::Test,
         "enum" => Token::Enum,

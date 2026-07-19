@@ -1,5 +1,7 @@
 // Auto-generated Sond header, public interface only. Do not edit.
 
+pub struct Slice { ptr: i64, len: i64 }
+
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //

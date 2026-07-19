@@ -84,6 +84,11 @@ pub struct Function {
     /// `interrupt fn`: an interrupt handler, codegen saves every GP register on
     /// entry, restores them on exit, and returns with `iretq` instead of `ret`.
     pub is_interrupt: bool,
+    /// `wrapping fn`: the body's integer arithmetic is DEFINED to wrap mod 2^N, the crypto
+    /// substrate (ChaCha, Poly1305, SHA, Keccak, X25519…), where overflow is the specification,
+    /// not a bug. Overflow-checking is suppressed for this function, so the checked-by-default
+    /// discipline can hold everywhere else without drowning crypto in per-op annotations.
+    pub is_wrapping: bool,
     /// `test "name" { .. }`: a test block, lowered to a niladic function. It is NOT
     /// compiled into an ordinary program (only `sond test` gathers and runs them).
     pub is_test: bool,

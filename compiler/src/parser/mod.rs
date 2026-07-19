@@ -58,6 +58,7 @@ impl Parser {
             Some(
                 Token::Fn
                     | Token::Interrupt
+                    | Token::Wrapping
                     | Token::Let
                     | Token::Struct
                     | Token::Enum
@@ -85,7 +86,9 @@ impl Parser {
             };
             match kind {
                 // `fn` and `struct` consume their own leading visibility.
-                Some(Token::Fn | Token::Interrupt) => funcs.push(self.parse_function()),
+                Some(Token::Fn | Token::Interrupt | Token::Wrapping) => {
+                    funcs.push(self.parse_function())
+                }
                 Some(Token::Struct) => {
                     let s = self.parse_struct();
                     self.structs.push(s);
@@ -240,6 +243,7 @@ impl Parser {
 
     pub fn parse_function(&mut self) -> Function {
         let vis = self.parse_visibility();
+        let is_wrapping = self.eat(Token::Wrapping);
         let is_interrupt = self.eat(Token::Interrupt);
         self.expect(Token::Fn);
         let name = self.expect_ident();
@@ -300,6 +304,7 @@ impl Parser {
             ensures,
             effects,
             is_interrupt,
+            is_wrapping,
             is_test: false,
             test_name: None,
             body,

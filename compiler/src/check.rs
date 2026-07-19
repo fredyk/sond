@@ -349,6 +349,12 @@ fn mutated_base(target: &Expr) -> Option<&str> {
 /// the divisor obligations).
 pub fn check_constant_overflow(funcs: &[Function]) -> Result<(), String> {
     for f in funcs {
+        // A `wrapping fn` opts its body OUT of overflow-checking: its integer arithmetic is
+        // DEFINED to wrap mod 2^N (the crypto substrate), so an overflow there is the intended
+        // semantics, not an error to reject.
+        if f.is_wrapping {
+            continue;
+        }
         overflow_block(&f.body, &f.name)?;
     }
     Ok(())
@@ -1694,6 +1700,25 @@ mod tests {
         assert!(
             check_constant_overflow(&funcs).is_ok(),
             "in-range constant arithmetic is fine"
+        );
+    }
+
+    #[test]
+    fn a_wrapping_function_exempts_overflow_checking() {
+        // Inside a `wrapping fn` the machine's mod-2^N arithmetic is the intended semantics (the
+        // crypto substrate), so an overflow that would be a compile error in an ordinary function
+        // is allowed, the region marker that lets #3 flip to checked-by-default elsewhere.
+        let over = "9000000000000000000 + 9000000000000000000";
+        let ordinary = Parser::new(tokenize(&format!("fn f() -> i64 {{ {over} }}"))).parse_program();
+        assert!(
+            check_constant_overflow(&ordinary).is_err(),
+            "an ordinary function still rejects the overflow"
+        );
+        let wrapping =
+            Parser::new(tokenize(&format!("wrapping fn f() -> i64 {{ {over} }}"))).parse_program();
+        assert!(
+            check_constant_overflow(&wrapping).is_ok(),
+            "a `wrapping fn` allows the intended wrap"
         );
     }
 }
