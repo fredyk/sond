@@ -135,6 +135,7 @@ fn verify_function(
         env: env.clone(),
         cons: Vec::new(),
         obligations: Vec::new(),
+        broke: false,
     };
     let mut ctx = Ctx {
         contracts,
@@ -259,6 +260,9 @@ struct State {
     env: HashMap<String, Sym>,
     cons: Vec<SymProp>,
     obligations: Vec<Obligation>,
+    /// This path has hit a `break`: it has left the enclosing loop, so no later statement in the
+    /// body applies to it and (in a loop) it does not re-establish the invariant on a back-edge.
+    broke: bool,
 }
 
 /// A completed path: its final state plus the symbolic value the block/expression yields.
@@ -307,16 +311,16 @@ fn eval_block_paths(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<Pa
 fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> {
     let mut states = vec![state];
     for stmt in &block.stmts {
-        match stmt {
-            Stmt::Let { name, value, .. } => {
-                states = fork_bind(states, name, value, ctx)?;
-            }
+        // A path that has already `break`ed out of the loop is done: it skips every remaining
+        // statement. Only the still-live paths are advanced; the broken ones are re-joined after.
+        let (mut states_out, live): (Vec<State>, Vec<State>) =
+            states.into_iter().partition(|s| s.broke);
+        let advanced = match stmt {
+            Stmt::Let { name, value, .. } => fork_bind(live, name, value, ctx)?,
             Stmt::Assign {
                 target: Expr::Var(name),
                 value,
-            } => {
-                states = fork_bind(states, name, value, ctx)?;
-            }
+            } => fork_bind(live, name, value, ctx)?,
             // A field assignment or non-variable target is undecidable here.
             Stmt::Assign { .. } => {
                 return ctx.bail("an assignment to a field or non-variable target");
@@ -326,30 +330,37 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
             // unsound: a branch that assigns (e.g. `if c { x = -1 }`) would silently not update the
             // state, so an invariant a branch violates was spuriously "preserved". Its value is
             // discarded; a missing `else` is a no-op branch carrying only the negated guard.
-            Stmt::Expr(e @ (Expr::If { .. } | Expr::Match { .. })) => {
-                states = eval_effect(e, states, ctx)?;
-            }
+            Stmt::Expr(e @ (Expr::If { .. } | Expr::Match { .. })) => eval_effect(e, live, ctx)?,
             // Any other statement-position expression (a value, or an uncontracted call like
             // `print_int`) has no effect on the scalar state the prover tracks, Sond has no
             // reference-to-local, so a call cannot reassign a caller's local, and no contract to
             // enforce, so it is soundly discarded.
-            Stmt::Expr(_) => {}
+            Stmt::Expr(_) => live,
             // A loop is verified via its invariant (init + preservation), then continues
             // with (invariant ∧ ¬condition). Without an invariant it is unverifiable.
             Stmt::For {
                 cond,
                 invariant,
                 body,
-            } if !invariant.is_empty() => {
-                states = eval_loop(states, cond.as_ref(), invariant, body, ctx)?;
-            }
+            } if !invariant.is_empty() => eval_loop(live, cond.as_ref(), invariant, body, ctx)?,
             Stmt::For { .. } => {
                 return ctx.bail("a `for` loop without an `invariant { .. }` clause");
             }
             Stmt::Return(_) => return ctx.bail("an early `return`"),
-            Stmt::Break => return ctx.bail("a `break`"),
+            // `break` marks each live path as having left the loop; those paths then flow through
+            // to the end untouched, and the enclosing `eval_loop` excludes them from the back-edge
+            // invariant check (they exit, so there is no next iteration to re-establish it for).
+            Stmt::Break => {
+                let mut broken = live;
+                for s in &mut broken {
+                    s.broke = true;
+                }
+                broken
+            }
             Stmt::Continue => return ctx.bail("a `continue`"),
-        }
+        };
+        states_out.extend(advanced);
+        states = states_out;
         if states.len() > MAX_PATHS {
             return ctx.bail("too many branch paths (the body exceeds the analysis cap)");
         }
@@ -567,6 +578,7 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
                             env: path.env,
                             cons: path.cons,
                             obligations: path.obligations,
+                            broke: false,
                         },
                         path.ret,
                     ));
@@ -744,16 +756,24 @@ fn eval_loop(
             env: henv,
             cons: pres_cons,
             obligations: Vec::new(),
+            broke: false,
         };
         for bs in eval_body(body, pres_state, ctx)? {
             // Any obligation inside the body (call precondition, nonzero divisor) must hold
-            // under the assumptions live where it arose.
+            // under the assumptions live where it arose, on EVERY path, including one that broke.
             for ob in &bs.obligations {
                 if !obligation_holds(ob, &ob.assumptions, &int_types) {
                     return ctx.bail("a safety obligation inside the loop body that could not be proved");
                 }
             }
-            // The invariant must be re-established at the end of the iteration.
+            // The invariant must be re-established at the end of the iteration, but only on a
+            // path that loops back. A path that `break`ed has LEFT the loop; there is no next
+            // iteration to re-establish it for, so it is excluded (checking it would spuriously
+            // reject the standard down-counting `if v == 0 { break }` idiom, whose last iteration
+            // legitimately need not preserve the bound past the exit).
+            if bs.broke {
+                continue;
+            }
             for inv in invariant {
                 let p = sym_prop(inv, &bs.env)?;
                 if !matches!(prove(&p, &bs.cons, &int_types), Outcome::Proven) {
@@ -763,22 +783,52 @@ fn eval_loop(
         }
         // (3) CONTINUATION: the loop is done. Facts that mention a modified variable spoke
         // of its pre-loop value, so they no longer describe it, drop them; the modified
-        // variables become fresh, constrained only by the invariant and the negated guard.
+        // variables become fresh.
         let mut cont = st;
         cont.cons.retain(|p| !prop_mentions(p, &modified));
         for v in &modified {
             cont.env.insert(v.clone(), ctx.fresh_var());
         }
-        for inv in invariant {
-            let p = sym_prop(inv, &cont.env)?;
-            cont.cons.push(p);
-        }
-        if let Some(c) = cond {
-            cont.cons.extend(cond_props(c, &cont.env).1); // ¬condition holds after the loop
+        // A loop that can `break` may exit with the condition still true and the invariant not
+        // necessarily holding at the break point, so NOTHING is assumed about the modified
+        // variables afterward (sound: fewer facts only make the continuation harder to prove). A
+        // break-free loop exits only when the condition is false with the invariant intact, so both
+        // are assumed.
+        if !block_breaks(body) {
+            for inv in invariant {
+                let p = sym_prop(inv, &cont.env)?;
+                cont.cons.push(p);
+            }
+            if let Some(c) = cond {
+                cont.cons.extend(cond_props(c, &cont.env).1); // ¬condition holds after the loop
+            }
         }
         out.push(cont);
     }
     Some(out)
+}
+
+/// Does the block `break` out of THIS loop? A `break` inside a nested `for` targets that inner
+/// loop, so nested loop bodies are not descended into; `if`/`match` branches (where a `break`
+/// commonly hides, e.g. `if v == 0 { break }`) are.
+fn block_breaks(block: &Block) -> bool {
+    fn expr_breaks(e: &Expr) -> bool {
+        match e {
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => block_breaks(then_branch) || else_branch.as_ref().is_some_and(|b| block_breaks(b)),
+            Expr::Match { arms, .. } => arms.iter().any(|a| block_breaks(&a.body)),
+            _ => false,
+        }
+    }
+    block.stmts.iter().any(|s| match s {
+        Stmt::Break => true,
+        Stmt::For { .. } => false,
+        Stmt::Expr(e) => expr_breaks(e),
+        _ => false,
+    }) || block.tail.as_ref().is_some_and(|t| expr_breaks(t))
 }
 
 /// The variables a loop body may change across iterations: every `Assign` target and
@@ -1945,6 +1995,28 @@ mod tests {
         // check needed, for every possible x.
         let funcs = parse("fn id(x: i64) -> (r: i64) requires { x > 0 } ensures { r > 0 } { x }");
         assert!(verify(&funcs).is_ok());
+    }
+
+    #[test]
+    fn verifies_a_down_counting_loop_with_a_break() {
+        // The x25519/ed25519 idiom: an infinite `for` whose counter is decremented each iteration
+        // and exits via `if bit == 0 { break }`. Preservation of `bit >= 0`: the break path exits
+        // (excluded from the back-edge check), and on the continuing path `bit != 0` (negated
+        // guard) with `bit >= 0` gives `bit - 1 >= 0`. Previously the `break` bailed the whole body.
+        let f = parse(
+            "fn f() -> (r: i64) ensures { r == r } { let mut bit = 254\nlet mut acc = 0\nfor invariant { bit >= 0 } { acc = bit\nif bit == 0 { break }\nbit = bit - 1 }\nacc }",
+        );
+        assert!(verify(&f).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_down_counting_loop_that_drops_below_zero() {
+        // Without the `if bit == 0 { break }` guard the decrement drives `bit` below 0, so the
+        // invariant `bit >= 0` is not preserved, must be rejected (soundness of the break idiom).
+        let f = parse(
+            "fn f() -> (r: i64) ensures { r == r } { let mut bit = 254\nfor invariant { bit >= 0 } { bit = bit - 1 }\n0 }",
+        );
+        assert!(verify(&f).is_err());
     }
 
     #[test]

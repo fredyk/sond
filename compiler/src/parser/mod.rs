@@ -422,7 +422,9 @@ impl Parser {
                         }
                         self.skip_semicolons();
                     } else {
-                        let cond = if self.peek() == Some(&Token::LBrace) {
+                        // No condition when the body (`{`) or an `invariant` clause follows `for`
+                        // directly, an infinite loop, optionally carrying an invariant.
+                        let cond = if matches!(self.peek(), Some(Token::LBrace | Token::Invariant)) {
                             None
                         } else {
                             let saved = self.no_struct_lit;
