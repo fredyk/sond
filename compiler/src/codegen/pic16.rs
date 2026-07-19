@@ -78,6 +78,7 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
     // the internal oscillator at 8 MHz (~208 Tcy per bit); calibrate on real hardware if framing
     // is off (widen/narrow BITDLY by a few counts).
     l!("BITDLY  equ     0x41            ; ~one bit period at 8 MHz/9600 (calibrate on HW)");
+    l!("HALFDLY equ     0x20            ; ~half a bit period (start-edge -> first-bit center)");
     l!("serial_init:");
     l!("        banksel OSCCON");
     l!("        movlw   0x70            ; IRCF=111 -> 8 MHz internal oscillator");
@@ -98,7 +99,7 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
     l!("        banksel PORTA");
     l!("        btfsc   PORTA, 1");
     l!("        goto    _sg_wait");
-    l!("        call    _bitdly         ; skip to ~middle of the start bit");
+    l!("        call    _halfdly        ; half a bit -> middle of the start bit (center sampling)");
     l!("_sg_bit:");
     l!("        call    _bitdly         ; advance ~one bit to the middle of this data bit");
     l!("        banksel PORTA");
@@ -135,6 +136,12 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
     l!("        movwf   0x74");
     l!("_bd:    decfsz  0x74, f");
     l!("        goto    _bd");
+    l!("        return");
+    l!("_halfdly:                       ; ~half a bit period, to land on bit centers");
+    l!("        movlw   HALFDLY");
+    l!("        movwf   0x74");
+    l!("_hd:    decfsz  0x74, f");
+    l!("        goto    _hd");
     l!("        return");
     l!("        end");
     out
@@ -369,5 +376,46 @@ fn emit_call(e: &Expr, out: &mut String, locals: &HashMap<String, u8>) {
             l!("        call    serial_putc");
         }
         _ => l!("        ; (unsupported call `{name}` in Phase 1b)"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn asm_for(src: &str) -> String {
+        let funcs = Parser::new(tokenize(src)).parse_program();
+        emit_pic16(&funcs)
+    }
+
+    // The bit-bang RX must sample each data bit at its CENTER. After the start
+    // edge is detected, the first delay must be HALF a bit period, so the
+    // subsequent full-bit delays land on bit centers. Delaying a full bit after
+    // the edge samples at bit BOUNDARIES and corrupts the byte, the node then
+    // never recognizes STX (0x02) and stays silent (verified on real hardware).
+    #[test]
+    fn rx_samples_at_bit_center_not_edge() {
+        let asm = asm_for("fn main() { serial_init() }");
+        assert!(asm.contains("_halfdly:"), "expected a half-bit delay routine _halfdly");
+
+        let wait = asm.find("_sg_wait:").expect("serial_getc start-bit wait");
+        let sg_bit = asm[wait..].find("_sg_bit:").expect("serial_getc sample loop") + wait;
+        let intro = &asm[wait..sg_bit];
+        assert!(
+            intro.contains("call    _halfdly"),
+            "the delay from the start edge to the first sample must be half a bit:\n{intro}"
+        );
+        assert!(
+            !intro.contains("call    _bitdly"),
+            "the initial delay must NOT be a full bit (that samples at bit edges)"
+        );
+
+        // Each data bit still advances one full bit period between samples.
+        assert!(
+            asm[sg_bit..].contains("call    _bitdly"),
+            "the per-bit advance must remain a full bit period"
+        );
     }
 }
