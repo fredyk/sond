@@ -1264,14 +1264,55 @@ fn arith_trustworthy(s: &Sym, cons: &[SymProp], int_types: &HashMap<String, (i12
 /// check (`check_constant_bounds`), and the reusable core of the eventual prove-or-error bounds.
 /// SOUND and NON-BREAKING: it returns true only when the negation is entailed; an index that
 /// merely MIGHT be out of range (the common unproven case) returns false and is left alone.
-pub fn index_provably_oob(idx: &Expr, bound: &Expr, assumptions: &[Expr], params: &[Param]) -> bool {
-    let env: HashMap<String, Sym> = params
+/// Collects the names of all variables appearing in an expression (for seeding the symbolic
+/// environment of the bounds check).
+fn collect_expr_vars(e: &Expr, out: &mut HashSet<String>) {
+    match e {
+        Expr::Var(n) => {
+            out.insert(n.clone());
+        }
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            collect_expr_vars(l, out);
+            collect_expr_vars(r, out);
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => collect_expr_vars(x, out),
+        Expr::Call(c, args) => {
+            collect_expr_vars(c, out);
+            for a in args {
+                collect_expr_vars(&a.value, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The lower/upper safety props, the assumption set, and the variable type ranges.
+type IndexProps = (SymProp, SymProp, Vec<SymProp>, HashMap<String, (i128, i128)>);
+
+/// The two safety propositions `0 <= idx` and `idx < bound`, the assumptions in scope, and the
+/// parameter type ranges, the shared setup of the bounds decisions below. `None` if the index
+/// or the bound is outside the linear fragment (a call, a computed length). `bound` is a constant
+/// `N` for a fixed-size array or `s.len` for a slice.
+fn index_props(
+    idx: &Expr,
+    bound: &Expr,
+    assumptions: &[Expr],
+    params: &[Param],
+) -> Option<IndexProps> {
+    // Every variable in play is a free symbolic value, parameters AND locals (a loop counter is
+    // a local, not a parameter). Seed the environment with all of them so `eval_expr` resolves
+    // them (a var absent from the environment would otherwise make the index unanalyzable).
+    let mut names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+    collect_expr_vars(idx, &mut names);
+    collect_expr_vars(bound, &mut names);
+    for a in assumptions {
+        collect_expr_vars(a, &mut names);
+    }
+    let env: HashMap<String, Sym> = names
         .iter()
-        .map(|p| (p.name.clone(), Sym::Var(p.name.clone())))
+        .map(|n| (n.clone(), Sym::Var(n.clone())))
         .collect();
-    let (Some(i), Some(hi)) = (eval_expr(idx, &env), eval_expr(bound, &env)) else {
-        return false; // a non-linear index or bound (a call, a computed length): can't reason
-    };
+    let (i, hi) = (eval_expr(idx, &env)?, eval_expr(bound, &env)?);
     let asm: Vec<SymProp> = assumptions.iter().filter_map(|e| sym_prop(e, &env)).collect();
     let int_types: HashMap<String, (i128, i128)> = params
         .iter()
@@ -1280,8 +1321,6 @@ pub fn index_provably_oob(idx: &Expr, bound: &Expr, assumptions: &[Expr], params
             _ => None,
         })
         .collect();
-    // Reject iff the assumptions force `idx < 0` (lower bound disproven) or `idx >= bound` (upper).
-    // `bound` is a constant `N` for a fixed-size array or `s.len` for a slice.
     let lower = SymProp {
         op: BinOp::Ge,
         lhs: i.clone(),
@@ -1292,8 +1331,33 @@ pub fn index_provably_oob(idx: &Expr, bound: &Expr, assumptions: &[Expr], params
         lhs: i,
         rhs: hi,
     };
-    matches!(prove(&lower, &asm, &int_types), Outcome::Disproven)
-        || matches!(prove(&upper, &asm, &int_types), Outcome::Disproven)
+    Some((lower, upper, asm, int_types))
+}
+
+/// Do the assumptions FORCE the index out of `[0, bound)`, a provable overrun? (The lenient
+/// check: reject only what is disproven.)
+pub fn index_provably_oob(idx: &Expr, bound: &Expr, assumptions: &[Expr], params: &[Param]) -> bool {
+    let Some((lower, upper, asm, it)) = index_props(idx, bound, assumptions, params) else {
+        return false;
+    };
+    matches!(prove(&lower, &asm, &it), Outcome::Disproven)
+        || matches!(prove(&upper, &asm, &it), Outcome::Disproven)
+}
+
+/// Is the index PROVEN to lie in `[0, bound)`, `0 <= idx` and `idx < bound` both discharged?
+/// (The strict check: accept only what is proven; anything unproven is a compile error. This is
+/// checked-by-default bounds.)
+pub fn index_proven_in_bounds(
+    idx: &Expr,
+    bound: &Expr,
+    assumptions: &[Expr],
+    params: &[Param],
+) -> bool {
+    let Some((lower, upper, asm, it)) = index_props(idx, bound, assumptions, params) else {
+        return false;
+    };
+    matches!(prove(&lower, &asm, &it), Outcome::Proven)
+        && matches!(prove(&upper, &asm, &it), Outcome::Proven)
 }
 
 fn is_comparison(op: &BinOp) -> bool {

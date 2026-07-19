@@ -596,29 +596,31 @@ fn bounds_expr(
     {
         if let Some(&n) = sizes.get(a) {
             match const_index(idx) {
-                // A compile-time-constant index outside [0, N) is a provable stack overrun.
+                // A compile-time-constant index outside [0, N) is a static stack overrun.
                 Some(k) if k < 0 || k >= n => {
                     return Err(format!(
                         "function `{fname}`: index {k} is out of bounds for `{a}` of size {n} (valid range 0..{n})"
                     ));
                 }
-                // A VARIABLE index the facts in scope force out of range is equally a provable
-                // overrun, discharged through the prover (`requires`, branch guards, loop bounds).
-                None if crate::verify::index_provably_oob(idx, &Expr::Int(n), asm, params) => {
-                    return Err(format!(
-                        "function `{fname}`: this index is provably out of bounds for `{a}` of size {n} (the facts in scope force it outside 0..{n})"
-                    ));
+                // A constant in [0, N) is statically safe.
+                Some(_) => {}
+                // Checked-by-default: a VARIABLE index must be PROVEN in `[0, N)` (from a
+                // `requires`, a `where`, branch guards, or a loop condition + invariant).
+                None => {
+                    if !crate::verify::index_proven_in_bounds(idx, &Expr::Int(n), asm, params) {
+                        return Err(format!(
+                            "function `{fname}`: cannot prove this index is in bounds for `{a}` of size {n}, bound it with a `where`/`requires`/loop `invariant` to 0..{n}"
+                        ));
+                    }
                 }
-                _ => {}
             }
         } else if is_slice_param(a, params) {
-            // A slice has no static size; its bound is the runtime `s.len`. Reject an index the
-            // facts in scope force out of `[0, s.len)`, a provable overrun, discharged through
-            // the prover which reasons about `s.len` as a symbolic value.
+            // A slice has no static size; its bound is the runtime `s.len`. Every index (constant
+            // or variable) must be PROVEN in `[0, s.len)`.
             let bound = Expr::Field(Box::new(Expr::Var(a.clone())), "len".to_string());
-            if crate::verify::index_provably_oob(idx, &bound, asm, params) {
+            if !crate::verify::index_proven_in_bounds(idx, &bound, asm, params) {
                 return Err(format!(
-                    "function `{fname}`: this index is provably out of bounds for slice `{a}` (the facts in scope force it outside 0..{a}.len)"
+                    "function `{fname}`: cannot prove this index is in bounds for slice `{a}`, bound it with a `where`/`requires`/loop `invariant` to 0..{a}.len"
                 ));
             }
         }
@@ -762,18 +764,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_variable_index_a_precondition_forces_out_of_bounds() {
-        // `requires { i >= 4 }` makes `a[i]` into a size-4 array a provable overrun.
-        let err = bounds("fn f(i: i64) -> i64 requires { i >= 4 } { let a[4]\na[i] }").unwrap_err();
-        assert!(err.contains("provably out of bounds"), "got: {err}");
+    fn rejects_an_unproven_variable_index() {
+        // Checked-by-default: an index that is not PROVEN in range is a compile error.
+        let err = bounds("fn f(i: i64) -> i64 { let a[4]\na[i] }").unwrap_err();
+        assert!(err.contains("cannot prove this index is in bounds"), "got: {err}");
     }
 
     #[test]
-    fn rejects_a_variable_index_a_branch_guard_forces_out_of_bounds() {
-        // Indexing inside the `i >= 4` branch: the guard proves the index is out of range.
+    fn rejects_a_variable_index_a_precondition_forces_out_of_bounds() {
+        // `requires { i >= 4 }` makes `a[i]` into a size-4 array unprovable (in fact disproven).
+        let err = bounds("fn f(i: i64) -> i64 requires { i >= 4 } { let a[4]\na[i] }").unwrap_err();
+        assert!(err.contains("cannot prove"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_variable_index_inside_a_branch_that_does_not_bound_it() {
+        // The `i >= 4` guard does not prove `i < 4`, so `a[i]` in that branch is rejected.
         let err = bounds("fn f(i: i64) -> i64 { let a[4]\nif i >= 4 { a[i] } else { 0 } }")
             .unwrap_err();
-        assert!(err.contains("provably out of bounds"), "got: {err}");
+        assert!(err.contains("cannot prove"), "got: {err}");
     }
 
     #[test]
@@ -785,20 +794,20 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_variable_index_with_no_information() {
-        // Non-breaking: an index that MIGHT be in range is left alone (only PROVABLE overruns
-        // are rejected, the full prove-or-error bounds await refinement types).
-        assert!(bounds("fn f(i: i64) -> i64 { let a[4]\na[i] }").is_ok());
+    fn accepts_a_variable_index_proven_by_a_loop() {
+        // A counting loop bounds the index: the condition gives `i < 4`, the invariant `i >= 0`.
+        assert!(bounds(
+            "fn f() -> i64 { let a[4]\nlet mut i = 0\nfor i < 4 invariant { i >= 0 } { a[i] = 0\ni = i + 1 }\n0 }"
+        )
+        .is_ok());
     }
 
     #[test]
-    fn rejects_a_slice_index_the_facts_force_past_the_length() {
-        // `i >= s.len` makes `s[i]` a provable overrun, bounded by the runtime length, not a
-        // static size.
+    fn rejects_a_slice_index_not_proven_within_the_length() {
         let err =
-            bounds("fn f(s: Slice, i: i64 where i >= s.len) -> i64 { s[i] }").unwrap_err();
+            bounds("fn f(s: Slice, i: i64) -> i64 { s[i] }").unwrap_err();
         assert!(
-            err.contains("provably out of bounds") && err.contains("slice"),
+            err.contains("cannot prove") && err.contains("slice"),
             "got: {err}"
         );
     }
@@ -811,21 +820,8 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_slice_index_with_no_information() {
-        // Non-breaking: a slice index that might be in range is left alone.
-        assert!(bounds("fn f(s: Slice, i: i64) -> i64 { s[i] }").is_ok());
-    }
-
-    #[test]
     fn rejects_a_constant_index_from_arithmetic_out_of_bounds() {
         assert!(bounds("fn f() -> i64 { let a[4]\na[2 + 3] }").is_err());
-    }
-
-    #[test]
-    fn accepts_a_variable_index_unchecked() {
-        // A variable index is left to the prover/refinements, the (C) on-ramp rejects only
-        // PROVABLE (constant) out-of-bounds, so this must NOT be rejected here.
-        assert!(bounds("fn f(i: i64) -> i64 { let a[4]\na[i] }").is_ok());
     }
 
     #[test]
