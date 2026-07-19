@@ -640,7 +640,12 @@ fn conjuncts(e: &Expr) -> Vec<&Expr> {
 fn seed_interval_bound(flow: &mut Flow, e: &Expr) {
     if let Expr::Binary(op, l, r) = e
         && let Expr::Var(v) = l.as_ref()
-        && let Some(k) = const_index(r)
+        // The bound `k` is a literal, or a variable resolved to its constant value (a global const
+        // like `TABLE_SIZE`, or a prior `let`), so `for i < TABLE_SIZE` seeds `i`'s ceiling.
+        && let Some(k) = const_index(r).or_else(|| match r.as_ref() {
+            Expr::Var(rv) => flow.consts.get(rv).copied(),
+            _ => None,
+        })
     {
         match op {
             BinOp::Lt => {
@@ -842,9 +847,17 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
     // Module-level arrays (`.data` tables, crypto S-boxes, round constants) are in scope in
     // every function, so seed their sizes once.
     let mut global_sizes: HashMap<String, i64> = HashMap::new();
+    // Immutable module-level scalar constants (`let TABLE_SIZE = 64`) are in scope everywhere and
+    // often bound a loop (`for i < TABLE_SIZE`) over an array of that size; resolve each to its
+    // value so the interval analysis can use it exactly like a literal.
+    let mut global_consts: HashMap<String, i64> = HashMap::new();
     for g in globals {
         if let Some(n) = g.array_len {
             global_sizes.insert(g.name.clone(), n);
+        } else if !g.mutable
+            && let Some(v) = const_index(&g.init)
+        {
+            global_consts.insert(g.name.clone(), v);
         }
     }
     for f in funcs {
@@ -852,6 +865,7 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
         // The function's preconditions are the facts true on every path from entry.
         let mut flow = Flow {
             facts: f.requires.clone(),
+            consts: global_consts.clone(),
             ..Default::default()
         };
         bounds_block(&f.body, &f.name, &mut sizes, &mut flow, &f.params, funcs)?;
@@ -1281,6 +1295,15 @@ mod tests {
     #[test]
     fn accepts_a_constant_index_from_arithmetic_in_bounds() {
         assert!(bounds("fn f() -> i64 { let a[4]\na[2 + 1] }").is_ok());
+    }
+
+    #[test]
+    fn a_loop_bounded_by_a_global_constant_proves() {
+        // A module-level `let N = 64` used as a loop bound over an array of the same size, the
+        // idiom `for i < TABLE_SIZE { table[i] }`, must prove: the global constant is resolved to
+        // its value, so `i < 64` bounds `table[64]`.
+        let src = "let N = 8\nfn f() -> i64 { let a[8]\nlet mut i = 0\nfor i < N { a[i] = 0\ni = i + 1 }\n0 }";
+        assert!(bounds(src).is_ok(), "a loop bounded by a global const should prove");
     }
 
     #[test]
