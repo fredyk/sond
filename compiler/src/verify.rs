@@ -1998,6 +1998,18 @@ mod tests {
     }
 
     #[test]
+    fn verifies_the_x25519_style_bit_loop_invariant() {
+        // The full x25_fe_invert / sc_reduce shape: an infinite down-counter that reads a bit table
+        // by a shifted index and exits on zero. Exercises the whole chain at once, opaque array
+        // read (`exp[byte_idx]`), shift range (`bit >>> 3`), disequality (`bit != 0`), and break.
+        // If this verifies, the prover can discharge the invariant the bounds check needs to trust.
+        let f = parse(
+            "fn f(exp: Slice) -> (r: i64) requires { exp.len >= 32 } ensures { r == r } { let mut bit = 254\nlet mut acc = 0\nfor invariant { bit >= 0; bit < 256 } { let byte_idx = bit >>> 3\nlet b = exp[byte_idx]\nacc = acc + b\nif bit == 0 { break }\nbit = bit - 1 }\nacc }",
+        );
+        assert!(verify(&f).is_ok());
+    }
+
+    #[test]
     fn verifies_a_down_counting_loop_with_a_break() {
         // The x25519/ed25519 idiom: an infinite `for` whose counter is decremented each iteration
         // and exits via `if bit == 0 { break }`. Preservation of `bit >= 0`: the break path exits
