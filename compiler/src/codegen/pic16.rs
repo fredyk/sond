@@ -12,6 +12,7 @@
 //! `delay()` builtin. Richer control flow, 8-bit arithmetic and locals come next.
 
 use crate::ast::{Expr, Function, Stmt};
+use std::collections::HashMap;
 
 /// Folds an expression to an 8-bit constant, or `None` if it is not a compile-time
 /// constant this minimal backend can place in a `movlw`.
@@ -55,7 +56,10 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
     l!("        retfie                  ; no interrupt handlers yet");
     l!("main:");
     if let Some(m) = funcs.iter().find(|f| f.name == "main") {
-        emit_stmts(&m.body.stmts, &mut out, &mut lbl);
+        let mut locals = HashMap::new();
+        let mut next = 0x20u8; // bank-0 GPRs 0x20..0x6F for locals (0x70+ used by serial/delay)
+        collect_locals(&m.body, &mut locals, &mut next);
+        emit_block(&m.body, &mut out, &mut lbl, &locals);
     }
     l!("        goto    $               ; halt");
     // A simple ~two-nested-loop busy delay (uses two GPRs at 0x70/0x71 in the common bank).
@@ -82,8 +86,30 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
     l!("        clrf    ANSEL           ; all pins digital");
     l!("        banksel TRISA");
     l!("        bcf     TRISA, 0        ; RA0 = TX = output");
+    l!("        bsf     TRISA, 1        ; RA1 = RX = input");
     l!("        banksel PORTA");
     l!("        bsf     PORTA, 0        ; idle line high");
+    l!("        return");
+    l!("serial_getc:                    ; receive one byte from RA1 (9600 8N1), return in W");
+    l!("        clrf    0x75            ; result accumulator");
+    l!("        movlw   0x08");
+    l!("        movwf   0x76            ; bit count");
+    l!("_sg_wait:                       ; wait for the start bit (line goes low)");
+    l!("        banksel PORTA");
+    l!("        btfsc   PORTA, 1");
+    l!("        goto    _sg_wait");
+    l!("        call    _bitdly         ; skip to ~middle of the start bit");
+    l!("_sg_bit:");
+    l!("        call    _bitdly         ; advance ~one bit to the middle of this data bit");
+    l!("        banksel PORTA");
+    l!("        bcf     STATUS, 0       ; carry = sampled RX level");
+    l!("        btfsc   PORTA, 1");
+    l!("        bsf     STATUS, 0");
+    l!("        rrf     0x75, f         ; shift carry into the byte, LSB first");
+    l!("        decfsz  0x76, f");
+    l!("        goto    _sg_bit");
+    l!("        call    _bitdly         ; step over the stop bit");
+    l!("        movf    0x75, w");
     l!("        return");
     l!("serial_putc:                    ; transmit W as 9600 8N1, LSB first, on RA0");
     l!("        movwf   0x72            ; byte");
@@ -124,64 +150,204 @@ fn as_call(e: &Expr) -> Option<(&str, &[crate::ast::Arg])> {
     None
 }
 
-fn emit_stmts(stmts: &[Stmt], out: &mut String, lbl: &mut usize) {
-    for s in stmts {
-        emit_stmt(s, out, lbl);
+/// Assigns each `let`-bound name a fixed bank-0 RAM address (0x20 upward), recursing into loop
+/// bodies and `if` branches. Phase-1b locals are STATIC (no data stack), apt for a small,
+/// non-reentrant MCU program.
+fn collect_locals(b: &crate::ast::Block, map: &mut HashMap<String, u8>, next: &mut u8) {
+    let scan_if = |cond: &Expr, t: &crate::ast::Block, e: Option<&crate::ast::Block>, map: &mut HashMap<String, u8>, next: &mut u8| {
+        let _ = cond;
+        collect_locals(t, map, next);
+        if let Some(eb) = e {
+            collect_locals(eb, map, next);
+        }
+    };
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { name, .. } => {
+                if !map.contains_key(name) {
+                    map.insert(name.clone(), *next);
+                    *next += 1;
+                }
+            }
+            Stmt::For { body, .. } => collect_locals(body, map, next),
+            Stmt::Expr(Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            }) => scan_if(cond, then_branch, else_branch.as_deref(), map, next),
+            _ => {}
+        }
+    }
+    if let Some(Expr::If {
+        cond,
+        then_branch,
+        else_branch,
+    }) = b.tail.as_deref()
+    {
+        scan_if(cond, then_branch, else_branch.as_deref(), map, next);
     }
 }
 
-fn emit_stmt(s: &Stmt, out: &mut String, lbl: &mut usize) {
+/// Leaves the 8-bit value of `e` in W. Handles constants, locals, `serial_getc()`, and
+/// `+`/`-`/`&`/`|`/`^` of two sub-expressions (via a temp at 0x7E).
+fn eval_to_w(e: &Expr, out: &mut String, locals: &HashMap<String, u8>) {
+    macro_rules! l {
+        ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
+    }
+    if let Some(c) = const8(e) {
+        l!("        movlw   0x{:02X}", c & 0xFF);
+        return;
+    }
+    match e {
+        Expr::Var(v) => match locals.get(v) {
+            Some(a) => l!("        movf    0x{a:02X}, w"),
+            None => l!("        ; unknown local `{v}`"),
+        },
+        Expr::Binary(op, a, b) => {
+            eval_to_w(a, out, locals);
+            l!("        movwf   0x7E            ; lhs");
+            eval_to_w(b, out, locals);
+            match op {
+                crate::ast::BinOp::Add => l!("        addwf   0x7E, w         ; lhs + rhs"),
+                crate::ast::BinOp::Sub => l!("        subwf   0x7E, w         ; lhs - rhs"),
+                crate::ast::BinOp::BitAnd => l!("        andwf   0x7E, w"),
+                crate::ast::BinOp::BitOr => l!("        iorwf   0x7E, w"),
+                crate::ast::BinOp::BitXor => l!("        xorwf   0x7E, w"),
+                _ => l!("        ; unsupported operator in Phase 1b"),
+            }
+        }
+        _ => match as_call(e) {
+            Some(("serial_getc", [])) => l!("        call    serial_getc"),
+            _ => l!("        ; unsupported expression in Phase 1b"),
+        },
+    }
+}
+
+/// Emits a block: its statements, then its TAIL expression (Sond makes the last `if`/call in a
+/// block the tail, not a statement, so an `if`-dispatch at the end of a loop body lives here).
+fn emit_block(b: &crate::ast::Block, out: &mut String, lbl: &mut usize, locals: &HashMap<String, u8>) {
+    for s in &b.stmts {
+        emit_stmt(s, out, lbl, locals);
+    }
+    if let Some(tail) = &b.tail {
+        match tail.as_ref() {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals),
+            e if as_call(e).is_some() => emit_call(e, out, locals),
+            _ => {}
+        }
+    }
+}
+
+fn emit_stmt(s: &Stmt, out: &mut String, lbl: &mut usize, locals: &HashMap<String, u8>) {
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
     }
     match s {
-        // `for { .. }` with no condition, an infinite loop (the kernel/idle idiom).
+        Stmt::Let { name, value, .. } => {
+            eval_to_w(value, out, locals);
+            if let Some(a) = locals.get(name) {
+                l!("        movwf   0x{a:02X}            ; let {name}");
+            }
+        }
+        Stmt::Assign {
+            target: Expr::Var(v),
+            value,
+        } => {
+            eval_to_w(value, out, locals);
+            if let Some(a) = locals.get(v) {
+                l!("        movwf   0x{a:02X}            ; {v} =");
+            }
+        }
+        // `for { .. }` with no condition, an infinite loop (the node's main dispatch loop).
         Stmt::For {
             cond: None, body, ..
         } => {
             let n = *lbl;
             *lbl += 1;
             l!("_loop{n}:");
-            emit_stmts(&body.stmts, out, lbl);
+            emit_block(body, out, lbl, locals);
             l!("        goto    _loop{n}");
         }
-        Stmt::Expr(e) => emit_call(e, out),
-        _ => {
-            l!("        ; (unsupported statement omitted in Phase 1)");
-        }
+        // A statement-position `if x == C { .. } else { .. }`, the command dispatch.
+        Stmt::Expr(Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        }) => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals),
+        Stmt::Expr(e) => emit_call(e, out, locals),
+        _ => l!("        ; (unsupported statement omitted in Phase 1b)"),
     }
 }
 
-/// Emits a call in statement position: `poke8(reg, val)` and `delay()` in Phase 1.
-fn emit_call(e: &Expr, out: &mut String) {
+/// Emits `if <lhs> == C { then } else { else }` (or `!=`), the byte-compare dispatch a
+/// compute node needs. Other conditions are omitted (Phase 1b).
+fn emit_if(
+    cond: &Expr,
+    then_b: &crate::ast::Block,
+    else_b: Option<&crate::ast::Block>,
+    out: &mut String,
+    lbl: &mut usize,
+    locals: &HashMap<String, u8>,
+) {
+    macro_rules! l {
+        ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
+    }
+    let n = *lbl;
+    *lbl += 1;
+    if let Expr::Binary(op @ (crate::ast::BinOp::Eq | crate::ast::BinOp::Ne), lhs, rhs) = cond
+        && let Some(c) = const8(rhs)
+    {
+        eval_to_w(lhs, out, locals);
+        l!("        xorlw   0x{:02X}            ; Z set iff equal", c & 0xFF);
+        // Eq: skip the then-branch when NOT equal; Ne: skip when equal.
+        if matches!(op, crate::ast::BinOp::Eq) {
+            l!("        btfss   STATUS, 2       ; STATUS Z is bit 2");
+        } else {
+            l!("        btfsc   STATUS, 2");
+        }
+        l!("        goto    _else{n}");
+        emit_block(then_b, out, lbl, locals);
+        l!("        goto    _endif{n}");
+        l!("_else{n}:");
+        if let Some(eb) = else_b {
+            emit_block(eb, out, lbl, locals);
+        }
+        l!("_endif{n}:");
+    } else {
+        l!("        ; (unsupported condition in Phase 1b, only `var == const`)");
+    }
+}
+
+/// Emits a call in statement position: `poke8`, `delay`, `serial_init`, `serial_putc`, and a
+/// bare `serial_getc()` (value discarded).
+fn emit_call(e: &Expr, out: &mut String, locals: &HashMap<String, u8>) {
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
     }
     let Some((name, args)) = as_call(e) else {
-        l!("        ; (unsupported expression omitted in Phase 1)");
+        l!("        ; (unsupported expression omitted in Phase 1b)");
         return;
     };
     match (name, args.len()) {
-        ("poke8", 2) => {
-            let (reg, val) = (const8(&args[0].value), const8(&args[1].value));
-            match (reg, val) {
-                (Some(r), Some(v)) => {
-                    l!("        banksel 0x{r:02X}");
-                    l!("        movlw   0x{v:02X}");
-                    l!("        movwf   0x{r:02X}");
-                }
-                _ => l!("        ; poke8 needs constant reg,val in Phase 1"),
+        ("poke8", 2) => match (const8(&args[0].value), const8(&args[1].value)) {
+            (Some(r), Some(v)) => {
+                l!("        banksel 0x{r:02X}");
+                l!("        movlw   0x{v:02X}");
+                l!("        movwf   0x{r:02X}");
             }
-        }
+            _ => l!("        ; poke8 needs constant reg,val in Phase 1b"),
+        },
         ("delay", 0) => l!("        call    delay"),
         ("serial_init", 0) => l!("        call    serial_init"),
-        ("serial_putc", 1) => match const8(&args[0].value) {
-            Some(v) => {
-                l!("        movlw   0x{v:02X}");
-                l!("        call    serial_putc");
-            }
-            None => l!("        ; serial_putc needs a constant byte in Phase 1"),
-        },
-        _ => l!("        ; (unsupported call `{name}` in Phase 1)"),
+        ("serial_getc", 0) => l!("        call    serial_getc"),
+        ("serial_putc", 1) => {
+            eval_to_w(&args[0].value, out, locals);
+            l!("        call    serial_putc");
+        }
+        _ => l!("        ; (unsupported call `{name}` in Phase 1b)"),
     }
 }
