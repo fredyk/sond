@@ -457,6 +457,19 @@ pub fn desugar_structs(funcs: &mut [Function], structs: &[StructDef]) {
                 locals.insert(p.name.clone(), tn.to_string());
             }
         }
+        // A struct-typed named return is in scope in `ensures` (`ensures { r.x >= 0 }`).
+        if let (Some(rn), Some(rt)) = (&f.ret_name, &f.ret)
+            && let Some(tn) = base_struct(rt).filter(|t| sizes.contains_key(*t))
+        {
+            locals.insert(rn.clone(), tn.to_string());
+        }
+        // Lower struct field access in the contract propositions too, otherwise a contract that
+        // reads a field (e.g. `requires { s.len > 0 }`) reaches codegen as a raw `Field` and its
+        // runtime guard fails to compile. The prover is unaffected: a proposition it cannot put
+        // in linear form (a field read, lowered or not) is dropped either way.
+        for e in f.requires.iter_mut().chain(f.ensures.iter_mut()) {
+            desugar_expr(e, &fields, &sizes, &mut locals, &methods);
+        }
         desugar_block(&mut f.body, &fields, &sizes, &mut locals, &methods);
     }
 }
@@ -1193,6 +1206,70 @@ mod tests {
     }
 
     #[test]
+    fn foreach_over_a_slice_iterates_its_elements() {
+        // `for x in s { .. }` binds x to each element in turn.
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             let a[4]\n\
+             a[0] = 10  a[1] = 20  a[2] = 30  a[3] = 40\n\
+             let s = Slice { ptr: a, len: a.len }\n\
+             let mut acc = 0\n\
+             for x in s { acc = acc + x }\n\
+             print_int(acc)\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "100");
+    }
+
+    #[test]
+    fn foreach_over_an_array_iterates_its_elements() {
+        // Works on a bare fixed array too (its `.len` is the constant size).
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             let a[3]\n\
+             a[0] = 5  a[1] = 6  a[2] = 7\n\
+             let mut acc = 0\n\
+             for x in a { acc = acc + x }\n\
+             print_int(acc)\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "18");
+    }
+
+    #[test]
+    fn foreach_over_a_sub_slice_range() {
+        // Iterate a bound sub-slice, composes with ranges.
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             let a[5]\n\
+             a[0] = 1  a[1] = 2  a[2] = 3  a[3] = 4  a[4] = 5\n\
+             let s = Slice { ptr: a, len: a.len }\n\
+             let mid = s[1:4]\n\
+             let mut acc = 0\n\
+             for x in mid { acc = acc + x }\n\
+             print_int(acc)\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "9"); // 2+3+4
+    }
+
+    #[test]
+    fn for_range_is_half_open_and_increments_after_the_body() {
+        // `for i in 0..3` visits 0,1,2, the counter increment must run AFTER the body's tail,
+        // not before it (a prior bug printed 1,2,3).
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             for i in 0..3 { print_int(i) }\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "012");
+    }
+
+    #[test]
     fn negative_slice_index_counts_from_the_end() {
         // `s[-1]` is the last element, `s[-2]` the second-to-last.
         let out = compile_and_capture(
@@ -1331,6 +1408,23 @@ mod tests {
              }",
         );
         assert_eq!(out, "7");
+    }
+
+    #[test]
+    fn a_contract_reading_a_struct_field_lowers_its_runtime_guard() {
+        // `requires { s.len > 0 }` reads a Slice field in the runtime guard. It must lower like a
+        // body field access, reaching codegen as a raw `Field` used to crash the guard emit.
+        let out = compile_and_capture(
+            "fn first(s: Slice) -> i64 requires { s.len > 0 } { s[0] }\n\
+             fn main() -> i64 {\n\
+             let a[3]\n\
+             a[0] = 42\n\
+             let s = Slice { ptr: a, len: a.len }\n\
+             print_int(first(s))\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "42");
     }
 
     #[test]
