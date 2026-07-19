@@ -1084,6 +1084,7 @@ impl Codegen {
 
 mod builtins;
 mod expr;
+pub mod pic16;
 mod runtime;
 #[cfg(test)]
 mod tests;

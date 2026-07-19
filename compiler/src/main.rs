@@ -52,6 +52,9 @@ fn main() -> ExitCode {
     let freestanding = args.iter().any(|a| a == "--freestanding");
     let uefi = args.iter().any(|a| a == "--uefi");
     let shared = args.iter().any(|a| a == "--shared");
+    // The PIC16 target (16F684): emit MPASM/gpasm assembly and assemble it into a flashable
+    // Intel HEX, the smallest target profile, an 8-bit microcontroller.
+    let pic16 = args.iter().any(|a| a == "--pic16");
     let emit_header = args.iter().any(|a| a == "--emit-header");
 
     // Resolve `include "lib.snd"` directives (source-level, deduped) so multi-file
@@ -84,7 +87,9 @@ fn main() -> ExitCode {
     // cache key (the source alone). Never cache them, so a changed threshold or mode always
     // rebuilds.
     let is_test_build = args.iter().any(|a| a == "--test");
-    let cache_path = if is_test_build {
+    // The PIC16 path uses gpasm and produces a HEX, not an ELF/PE, keep it out of the x86
+    // binary cache (whose hit message and copied artefact assume a native binary).
+    let cache_path = if is_test_build || pic16 {
         None
     } else {
         build_cache_path(&src, target_tag)
@@ -236,7 +241,9 @@ fn main() -> ExitCode {
     sondc::desugar::desugar_contracts(&mut funcs, &structs);
 
     let asm = match std::panic::catch_unwind(|| {
-        if uefi {
+        if pic16 {
+            sondc::codegen::pic16::emit_pic16(&funcs)
+        } else if uefi {
             emit_uefi_g(&globals, &structs, &funcs)
         } else if freestanding {
             emit_freestanding_g(&globals, &structs, &funcs)
@@ -257,6 +264,35 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    // The PIC16 target assembles with `gpasm` into a flashable Intel HEX, a wholly different
+    // toolchain from the x86 ELF/PE path below, so it short-circuits here.
+    if pic16 {
+        let asm_path = format!("{output}.asm");
+        if let Err(e) = std::fs::write(&asm_path, &asm) {
+            eprintln!("sondc: cannot write {asm_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+        return match Command::new("gpasm")
+            .args(["-p", "p16f684"])
+            .arg(&asm_path)
+            .args(["-o", output.as_str()])
+            .status()
+        {
+            Ok(s) if s.success() => {
+                println!("sondc: wrote PIC16F684 Intel HEX `{output}` (flash it to the chip)");
+                ExitCode::SUCCESS
+            }
+            Ok(_) => {
+                eprintln!("sondc: gpasm failed to assemble {asm_path}");
+                ExitCode::FAILURE
+            }
+            Err(e) => {
+                eprintln!("sondc: cannot run gpasm (install gputils): {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
 
     let asm_path = format!("{output}.s");
     if let Err(e) = std::fs::write(&asm_path, &asm) {
