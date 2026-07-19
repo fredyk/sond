@@ -1721,4 +1721,23 @@ mod tests {
             "a `wrapping fn` allows the intended wrap"
         );
     }
+
+    #[test]
+    fn wrapping_exempts_only_overflow_not_bounds() {
+        // `wrapping` narrows to arithmetic overflow, a `wrapping fn` still gets bounds-checked, so
+        // a provable out-of-bounds index is rejected exactly as in an ordinary function.
+        let funcs = Parser::new(tokenize(
+            "wrapping fn f() -> i64 { let a[4]\na[9] }",
+        ))
+        .parse_program();
+        let err = check_constant_bounds(&funcs, &[]).unwrap_err();
+        assert!(err.contains("out of bounds"), "wrapping must not exempt bounds: {err}");
+    }
+
+    #[test]
+    fn pub_wrapping_fn_parses() {
+        // Visibility composes with the modifier.
+        let funcs = Parser::new(tokenize("pub wrapping fn f() -> i64 { 1 }")).parse_program();
+        assert!(funcs[0].is_wrapping && matches!(funcs[0].vis, crate::ast::Visibility::Pub));
+    }
 }
