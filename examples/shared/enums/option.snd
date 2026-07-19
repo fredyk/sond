@@ -22,11 +22,25 @@ pub fn unwrap_or(o: Opt, fallback: i64) -> i64 {
     }
 }
 
-// RETURNING an Option by value, the most common use. A division that cannot divide by
-// zero returns `None` instead of crashing; the caller is FORCED to handle the absence.
-// (A small enum is returned in registers, like any ≤16-byte struct.)
+// RETURNING an Option by value, the most common use. A division with no valid result returns
+// `None` instead of crashing; the caller is FORCED to handle the absence. Signed division has TWO
+// undefined cases the compiler makes us handle: `b == 0` (a trap) and `i64::MIN / -1` (the quotient
+// `2^63` overflows). Guarding both is what lets `a / b` be PROVEN safe, the checked-arithmetic
+// obligation, discharged by these branch guards. (A small enum is returned in registers, like any
+// ≤16-byte struct.)
 pub fn safe_div(a: i64, b: i64) -> Opt {
-    if b == 0 { None } else { Some(a / b) }
+    if b == 0 {
+        None
+    } else if b == 0 - 1 {
+        // Divisor -1: safe unless the dividend is i64::MIN (whose negation overflows).
+        if a == 0 - 9223372036854775807 - 1 {
+            None
+        } else {
+            Some(a / b)
+        }
+    } else {
+        Some(a / b)
+    }
 }
 
 // 1 if the option carries a value, 0 if it is empty.

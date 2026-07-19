@@ -455,9 +455,21 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
                 target: Expr::Var(name),
                 value,
             } => fork_bind(live, name, value, ctx)?,
-            // A field assignment or non-variable target is undecidable here.
-            Stmt::Assign { .. } => {
-                return ctx.bail("an assignment to a field or non-variable target");
+            // An assignment THROUGH an index or field (`a[i] = v`, `s.f = v`) is a memory write: it
+            // does not rebind a tracked scalar local (Sond arrays/structs are separate memory), so
+            // the scalar state is unchanged, but the index and value are still evaluated for their
+            // own obligations (a division in either must be proven safe). This is what lets a loop
+            // that fills an array (`digits[tmp_len] = ..`) have its counter invariant verified.
+            Stmt::Assign { target, value } => {
+                let mut next = Vec::new();
+                for st in live {
+                    for (st2, _) in eval_expr_paths(target, st, ctx)? {
+                        for (st3, _) in eval_expr_paths(value, st2, ctx)? {
+                            next.push(st3);
+                        }
+                    }
+                }
+                next
             }
             // A statement-position `if` (or `match`) is evaluated for its EFFECTS, the mutations
             // its branches make and the obligations they raise, NOT ignored. Ignoring it was

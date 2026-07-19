@@ -96,9 +96,11 @@ fn itoa(n: i64, buf: i64) -> i64 {
         return 1
     }
 
-    // Build digits in reverse order into a temp buffer.
+    // Build digits in reverse order into a temp buffer. The `tmp_len < 20` guard makes the buffer
+    // bound explicit and machine-checked; it never fires in practice (an i64 has at most 19
+    // decimal digits), so the output is unchanged.
     let mut digits[20]
-    while val > 0 {
+    while val > 0 && tmp_len < 20 invariant { tmp_len <= 20 } {
         let d = val % 10
         digits[tmp_len] = d + 48
         tmp_len = tmp_len + 1

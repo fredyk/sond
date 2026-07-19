@@ -614,6 +614,20 @@ fn has_break(b: &Block) -> bool {
     }) || b.tail.as_ref().is_some_and(|t| in_expr(t))
 }
 
+/// Flattens a conjunction `a && b && ..` into its conjuncts; a non-`&&` expression is a single
+/// conjunct. Each conjunct of a loop condition holds throughout the body, so each is usable
+/// separately (the linear prover cannot consume a raw `&&`).
+fn conjuncts(e: &Expr) -> Vec<&Expr> {
+    match e {
+        Expr::Binary(BinOp::And, l, r) => {
+            let mut v = conjuncts(l);
+            v.extend(conjuncts(r));
+            v
+        }
+        _ => vec![e],
+    }
+}
+
 /// Records the interval bound a `v OP const` proposition implies into the flow's counter/ceiling
 /// maps, a floor for `>=`/`>`, a ceiling for `<`/`<=`, so the interval analysis (`expr_range`)
 /// can use it to bound a derived index like `v >> 3`. Other shapes contribute nothing.
@@ -982,31 +996,14 @@ fn bounds_block(
                     }
                 }
                 // The condition holds at the top of each iteration (invalidated inside the body as
-                // soon as the counter steps). Seed the bound it names as an interval too, so a
-                // derived index (`bit >> 3`) can be reasoned about, the increasing counter's cond
-                // supplies its ceiling, the decreasing counter's cond supplies its floor.
+                // soon as the counter steps). A conjunctive condition (`val > 0 && tmp_len < 20`)
+                // is split so EACH conjunct is a usable fact and interval bound, the second bounds
+                // the digit buffer's index. The bound it names feeds the interval maps too, so a
+                // derived index (`bit >> 3`) can be reasoned about.
                 if let Some(c) = cond {
-                    body_flow.facts.push(c.clone());
-                    if let Expr::Binary(op, l, r) = c
-                        && let Expr::Var(v) = l.as_ref()
-                        && modified.contains(v)
-                        && let Some(k) = const_index(r)
-                    {
-                        match op {
-                            BinOp::Lt => {
-                                body_flow.ceilings.insert(v.clone(), k - 1);
-                            }
-                            BinOp::Le => {
-                                body_flow.ceilings.insert(v.clone(), k);
-                            }
-                            BinOp::Gt => {
-                                body_flow.counters.insert(v.clone(), k + 1);
-                            }
-                            BinOp::Ge => {
-                                body_flow.counters.insert(v.clone(), k);
-                            }
-                            _ => {}
-                        }
+                    for conj in conjuncts(c) {
+                        body_flow.facts.push(conj.clone());
+                        seed_interval_bound(&mut body_flow, conj);
                     }
                 }
                 // A VERIFIED invariant holds at the top of every iteration, so its propositions are
@@ -1014,7 +1011,7 @@ fn bounds_block(
                 // variable they mention is reassigned (matching where the invariant is guaranteed:
                 // at the iteration top, before the body's mutations). This is what lets the crypto
                 // down-counting loops prove `exp[bit >> 3]` from `invariant { bit >= 0; bit < 256 }`.
-                if !invariant.is_empty()
+                let inv_verified = !invariant.is_empty()
                     && crate::verify::loop_invariant_verified(
                         funcs,
                         params,
@@ -1022,8 +1019,8 @@ fn bounds_block(
                         cond.as_ref(),
                         invariant,
                         body,
-                    )
-                {
+                    );
+                if inv_verified {
                     for inv in invariant {
                         body_flow.facts.push(inv.clone());
                         // Also feed the interval maps (`expr_range` reads them, not `facts`) so a
@@ -1037,6 +1034,16 @@ fn bounds_block(
                 // After the loop, every reassigned variable is unknown.
                 for v in &modified {
                     flow.invalidate(v);
+                }
+                // A VERIFIED invariant of a break-free loop holds AFTER the loop as well (it held at
+                // every iteration top and the loop exits only by the condition failing), so seed it
+                // into the continuation, this carries `tmp_len <= 20` from a digit-building loop to
+                // the reversal loop that reads `digits[tmp_len - 1 - j]`.
+                if inv_verified && !has_break(body) {
+                    for inv in invariant {
+                        flow.facts.push(inv.clone());
+                        seed_interval_bound(flow, inv);
+                    }
                 }
                 // A break-free `for cond {}` exits only when `cond` is false, so `!cond` holds
                 // afterward, a sound fact even about the (modified) counter. When it bounds the
