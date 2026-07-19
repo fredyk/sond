@@ -533,6 +533,106 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
             Some(out)
         }
         Expr::Call(callee, args) => eval_call(callee, args, state, ctx),
+        // Left shift is exact multiplication by a power of two: `e << k` == `e * 2^k`. Model it as
+        // that product so a bounded operand keeps a provable (overflow-gated) bound.
+        Expr::Binary(BinOp::Shl, l, r) => {
+            let mut out = Vec::new();
+            for (s1, lv) in eval_expr_paths(l, state, ctx)? {
+                for (s2, rv) in eval_expr_paths(r, s1, ctx)? {
+                    let value = match simplify(rv) {
+                        Sym::Const(k) if (0..63).contains(&k) => {
+                            simplify(Sym::Mul(Box::new(Sym::Const(1i64 << k)), Box::new(lv.clone())))
+                        }
+                        _ => ctx.fresh_var(),
+                    };
+                    out.push((s2, value));
+                }
+            }
+            Some(out)
+        }
+        // Right shift `e >> k` / `e >>> k` = `e / 2^k` for a non-negative `e`: the result is opaque
+        // (floor division is non-linear) but carries the same sign/magnitude facts as `/` -
+        // `0 <= q`, `2^k*q <= e`, `e < 2^k*(q+1)`, which a bounded operand turns into a tight
+        // range (`x < 256` gives `x >> 3 < 32`). Without a non-negative operand the facts do not
+        // hold (an arithmetic `>>` of a negative value is negative), so they are only added then.
+        Expr::Binary(BinOp::Shr | BinOp::LShr, l, r) => {
+            let mut out = Vec::new();
+            for (s1, lv) in eval_expr_paths(l, state, ctx)? {
+                for (mut s2, rv) in eval_expr_paths(r, s1, ctx)? {
+                    let q = ctx.fresh_var();
+                    if let Sym::Const(k) = simplify(rv)
+                        && (0..63).contains(&k)
+                    {
+                        let mut asm = ctx.requires.clone();
+                        asm.extend(s2.cons.iter().cloned());
+                        let nonneg = matches!(
+                            prove(
+                                &SymProp {
+                                    op: BinOp::Ge,
+                                    lhs: lv.clone(),
+                                    rhs: Sym::Const(0)
+                                },
+                                &asm,
+                                &ctx.int_types
+                            ),
+                            Outcome::Proven
+                        );
+                        if nonneg {
+                            let pow = Sym::Const(1i64 << k);
+                            let scaled =
+                                simplify(Sym::Mul(Box::new(pow.clone()), Box::new(q.clone())));
+                            s2.cons.push(SymProp {
+                                op: BinOp::Ge,
+                                lhs: q.clone(),
+                                rhs: Sym::Const(0),
+                            });
+                            s2.cons.push(SymProp {
+                                op: BinOp::Le,
+                                lhs: scaled.clone(),
+                                rhs: lv.clone(),
+                            });
+                            s2.cons.push(SymProp {
+                                op: BinOp::Lt,
+                                lhs: lv.clone(),
+                                rhs: simplify(Sym::Add(Box::new(scaled), Box::new(pow))),
+                            });
+                        }
+                    }
+                    out.push((s2, q));
+                }
+            }
+            Some(out)
+        }
+        // Bitwise AND with a non-negative constant mask confines the result to `[0, mask]` for ANY
+        // operand, the low-bits idiom (`x & 0xFF`), sound regardless of the operand's sign.
+        Expr::Binary(BinOp::BitAnd, l, r) => {
+            let mut out = Vec::new();
+            for (s1, lv) in eval_expr_paths(l, state, ctx)? {
+                for (mut s2, rv) in eval_expr_paths(r, s1, ctx)? {
+                    let q = ctx.fresh_var();
+                    let mask = match (simplify(lv.clone()), simplify(rv)) {
+                        (Sym::Const(m), _) | (_, Sym::Const(m)) => Some(m),
+                        _ => None,
+                    };
+                    if let Some(m) = mask
+                        && m >= 0
+                    {
+                        s2.cons.push(SymProp {
+                            op: BinOp::Ge,
+                            lhs: q.clone(),
+                            rhs: Sym::Const(0),
+                        });
+                        s2.cons.push(SymProp {
+                            op: BinOp::Le,
+                            lhs: q.clone(),
+                            rhs: Sym::Const(m),
+                        });
+                    }
+                    out.push((s2, q));
+                }
+            }
+            Some(out)
+        }
         // comparisons-as-values, field/index reads, etc.: out of the fragment.
         _ => ctx.bail("an unsupported expression (a comparison used as a value, or a field/index read)"),
     }
@@ -1825,6 +1925,42 @@ mod tests {
         // Without `i >= 0`, `i / 2 >= 0` is false for negative i, must NOT be proven.
         let d = parse("fn f(i: i64) -> (r: i64) ensures { r >= 0 } { i / 2 }");
         assert!(verify(&d).is_err());
+    }
+
+    #[test]
+    fn proves_the_range_of_a_right_shift() {
+        // `x >>> 3` = x / 8 for x >= 0: lands in [0, 32) when x < 256, the byte-index bound of the
+        // crypto down-counting loops. Previously the body left the fragment (a shift bailed).
+        let s = parse(
+            "fn f(x: i64 where x >= 0 && x < 256) -> (r: i64) ensures { r >= 0; r < 32 } { x >>> 3 }",
+        );
+        assert!(verify(&s).is_ok());
+        // Arithmetic `>>` behaves the same on a non-negative operand.
+        let a = parse("fn f(x: i64 where x >= 0) -> (r: i64) ensures { r >= 0 } { x >> 4 }");
+        assert!(verify(&a).is_ok());
+    }
+
+    #[test]
+    fn does_not_prove_a_right_shift_bound_without_the_sign() {
+        // Arithmetic `x >> 1` of a negative `x` is negative, `r >= 0` must NOT be proven.
+        let s = parse("fn f(x: i64) -> (r: i64) ensures { r >= 0 } { x >> 1 }");
+        assert!(verify(&s).is_err());
+    }
+
+    #[test]
+    fn proves_the_range_of_a_bitmask() {
+        // `x & m` lands in [0, m] for any `x` when `m >= 0`, the low-bits confinement.
+        let m = parse("fn f(x: i64) -> (r: i64) ensures { r >= 0; r <= 7 } { x & 7 }");
+        assert!(verify(&m).is_ok());
+    }
+
+    #[test]
+    fn treats_a_left_shift_as_a_multiply() {
+        // `x << 3` == `x * 8` exactly, so a bounded operand keeps a provable bound.
+        let s = parse(
+            "fn f(x: i64 where x >= 0 && x < 10) -> (r: i64) ensures { r >= 0; r < 80 } { x << 3 }",
+        );
+        assert!(verify(&s).is_ok());
     }
 
     #[test]
