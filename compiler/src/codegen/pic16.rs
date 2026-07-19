@@ -84,7 +84,12 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
     l!("        movlw   0x70            ; IRCF=111 -> 8 MHz internal oscillator");
     l!("        movwf   OSCCON");
     l!("        banksel ANSEL");
-    l!("        clrf    ANSEL           ; all pins digital");
+    l!("        clrf    ANSEL           ; all pins digital (ADC off)");
+    l!("        banksel CMCON0");
+    l!("        movlw   0x07            ; CM<2:0>=111");
+    l!("        movwf   CMCON0          ; comparators off -> RA1 (C1IN-) is digital I/O");
+    l!("        banksel VRCON");
+    l!("        clrf    VRCON           ; CVref off (also shares RA1)");
     l!("        banksel TRISA");
     l!("        bcf     TRISA, 0        ; RA0 = TX = output");
     l!("        bsf     TRISA, 1        ; RA1 = RX = input");
@@ -417,5 +422,19 @@ mod tests {
             asm[sg_bit..].contains("call    _bitdly"),
             "the per-bit advance must remain a full bit period"
         );
+    }
+
+    // The RX pin (RA1) doubles as the analog comparator input C1IN-. On the
+    // 16F684 the comparator powers up ON, which leaves RA1 analog with its
+    // DIGITAL INPUT BUFFER DISABLED, so a digital read of RA1 never sees the
+    // incoming serial line (TX/RA0 still works because it is driven as output).
+    // serial_init must turn the comparators off so RX is a real digital input.
+    #[test]
+    fn serial_init_makes_rx_pin_digital() {
+        let asm = asm_for("fn main() { serial_init() }");
+        // 111 = comparators off, CxIN pins digital I/O (0x00 would be an ANALOG mode).
+        assert!(asm.contains("movlw   0x07"), "serial_init must load CM<2:0>=111 to disable comparators");
+        assert!(asm.contains("movwf   CMCON0"), "serial_init must write CMCON0 to make RA1 digital");
+        assert!(asm.contains("clrf    VRCON"), "serial_init must disable CVref (also on RA1)");
     }
 }
