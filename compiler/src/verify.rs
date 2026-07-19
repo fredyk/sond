@@ -852,6 +852,20 @@ fn eval_expr(e: &Expr, env: &HashMap<String, Sym>) -> Option<Sym> {
             };
             Some(simplify(combined))
         }
+        // A struct/slice field read is a fixed value within the function, so treat it as a
+        // consistent opaque symbolic variable, this lets a contract reason about a slice's
+        // length (`requires { i < s.len }`). `s.field` before desugaring (the bounds check runs
+        // then) and `s[k]` after it (a lowered field, the form the prover sees) name the same
+        // slot the same way. Only reached from contract propositions and the bounds check, where
+        // no mutation happens, so the "fixed value" assumption is sound.
+        Expr::Field(base, field) => match base.as_ref() {
+            Expr::Var(b) => Some(Sym::Var(format!("{b}.{field}"))),
+            _ => None,
+        },
+        Expr::Index(base, idx) => match (base.as_ref(), idx.as_ref()) {
+            (Expr::Var(b), Expr::Int(k)) => Some(Sym::Var(format!("{b}#{k}"))),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -1672,6 +1686,19 @@ mod tests {
         // Without `i >= 0`, `i / 2 >= 0` is false for negative i, must NOT be proven.
         let d = parse("fn f(i: i64) -> (r: i64) ensures { r >= 0 } { i / 2 }");
         assert!(verify(&d).is_err());
+    }
+
+    #[test]
+    fn reasons_about_a_slice_length_field_in_a_contract() {
+        // `s.len` is a consistent symbolic value: `where n < s.len` bounds `n` by the slice's
+        // length, and the postcondition restating it is proven.
+        let funcs = parse(
+            "fn pick(s: Slice, n: i64 where n < s.len) -> (r: i64) requires { s.len > 0 } ensures { r < s.len } { n }",
+        );
+        assert!(verify(&funcs).is_ok());
+        // Without the bound, `r < s.len` is not provable (n is unconstrained).
+        let bad = parse("fn pick(s: Slice, n: i64) -> (r: i64) ensures { r < s.len } { n }");
+        assert!(verify(&bad).is_err());
     }
 
     #[test]
