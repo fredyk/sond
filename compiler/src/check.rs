@@ -9,7 +9,9 @@
 //!
 //! Runs BEFORE struct desugaring, so it sees the original `p.field` form.
 
-use crate::ast::{BinOp, Block, EnumDef, Expr, Function, Global, Param, Stmt, StructDef, Type, UnOp};
+use crate::ast::{
+    Arg, BinOp, Block, EnumDef, Expr, Function, Global, Param, Stmt, StructDef, Type, UnOp,
+};
 
 /// Exhaustiveness: every `match` on a sum type must cover ALL of its enum's variants,
 /// use only variants that exist, and not repeat one. A missing case is a COMPILE ERROR
@@ -899,6 +901,84 @@ fn negate_cond(e: &Expr) -> Option<Expr> {
     Some(Expr::Binary(nop, l.clone(), r.clone()))
 }
 
+/// Replaces free `Var(name)` nodes per `map`, used to instantiate a callee's `ensures` at a
+/// call site (its return name becomes the binding, its parameters become the arguments).
+fn subst_vars(e: &Expr, map: &HashMap<String, Expr>) -> Expr {
+    match e {
+        Expr::Var(v) => map.get(v).cloned().unwrap_or_else(|| e.clone()),
+        Expr::Binary(op, l, r) => Expr::Binary(
+            op.clone(),
+            Box::new(subst_vars(l, map)),
+            Box::new(subst_vars(r, map)),
+        ),
+        Expr::Unary(op, x) => Expr::Unary(op.clone(), Box::new(subst_vars(x, map))),
+        Expr::Field(x, f) => Expr::Field(Box::new(subst_vars(x, map)), f.clone()),
+        Expr::Index(a, b) => Expr::Index(Box::new(subst_vars(a, map)), Box::new(subst_vars(b, map))),
+        Expr::Cast(x, t) => Expr::Cast(Box::new(subst_vars(x, map)), t.clone()),
+        Expr::Call(c, args) => Expr::Call(
+            Box::new(subst_vars(c, map)),
+            args.iter()
+                .map(|a| Arg {
+                    name: a.name.clone(),
+                    value: subst_vars(&a.value, map),
+                })
+                .collect(),
+        ),
+        _ => e.clone(),
+    }
+}
+
+/// Does `e` reference any of `names` as a free variable? Guards ensures-propagation: a clause
+/// still mentioning a callee parameter (one not positionally mapped to an argument) must not be
+/// assumed, since the bare name could alias an unrelated caller variable.
+fn mentions_any(e: &Expr, names: &HashSet<String>) -> bool {
+    match e {
+        Expr::Var(v) => names.contains(v),
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            mentions_any(l, names) || mentions_any(r, names)
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => mentions_any(x, names),
+        Expr::Call(c, args) => {
+            mentions_any(c, names) || args.iter().any(|a| mentions_any(&a.value, names))
+        }
+        _ => false,
+    }
+}
+
+/// Instantiates a callee's `ensures` at a `let name = f(args)` binding and returns the sound
+/// facts about `name`, the return name mapped to `name`, and (only for all-positional calls)
+/// each parameter mapped to its argument. A clause still mentioning an unmapped parameter is
+/// dropped (it could alias a caller variable). This is what carries a bounded allocator return
+/// (`fu_alloc`/`fu_find`, `-> (r) ensures { r >= 0; r < N }`) to the index at the call site.
+fn call_ensures_facts(name: &str, value: &Expr, funcs: &[Function]) -> Vec<Expr> {
+    let Expr::Call(callee, cargs) = value else {
+        return Vec::new();
+    };
+    let Expr::Var(fnname) = callee.as_ref() else {
+        return Vec::new();
+    };
+    let Some(f) = funcs
+        .iter()
+        .find(|g| &g.name == fnname && g.ret_name.is_some())
+    else {
+        return Vec::new();
+    };
+    let positional = cargs.len() == f.params.len() && cargs.iter().all(|a| a.name.is_none());
+    let mut map: HashMap<String, Expr> = HashMap::new();
+    map.insert(f.ret_name.clone().unwrap(), Expr::Var(name.to_string()));
+    if positional {
+        for (p, a) in f.params.iter().zip(cargs) {
+            map.insert(p.name.clone(), a.value.clone());
+        }
+    }
+    let param_names: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
+    f.ensures
+        .iter()
+        .map(|ens| subst_vars(ens, &map))
+        .filter(|fact| !mentions_any(fact, &param_names))
+        .collect()
+}
+
 fn bounds_block(
     b: &Block,
     fname: &str,
@@ -940,6 +1020,13 @@ fn bounds_block(
                             if let Some((lo, hi)) = expr_range(value, flow) {
                                 flow.counters.insert(name.clone(), lo);
                                 flow.ceilings.insert(name.clone(), hi);
+                            }
+                            // A call with a postcondition carries its `ensures` to the binding, so
+                            // a bounded allocator return (`let i = alloc()`) bounds `t[i]` without
+                            // restating the bound at the call site.
+                            for fact in call_ensures_facts(name, value, funcs) {
+                                seed_interval_bound(flow, &fact);
+                                flow.facts.push(fact);
                             }
                         }
                     }
@@ -1295,6 +1382,31 @@ mod tests {
     #[test]
     fn accepts_a_constant_index_from_arithmetic_in_bounds() {
         assert!(bounds("fn f() -> i64 { let a[4]\na[2 + 1] }").is_ok());
+    }
+
+    #[test]
+    fn propagates_a_callees_ensures_to_bound_an_indexed_return() {
+        // `alloc()` guarantees `0 <= r < 4` of its return; after `let i = alloc()` the index
+        // `t[i]` must prove in bounds FROM that postcondition, the whole point of a return
+        // contract is that the caller may assume it, so a bounded allocator index need not be
+        // re-stated at every call site. (This is the `fu_alloc`/`fu_find` pattern.)
+        let src = "let mut t[4]\n\
+                   fn alloc() -> (r: i64) ensures { r >= 0; r < 4 } { 2 }\n\
+                   fn use_it() { let i = alloc()\nt[i] = 1 }\n\
+                   fn main() -> i64 { use_it()\n0 }";
+        assert!(bounds(src).is_ok(), "callee ensures should bound the return");
+    }
+
+    #[test]
+    fn does_not_propagate_an_ensures_mentioning_an_unmapped_parameter() {
+        // With a KEYWORD argument the parameters are not positionally mapped, so an `ensures`
+        // that mentions a parameter must NOT be assumed (the bare param name could alias an
+        // unrelated caller variable), the index stays unproven. Soundness guard.
+        let src = "let mut t[4]\n\
+                   fn pick(n: i64) -> (r: i64) ensures { r < n } { 0 }\n\
+                   fn use_it() { let i = pick(n=4)\nt[i] = 1 }\n\
+                   fn main() -> i64 { use_it()\n0 }";
+        assert!(bounds(src).is_err(), "must not assume an unmapped-param ensures");
     }
 
     #[test]
