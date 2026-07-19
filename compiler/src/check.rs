@@ -979,6 +979,33 @@ fn call_ensures_facts(name: &str, value: &Expr, funcs: &[Function]) -> Vec<Expr>
         .collect()
 }
 
+/// Does `b` never fall through, does every path end in `return`/`break`/`continue`? A block
+/// diverges when its last statement is such a jump, or its tail is an if/match whose branches all
+/// diverge. Used to refine the code AFTER a guard clause: reaching it means the guard was false.
+fn block_diverges(b: &Block) -> bool {
+    if let Some(tail) = &b.tail {
+        return match tail.as_ref() {
+            Expr::If {
+                then_branch,
+                else_branch: Some(eb),
+                ..
+            } => block_diverges(then_branch) && block_diverges(eb),
+            Expr::Match { arms, .. } => arms.iter().all(|a| block_diverges(&a.body)),
+            _ => false,
+        };
+    }
+    match b.stmts.last() {
+        Some(Stmt::Return(_) | Stmt::Break | Stmt::Continue) => true,
+        Some(Stmt::Expr(Expr::If {
+            then_branch,
+            else_branch: Some(eb),
+            ..
+        })) => block_diverges(then_branch) && block_diverges(eb),
+        Some(Stmt::Expr(Expr::Match { arms, .. })) => arms.iter().all(|a| block_diverges(&a.body)),
+        _ => false,
+    }
+}
+
 fn bounds_block(
     b: &Block,
     fname: &str,
@@ -1066,6 +1093,37 @@ fn bounds_block(
                 // Assigning through an index/field: a memory write, no scalar rebinding.
                 bounds_expr(target, fname, sizes, flow, params, funcs)?;
                 bounds_expr(value, fname, sizes, flow, params, funcs)?;
+            }
+            Stmt::Expr(e @ Expr::If { .. }) => {
+                // Check the condition and both branches (delegated to bounds_expr, which also
+                // invalidates variables a branch reassigns). Then refine the CONTINUATION: a guard
+                // clause whose then-branch never falls through means reaching the next statement
+                // implies the condition was false, so `!cond` holds afterwards. This is what lets
+                // `if fi < 0 { return }` establish `fi >= 0` for a later `used[fi]`. A single
+                // comparison negates cleanly; a conjunctive guard's negation is a disjunction we
+                // simply do not assume (sound, weaker). Symmetrically a diverging `else` with a
+                // fall-through then-branch contributes `cond` (which the prover splits on `&&`).
+                bounds_expr(e, fname, sizes, flow, params, funcs)?;
+                if let Expr::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                } = e
+                {
+                    if else_branch.is_none() && block_diverges(then_branch) {
+                        if let Some(neg) = negate_cond(cond) {
+                            seed_interval_bound(flow, &neg);
+                            flow.facts.push(neg);
+                        }
+                    } else if let Some(eb) = else_branch
+                        && block_diverges(eb)
+                        && !block_diverges(then_branch)
+                    {
+                        let c = cond.as_ref().clone();
+                        seed_interval_bound(flow, &c);
+                        flow.facts.push(c);
+                    }
+                }
             }
             Stmt::Return(Some(v)) | Stmt::Expr(v) => bounds_expr(v, fname, sizes, flow, params, funcs)?,
             Stmt::For {
@@ -1395,6 +1453,29 @@ mod tests {
                    fn use_it() { let i = alloc()\nt[i] = 1 }\n\
                    fn main() -> i64 { use_it()\n0 }";
         assert!(bounds(src).is_ok(), "callee ensures should bound the return");
+    }
+
+    #[test]
+    fn a_guard_clause_early_return_refines_the_continuation() {
+        // `if fi < 0 { return }` means any code AFTER it runs only when `fi >= 0`. Combined with
+        // an upper bound from the callee's `ensures`, that lower bound proves the index. This is
+        // the `let fi = fu_alloc(); if fi < 0 { return } used[fi]` sentinel-allocator pattern.
+        let src = "let mut used[64]\n\
+                   fn alloc() -> (r: i64) ensures { r < 64 } { 5 }\n\
+                   fn open() { let fi = alloc()\nif fi < 0 { return }\nused[fi] = 1 }\n\
+                   fn main() -> i64 { open()\n0 }";
+        assert!(bounds(src).is_ok(), "early-return guard should establish fi >= 0");
+    }
+
+    #[test]
+    fn without_the_guard_the_lower_bound_stays_unproven() {
+        // Same as above but WITHOUT the `if fi < 0 { return }` guard: the callee only promises
+        // `r < 64`, so `fi` could be negative and the index is correctly rejected.
+        let src = "let mut used[64]\n\
+                   fn alloc() -> (r: i64) ensures { r < 64 } { 5 }\n\
+                   fn open() { let fi = alloc()\nused[fi] = 1 }\n\
+                   fn main() -> i64 { open()\n0 }";
+        assert!(bounds(src).is_err(), "no lower bound without the guard");
     }
 
     #[test]
