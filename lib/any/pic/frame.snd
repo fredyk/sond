@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/pic/frame.snd, wire framing for the PIC compute cluster.
+//
+// A node is driven over a serial link with fixed little frames:
+//   [STX=0x02][node][code][len][payload_0 .. payload_{len-1}][checksum]
+// The checksum is a bytewise XOR over node, code, len and the payload, so a
+// single flipped bit on the (noisy, bit-banged) line is caught by the receiver.
+// No allocator: the caller owns the output buffer. This layout is the contract
+// shared by the Go host, the Sond host and the on-chip firmware, keep them equal.
+
+let PIC_STX = 0x02
+
+// pic_frame_checksum computes the XOR of node, code, len and the `plen` payload
+// bytes starting at `pay`. Returned in 0..255.
+fn pic_frame_checksum(node: i64, code: i64, plen: i64, pay: i64) -> i64 {
+    let mut cs = (node ^ code ^ plen) & 0xff
+    let mut i = 0
+    for i < plen {
+        cs = cs ^ peek8(pay + i)
+        i = i + 1
+    }
+    cs & 0xff
+}
+
+// pic_frame_encode writes a full frame into `out` and returns its total length
+// (plen + 5: STX + node + code + len + payload + checksum).
+fn pic_frame_encode(out: i64, node: i64, code: i64, pay: i64, plen: i64) -> i64 {
+    poke8(out + 0, PIC_STX)
+    poke8(out + 1, node & 0xff)
+    poke8(out + 2, code & 0xff)
+    poke8(out + 3, plen & 0xff)
+    let mut i = 0
+    for i < plen {
+        poke8(out + 4 + i, peek8(pay + i))
+        i = i + 1
+    }
+    poke8(out + 4 + plen, pic_frame_checksum(node, code, plen, pay))
+    plen + 5
+}
+
+// Accessors over a received frame buffer.
+fn pic_frame_node(buf: i64) -> i64 { peek8(buf + 1) }
+fn pic_frame_code(buf: i64) -> i64 { peek8(buf + 2) }
+fn pic_frame_len(buf: i64) -> i64 { peek8(buf + 3) }
+fn pic_frame_payload(buf: i64) -> i64 { buf + 4 }
+
+// pic_frame_verify returns 1 iff `buf` holds a well-formed frame of exactly
+// `total` bytes: STX present, declared length consistent, checksum intact.
+fn pic_frame_verify(buf: i64, total: i64) -> i64 {
+    if total < 5 { return 0 }
+    if peek8(buf + 0) != PIC_STX { return 0 }
+    let plen = peek8(buf + 3)
+    if plen + 5 != total { return 0 }
+    let want = peek8(buf + 4 + plen)
+    let got = pic_frame_checksum(peek8(buf + 1), peek8(buf + 2), plen, buf + 4)
+    if got != want { return 0 }
+    1
+}

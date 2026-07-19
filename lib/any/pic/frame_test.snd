@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for pic/frame.snd, the PIC-cluster wire framing.
+// Frame layout: [STX=0x02][node][code][len][payload...][checksum]
+// checksum = XOR over node, code, len and every payload byte.
+// These vectors MUST match the Go host (internal/proto) and the PIC firmware.
+//   sond test lib/any/pic/frame_test.snd
+
+include "any/pic/frame.snd"
+include "x86_64/linux/testing.snd"
+
+let mut out[16]      // 128 bytes, plenty for a max 4+255+1 frame in tests
+let mut pay[16]
+
+test "frame: PING encode (node 255, code 0, no payload)" {
+    let n = pic_frame_encode(out, 255, 0, pay, 0)
+    assert_eq(n, 5)
+    assert_eq(peek8(out + 0), 0x02)   // STX
+    assert_eq(peek8(out + 1), 255)    // node
+    assert_eq(peek8(out + 2), 0)      // code
+    assert_eq(peek8(out + 3), 0)      // len
+    assert_eq(peek8(out + 4), 255)    // checksum = 255^0^0
+}
+
+test "frame: ADD8 encode (node 1, code 1, payload 5,7)" {
+    poke8(pay + 0, 5)
+    poke8(pay + 1, 7)
+    let n = pic_frame_encode(out, 1, 1, pay, 2)
+    assert_eq(n, 7)
+    assert_eq(peek8(out + 0), 0x02)
+    assert_eq(peek8(out + 1), 1)
+    assert_eq(peek8(out + 2), 1)
+    assert_eq(peek8(out + 3), 2)
+    assert_eq(peek8(out + 4), 5)
+    assert_eq(peek8(out + 5), 7)
+    assert_eq(peek8(out + 6), 0)      // 1^1^2^5^7 = 0
+}
+
+test "frame: checksum helper matches encode" {
+    poke8(pay + 0, 0xAB)
+    poke8(pay + 1, 0xCD)
+    let cs = pic_frame_checksum(9, 0x10, 2, pay)
+    // 9 ^ 0x10 ^ 2 ^ 0xAB ^ 0xCD
+    assert_eq(cs, 9 ^ 0x10 ^ 2 ^ 0xAB ^ 0xCD)
+}
+
+test "frame: verify accepts a well-formed frame" {
+    poke8(pay + 0, 42)
+    let n = pic_frame_encode(out, 3, 1, pay, 1)
+    assert_eq(pic_frame_verify(out, n), 1)
+}
+
+test "frame: verify rejects a corrupted payload byte" {
+    poke8(pay + 0, 42)
+    let n = pic_frame_encode(out, 3, 1, pay, 1)
+    poke8(out + 4, 43)                // flip the payload, checksum now stale
+    assert_eq(pic_frame_verify(out, n), 0)
+}
+
+test "frame: verify rejects a runt frame (< 5 bytes)" {
+    poke8(out + 0, 0x02)
+    assert_eq(pic_frame_verify(out, 4), 0)
+}
+
+test "frame: verify rejects a length/total mismatch" {
+    poke8(pay + 0, 1)
+    let n = pic_frame_encode(out, 3, 1, pay, 1)   // n == 6, len byte == 1
+    assert_eq(pic_frame_verify(out, n + 1), 0)    // claim one byte too many
+}
+
+test "frame: verify rejects a bad STX" {
+    poke8(pay + 0, 1)
+    let n = pic_frame_encode(out, 3, 1, pay, 1)
+    poke8(out + 0, 0x03)             // not STX
+    assert_eq(pic_frame_verify(out, n), 0)
+}
+
+test "frame: accessors read node/code/len/payload" {
+    poke8(pay + 0, 0x11)
+    poke8(pay + 1, 0x22)
+    let n = pic_frame_encode(out, 7, 2, pay, 2)
+    assert_eq(pic_frame_node(out), 7)
+    assert_eq(pic_frame_code(out), 2)
+    assert_eq(pic_frame_len(out), 2)
+    assert_eq(peek8(pic_frame_payload(out) + 0), 0x11)
+    assert_eq(peek8(pic_frame_payload(out) + 1), 0x22)
+}
