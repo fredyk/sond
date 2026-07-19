@@ -845,6 +845,100 @@ fn is_monotonic_decounter(v: &str, b: &Block) -> bool {
     all_steps(v, b, &|v, e| decrement_of(v, e).is_some())
 }
 
+/// Does assigning `value` to a global known `>= 0` keep it `>= 0`? True for `g = c`, `g = g + c`,
+/// `g = g * c` with a non-negative constant `c`, the shapes a counter/length ever takes.
+fn rhs_preserves_nonneg(value: &Expr, g: &str) -> bool {
+    if matches!(const_index(value), Some(v) if v >= 0) {
+        return true;
+    }
+    let is_g = |e: &Expr| matches!(e, Expr::Var(v) if v == g);
+    let nonneg_const = |e: &Expr| matches!(const_index(e), Some(v) if v >= 0);
+    matches!(value, Expr::Binary(BinOp::Add | BinOp::Mul, l, r)
+        if (is_g(l) && nonneg_const(r)) || (is_g(r) && nonneg_const(l)))
+}
+
+/// Does every assignment to `g` anywhere in `e`'s nested blocks preserve non-negativity? Walks
+/// into the branch blocks of `if`/`match` expressions (the only expression forms that hold
+/// statements); other expressions contain no assignments.
+fn expr_assigns_preserve_nonneg(e: &Expr, g: &str) -> bool {
+    match e {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_assigns_preserve_nonneg(cond, g)
+                && block_assigns_preserve_nonneg(then_branch, g)
+                && else_branch
+                    .as_ref()
+                    .is_none_or(|eb| block_assigns_preserve_nonneg(eb, g))
+        }
+        Expr::Match { scrutinee, arms } => {
+            expr_assigns_preserve_nonneg(scrutinee, g)
+                && arms.iter().all(|a| block_assigns_preserve_nonneg(&a.body, g))
+        }
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            expr_assigns_preserve_nonneg(l, g) && expr_assigns_preserve_nonneg(r, g)
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
+            expr_assigns_preserve_nonneg(x, g)
+        }
+        Expr::Call(c, args) => {
+            expr_assigns_preserve_nonneg(c, g)
+                && args.iter().all(|a| expr_assigns_preserve_nonneg(&a.value, g))
+        }
+        Expr::List(items) => items.iter().all(|i| expr_assigns_preserve_nonneg(i, g)),
+        Expr::StructLit(_, fields) => {
+            fields.iter().all(|(_, v)| expr_assigns_preserve_nonneg(v, g))
+        }
+        Expr::SliceRange(b, lo, hi) => {
+            expr_assigns_preserve_nonneg(b, g)
+                && lo.as_ref().is_none_or(|x| expr_assigns_preserve_nonneg(x, g))
+                && hi.as_ref().is_none_or(|x| expr_assigns_preserve_nonneg(x, g))
+        }
+        _ => true,
+    }
+}
+
+fn stmt_assigns_preserve_nonneg(s: &Stmt, g: &str) -> bool {
+    match s {
+        Stmt::Assign {
+            target: Expr::Var(v),
+            value,
+        } if v == g => rhs_preserves_nonneg(value, g),
+        Stmt::For { body, .. } => block_assigns_preserve_nonneg(body, g),
+        Stmt::Let { value, .. }
+        | Stmt::Return(Some(value))
+        | Stmt::Expr(value)
+        | Stmt::Assign { value, .. } => expr_assigns_preserve_nonneg(value, g),
+        _ => true,
+    }
+}
+
+fn block_assigns_preserve_nonneg(b: &Block, g: &str) -> bool {
+    b.stmts.iter().all(|s| stmt_assigns_preserve_nonneg(s, g))
+        && b.tail
+            .as_ref()
+            .is_none_or(|t| expr_assigns_preserve_nonneg(t, g))
+}
+
+/// Module-level mutable scalar globals PROVABLY `>= 0` in every function: initialised to a
+/// non-negative constant and only ever assigned a non-negativity-preserving value across the
+/// WHOLE program. A counter that starts at 0 and only increments is the canonical case, so a
+/// later `t[count]` (or `let i = count; t[i]`) needs no hand-written `count >= 0`, the floor is
+/// a whole-module invariant no per-function walk can see. Sound: an unproven mutation (a
+/// decrement, an opaque RHS) drops the global from the set.
+fn nonnegative_globals(funcs: &[Function], globals: &[Global]) -> HashSet<String> {
+    let mut cands: HashSet<String> = globals
+        .iter()
+        .filter(|g| g.mutable && g.array_len.is_none())
+        .filter(|g| matches!(const_index(&g.init), Some(v) if v >= 0))
+        .map(|g| g.name.clone())
+        .collect();
+    cands.retain(|g| funcs.iter().all(|f| block_assigns_preserve_nonneg(&f.body, g)));
+    cands
+}
+
 pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(), String> {
     // Module-level arrays (`.data` tables, crypto S-boxes, round constants) are in scope in
     // every function, so seed their sizes once.
@@ -862,6 +956,9 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
             global_consts.insert(g.name.clone(), v);
         }
     }
+    // Mutable scalar globals that never go negative anywhere (counters, lengths) carry a `>= 0`
+    // floor into every function, the whole-module invariant a single function cannot establish.
+    let nonneg = nonnegative_globals(funcs, globals);
     for f in funcs {
         let mut sizes = global_sizes.clone();
         // The function's preconditions are the facts true on every path from entry.
@@ -870,6 +967,16 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
             consts: global_consts.clone(),
             ..Default::default()
         };
+        for g in &nonneg {
+            flow.facts.push(Expr::Binary(
+                BinOp::Ge,
+                Box::new(Expr::Var(g.clone())),
+                Box::new(Expr::Int(0)),
+            ));
+            // A floor of 0 in the interval maps too, so a non-negativity-preserving increment
+            // (`count = count + 1`) keeps it, the fact alone is dropped when `count` is reassigned.
+            flow.counters.insert(g.clone(), 0);
+        }
         bounds_block(&f.body, &f.name, &mut sizes, &mut flow, &f.params, funcs)?;
     }
     Ok(())
@@ -1453,6 +1560,30 @@ mod tests {
                    fn use_it() { let i = alloc()\nt[i] = 1 }\n\
                    fn main() -> i64 { use_it()\n0 }";
         assert!(bounds(src).is_ok(), "callee ensures should bound the return");
+    }
+
+    #[test]
+    fn a_nonnegative_global_counter_bounds_an_index_below() {
+        // `count` starts at 0 and is only ever incremented, so it is `>= 0` everywhere, a
+        // whole-module invariant the per-function walk cannot see. With the upper bound from the
+        // `if count < 4` guard, `t[count]` proves in bounds with NO hand-written `count >= 0`.
+        let src = "let mut count = 0\n\
+                   let mut t[4]\n\
+                   fn bump() { if count < 4 { t[count] = 1\ncount = count + 1 } }\n\
+                   fn main() -> i64 { bump()\n0 }";
+        assert!(bounds(src).is_ok(), "nonneg global counter should give the lower bound");
+    }
+
+    #[test]
+    fn a_global_that_can_go_negative_is_not_assumed_nonnegative() {
+        // `count` is decremented in one function, so it is NOT provably `>= 0`; even under the
+        // `count < 4` guard the index must be rejected (a negative index is a real overrun).
+        let src = "let mut count = 0\n\
+                   let mut t[4]\n\
+                   fn dec() { count = count - 1 }\n\
+                   fn use_it() { if count < 4 { t[count] = 1 } }\n\
+                   fn main() -> i64 { use_it()\n0 }";
+        assert!(bounds(src).is_err(), "a decremented global is not provably nonneg");
     }
 
     #[test]
