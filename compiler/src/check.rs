@@ -724,10 +724,16 @@ fn expr_range(e: &Expr, flow: &Flow) -> Option<(i64, i64)> {
             if let Some(&c) = flow.consts.get(v) {
                 return Some((c, c));
             }
-            Some((
-                flow.counters.get(v).copied()?,
-                flow.ceilings.get(v).copied()?,
-            ))
+            // A one-sided bound is still a SOUND interval against the type's extreme: a proven
+            // floor `f` puts the value in `[f, i64::MAX]` (a nonneg counter with no upper bound),
+            // a proven ceiling `c` in `[i64::MIN, c]`. This is what lets `head % 16` clamp when
+            // only `head >= 0` is known, the modulo case reads just the dividend's floor.
+            match (flow.counters.get(v).copied(), flow.ceilings.get(v).copied()) {
+                (Some(lo), Some(hi)) => Some((lo, hi)),
+                (Some(lo), None) => Some((lo, i64::MAX)),
+                (None, Some(hi)) => Some((i64::MIN, hi)),
+                (None, None) => None,
+            }
         }
         Expr::Binary(op, l, r) => match op {
             BinOp::BitAnd => {
@@ -1572,6 +1578,18 @@ mod tests {
                    fn bump() { if count < 4 { t[count] = 1\ncount = count + 1 } }\n\
                    fn main() -> i64 { bump()\n0 }";
         assert!(bounds(src).is_ok(), "nonneg global counter should give the lower bound");
+    }
+
+    #[test]
+    fn a_modulo_of_a_nonnegative_global_bounds_a_ring_index() {
+        // `head` is a nonneg counter (0, only incremented), so `head % 16` is in [0, 16), the
+        // ring-buffer index. The modulo clamps however large `head` grows, so no upper bound on
+        // `head` is needed; only its floor (>= 0), which the nonneg-global analysis supplies.
+        let src = "let mut head = 0\n\
+                   let mut ring[16]\n\
+                   fn push(v: i64) { let i = head % 16\nring[i] = v\nhead = head + 1 }\n\
+                   fn main() -> i64 { push(7)\n0 }";
+        assert!(bounds(src).is_ok(), "modulo of a nonneg global is a valid ring index");
     }
 
     #[test]
