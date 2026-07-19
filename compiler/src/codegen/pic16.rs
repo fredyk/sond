@@ -272,6 +272,26 @@ fn emit_stmt(s: &Stmt, out: &mut String, lbl: &mut usize, locals: &HashMap<Strin
             emit_block(body, out, lbl, locals);
             l!("        goto    _loop{n}");
         }
+        // `for lhs < rhs { .. }`, an 8-bit counted loop (unsigned), the basis of compute kernels
+        // and reading a length-prefixed payload. `lhs = lhs + 1` in the body advances it.
+        Stmt::For {
+            cond: Some(Expr::Binary(crate::ast::BinOp::Lt, lhs, rhs)),
+            body,
+            ..
+        } => {
+            let n = *lbl;
+            *lbl += 1;
+            l!("_loop{n}:");
+            eval_to_w(lhs, out, locals);
+            l!("        movwf   0x7E            ; loop lhs");
+            eval_to_w(rhs, out, locals);
+            l!("        subwf   0x7E, w         ; lhs - rhs, C set iff lhs >= rhs");
+            l!("        btfsc   STATUS, 0       ; C is bit 0");
+            l!("        goto    _end{n}         ; lhs >= rhs -> exit");
+            emit_block(body, out, lbl, locals);
+            l!("        goto    _loop{n}");
+            l!("_end{n}:");
+        }
         // A statement-position `if x == C { .. } else { .. }`, the command dispatch.
         Stmt::Expr(Expr::If {
             cond,
