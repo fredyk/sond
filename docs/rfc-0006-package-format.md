@@ -140,6 +140,76 @@ new contract. If it breaks, it does not compile.
   (the name is metadata) --- great for AI, but how do name changes propagate in the friendly
   layer? (Unison solves this with `alias`/`update`.) **Pending** to define the flow.
 
+## 7. Implementation plan (incremental, each slice shippable and gate-verified)
+
+The full format is large; it lands in slices, each one useful on its own and each keeping the
+existing flat `include` working (additive, never a breaking migration). The FIRST slice delivers
+the thing a reader notices immediately, **qualified referencing** (`module.function` instead of a
+flat C-style global namespace), which is exactly the friendly-name layer of §3.5. Content
+hashing (§3.1), contract re-verification (§3.3) and the capability manifest (§3.4) ride on top of
+it in later slices; none of them changes the call-site surface, so the namespacing designed here
+is stable.
+
+### 7.1 Increment 1 --- namespaced `import` and qualified calls (the §3.5 friendly-name layer)
+
+**Surface.** A new top-level directive, additive alongside `include`:
+
+```sond
+import "any/strings"            // namespace = the file's basename -> strings.itoa(x)
+import "any/strings" as str     // explicit alias                 -> str.itoa(x)
+```
+
+A call through a namespace is ordinary field-call syntax the parser already produces
+(`str.itoa(x)` parses as `Call(Field(Var("str"), "itoa"), [x])`), so **no new call syntax** is
+introduced --- only a resolution step that rewrites it.
+
+**Visibility finally means something.** Only `pub` functions of the imported module are reachable
+through its namespace; a `priv` function is invisible to importers (today `include` flattens
+everything into one namespace with no enforcement --- RFC-0001 §4.2's module privacy becomes real).
+
+**Resolution model (the mechanism, no new backend).** A namespaced module's functions are
+*mangled* to globally-unique names, and calls are rewritten to them:
+
+1. `resolve.rs`, on an `import "P" as ns`, parses `P` and, for each **definition** line
+   (`fn`/`pub fn`/`priv fn`), rewrites the declared name `f` to a mangled `ns$f` (a safe,
+   unambiguous edit --- the identifier immediately after `fn`). It records the map
+   `ns.f -> ns$f` together with each function's visibility. (`$` is not a legal identifier char,
+   so a mangled name can never collide with a user identifier or another module's; the mangling is
+   internal and never shown.)
+2. A post-parse **resolution pass** rewrites calls:
+   - a qualified `ns.f(args)` where `ns` is a known import alias -> `Call(Var("ns$f"), args)`,
+     erroring if `f` is not `pub` in `ns` (or does not exist);
+   - inside a namespaced module's own function `ns$g`, a bare sibling call `f(args)` where `ns$f`
+     exists -> `ns$f(args)` (intra-module calls resolve to the module's mangled names);
+   - a `ns` that is an import alias is tracked so it is never mistaken for a struct value in the
+     existing `x.m()` method-call desugar (a name collision between an alias and a local is an
+     error).
+
+Because mangling touches only definition names (a text-safe edit) and call rewriting is done on
+the AST (robust), the model is sound and needs no lexer/parser change beyond recognizing the
+`import` directive. `include` (flat splice) stays for backward compatibility; `import` is the
+namespaced path forward.
+
+**TDD checkpoints:** an `import ... as ns` mangles the module's defs and exposes only `pub`;
+`ns.f()` resolves and runs; a `priv` function is unreachable through the namespace; an unaliased
+`import "a/b"` namespaces under `b`; two modules defining the same `f` no longer collide. New
+language surface, so it passes the qwen3.6 gate before merge.
+
+### 7.2 Later increments (ride on Increment 1, do not change the call surface)
+
+2. **Manifest + content hashing (§3.1):** a `package`/`require { name = sond:<hash> }` block;
+   `import name` resolves the friendly name to the pinned hash; the module's identity becomes the
+   hash of its normalized AST+contract. Open question #1 (per-definition vs per-module granularity)
+   is decided here --- proposal stands: per definition internally, friendly package names on top.
+3. **Contract re-verification on update (§3.3):** re-pointing a hash re-checks contract-against-
+   contract at every usage; an observable-behavior change does not compile.
+4. **Capability manifest (§3.4):** each package declares its capabilities; the compiler propagates
+   and audits them (RFC-0000 Pillar 4).
+
+Increment 1 is the one that answers "there is no way to reference by namespace/module.function" ---
+it is the friendly-name layer, usable immediately with path resolution, and the stable surface the
+hash/contract/capability layers attach to.
+
 ---
 
 *Conclusion: Sond's package format is the Go model --- decentralized, checksummed,
