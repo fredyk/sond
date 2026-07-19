@@ -633,8 +633,30 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
             }
             Some(out)
         }
-        // comparisons-as-values, field/index reads, etc.: out of the fragment.
-        _ => ctx.bail("an unsupported expression (a comparison used as a value, or a field/index read)"),
+        // An array or field READ yields an arbitrary value the linear engine cannot model, so it
+        // is an opaque fresh variable, NOT a fragment exit. The base and index are still
+        // evaluated for their own obligations (a division in the index must be proven safe) and to
+        // fork on any branch they contain. Each read is a DISTINCT fresh value: two reads are not
+        // assumed equal (sound, the array/struct may have changed between them).
+        Expr::Index(base, index) => {
+            let mut out = Vec::new();
+            for (s1, _) in eval_expr_paths(base, state, ctx)? {
+                for (s2, _) in eval_expr_paths(index, s1, ctx)? {
+                    out.push((s2, ctx.fresh_var()));
+                }
+            }
+            Some(out)
+        }
+        Expr::Field(base, _) => {
+            let mut out = Vec::new();
+            for (s2, _) in eval_expr_paths(base, state, ctx)? {
+                out.push((s2, ctx.fresh_var()));
+            }
+            Some(out)
+        }
+        // a comparison used as a value, a cast, a list/struct literal, `|`/`^`, etc.: out of the
+        // fragment (no linear model).
+        _ => ctx.bail("an unsupported expression (a comparison used as a value, or an unsupported operator)"),
     }
 }
 
@@ -1833,6 +1855,23 @@ mod tests {
         // check needed, for every possible x.
         let funcs = parse("fn id(x: i64) -> (r: i64) requires { x > 0 } ensures { r > 0 } { x }");
         assert!(verify(&funcs).is_ok());
+    }
+
+    #[test]
+    fn an_array_read_is_an_opaque_value_not_a_fragment_exit() {
+        // Reading `a[i]` no longer makes the whole body unverifiable: the read yields an arbitrary
+        // value, so a contract that holds for ANY result still verifies, and one that constrains
+        // the opaque value is (soundly) not provable.
+        let ok = parse(
+            "fn f(a: Slice, i: i64 where 0 <= i && i < a.len) -> (r: i64) ensures { r == r } { a[i] }",
+        );
+        assert!(verify(&ok).is_ok());
+        // The safety obligation on the INDEX expression is still gathered through the read: a
+        // division in the index must be proven safe.
+        let div = parse(
+            "fn g(a: Slice, k: i64) -> (r: i64) ensures { r == r } { a[10 / k] }",
+        );
+        assert!(verify(&div).is_err());
     }
 
     #[test]
