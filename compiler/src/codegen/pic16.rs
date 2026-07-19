@@ -330,11 +330,19 @@ fn emit_if(
     }
     let n = *lbl;
     *lbl += 1;
-    if let Expr::Binary(op @ (crate::ast::BinOp::Eq | crate::ast::BinOp::Ne), lhs, rhs) = cond
-        && let Some(c) = const8(rhs)
-    {
-        eval_to_w(lhs, out, locals);
-        l!("        xorlw   0x{:02X}            ; Z set iff equal", c & 0xFF);
+    if let Expr::Binary(op @ (crate::ast::BinOp::Eq | crate::ast::BinOp::Ne), lhs, rhs) = cond {
+        // Leave W = lhs XOR rhs, so the Z flag is set iff the two are equal.
+        if let Some(c) = const8(rhs) {
+            eval_to_w(lhs, out, locals);
+            l!("        xorlw   0x{:02X}            ; Z set iff equal", c & 0xFF);
+        } else {
+            // General comparison of two runtime values (e.g. a frame checksum
+            // `calc == chk`): stash rhs in a scratch register, then XOR lhs in.
+            eval_to_w(rhs, out, locals);
+            l!("        movwf   0x7D            ; rhs of the comparison");
+            eval_to_w(lhs, out, locals);
+            l!("        xorwf   0x7D, w         ; Z set iff lhs == rhs");
+        }
         // Eq: skip the then-branch when NOT equal; Ne: skip when equal.
         if matches!(op, crate::ast::BinOp::Eq) {
             l!("        btfss   STATUS, 2       ; STATUS Z is bit 2");
@@ -350,7 +358,7 @@ fn emit_if(
         }
         l!("_endif{n}:");
     } else {
-        l!("        ; (unsupported condition in Phase 1b, only `var == const`)");
+        l!("        ; (unsupported condition in Phase 1b, only `==`/`!=`)");
     }
 }
 
@@ -436,5 +444,18 @@ mod tests {
         assert!(asm.contains("movlw   0x07"), "serial_init must load CM<2:0>=111 to disable comparators");
         assert!(asm.contains("movwf   CMCON0"), "serial_init must write CMCON0 to make RA1 digital");
         assert!(asm.contains("clrf    VRCON"), "serial_init must disable CVref (also on RA1)");
+    }
+
+    // A frame checksum test (`if calc == chk`) compares two VARIABLES. The
+    // backend must compile it, otherwise the guarded reply is silently dropped
+    // (the ADD8 node validated its checksum and never answered).
+    #[test]
+    fn if_compares_two_variables() {
+        let asm = asm_for("fn main() { let a = serial_getc() let b = serial_getc() if a == b { serial_putc(1) } }");
+        assert!(
+            !asm.contains("unsupported condition"),
+            "a var == var condition must be supported, got:\n{asm}"
+        );
+        assert!(asm.contains("xorwf"), "var == var equality should XOR the two operands (xorwf)");
     }
 }
