@@ -231,6 +231,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Lower struct-field access in the contracts NOW, after the prover saw the source-level
+    // form (`s.len`, readable), so the runtime guard codegen receives the lowered slot read.
+    sondc::desugar::desugar_contracts(&mut funcs, &structs);
+
     let asm = match std::panic::catch_unwind(|| {
         if uefi {
             emit_uefi_g(&globals, &structs, &funcs)

@@ -457,20 +457,43 @@ pub fn desugar_structs(funcs: &mut [Function], structs: &[StructDef]) {
                 locals.insert(p.name.clone(), tn.to_string());
             }
         }
+        desugar_block(&mut f.body, &fields, &sizes, &mut locals, &methods);
+    }
+}
+
+/// Lowers struct-field access inside the contract propositions (`requires`/`ensures`), run
+/// AFTER the prover, so the prover sees the source-level `s.len` (readable diagnostics and a
+/// name it reasons about), while codegen still receives the lowered slot read for the runtime
+/// guard. Without this a contract reading a field reaches codegen as a raw `Field` and fails to
+/// compile its guard.
+pub fn desugar_contracts(funcs: &mut [Function], structs: &[StructDef]) {
+    let mut fields: FieldMap = HashMap::new();
+    let mut sizes: SizeMap = HashMap::new();
+    for s in structs {
+        let mut fm = HashMap::new();
+        for (i, f) in s.fields.iter().enumerate() {
+            fm.insert(f.name.clone(), i as i64);
+        }
+        sizes.insert(s.name.clone(), s.fields.len() as i64);
+        fields.insert(s.name.clone(), fm);
+    }
+    let methods: MethodSet = funcs.iter().map(|f| f.name.clone()).collect();
+    for f in funcs.iter_mut() {
+        let mut locals: HashMap<String, String> = HashMap::new();
+        for p in &f.params {
+            if let Some(tn) = base_struct(&p.ty).filter(|t| sizes.contains_key(*t)) {
+                locals.insert(p.name.clone(), tn.to_string());
+            }
+        }
         // A struct-typed named return is in scope in `ensures` (`ensures { r.x >= 0 }`).
         if let (Some(rn), Some(rt)) = (&f.ret_name, &f.ret)
             && let Some(tn) = base_struct(rt).filter(|t| sizes.contains_key(*t))
         {
             locals.insert(rn.clone(), tn.to_string());
         }
-        // Lower struct field access in the contract propositions too, otherwise a contract that
-        // reads a field (e.g. `requires { s.len > 0 }`) reaches codegen as a raw `Field` and its
-        // runtime guard fails to compile. The prover is unaffected: a proposition it cannot put
-        // in linear form (a field read, lowered or not) is dropped either way.
         for e in f.requires.iter_mut().chain(f.ensures.iter_mut()) {
             desugar_expr(e, &fields, &sizes, &mut locals, &methods);
         }
-        desugar_block(&mut f.body, &fields, &sizes, &mut locals, &methods);
     }
 }
 
@@ -1127,6 +1150,8 @@ mod tests {
         structs.extend(synth);
         hoist_struct_literals(&mut funcs);
         desugar_structs(&mut funcs, &structs);
+        // Contracts lower after the prover in the real driver; here (no prover) just before codegen.
+        desugar_contracts(&mut funcs, &structs);
         // Pass structs to codegen too, so a function returning a small struct/enum
         // returns it by value (RAX:RDX), the driver does the same.
         let asm = emit_program_g(&[], &structs, &funcs);
