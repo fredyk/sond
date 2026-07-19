@@ -1275,6 +1275,24 @@ fn sym_prop(e: &Expr, env: &HashMap<String, Sym>) -> Option<SymProp> {
     })
 }
 
+/// Splits one assumption into its atomic comparison propositions, flattening a top-level `&&`
+/// conjunction (`a && b && c` -> `[a, b, c]`). A conjunctive FACT means every conjunct holds, so
+/// each is a usable linear constraint; without this the whole `And` is dropped by [`sym_prop`]
+/// (it is not itself a comparison) and neither bound reaches the engine, which is why a
+/// `requires { 0 <= i && i < N }`, an `if a && b { .. }` guard, or an `invariant { .. }` written
+/// with `&&` (rather than `;`-separated props) failed to bound an index. Sound: the conjuncts are
+/// already implied by the assumption, so adding them can only prove more, never wrongly succeed.
+fn sym_props(e: &Expr, env: &HashMap<String, Sym>) -> Vec<SymProp> {
+    match e {
+        Expr::Binary(BinOp::And, l, r) => {
+            let mut v = sym_props(l, env);
+            v.extend(sym_props(r, env));
+            v
+        }
+        _ => sym_prop(e, env).into_iter().collect(),
+    }
+}
+
 /// A linear expression `Σ coeff·var + k` over the parameters. A constraint is a `Lin`
 /// read as `Lin ≥ 0`. This is the normal form the decision procedure works in.
 #[derive(Clone, Debug)]
@@ -1733,7 +1751,7 @@ fn index_props(
         .map(|n| (n.clone(), Sym::Var(n.clone())))
         .collect();
     let (i, hi) = (eval_expr(idx, &env)?, eval_expr(bound, &env)?);
-    let asm: Vec<SymProp> = assumptions.iter().filter_map(|e| sym_prop(e, &env)).collect();
+    let asm: Vec<SymProp> = assumptions.iter().flat_map(|e| sym_props(e, &env)).collect();
     let int_types = int_types_of(params);
     let lower = SymProp {
         op: BinOp::Ge,
@@ -1793,7 +1811,7 @@ fn proven_nonneg(e: &Expr, assumptions: &[Expr], params: &[Param]) -> bool {
     let Some(sym) = eval_expr(e, &env) else {
         return false;
     };
-    let asm: Vec<SymProp> = assumptions.iter().filter_map(|a| sym_prop(a, &env)).collect();
+    let asm: Vec<SymProp> = assumptions.iter().flat_map(|a| sym_props(a, &env)).collect();
     let prop = SymProp {
         op: BinOp::Ge,
         lhs: sym,
@@ -2451,6 +2469,30 @@ mod tests {
              requires { x >= y; y >= z } ensures { r >= z } { x }",
         );
         assert!(verify(&funcs).is_ok());
+    }
+
+    #[test]
+    fn splits_a_conjunctive_assumption_to_bound_an_index() {
+        // A SINGLE `&&` fact, `count >= 0 && count < 4`, must bound `count` for size 4.
+        // Written as one conjunction (as an `if a && b { .. }` guard or a `requires { a && b }`
+        // yields), not two `;`-separated props. Before the fix the whole `And` was dropped
+        // because it is not itself a comparison, so neither conjunct reached the linear engine.
+        let count = || Box::new(Expr::Var("count".to_string()));
+        let asm = vec![Expr::Binary(
+            BinOp::And,
+            Box::new(Expr::Binary(BinOp::Ge, count(), Box::new(Expr::Int(0)))),
+            Box::new(Expr::Binary(BinOp::Lt, count(), Box::new(Expr::Int(4)))),
+        )];
+        let params = vec![Param {
+            name: "count".to_string(),
+            ty: Type::Named("i64".to_string()),
+        }];
+        assert!(index_proven_in_bounds(
+            &Expr::Var("count".to_string()),
+            &Expr::Int(4),
+            &asm,
+            &params
+        ));
     }
 
     #[test]
