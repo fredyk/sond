@@ -1276,15 +1276,20 @@ fn prove(
     {
         return Outcome::Unknown;
     }
-    // The assumptions as `≥ 0` constraints. A non-linear or `!=` assumption is simply
-    // dropped: fewer facts can only make proving harder (never wrongly succeed) and, since
-    // dropping constraints preserves unsatisfiability, cannot cause a wrong "disproven".
+    // The assumptions as `≥ 0` constraints, plus the `!=` ones kept aside as DISEQUALITIES (each a
+    // `Lin` that is `!= 0`). A non-linear assumption is dropped: fewer facts can only make proving
+    // harder, never wrongly succeed.
     let mut a: Vec<Lin> = Vec::new();
+    let mut diseqs: Vec<Lin> = Vec::new();
     for ap in assumptions {
-        if let (Some(l), Some(r)) = (lin_of_sym(&ap.lhs), lin_of_sym(&ap.rhs))
-            && let Some(cs) = holds_cons(&ap.op, &l, &r)
-        {
-            a.extend(cs);
+        if let (Some(l), Some(r)) = (lin_of_sym(&ap.lhs), lin_of_sym(&ap.rhs)) {
+            if ap.op == BinOp::Ne {
+                if let Some(d) = l.sub(&r) {
+                    diseqs.push(d);
+                }
+            } else if let Some(cs) = holds_cons(&ap.op, &l, &r) {
+                a.extend(cs);
+            }
         }
     }
     let (Some(l), Some(r)) = (lin_of_sym(&p.lhs), lin_of_sym(&p.rhs)) else {
@@ -1305,21 +1310,64 @@ fn prove(
             Outcome::Unknown
         };
     }
-    let Some(holds) = holds_cons(&p.op, &l, &r) else {
+    let base = linear_outcome(&p.op, &l, &r, &a);
+    // A disequality `d != 0` is `d <= -1 ∨ d >= 1` over ℤ. When the conjunctive facts alone leave
+    // the goal Unknown, case-split on each disequality: the goal is PROVEN iff it holds under every
+    // consistent combination (an inconsistent case is vacuously true). Bounded to keep the split
+    // (2^n cases) small; beyond the cap the disequalities are simply not used (still sound).
+    const MAX_DISEQS: usize = 4;
+    if matches!(base, Outcome::Unknown) && !diseqs.is_empty() && diseqs.len() <= MAX_DISEQS {
+        let goal = (p.op.clone(), l, r);
+        if prove_by_cases(&goal.0, &goal.1, &goal.2, a, &diseqs) {
+            return Outcome::Proven;
+        }
+        return Outcome::Unknown;
+    }
+    base
+}
+
+/// The linear outcome of a goal `l OP r` (OP not `!=`) under `≥ 0` assumptions `a`: Proven if the
+/// assumptions entail every constraint the goal needs, Disproven if the goal is unsatisfiable with
+/// them, else Unknown. An inconsistent `a` proves any goal (vacuously), which is what makes a
+/// disequality case-split's dead branches drop out.
+fn linear_outcome(op: &BinOp, l: &Lin, r: &Lin, a: &[Lin]) -> Outcome {
+    let Some(holds) = holds_cons(op, l, r) else {
         return Outcome::Unknown;
     };
-    // Proven: the assumptions entail every constraint the goal needs.
-    if holds.iter().all(|h| implies_geq0(&a, h)) {
+    if holds.iter().all(|h| implies_geq0(a, h)) {
         return Outcome::Proven;
     }
-    // Disproven: the goal is impossible under the assumptions (adding it is unsatisfiable),
-    // so the postcondition is false for every input the precondition allows.
-    let mut with_goal = a;
+    let mut with_goal = a.to_vec();
     with_goal.extend(holds);
     if unsat(with_goal) {
         return Outcome::Disproven;
     }
     Outcome::Unknown
+}
+
+/// Is the goal PROVEN under every consistent case of the disequalities? Each `d != 0` splits into
+/// `d <= -1` (`-d - 1 >= 0`) and `d >= 1` (`d - 1 >= 0`); the goal must hold in both. A case whose
+/// assumptions are contradictory proves the goal vacuously (via `linear_outcome`).
+fn prove_by_cases(op: &BinOp, l: &Lin, r: &Lin, a: Vec<Lin>, diseqs: &[Lin]) -> bool {
+    let Some((d, rest)) = diseqs.split_first() else {
+        return matches!(linear_outcome(op, l, r, &a), Outcome::Proven);
+    };
+    // case `d <= -1`  ==  `-d - 1 >= 0`
+    let Some(mut low) = d.scale(-1) else {
+        return false; // overflow negating the disequality, conservative
+    };
+    low.k -= 1;
+    let mut a_low = a.clone();
+    a_low.push(low);
+    if !prove_by_cases(op, l, r, a_low, rest) {
+        return false;
+    }
+    // case `d >= 1`  ==  `d - 1 >= 0`
+    let mut high = d.clone();
+    high.k -= 1;
+    let mut a_high = a;
+    a_high.push(high);
+    prove_by_cases(op, l, r, a_high, rest)
 }
 
 /// The inclusive `[min, max]` value range of a built-in integer type (as i128), or `None` for a
@@ -1897,6 +1945,24 @@ mod tests {
         // check needed, for every possible x.
         let funcs = parse("fn id(x: i64) -> (r: i64) requires { x > 0 } ensures { r > 0 } { x }");
         assert!(verify(&funcs).is_ok());
+    }
+
+    #[test]
+    fn uses_a_disequality_to_tighten_an_integer_bound() {
+        // `bit != 0` with `bit >= 0` forces `bit >= 1` over ℤ, so `bit - 1 >= 0`, the exact step
+        // a down-counting loop's `if bit == 0 { break }` guard gives before `bit = bit - 1`.
+        let f = parse(
+            "fn f(bit: i64 where bit >= 0 && bit != 0) -> (r: i64) ensures { r >= 0 } { bit - 1 }",
+        );
+        assert!(verify(&f).is_ok());
+    }
+
+    #[test]
+    fn a_disequality_alone_does_not_prove_a_bound() {
+        // Without the `>= 0`, `bit != 0` does not bound `bit - 1` below (bit could be very
+        // negative), must NOT be proven.
+        let f = parse("fn f(bit: i64 where bit != 0) -> (r: i64) ensures { r >= 0 } { bit - 1 }");
+        assert!(verify(&f).is_err());
     }
 
     #[test]
