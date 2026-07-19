@@ -321,7 +321,19 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
             Stmt::Assign { .. } => {
                 return ctx.bail("an assignment to a field or non-variable target");
             }
-            Stmt::Expr(_) => {} // a discarded side effect does not change the result
+            // A statement-position `if` (or `match`) is evaluated for its EFFECTS, the mutations
+            // its branches make and the obligations they raise, NOT ignored. Ignoring it was
+            // unsound: a branch that assigns (e.g. `if c { x = -1 }`) would silently not update the
+            // state, so an invariant a branch violates was spuriously "preserved". Its value is
+            // discarded; a missing `else` is a no-op branch carrying only the negated guard.
+            Stmt::Expr(e @ (Expr::If { .. } | Expr::Match { .. })) => {
+                states = eval_effect(e, states, ctx)?;
+            }
+            // Any other statement-position expression (a value, or an uncontracted call like
+            // `print_int`) has no effect on the scalar state the prover tracks, Sond has no
+            // reference-to-local, so a call cannot reassign a caller's local, and no contract to
+            // enforce, so it is soundly discarded.
+            Stmt::Expr(_) => {}
             // A loop is verified via its invariant (init + preservation), then continues
             // with (invariant ∧ ¬condition). Without an invariant it is unverifiable.
             Stmt::For {
@@ -343,6 +355,36 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
         }
     }
     Some(states)
+}
+
+/// Evaluates a statement-position `if`/`match` for its EFFECTS across every incoming state,
+/// discarding the value. Each `if` forks: the then-branch runs under the guard, the else-branch
+/// (an empty no-op when absent) under its negation, and both continuations carry forward so a
+/// later statement sees the path-specific facts. `None` if a branch leaves the fragment.
+fn eval_effect(e: &Expr, states: Vec<State>, ctx: &mut Ctx) -> Option<Vec<State>> {
+    let Expr::If {
+        cond,
+        then_branch,
+        else_branch,
+    } = e
+    else {
+        // A statement-position `match` is not yet modelled; reject rather than ignore (sound).
+        return ctx.bail("a `match` in statement position");
+    };
+    let mut out = Vec::new();
+    for st in states {
+        let (then_props, else_props) = cond_props(cond, &st.env);
+        let mut then_state = st.clone();
+        then_state.cons.extend(then_props);
+        out.extend(eval_body(then_branch, then_state, ctx)?);
+        let mut else_state = st;
+        else_state.cons.extend(else_props);
+        match else_branch {
+            Some(eb) => out.extend(eval_body(eb, else_state, ctx)?),
+            None => out.push(else_state),
+        }
+    }
+    Some(out)
 }
 
 /// Evaluates a block executed for effect only (a loop body): its statements, then its
@@ -1855,6 +1897,28 @@ mod tests {
         // check needed, for every possible x.
         let funcs = parse("fn id(x: i64) -> (r: i64) requires { x > 0 } ensures { r > 0 } { x }");
         assert!(verify(&funcs).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_loop_whose_statement_if_violates_the_invariant() {
+        // SOUNDNESS: a statement-position `if` that assigns must be PROCESSED, not ignored, else
+        // the invariant `x >= 0` is spuriously "preserved" while the branch sets x = -1. Regression
+        // guard for a real unsoundness: verify accepted this, the ud2 guard trapped at runtime, and
+        // in release (guard erased) it would silently return -1.
+        let f = parse(
+            "fn f() -> (r: i64) ensures { r >= 0 } { let mut x = 5\nfor x > 0 invariant { x >= 0 } { if x > 0 { x = 0 - 1 }\nlet d = 0 }\nx }",
+        );
+        assert!(verify(&f).is_err());
+    }
+
+    #[test]
+    fn a_statement_if_that_preserves_the_invariant_still_verifies() {
+        // The mirror of the soundness guard: a statement-`if` whose every branch keeps the
+        // invariant is accepted, processing it must not over-reject.
+        let f = parse(
+            "fn f(n: i64 where n > 0) -> (r: i64) ensures { r >= 0 } { let mut x = 0\nfor x < n invariant { x >= 0 } { if x < n { x = x + 1 }\nlet d = 0 }\nx }",
+        );
+        assert!(verify(&f).is_ok());
     }
 
     #[test]
