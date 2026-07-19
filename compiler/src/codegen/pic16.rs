@@ -69,6 +69,47 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
     l!("        decfsz  0x70, f");
     l!("        goto    _dly1");
     l!("        return");
+    // Bit-banged 9600-baud 8N1 UART on RA0 (TX). The 16F684 has no hardware UART, so this is
+    // the physical layer of the PIC-cluster link (PC <-> CP2102 <-> PIC). BITDLY is tuned for
+    // the internal oscillator at 8 MHz (~208 Tcy per bit); calibrate on real hardware if framing
+    // is off (widen/narrow BITDLY by a few counts).
+    l!("BITDLY  equ     0x41            ; ~one bit period at 8 MHz/9600 (calibrate on HW)");
+    l!("serial_init:");
+    l!("        banksel OSCCON");
+    l!("        movlw   0x70            ; IRCF=111 -> 8 MHz internal oscillator");
+    l!("        movwf   OSCCON");
+    l!("        banksel ANSEL");
+    l!("        clrf    ANSEL           ; all pins digital");
+    l!("        banksel TRISA");
+    l!("        bcf     TRISA, 0        ; RA0 = TX = output");
+    l!("        banksel PORTA");
+    l!("        bsf     PORTA, 0        ; idle line high");
+    l!("        return");
+    l!("serial_putc:                    ; transmit W as 9600 8N1, LSB first, on RA0");
+    l!("        movwf   0x72            ; byte");
+    l!("        movlw   0x08");
+    l!("        movwf   0x73            ; bit count");
+    l!("        banksel PORTA");
+    l!("        bcf     PORTA, 0        ; start bit");
+    l!("        call    _bitdly");
+    l!("_sp_bit:");
+    l!("        rrf     0x72, f         ; LSB -> C");
+    l!("        btfss   STATUS, 0       ; C is bit 0 of STATUS");
+    l!("        bcf     PORTA, 0");
+    l!("        btfsc   STATUS, 0");
+    l!("        bsf     PORTA, 0");
+    l!("        call    _bitdly");
+    l!("        decfsz  0x73, f");
+    l!("        goto    _sp_bit");
+    l!("        bsf     PORTA, 0        ; stop bit");
+    l!("        call    _bitdly");
+    l!("        return");
+    l!("_bitdly:");
+    l!("        movlw   BITDLY");
+    l!("        movwf   0x74");
+    l!("_bd:    decfsz  0x74, f");
+    l!("        goto    _bd");
+    l!("        return");
     l!("        end");
     out
 }
@@ -133,6 +174,14 @@ fn emit_call(e: &Expr, out: &mut String) {
             }
         }
         ("delay", 0) => l!("        call    delay"),
+        ("serial_init", 0) => l!("        call    serial_init"),
+        ("serial_putc", 1) => match const8(&args[0].value) {
+            Some(v) => {
+                l!("        movlw   0x{v:02X}");
+                l!("        call    serial_putc");
+            }
+            None => l!("        ; serial_putc needs a constant byte in Phase 1"),
+        },
         _ => l!("        ; (unsupported call `{name}` in Phase 1)"),
     }
 }
