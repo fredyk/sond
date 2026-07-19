@@ -26,6 +26,20 @@ fn parses_a_test_block() {
 }
 
 #[test]
+fn test_is_a_contextual_keyword_usable_as_an_identifier() {
+    // `test` is a keyword only in `test "name" { .. }` position (a test block). Elsewhere, a
+    // function name, a variable, a parameter, it is an ordinary identifier. (Gate finding: an
+    // independent AI hit "expected identifier, got Test" writing `fn test()`.)
+    let f = parse_fn("fn test(test: i64) -> i64 { let test = 1\ntest }");
+    assert_eq!(f.name, "test", "a function may be named `test`");
+    assert_eq!(f.params[0].name, "test", "a parameter may be named `test`");
+    // The top-level test-block form still parses (the keyword role is unaffected).
+    let mut p = Parser::new(tokenize("test \"still works\" { let x = 1 }"));
+    let funcs = p.parse_program();
+    assert!(funcs[0].is_test);
+}
+
+#[test]
 fn parses_multiple_tests_with_distinct_names() {
     let mut p = Parser::new(tokenize(
         "test \"one\" { let a = 1 }\ntest \"two\" { let b = 2 }",

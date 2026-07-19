@@ -305,6 +305,19 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         }
     }
 
+    // `test` is a keyword ONLY in a top-level `test "name" { .. }` block, i.e. when immediately
+    // followed by a string literal. Everywhere else (a function name, a parameter, a variable) it
+    // is an ordinary identifier. Reclassify here in one place so all positions agree, without any
+    // parser-wide special-casing. (Gate finding: an independent AI hit "expected identifier, got
+    // Test" writing `fn test()`.)
+    for i in 0..tokens.len() {
+        if matches!(tokens[i], Token::Test)
+            && !matches!(tokens.get(i + 1), Some(Token::Str(_)))
+        {
+            tokens[i] = Token::Ident("test".to_string());
+        }
+    }
+
     tokens
 }
 
