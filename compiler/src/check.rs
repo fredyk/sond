@@ -478,6 +478,320 @@ fn const_fold(e: &Expr, fname: &str) -> Result<Option<i64>, String> {
 /// (an off-by-one, a wrong literal). Only PROVABLE out-of-bounds are rejected; a variable index
 /// is left to the prover and the coming refinement types. Non-breaking: no valid program indexes
 /// a known-size array with a constant out of range. Mirrors `check_constant_overflow`.
+/// The flow-sensitive facts the bounds check carries as it walks a body: the sound propositions
+/// that hold at the current program point. It NEVER trusts an unverified user `invariant`; the
+/// counter floors below are PROVEN here from the loop's own shape.
+#[derive(Clone, Default)]
+struct Flow {
+    /// Invalidatable facts (a precondition, a loop condition, a branch guard), dropped as soon as
+    /// a variable they mention is reassigned, because they may no longer hold.
+    facts: Vec<Expr>,
+    /// Monotonic-counter floors: `v >= C`. A counter set to constant `C` before a loop and stepped
+    /// only by `v = v + <positive const>` never drops below `C`, so this survives its increment
+    /// (unlike the upper bound from the condition, which the increment invalidates).
+    counters: HashMap<String, i64>,
+    /// Monotonic-counter ceilings: `v <= C`. The mirror of `counters` for a DECREASING counter
+    /// (stepped only by `v = v - <positive const>` from a constant entry), which never rises above
+    /// its entry value, and for the derived upper bound of a masked/shifted value.
+    ceilings: HashMap<String, i64>,
+    /// Known exact constant values: `v == C`.
+    consts: HashMap<String, i64>,
+}
+
+impl Flow {
+    /// The proposition set for discharging a bounds obligation at this point.
+    fn assumptions(&self) -> Vec<Expr> {
+        let mut a = self.facts.clone();
+        for (v, &c) in &self.counters {
+            a.push(cmp_const(BinOp::Ge, v, c));
+        }
+        for (v, &c) in &self.ceilings {
+            a.push(cmp_const(BinOp::Le, v, c));
+        }
+        for (v, &c) in &self.consts {
+            a.push(cmp_const(BinOp::Ge, v, c));
+            a.push(cmp_const(BinOp::Le, v, c));
+        }
+        a
+    }
+    /// A variable was reassigned: drop every fact that mentions it and any const/counter status.
+    fn invalidate(&mut self, v: &str) {
+        self.facts.retain(|f| !mentions(f, v));
+        self.counters.remove(v);
+        self.ceilings.remove(v);
+        self.consts.remove(v);
+    }
+}
+
+fn cmp_const(op: BinOp, v: &str, c: i64) -> Expr {
+    Expr::Binary(
+        op,
+        Box::new(Expr::Var(v.to_string())),
+        Box::new(Expr::Int(c)),
+    )
+}
+
+fn cmp_var(op: BinOp, v: &str, rhs: &Expr) -> Expr {
+    Expr::Binary(op, Box::new(Expr::Var(v.to_string())), Box::new(rhs.clone()))
+}
+
+/// Does `e` mention the variable `name`?
+fn mentions(e: &Expr, name: &str) -> bool {
+    match e {
+        Expr::Var(v) => v == name,
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => mentions(l, name) || mentions(r, name),
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => mentions(x, name),
+        Expr::Call(c, args) => mentions(c, name) || args.iter().any(|a| mentions(&a.value, name)),
+        _ => false,
+    }
+}
+
+/// Collects every variable assigned (as a plain `v = ..` target) anywhere in a block.
+fn assigned_vars(b: &Block, out: &mut HashSet<String>) {
+    let push = |e: &Expr, out: &mut HashSet<String>| match e {
+        Expr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            assigned_vars(then_branch, out);
+            if let Some(eb) = else_branch {
+                assigned_vars(eb, out);
+            }
+        }
+        Expr::Match { arms, .. } => {
+            for a in arms {
+                assigned_vars(&a.body, out);
+            }
+        }
+        _ => {}
+    };
+    for s in &b.stmts {
+        match s {
+            Stmt::Assign {
+                target: Expr::Var(v),
+                value,
+            } => {
+                out.insert(v.clone());
+                push(value, out);
+            }
+            Stmt::Assign { value, .. } => push(value, out),
+            Stmt::For { body, .. } => assigned_vars(body, out),
+            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
+                push(value, out)
+            }
+            _ => {}
+        }
+    }
+    if let Some(t) = &b.tail {
+        push(t, out);
+    }
+}
+
+/// Does the block `break` out of THIS loop? A `break` inside a NESTED `for` targets that inner
+/// loop, so nested loop bodies are not descended into. Used to decide whether the negated loop
+/// condition is a sound post-loop fact (it is not if the loop can exit early via `break`).
+fn has_break(b: &Block) -> bool {
+    fn in_expr(e: &Expr) -> bool {
+        match e {
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => has_break(then_branch) || else_branch.as_ref().is_some_and(|eb| has_break(eb)),
+            Expr::Match { arms, .. } => arms.iter().any(|a| has_break(&a.body)),
+            _ => false,
+        }
+    }
+    b.stmts.iter().any(|s| match s {
+        Stmt::Break => true,
+        Stmt::For { .. } => false,
+        Stmt::Let { value, .. }
+        | Stmt::Return(Some(value))
+        | Stmt::Expr(value)
+        | Stmt::Assign { value, .. } => in_expr(value),
+        _ => false,
+    }) || b.tail.as_ref().is_some_and(|t| in_expr(t))
+}
+
+/// If `e` is `v >= k` or `v > k` with `k` a constant, the monotonic floor it establishes for `v`:
+/// `k` (resp. `k + 1`).
+fn floor_from(e: &Expr) -> Option<(String, i64)> {
+    let Expr::Binary(op, l, r) = e else {
+        return None;
+    };
+    let Expr::Var(v) = l.as_ref() else {
+        return None;
+    };
+    let k = const_index(r)?;
+    match op {
+        BinOp::Ge => Some((v.clone(), k)),
+        BinOp::Gt => Some((v.clone(), k + 1)),
+        _ => None,
+    }
+}
+
+/// If `value` is `v + K` or `K + v` with `K` a positive constant, returns `K`, the shape of a
+/// monotonic increasing counter step.
+fn increment_of(v: &str, value: &Expr) -> Option<i64> {
+    let Expr::Binary(BinOp::Add, l, r) = value else {
+        return None;
+    };
+    let is_v = |e: &Expr| matches!(e, Expr::Var(n) if n == v);
+    let k = if is_v(l) {
+        const_index(r)?
+    } else if is_v(r) {
+        const_index(l)?
+    } else {
+        return None;
+    };
+    (k > 0).then_some(k)
+}
+
+/// If `value` is `v - K` with `K` a positive constant, returns `K`, a monotonic DECREASING step.
+fn decrement_of(v: &str, value: &Expr) -> Option<i64> {
+    let Expr::Binary(BinOp::Sub, l, r) = value else {
+        return None;
+    };
+    if !matches!(l.as_ref(), Expr::Var(n) if n == v) {
+        return None;
+    }
+    let k = const_index(r)?;
+    (k > 0).then_some(k)
+}
+
+/// A conservative `[lo, hi]` interval for `e` under the current flow, or `None` if not bounded on
+/// both sides. Sound interval arithmetic over the operators crypto uses to derive an index from a
+/// counter: masking (`& (2^k-1)`), shifts (`>>`/`>>>`/`<<`), `/`, `%`, and `+`/`-`/`*`. This is
+/// what lets `exp[bit >> 3]` and `a[i / 8]` be proven in bounds without a hand-written `where`.
+fn expr_range(e: &Expr, flow: &Flow) -> Option<(i64, i64)> {
+    match e {
+        Expr::Int(n) => Some((*n, *n)),
+        Expr::Var(v) => {
+            if let Some(&c) = flow.consts.get(v) {
+                return Some((c, c));
+            }
+            Some((
+                flow.counters.get(v).copied()?,
+                flow.ceilings.get(v).copied()?,
+            ))
+        }
+        Expr::Binary(op, l, r) => match op {
+            BinOp::BitAnd => {
+                // `e & (2^k - 1)` ∈ [0, mask] for any `e`, the mask keeps only the low bits.
+                let m = const_index(l).or_else(|| const_index(r))?;
+                (m >= 0 && (m & m.wrapping_add(1)) == 0).then_some((0, m))
+            }
+            BinOp::Shr | BinOp::LShr => {
+                // `e >> k` = `e / 2^k` for non-negative `e`: shifts the interval down.
+                let (llo, lhi) = expr_range(l, flow)?;
+                let k = const_index(r)?;
+                (llo >= 0 && (0..63).contains(&k)).then_some((llo >> k, lhi >> k))
+            }
+            BinOp::Shl => {
+                let (llo, lhi) = expr_range(l, flow)?;
+                let k = const_index(r)?;
+                (llo >= 0 && (0..63).contains(&k))
+                    .then_some((llo.wrapping_shl(k as u32), lhi.wrapping_shl(k as u32)))
+            }
+            BinOp::Div => {
+                let d = const_index(r)?;
+                let (llo, lhi) = expr_range(l, flow)?;
+                (d > 0 && llo >= 0).then_some((llo / d, lhi / d))
+            }
+            BinOp::Mod => {
+                let m = const_index(r)?;
+                let (llo, _) = expr_range(l, flow)?;
+                (m > 0 && llo >= 0).then_some((0, m - 1))
+            }
+            BinOp::Add => {
+                let (a, b) = expr_range(l, flow)?;
+                let (c, d) = expr_range(r, flow)?;
+                Some((a.checked_add(c)?, b.checked_add(d)?))
+            }
+            BinOp::Sub => {
+                let (a, b) = expr_range(l, flow)?;
+                let (c, d) = expr_range(r, flow)?;
+                Some((a.checked_sub(d)?, b.checked_sub(c)?))
+            }
+            BinOp::Mul => {
+                let (a, b) = expr_range(l, flow)?;
+                let (c, d) = expr_range(r, flow)?;
+                (a >= 0 && c >= 0).then_some((a.checked_mul(c)?, b.checked_mul(d)?))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Does EVERY assignment to `v` in the block satisfy `step` (and is there at least one)? Used to
+/// recognise a monotonic counter, all increments (`is_monotonic_counter`) or all decrements
+/// (`is_monotonic_decounter`).
+fn all_steps<F: Fn(&str, &Expr) -> bool>(v: &str, b: &Block, step: &F) -> bool {
+    fn walk<F: Fn(&str, &Expr) -> bool>(
+        v: &str,
+        b: &Block,
+        step: &F,
+        all_ok: &mut bool,
+        any: &mut bool,
+    ) {
+        let in_expr = |e: &Expr, all_ok: &mut bool, any: &mut bool| match e {
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                walk(v, then_branch, step, all_ok, any);
+                if let Some(eb) = else_branch {
+                    walk(v, eb, step, all_ok, any);
+                }
+            }
+            Expr::Match { arms, .. } => {
+                for a in arms {
+                    walk(v, &a.body, step, all_ok, any);
+                }
+            }
+            _ => {}
+        };
+        for s in &b.stmts {
+            match s {
+                Stmt::Assign {
+                    target: Expr::Var(t),
+                    value,
+                } if t == v => {
+                    *any = true;
+                    if !step(v, value) {
+                        *all_ok = false;
+                    }
+                }
+                Stmt::For { body, .. } => walk(v, body, step, all_ok, any),
+                Stmt::Let { value, .. }
+                | Stmt::Return(Some(value))
+                | Stmt::Expr(value)
+                | Stmt::Assign { value, .. } => in_expr(value, all_ok, any),
+                _ => {}
+            }
+        }
+        if let Some(t) = &b.tail {
+            in_expr(t, all_ok, any);
+        }
+    }
+    let (mut all_ok, mut any) = (true, false);
+    walk(v, b, step, &mut all_ok, &mut any);
+    any && all_ok
+}
+
+/// `v` is stepped only by `v = v + <positive const>`: it only ever increases from its entry value.
+fn is_monotonic_counter(v: &str, b: &Block) -> bool {
+    all_steps(v, b, &|v, e| increment_of(v, e).is_some())
+}
+
+/// `v` is stepped only by `v = v - <positive const>`: it only ever decreases from its entry value.
+fn is_monotonic_decounter(v: &str, b: &Block) -> bool {
+    all_steps(v, b, &|v, e| decrement_of(v, e).is_some())
+}
+
 pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(), String> {
     // Module-level arrays (`.data` tables, crypto S-boxes, round constants) are in scope in
     // every function, so seed their sizes once.
@@ -490,8 +804,11 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
     for f in funcs {
         let mut sizes = global_sizes.clone();
         // The function's preconditions are the facts true on every path from entry.
-        let asm: Vec<Expr> = f.requires.clone();
-        bounds_block(&f.body, &f.name, &mut sizes, &asm, &f.params)?;
+        let mut flow = Flow {
+            facts: f.requires.clone(),
+            ..Default::default()
+        };
+        bounds_block(&f.body, &f.name, &mut sizes, &mut flow, &f.params)?;
     }
     Ok(())
 }
@@ -526,7 +843,7 @@ fn bounds_block(
     b: &Block,
     fname: &str,
     sizes: &mut HashMap<String, i64>,
-    asm: &[Expr],
+    flow: &mut Flow,
     params: &[Param],
 ) -> Result<(), String> {
     for s in &b.stmts {
@@ -537,7 +854,9 @@ fn bounds_block(
                 array_len,
                 ..
             } => {
-                bounds_expr(value, fname, sizes, asm, params)?;
+                bounds_expr(value, fname, sizes, flow, params)?;
+                // Rebinding the name drops any prior fact/const/counter about it.
+                flow.invalidate(name);
                 match array_len {
                     // `let a[N]` records the known size; a scalar `let a = ..` reusing the
                     // name drops any prior size so a later index is not checked against it.
@@ -546,40 +865,143 @@ fn bounds_block(
                     }
                     None => {
                         sizes.remove(name);
+                        if let Some(c) = const_index(value) {
+                            flow.consts.insert(name.clone(), c);
+                        } else {
+                            // Record the definitional equality `name == value` so the prover can
+                            // substitute (`let t = 16 + j` reduces `W[t - 16]` to `W[j]`). It is
+                            // dropped as soon as `name` or any variable in `value` is reassigned,
+                            // since both invalidate facts mentioning them.
+                            flow.facts.push(cmp_var(BinOp::Ge, name, value));
+                            flow.facts.push(cmp_var(BinOp::Le, name, value));
+                            // And its derived interval, for a masked/shifted offset the linear
+                            // prover cannot express (`let byte_idx = bit >> 3`).
+                            if let Some((lo, hi)) = expr_range(value, flow) {
+                                flow.counters.insert(name.clone(), lo);
+                                flow.ceilings.insert(name.clone(), hi);
+                            }
+                        }
                     }
                 }
             }
-            Stmt::Assign { target, value } => {
-                bounds_expr(target, fname, sizes, asm, params)?;
-                bounds_expr(value, fname, sizes, asm, params)?;
-            }
-            Stmt::Return(Some(v)) | Stmt::Expr(v) => bounds_expr(v, fname, sizes, asm, params)?,
-            Stmt::For {
-                cond,
-                invariant,
-                body,
+            Stmt::Assign {
+                target: Expr::Var(v),
+                value,
             } => {
+                bounds_expr(value, fname, sizes, flow, params)?;
+                // Classify the reassignment against `v`'s bounds captured BEFORE invalidation:
+                // an increment `v = v + k` keeps the floor (drops the ceiling), a decrement keeps
+                // the ceiling (drops the floor), a fresh constant is exact, and any other value
+                // takes whatever interval can be derived for it (a mask/shift/mod bounds it).
+                let floor = flow.consts.get(v).or(flow.counters.get(v)).copied();
+                let ceil = flow.consts.get(v).or(flow.ceilings.get(v)).copied();
+                let is_inc = increment_of(v, value).is_some();
+                let is_dec = decrement_of(v, value).is_some();
+                let rng = expr_range(value, flow);
+                flow.invalidate(v);
+                if is_inc {
+                    if let Some(c) = floor {
+                        flow.counters.insert(v.clone(), c);
+                    }
+                } else if is_dec {
+                    if let Some(c) = ceil {
+                        flow.ceilings.insert(v.clone(), c);
+                    }
+                } else if let Some(c) = const_index(value) {
+                    flow.consts.insert(v.clone(), c);
+                } else if let Some((lo, hi)) = rng {
+                    flow.counters.insert(v.clone(), lo);
+                    flow.ceilings.insert(v.clone(), hi);
+                }
+            }
+            Stmt::Assign { target, value } => {
+                // Assigning through an index/field: a memory write, no scalar rebinding.
+                bounds_expr(target, fname, sizes, flow, params)?;
+                bounds_expr(value, fname, sizes, flow, params)?;
+            }
+            Stmt::Return(Some(v)) | Stmt::Expr(v) => bounds_expr(v, fname, sizes, flow, params)?,
+            Stmt::For { cond, body, .. } => {
+                // The user `invariant` clause is IGNORED: it is unverified, so trusting it would be
+                // unsound. The loop's sound facts are derived here instead.
                 if let Some(c) = cond {
-                    bounds_expr(c, fname, sizes, asm, params)?;
+                    bounds_expr(c, fname, sizes, flow, params)?;
                 }
-                for inv in invariant {
-                    bounds_expr(inv, fname, sizes, asm, params)?;
+                let mut modified = HashSet::new();
+                assigned_vars(body, &mut modified);
+                let mut body_flow = flow.clone();
+                // Facts about a variable the body reassigns do not survive across iterations.
+                for v in &modified {
+                    body_flow.invalidate(v);
                 }
-                // Inside the loop body the condition and every invariant hold as facts.
-                let mut inner_asm = asm.to_vec();
+                // A variable stepped only by `v = v + <positive const>` from a constant entry never
+                // drops below that entry value, a PROVEN monotonic floor; its mirror, a decrement,
+                // never rises above the entry value, a monotonic ceiling.
+                for v in &modified {
+                    if is_monotonic_counter(v, body)
+                        && let Some(&c) = flow.consts.get(v).or_else(|| flow.counters.get(v))
+                    {
+                        body_flow.counters.insert(v.clone(), c);
+                    }
+                    if is_monotonic_decounter(v, body)
+                        && let Some(&c) = flow.consts.get(v).or_else(|| flow.ceilings.get(v))
+                    {
+                        body_flow.ceilings.insert(v.clone(), c);
+                    }
+                }
+                // The condition holds at the top of each iteration (invalidated inside the body as
+                // soon as the counter steps). Seed the bound it names as an interval too, so a
+                // derived index (`bit >> 3`) can be reasoned about, the increasing counter's cond
+                // supplies its ceiling, the decreasing counter's cond supplies its floor.
                 if let Some(c) = cond {
-                    inner_asm.push(c.clone());
+                    body_flow.facts.push(c.clone());
+                    if let Expr::Binary(op, l, r) = c
+                        && let Expr::Var(v) = l.as_ref()
+                        && modified.contains(v)
+                        && let Some(k) = const_index(r)
+                    {
+                        match op {
+                            BinOp::Lt => {
+                                body_flow.ceilings.insert(v.clone(), k - 1);
+                            }
+                            BinOp::Le => {
+                                body_flow.ceilings.insert(v.clone(), k);
+                            }
+                            BinOp::Gt => {
+                                body_flow.counters.insert(v.clone(), k + 1);
+                            }
+                            BinOp::Ge => {
+                                body_flow.counters.insert(v.clone(), k);
+                            }
+                            _ => {}
+                        }
+                    }
                 }
-                inner_asm.extend(invariant.iter().cloned());
                 // A declaration inside the loop does not escape it.
                 let mut inner = sizes.clone();
-                bounds_block(body, fname, &mut inner, &inner_asm, params)?;
+                bounds_block(body, fname, &mut inner, &mut body_flow, params)?;
+                // After the loop, every reassigned variable is unknown.
+                for v in &modified {
+                    flow.invalidate(v);
+                }
+                // A break-free `for cond {}` exits only when `cond` is false, so `!cond` holds
+                // afterward, a sound fact even about the (modified) counter. When it bounds the
+                // counter below (`v >= k`), that floor carries into a later loop reusing `v` (the
+                // SHA message-schedule idiom, where one `t` runs 0..16 then 16..80).
+                if let Some(c) = cond
+                    && !has_break(body)
+                    && let Some(neg) = negate_cond(c)
+                {
+                    if let Some((v, k)) = floor_from(&neg) {
+                        flow.counters.insert(v, k);
+                    }
+                    flow.facts.push(neg);
+                }
             }
             _ => {}
         }
     }
     if let Some(t) = &b.tail {
-        bounds_expr(t, fname, sizes, asm, params)?;
+        bounds_expr(t, fname, sizes, flow, params)?;
     }
     Ok(())
 }
@@ -588,7 +1010,7 @@ fn bounds_expr(
     e: &Expr,
     fname: &str,
     sizes: &HashMap<String, i64>,
-    asm: &[Expr],
+    flow: &mut Flow,
     params: &[Param],
 ) -> Result<(), String> {
     if let Expr::Index(base, idx) = e
@@ -605,11 +1027,22 @@ fn bounds_expr(
                 // A constant in [0, N) is statically safe.
                 Some(_) => {}
                 // Checked-by-default: a VARIABLE index must be PROVEN in `[0, N)` (from a
-                // `requires`, a `where`, branch guards, or a loop condition + invariant).
+                // `requires`, a `where`, branch guards, or a loop condition + counter floor).
                 None => {
-                    if !crate::verify::index_proven_in_bounds(idx, &Expr::Int(n), asm, params) {
+                    // Either a derived interval confines the index (`bit >> 3`, `i / 8`, `x & 7`),
+                    // or the linear prover discharges it (`i`, `i - 16` from a counter + condition).
+                    let in_range =
+                        matches!(expr_range(idx, flow), Some((lo, hi)) if lo >= 0 && hi < n);
+                    if !in_range
+                        && !crate::verify::index_proven_in_bounds(
+                            idx,
+                            &Expr::Int(n),
+                            &flow.assumptions(),
+                            params,
+                        )
+                    {
                         return Err(format!(
-                            "function `{fname}`: cannot prove this index is in bounds for `{a}` of size {n}, bound it with a `where`/`requires`/loop `invariant` to 0..{n}"
+                            "function `{fname}`: cannot prove this index is in bounds for `{a}` of size {n}, bound it with a `where`/`requires`/loop condition to 0..{n}"
                         ));
                     }
                 }
@@ -618,37 +1051,38 @@ fn bounds_expr(
             // A slice has no static size; its bound is the runtime `s.len`. Every index (constant
             // or variable) must be PROVEN in `[0, s.len)`.
             let bound = Expr::Field(Box::new(Expr::Var(a.clone())), "len".to_string());
-            if !crate::verify::index_proven_in_bounds(idx, &bound, asm, params) {
+            let asm = flow.assumptions();
+            if !crate::verify::index_proven_in_bounds(idx, &bound, &asm, params) {
                 return Err(format!(
-                    "function `{fname}`: cannot prove this index is in bounds for slice `{a}`, bound it with a `where`/`requires`/loop `invariant` to 0..{a}.len"
+                    "function `{fname}`: cannot prove this index is in bounds for slice `{a}`, bound it with a `where`/`requires`/loop condition to 0..{a}.len"
                 ));
             }
         }
     }
     match e {
         Expr::Binary(_, l, r) | Expr::Index(l, r) => {
-            bounds_expr(l, fname, sizes, asm, params)?;
-            bounds_expr(r, fname, sizes, asm, params)
+            bounds_expr(l, fname, sizes, flow, params)?;
+            bounds_expr(r, fname, sizes, flow, params)
         }
         Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
-            bounds_expr(x, fname, sizes, asm, params)
+            bounds_expr(x, fname, sizes, flow, params)
         }
         Expr::Call(c, args) => {
-            bounds_expr(c, fname, sizes, asm, params)?;
+            bounds_expr(c, fname, sizes, flow, params)?;
             for a in args {
-                bounds_expr(&a.value, fname, sizes, asm, params)?;
+                bounds_expr(&a.value, fname, sizes, flow, params)?;
             }
             Ok(())
         }
         Expr::List(items) => {
             for it in items {
-                bounds_expr(it, fname, sizes, asm, params)?;
+                bounds_expr(it, fname, sizes, flow, params)?;
             }
             Ok(())
         }
         Expr::StructLit(_, fields) => {
             for (_, v) in fields {
-                bounds_expr(v, fname, sizes, asm, params)?;
+                bounds_expr(v, fname, sizes, flow, params)?;
             }
             Ok(())
         }
@@ -657,27 +1091,44 @@ fn bounds_expr(
             then_branch,
             else_branch,
         } => {
-            bounds_expr(cond, fname, sizes, asm, params)?;
-            // The guard holds in the then-branch; its negation in the else-branch.
-            let mut then_asm = asm.to_vec();
-            then_asm.push(cond.as_ref().clone());
+            bounds_expr(cond, fname, sizes, flow, params)?;
+            // Each branch reasons under its own guard on a clone; after the `if`, any variable a
+            // branch reassigned is unknown.
+            let mut then_flow = flow.clone();
+            then_flow.facts.push(cond.as_ref().clone());
             let mut t = sizes.clone();
-            bounds_block(then_branch, fname, &mut t, &then_asm, params)?;
+            bounds_block(then_branch, fname, &mut t, &mut then_flow, params)?;
             if let Some(eb) = else_branch {
-                let mut else_asm = asm.to_vec();
+                let mut else_flow = flow.clone();
                 if let Some(neg) = negate_cond(cond) {
-                    else_asm.push(neg);
+                    else_flow.facts.push(neg);
                 }
                 let mut e2 = sizes.clone();
-                bounds_block(eb, fname, &mut e2, &else_asm, params)?;
+                bounds_block(eb, fname, &mut e2, &mut else_flow, params)?;
+            }
+            let mut modified = HashSet::new();
+            assigned_vars(then_branch, &mut modified);
+            if let Some(eb) = else_branch {
+                assigned_vars(eb, &mut modified);
+            }
+            for v in &modified {
+                flow.invalidate(v);
             }
             Ok(())
         }
         Expr::Match { scrutinee, arms } => {
-            bounds_expr(scrutinee, fname, sizes, asm, params)?;
+            bounds_expr(scrutinee, fname, sizes, flow, params)?;
             for a in arms {
                 let mut m = sizes.clone();
-                bounds_block(&a.body, fname, &mut m, asm, params)?;
+                let mut arm_flow = flow.clone();
+                bounds_block(&a.body, fname, &mut m, &mut arm_flow, params)?;
+            }
+            let mut modified = HashSet::new();
+            for a in arms {
+                assigned_vars(&a.body, &mut modified);
+            }
+            for v in &modified {
+                flow.invalidate(v);
             }
             Ok(())
         }
@@ -800,6 +1251,162 @@ mod tests {
             "fn f() -> i64 { let a[4]\nlet mut i = 0\nfor i < 4 invariant { i >= 0 } { a[i] = 0\ni = i + 1 }\n0 }"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn accepts_a_counting_loop_with_no_invariant_clause() {
+        // The floor comes from the constant init `i = 0` (a proven monotonic counter), the upper
+        // bound from the loop condition. No user `invariant` is needed or trusted.
+        assert!(bounds(
+            "fn f() -> i64 { let a[4]\nlet mut i = 0\nfor i < 4 { a[i] = 0\ni = i + 1 }\n0 }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn accepts_a_counting_loop_from_a_nonzero_constant_start() {
+        // `i` starts at 2 and only steps up, so `i >= 2`; the condition gives `i < 6`. Both bound
+        // `a[i]` in a size-6 array.
+        assert!(bounds(
+            "fn f() -> i64 { let a[6]\nlet mut i = 2\nfor i < 6 { a[i] = 0\ni = i + 1 }\n0 }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_a_loop_whose_invariant_lies_about_the_counter() {
+        // SOUNDNESS: a user `invariant { i < 4 }` on a loop that actually runs `i` up to 10 must NOT
+        // be trusted, writing `a[i]` into a size-4 array is out of bounds for i in 4..10. The
+        // condition only proves `i < 10`, which does not bound a size-4 array, so this is rejected.
+        let err = bounds(
+            "fn f() -> i64 { let a[4]\nlet mut i = 0\nfor i < 10 invariant { i >= 0; i < 4 } { a[i] = i\ni = i + 1 }\n0 }",
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot prove"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_an_index_after_the_counter_is_incremented() {
+        // Flow-sensitive: after `i = i + 1` the condition `i < 4` no longer holds (i could be 4), so
+        // the access is rejected even though the loop condition is `i < 4`.
+        let err = bounds(
+            "fn f() -> i64 { let a[4]\nlet mut i = 0\nfor i < 4 { i = i + 1\na[i] = 0 }\n0 }",
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot prove"), "got: {err}");
+    }
+
+    #[test]
+    fn accepts_a_shift_index_from_a_decrementing_counter() {
+        // The x25519 / ed25519 idiom: `bit` counts DOWN from a constant under `for bit >= 0`, and
+        // the array is indexed by `bit >> 3` (= bit/8). The ceiling (bit <= 255) and the condition
+        // (bit >= 0) confine `bit >> 3` to [0, 31], in bounds for a size-32 array.
+        assert!(bounds(
+            "fn f() -> i64 { let exp[32]\nlet mut acc = 0\nlet mut bit = 255\nfor bit >= 0 { acc = acc + exp[bit >> 3]\nif bit == 0 { acc = acc }\nbit = bit - 1 }\nacc }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn accepts_a_division_index_bounded_by_the_counter() {
+        // `a[i / 8]` with `i` a counter in [0, 64) lands in [0, 8), the hexdump idiom.
+        assert!(bounds(
+            "fn f() -> i64 { let a[8]\nlet mut i = 0\nfor i < 64 { a[i / 8] = 0\ni = i + 1 }\n0 }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn accepts_an_index_from_a_masked_variable() {
+        // `j = (j + 1) & 0xFF` confines `j` to [0, 255]; `S[j]` is then in bounds for a size-256
+        // array, the RC4 permutation idiom, where the index lives in a masked variable.
+        assert!(bounds(
+            "fn f() -> i64 { let mut S[256]\nlet mut j = 0\nlet mut i = 0\nfor i < 10 { j = (j + 1) & 0xFF\nS[j] = i\ni = i + 1 }\n0 }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_a_division_index_that_can_exceed_the_array() {
+        // `a[i / 2]` with `i` in [0, 64) reaches 31, out of bounds for a size-8 array.
+        let err = bounds(
+            "fn f() -> i64 { let a[8]\nlet mut i = 0\nfor i < 64 { a[i / 2] = 0\ni = i + 1 }\n0 }",
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot prove"), "got: {err}");
+    }
+
+    #[test]
+    fn accepts_an_index_through_a_linear_let_binding() {
+        // `let t = 16 + j` lets `W[t - 16]` reduce to `W[j]` and `W[t]` to `W[16 + j]` (j the
+        // counter): the SHA-256 message schedule, which indexes via a derived offset.
+        assert!(bounds(
+            "fn f() -> i64 { let W[64]\nlet mut j = 0\nfor j < 48 { let t = 16 + j\nW[t] = W[t - 16]\nj = j + 1 }\n0 }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn accepts_a_counter_carried_across_sequential_loops() {
+        // A break-free `for t < 16` exits only when `t >= 16`, so that floor carries into a second
+        // loop reusing `t`; `W[t - 16]` is then provable, the SHA message-schedule idiom.
+        assert!(bounds(
+            "fn f() -> i64 { let W[80]\nlet mut t = 0\nfor t < 16 { W[t] = 0\nt = t + 1 }\nfor t < 80 { W[t] = W[t - 16]\nt = t + 1 }\n0 }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn does_not_assume_the_negated_condition_after_a_loop_with_break() {
+        // SOUNDNESS: a `break` may exit the loop while `t < 16` still holds, so `t >= 16` is NOT a
+        // sound post-loop fact, the second loop's `W[t - 16]` (t could be small) is rejected.
+        let err = bounds(
+            "fn f() -> i64 { let W[80]\nlet mut t = 0\nfor t < 16 { if t > 5 { break }\nt = t + 1 }\nfor t < 80 { W[t - 16] = 0\nt = t + 1 }\n0 }",
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot prove"), "got: {err}");
+    }
+
+    #[test]
+    fn accepts_a_modulo_index_confined_to_the_array() {
+        // `key[i % 3]` into a size-3 array: `i % 3` ∈ [0, 3) since the counter gives `i >= 0`.
+        assert!(bounds(
+            "fn f() -> i64 { let key[3]\nkey[0] = 1\nlet mut i = 0\nfor i < 256 { key[i % 3] = 0\ni = i + 1 }\n0 }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_a_modulo_index_whose_modulus_exceeds_the_array() {
+        // `a[i % 8]` into a size-4 array: `i % 8` can reach 7, out of bounds.
+        let err = bounds(
+            "fn f() -> i64 { let a[4]\nlet mut i = 0\nfor i < 256 { a[i % 8] = 0\ni = i + 1 }\n0 }",
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot prove"), "got: {err}");
+    }
+
+    #[test]
+    fn accepts_a_bitmask_index_confined_to_the_array() {
+        // `a[i & 7]` ∈ [0, 8) for any `i`, a power-of-two-minus-one mask, no sign obligation.
+        assert!(bounds(
+            "fn f(i: i64) -> i64 { let a[8]\na[i & 7] = 0\na[0] }"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_a_bitmask_index_wider_than_the_array() {
+        // `a[i & 15]` can reach 15, out of bounds for a size-8 array.
+        let err = bounds("fn f(i: i64) -> i64 { let a[8]\na[i & 15] = 0\na[0] }").unwrap_err();
+        assert!(err.contains("cannot prove"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_a_modulo_index_without_a_nonnegative_dividend() {
+        // `a[i % 3]` with an unconstrained `i` (could be negative → `i % 3` negative) is rejected.
+        let err = bounds("fn f(i: i64) -> i64 { let a[4]\na[i % 3] = 0\na[0] }").unwrap_err();
+        assert!(err.contains("cannot prove"), "got: {err}");
     }
 
     #[test]

@@ -23,7 +23,7 @@ fn main() -> i64 {
     // is_broadcast: all six bytes are 0xFF
     let mut all_ff = true
     let mut j = 0
-    for j < 6 invariant { j >= 0 } {
+    for j < 6 {
         if mac[j] != 0xFF {
             all_ff = false
         }

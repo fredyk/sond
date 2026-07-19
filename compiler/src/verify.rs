@@ -1314,13 +1314,7 @@ fn index_props(
         .collect();
     let (i, hi) = (eval_expr(idx, &env)?, eval_expr(bound, &env)?);
     let asm: Vec<SymProp> = assumptions.iter().filter_map(|e| sym_prop(e, &env)).collect();
-    let int_types: HashMap<String, (i128, i128)> = params
-        .iter()
-        .filter_map(|p| match &p.ty {
-            Type::Named(t) => int_range(t).map(|r| (p.name.clone(), r)),
-            _ => None,
-        })
-        .collect();
+    let int_types = int_types_of(params);
     let lower = SymProp {
         op: BinOp::Ge,
         lhs: i.clone(),
@@ -1344,6 +1338,83 @@ pub fn index_provably_oob(idx: &Expr, bound: &Expr, assumptions: &[Expr], params
         || matches!(prove(&upper, &asm, &it), Outcome::Disproven)
 }
 
+/// The integer-typed parameters and their value ranges (`i32` -> [-2^31, 2^31-1]), so the prover
+/// can reason width-aware about overflow. Locals are untyped here (treated as unbounded i64).
+fn int_types_of(params: &[Param]) -> HashMap<String, (i128, i128)> {
+    params
+        .iter()
+        .filter_map(|p| match &p.ty {
+            Type::Named(t) => int_range(t).map(|r| (p.name.clone(), r)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Folds `e` to a constant integer, or `None` if it is not compile-time constant.
+fn const_of(e: &Expr) -> Option<i64> {
+    match eval_expr(e, &HashMap::new()) {
+        Some(Sym::Const(n)) => Some(n),
+        _ => None,
+    }
+}
+
+/// Is `e >= 0` discharged by the assumptions, over the same symbolic environment as the bounds
+/// check? Used to certify that a modulo's dividend is non-negative.
+fn proven_nonneg(e: &Expr, assumptions: &[Expr], params: &[Param]) -> bool {
+    let mut names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+    collect_expr_vars(e, &mut names);
+    for a in assumptions {
+        collect_expr_vars(a, &mut names);
+    }
+    let env: HashMap<String, Sym> = names
+        .iter()
+        .map(|n| (n.clone(), Sym::Var(n.clone())))
+        .collect();
+    let Some(sym) = eval_expr(e, &env) else {
+        return false;
+    };
+    let asm: Vec<SymProp> = assumptions.iter().filter_map(|a| sym_prop(a, &env)).collect();
+    let prop = SymProp {
+        op: BinOp::Ge,
+        lhs: sym,
+        rhs: Sym::Const(0),
+    };
+    matches!(prove(&prop, &asm, &int_types_of(params)), Outcome::Proven)
+}
+
+/// In-bounds proofs the LINEAR evaluator cannot express, because `%` and `&` are not linear (there
+/// is no `Sym` for them): an index of the form `e % m` is confined to `[0, m)` when `e >= 0` and
+/// `m > 0`, and `e & (2^k - 1)` is confined to `[0, 2^k)` for ANY `e` (the mask keeps only the low
+/// bits, regardless of sign). Either is in bounds when its confinement ceiling fits the array.
+fn index_bounded_by_structure(
+    idx: &Expr,
+    bound: &Expr,
+    assumptions: &[Expr],
+    params: &[Param],
+) -> bool {
+    let Some(n) = const_of(bound) else {
+        return false; // a runtime bound (slice `s.len`) is not a static ceiling to compare against
+    };
+    match idx {
+        Expr::Binary(BinOp::Mod, dividend, divisor) => {
+            let Some(m) = const_of(divisor) else {
+                return false;
+            };
+            // `e % m` ∈ [0, m) needs `m > 0` and a non-negative dividend; it fits iff `m <= n`.
+            m > 0 && m <= n && proven_nonneg(dividend, assumptions, params)
+        }
+        Expr::Binary(BinOp::BitAnd, l, r) => {
+            // A `2^k - 1` mask (all low bits set) confines the result to [0, mask]; fits iff
+            // `mask < n`. Holds for any dividend sign, so no non-negativity obligation.
+            let Some(mask) = const_of(l).or_else(|| const_of(r)) else {
+                return false;
+            };
+            mask >= 0 && (mask & mask.wrapping_add(1)) == 0 && mask < n
+        }
+        _ => false,
+    }
+}
+
 /// Is the index PROVEN to lie in `[0, bound)`, `0 <= idx` and `idx < bound` both discharged?
 /// (The strict check: accept only what is proven; anything unproven is a compile error. This is
 /// checked-by-default bounds.)
@@ -1353,6 +1424,9 @@ pub fn index_proven_in_bounds(
     assumptions: &[Expr],
     params: &[Param],
 ) -> bool {
+    if index_bounded_by_structure(idx, bound, assumptions, params) {
+        return true;
+    }
     let Some((lower, upper, asm, it)) = index_props(idx, bound, assumptions, params) else {
         return false;
     };
