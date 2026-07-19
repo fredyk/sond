@@ -168,27 +168,32 @@ through its namespace; a `priv` function is invisible to importers (today `inclu
 everything into one namespace with no enforcement --- RFC-0001 §4.2's module privacy becomes real).
 
 **Resolution model (the mechanism, no new backend).** A namespaced module's functions are
-*mangled* to globally-unique names, and calls are rewritten to them:
+*mangled* to globally-unique names, and calls are rewritten to them. The split is deliberate:
+**definition names are mangled in the spliced text** (a safe, unambiguous edit --- the identifier
+right after `fn`), while **call sites are rewritten on the AST** (robust --- text call-rewriting
+would hit variables, strings and comments):
 
-1. `resolve.rs`, on an `import "P" as ns`, parses `P` and, for each **definition** line
-   (`fn`/`pub fn`/`priv fn`), rewrites the declared name `f` to a mangled `ns$f` (a safe,
-   unambiguous edit --- the identifier immediately after `fn`). It records the map
-   `ns.f -> ns$f` together with each function's visibility. (`$` is not a legal identifier char,
-   so a mangled name can never collide with a user identifier or another module's; the mangling is
-   internal and never shown.)
-2. A post-parse **resolution pass** rewrites calls:
-   - a qualified `ns.f(args)` where `ns` is a known import alias -> `Call(Var("ns$f"), args)`,
+1. `resolve.rs`, on an `import "P" as ns`, splices `P` but rewrites every **definition** line
+   (`fn`/`pub fn`/`priv fn`) so `f` becomes the mangled `ns__f`. The separator is `__` because the
+   mangled name must itself lex as an identifier (the spliced text goes back through the lexer,
+   which admits only `[A-Za-z0-9_]` --- so a sigil like `$` is NOT usable here). Collisions are
+   made impossible by a **check**: if a mangled name coincides with any other function name in the
+   program, that is a hard error (in practice `strings__itoa` never clashes). Two modules that both
+   define `f` therefore coexist as `a__f` and `b__f` --- the flat-namespace collision that plagues
+   `include` disappears. resolve.rs records the map `ns.f -> ns__f` with each function's
+   visibility.
+2. A post-parse **resolution pass** rewrites calls on the AST:
+   - a qualified `ns.f(args)` where `ns` is a known import alias -> `Call(Var("ns__f"), args)`,
      erroring if `f` is not `pub` in `ns` (or does not exist);
-   - inside a namespaced module's own function `ns$g`, a bare sibling call `f(args)` where `ns$f`
-     exists -> `ns$f(args)` (intra-module calls resolve to the module's mangled names);
-   - a `ns` that is an import alias is tracked so it is never mistaken for a struct value in the
-     existing `x.m()` method-call desugar (a name collision between an alias and a local is an
-     error).
+   - inside a namespaced module's own function `ns__g`, a bare sibling call `f(args)` for which
+     `ns__f` exists -> `ns__f(args)` (intra-module calls resolve to the module's mangled names ---
+     the module's bodies were text-mangled only at their DEFINITION sites, never at their calls);
+   - an import alias `ns` is tracked so it is never mistaken for a struct value in the existing
+     `x.m()` method-call desugar (an alias colliding with a local variable name is an error).
 
-Because mangling touches only definition names (a text-safe edit) and call rewriting is done on
-the AST (robust), the model is sound and needs no lexer/parser change beyond recognizing the
-`import` directive. `include` (flat splice) stays for backward compatibility; `import` is the
-namespaced path forward.
+Because definition mangling is a text-safe edit and call rewriting is on the AST, the model is
+sound and needs no lexer/parser change beyond recognizing the `import` directive. `include` (flat
+splice) stays for backward compatibility; `import` is the namespaced path forward.
 
 **TDD checkpoints:** an `import ... as ns` mangles the module's defs and exposes only `pub`;
 `ns.f()` resolves and runs; a `priv` function is unreachable through the namespace; an unaliased
