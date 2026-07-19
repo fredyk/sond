@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// pic-cluster.snd, the PIC compute-cluster host, entirely in Sond.
+//
+// Drives a PIC16F684 node over a USB-serial bridge (e.g. a CP2102 at
+// /dev/ttyUSB0): opens the line raw 9600 8N1, PINGs the node, then asks it to
+// add two bytes (ADD8). The wire framing is lib/any/pic/frame.snd and the line
+// handling is lib/x86_64/linux/serial.snd, this program is just the glue that
+// a PC uses to offload work onto the microcontrollers.
+//
+//   sondc examples/host/pic/pic-cluster/pic-cluster.snd -o /tmp/pic-cluster && /tmp/pic-cluster
+//
+// Exit 0 iff the node answered PING with a valid frame.
+
+include "x86_64/linux/io.snd"
+include "x86_64/linux/serial.snd"
+include "any/strings.snd"
+include "any/pic/frame.snd"
+
+let mut decbuf[4]
+
+fn puts(s: i64) { write_buf(1, s, strlen(s)) }
+
+// putdec prints an unsigned integer in base 10.
+fn putdec(n: i64) {
+    if n == 0 { puts(cstr("0")); return }
+    let mut d = 0
+    let mut t = n
+    for t > 0 { d = d + 1; t = t / 10 }
+    let mut i = d
+    let mut v = n
+    for i > 0 { i = i - 1; poke8(decbuf + i, 0x30 + (v % 10)); v = v / 10 }
+    write_buf(1, decbuf, d)
+}
+
+// read_full reads exactly n bytes into buf, respecting the line's read timeout.
+// Returns the number of bytes actually read (< n means the node went silent).
+fn read_full(fd: i64, buf: i64, n: i64) -> i64 {
+    let mut got = 0
+    for got < n {
+        let r = serial_read(fd, buf + got, n - got)
+        if r <= 0 { return got }        // timeout (VTIME) or EOF
+        got = got + r
+    }
+    got
+}
+
+// call sends one command frame and reads the reply frame into rxbuf.
+// Returns the reply's total length, or 0 on timeout / short read.
+fn call(fd: i64, node: i64, code: i64, pay: i64, plen: i64, rxbuf: i64) -> i64 {
+    let txbuf[40]
+    let n = pic_frame_encode(txbuf, node, code, pay, plen)
+    serial_flush(fd)                    // drop stale line noise before the exchange
+    serial_write(fd, txbuf, n)
+    if read_full(fd, rxbuf, 4) < 4 { return 0 }   // STX+node+code+len
+    let rlen = peek8(rxbuf + 3)
+    if read_full(fd, rxbuf + 4, rlen + 1) < rlen + 1 { return 0 }  // payload + checksum
+    rlen + 5
+}
+
+fn main() -> i64 {
+    let fd = serial_open(cstr("/dev/ttyUSB0"))
+    if fd < 0 { puts(cstr("open /dev/ttyUSB0 failed\n")); return 1 }
+    serial_config(fd, B9600, 0, 20)     // raw 8N1, 2.0s read timeout
+
+    let rx[40]
+    let pay[8]
+
+    // PING is addressed to the broadcast id 255; the node answers with its own id.
+    let n = call(fd, 255, 0, pay, 0, rx)
+    if n <= 0 { puts(cstr("PING: no reply (timeout)\n")); serial_close(fd); return 2 }
+    if pic_frame_verify(rx, n) == 0 { puts(cstr("PING: bad frame/checksum\n")); serial_close(fd); return 3 }
+
+    let node = pic_frame_node(rx)
+    puts(cstr("PING ok  node=")); putdec(node); puts(cstr("\n"))
+
+    // ADD8: ask the node to compute 5 + 7 on-chip.
+    poke8(pay + 0, 5)
+    poke8(pay + 1, 7)
+    let m = call(fd, node, 1, pay, 2, rx)
+    if m > 0 {
+        if pic_frame_verify(rx, m) == 1 {
+            puts(cstr("ADD8 5+7 = ")); putdec(peek8(pic_frame_payload(rx))); puts(cstr("\n"))
+        }
+    }
+
+    serial_close(fd)
+    0
+}
