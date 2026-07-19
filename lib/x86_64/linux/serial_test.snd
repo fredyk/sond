@@ -1,0 +1,120 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for serial.snd, the termios builder for a raw 9600 8N1 line.
+// The struct byte layout is the kernel `struct termios` (asm-generic, NCCS=19,
+// 36 bytes) consumed by the TCSETS ioctl, so we assert it byte-for-byte.
+//   sond test lib/x86_64/linux/serial_test.snd
+
+include "x86_64/linux/serial.snd"
+include "any/strings.snd"
+include "x86_64/linux/testing.snd"
+
+// ioctls to allocate a pseudo-terminal pair, so the wrappers can be exercised
+// end-to-end against a real tty without any hardware attached.
+let TIOCSPTLCK = 0x40045431   // unlock the slave
+let TIOCGPTN = 0x80045430     // fetch the slave's number
+
+let mut t[8]     // 64 bytes, holds the 36-byte struct termios
+let mut ptspath[8]
+let mut txbuf[2]
+let mut rxbuf[2]
+
+// Write the decimal form of n into buf, NUL-terminated; return the digit count.
+fn utoa(buf: i64, n: i64) -> i64 {
+    if n == 0 { poke8(buf, 0x30); poke8(buf + 1, 0); return 1 }
+    let mut d = 0
+    let mut tmp = n
+    for tmp > 0 { d = d + 1; tmp = tmp / 10 }
+    let mut i = d
+    let mut v = n
+    for i > 0 { i = i - 1; poke8(buf + i, 0x30 + (v % 10)); v = v / 10 }
+    poke8(buf + d, 0)
+    d
+}
+
+fn peek32le(a: i64) -> i64 {
+    peek8(a) | (peek8(a + 1) << 8) | (peek8(a + 2) << 16) | (peek8(a + 3) << 24)
+}
+
+test "serial: termios_raw clears iflag/oflag/lflag" {
+    let mut i = 0
+    for i < 64 { poke8(t + i, 0xAA); i = i + 1 }   // poison first
+    termios_raw(t, B9600, 0, 20)
+    assert_eq(peek32le(t + 0), 0)     // c_iflag: no ICRNL/IXON/...
+    assert_eq(peek32le(t + 4), 0)     // c_oflag: no OPOST
+    assert_eq(peek32le(t + 12), 0)    // c_lflag: no ICANON/ECHO/ISIG
+    assert_eq(peek8(t + 16), 0)       // c_line
+}
+
+test "serial: termios_raw sets cflag to B9600|CS8|CREAD|CLOCAL" {
+    termios_raw(t, B9600, 0, 20)
+    // 0x0d | 0x30 | 0x80 | 0x800 = 0x08BD
+    assert_eq(peek32le(t + 8), 0x08BD)
+}
+
+test "serial: termios_raw honours a different baud" {
+    termios_raw(t, B115200, 1, 0)
+    // 0x1002 | 0x30 | 0x80 | 0x800 = 0x18B2
+    assert_eq(peek32le(t + 8), B115200 | 0x30 | 0x80 | 0x800)
+}
+
+test "serial: termios_raw writes VMIN/VTIME in c_cc" {
+    termios_raw(t, B9600, 0, 20)
+    // c_cc starts at offset 17; VTIME index 5, VMIN index 6.
+    assert_eq(peek8(t + 17 + 5), 20)  // VTIME
+    assert_eq(peek8(t + 17 + 6), 0)   // VMIN
+    termios_raw(t, B9600, 1, 0)
+    assert_eq(peek8(t + 17 + 5), 0)
+    assert_eq(peek8(t + 17 + 6), 1)
+}
+
+test "serial: utoa renders small integers" {
+    assert_eq(utoa(ptspath, 0), 1)
+    assert_eq(peek8(ptspath + 0), 0x30)   // '0'
+    assert_eq(utoa(ptspath, 12), 2)
+    assert_eq(peek8(ptspath + 0), 0x31)   // '1'
+    assert_eq(peek8(ptspath + 1), 0x32)   // '2'
+}
+
+// Integration: allocate a real pty pair, configure the slave as a raw 9600 8N1
+// line (the kernel must accept our struct termios), and round-trip bytes. This
+// exercises serial_open/config/flush/read/write/close without any hardware.
+test "serial: open+config+write+read round-trip over a pty" {
+    let master = serial_open(cstr("/dev/ptmx"))
+    assert(master >= 0)
+
+    let lock[1]
+    poke32(lock, 0)
+    assert_eq(syscall(SYS_ioctl, master, TIOCSPTLCK, lock), 0)  // unlock slave
+
+    let np[1]
+    poke32(np, 0)
+    assert_eq(syscall(SYS_ioctl, master, TIOCGPTN, np), 0)
+    let n = peek32(np)
+
+    // Build "/dev/pts/<n>"
+    let mut i = 0
+    let dev = cstr("/dev/pts/")
+    for i < 9 { poke8(ptspath + i, peek8(dev + i)); i = i + 1 }
+    utoa(ptspath + 9, n)
+
+    let slave = serial_open(ptspath)
+    assert(slave >= 0)
+
+    // The kernel accepts our termios iff TCSETS returns 0, validates the layout.
+    assert_eq(serial_config(slave, B9600, 0, 5), 0)
+    serial_flush(slave)
+
+    // Host writes on the master end; the configured slave reads it back.
+    poke8(txbuf + 0, 0x41)   // 'A'
+    poke8(txbuf + 1, 0x5A)   // 'Z'
+    assert_eq(serial_write(master, txbuf, 2), 2)
+    let r = serial_read(slave, rxbuf, 8)
+    assert_eq(r, 2)
+    assert_eq(peek8(rxbuf + 0), 0x41)
+    assert_eq(peek8(rxbuf + 1), 0x5A)
+
+    assert_eq(serial_close(slave), 0)
+    assert_eq(serial_close(master), 0)
+}

@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/serial.snd, raw serial-line access over Linux syscalls.
+//
+// Opens a tty (e.g. a USB-serial bridge at /dev/ttyUSB0), puts it in raw
+// 8N1 mode at a chosen baud, and moves bytes with read/write. No allocator:
+// the caller provides buffers. This is the host side of the PIC compute
+// cluster; pair it with lib/any/pic/frame.snd for the wire protocol.
+
+include "x86_64/linux/io.snd"     // open_file/read_buf/write_buf/close_fd (+ syscall nums)
+
+// open() flags
+let O_RDWR = 2
+let O_NOCTTY = 0x100              // don't let the tty become our controlling terminal
+
+// ioctl requests for the terminal
+let TCSETS = 0x5402              // set termios now
+let TCFLSH = 0x540B              // flush queued I/O
+let TCIOFLUSH = 2                // ...both directions
+
+// c_cflag control bits
+let CS8 = 0x30
+let CREAD = 0x80
+let CLOCAL = 0x800
+
+// Standard baud codes (values of the CBAUD field in c_cflag).
+let B9600 = 0x0d
+let B19200 = 0x0e
+let B38400 = 0x0f
+let B57600 = 0x1001
+let B115200 = 0x1002
+
+// c_cc special-character indices (offsets into c_cc, which starts at byte 17).
+let VTIME = 5
+let VMIN = 6
+
+// termios_raw fills `buf` with a 36-byte kernel `struct termios` describing a
+// raw line: no input/output/line processing, 8 data bits, no parity, one stop
+// bit, reader enabled and modem lines ignored. vmin/vtime set the blocking
+// behaviour of read: vmin=0,vtime=t gives a t-decisecond read timeout.
+fn termios_raw(buf: i64, baud: i64, vmin: i64, vtime: i64) {
+    let mut i = 0
+    for i < 36 { poke8(buf + i, 0); i = i + 1 }          // zero the whole struct
+    poke32(buf + 8, baud | CS8 | CREAD | CLOCAL)         // c_cflag
+    poke8(buf + 17 + VTIME, vtime & 0xff)
+    poke8(buf + 17 + VMIN, vmin & 0xff)
+}
+
+// serial_open opens the device read-write without taking it as a controlling
+// terminal. Returns an fd (>= 0) or -errno.
+fn serial_open(path: i64) -> i64 {
+    open_file(path, O_RDWR | O_NOCTTY, 0)
+}
+
+// serial_config applies a raw 8N1 line at `baud` with the given read timeout.
+// Returns 0 on success or -errno from the ioctl.
+fn serial_config(fd: i64, baud: i64, vmin: i64, vtime: i64) -> i64 {
+    let buf[8]
+    termios_raw(buf, baud, vmin, vtime)
+    syscall(SYS_ioctl, fd, TCSETS, buf)
+}
+
+// serial_flush discards any bytes queued in either direction, call it before
+// a fresh request/response exchange so stale line noise can't be mis-framed.
+fn serial_flush(fd: i64) -> i64 {
+    syscall(SYS_ioctl, fd, TCFLSH, TCIOFLUSH)
+}
+
+fn serial_read(fd: i64, buf: i64, n: i64) -> i64 { read_buf(fd, buf, n) }
+fn serial_write(fd: i64, buf: i64, n: i64) -> i64 { write_buf(fd, buf, n) }
+fn serial_close(fd: i64) -> i64 { close_fd(fd) }
