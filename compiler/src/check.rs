@@ -971,6 +971,191 @@ fn nonnegative_globals(funcs: &[Function], globals: &[Global]) -> HashSet<String
     cands
 }
 
+/// Folds `e` to a constant, resolving a bare global-const variable through `consts`.
+fn resolve_const(e: &Expr, consts: &HashMap<String, i64>) -> Option<i64> {
+    const_index(e).or_else(|| match e {
+        Expr::Var(v) => consts.get(v).copied(),
+        _ => None,
+    })
+}
+
+/// If `cond` (or one of its `&&` conjuncts) is `g < L` / `g <= L` with `L` constant, the upper
+/// bound it puts on `g` inside the guarded branch (`L-1` / `L`); `None` otherwise.
+fn guard_upper(cond: &Expr, g: &str, consts: &HashMap<String, i64>) -> Option<i64> {
+    for c in conjuncts(cond) {
+        if let Expr::Binary(op, l, r) = c
+            && let Expr::Var(v) = l.as_ref()
+            && v == g
+            && let Some(lv) = resolve_const(r, consts)
+        {
+            match op {
+                BinOp::Lt => return Some(lv - 1),
+                BinOp::Le => return Some(lv),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// Combines the enclosing guard with the one `cond` adds (the tighter of the two upper bounds).
+fn tighten_guard(cur: Option<i64>, cond: &Expr, g: &str, consts: &HashMap<String, i64>) -> Option<i64> {
+    match (cur, guard_upper(cond, g, consts)) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (None, b) => b,
+        (a, None) => a,
+    }
+}
+
+/// Walks `e`'s nested `if`/`match` branches for assignments to `g` (the only expression forms that
+/// hold statements). Returns false if any assignment leaves `g` unbounded.
+fn walk_ceiling_expr(
+    e: &Expr,
+    g: &str,
+    guard: Option<i64>,
+    consts: &HashMap<String, i64>,
+    ceil: &mut Option<i64>,
+) -> bool {
+    match e {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let tg = tighten_guard(guard, cond, g, consts);
+            walk_ceiling(then_branch, g, tg, consts, ceil)
+                && else_branch
+                    .as_ref()
+                    .is_none_or(|eb| walk_ceiling(eb, g, guard, consts, ceil))
+        }
+        Expr::Match { arms, .. } => {
+            for a in arms {
+                if !walk_ceiling(&a.body, g, guard, consts, ceil) {
+                    return false;
+                }
+            }
+            true
+        }
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            walk_ceiling_expr(l, g, guard, consts, ceil) && walk_ceiling_expr(r, g, guard, consts, ceil)
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
+            walk_ceiling_expr(x, g, guard, consts, ceil)
+        }
+        Expr::Call(c, args) => {
+            walk_ceiling_expr(c, g, guard, consts, ceil)
+                && args
+                    .iter()
+                    .all(|a| walk_ceiling_expr(&a.value, g, guard, consts, ceil))
+        }
+        _ => true,
+    }
+}
+
+/// Walks a block for assignments to `g`, tracking the enclosing `if g < L` guard, and folds the
+/// running ceiling. A constant assignment contributes its value; a decrement preserves the
+/// ceiling; an increment `g = g + k` contributes `guard + k` and REQUIRES an enclosing guard
+/// (else `g` is unbounded → false). After any mutation of `g` the guard no longer holds, and a
+/// loop body is walked with no guard (it does not persist across iterations). Returns false to
+/// signal "unbounded" (bail).
+fn walk_ceiling(
+    b: &Block,
+    g: &str,
+    guard: Option<i64>,
+    consts: &HashMap<String, i64>,
+    ceil: &mut Option<i64>,
+) -> bool {
+    let mut guard = guard;
+    for s in &b.stmts {
+        match s {
+            Stmt::Assign {
+                target: Expr::Var(v),
+                value,
+            } if v == g => {
+                if let Some(c) = resolve_const(value, consts) {
+                    *ceil = Some(ceil.map_or(c, |x| x.max(c)));
+                } else if decrement_of(g, value).is_some() {
+                    // decrement preserves any ceiling, no new contribution
+                } else if let Some(k) = increment_of(g, value) {
+                    match guard {
+                        Some(gc) => {
+                            let c = gc + k;
+                            *ceil = Some(ceil.map_or(c, |x| x.max(c)));
+                        }
+                        None => return false, // unguarded increment, unbounded
+                    }
+                } else {
+                    return false; // opaque assignment, unbounded
+                }
+                guard = None; // `g` changed: the `g < L` guard no longer holds below
+            }
+            Stmt::Expr(Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            }) => {
+                let tg = tighten_guard(guard, cond, g, consts);
+                if !walk_ceiling(then_branch, g, tg, consts, ceil) {
+                    return false;
+                }
+                if let Some(eb) = else_branch
+                    && !walk_ceiling(eb, g, guard, consts, ceil)
+                {
+                    return false;
+                }
+            }
+            Stmt::For { body, .. } => {
+                if !walk_ceiling(body, g, None, consts, ceil) {
+                    return false;
+                }
+            }
+            Stmt::Let { value, .. }
+            | Stmt::Return(Some(value))
+            | Stmt::Expr(value)
+            | Stmt::Assign { value, .. }
+                if !walk_ceiling_expr(value, g, guard, consts, ceil) => {
+                    return false;
+                }
+            _ => {}
+        }
+    }
+    if let Some(t) = &b.tail
+        && !walk_ceiling_expr(t, g, guard, consts, ceil) {
+            return false;
+        }
+    true
+}
+
+/// Module-level mutable scalar globals with a PROVEN upper bound `g <= C` everywhere: the
+/// initialiser is a constant and every assignment across the whole program keeps `g` bounded (a
+/// constant, a decrement, or an increment made under an `if g < L` guard). A counter incremented
+/// only inside `if cnt < N { .. }` is the canonical case, so `for i < cnt { a[i] }` proves without
+/// a hand-written bound. Sound: one unguarded increment (or opaque write) drops the global.
+fn bounded_globals(
+    funcs: &[Function],
+    globals: &[Global],
+    consts: &HashMap<String, i64>,
+) -> HashMap<String, i64> {
+    let mut out = HashMap::new();
+    for gd in globals {
+        if !gd.mutable || gd.array_len.is_some() {
+            continue;
+        }
+        let Some(init) = const_index(&gd.init) else {
+            continue;
+        };
+        let mut ceil = Some(init);
+        if funcs
+            .iter()
+            .all(|f| walk_ceiling(&f.body, &gd.name, None, consts, &mut ceil))
+            && let Some(c) = ceil
+        {
+            out.insert(gd.name.clone(), c);
+        }
+    }
+    out
+}
+
 pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(), String> {
     // Module-level arrays (`.data` tables, crypto S-boxes, round constants) are in scope in
     // every function, so seed their sizes once.
@@ -991,6 +1176,9 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
     // Mutable scalar globals that never go negative anywhere (counters, lengths) carry a `>= 0`
     // floor into every function, the whole-module invariant a single function cannot establish.
     let nonneg = nonnegative_globals(funcs, globals);
+    // Mutable scalar globals bounded above (a counter only incremented under `if g < N`) carry a
+    // `g <= C` ceiling into every function, so `for i < g { a[i] }` proves in bounds.
+    let bounded = bounded_globals(funcs, globals, &global_consts);
     for f in funcs {
         let mut sizes = global_sizes.clone();
         // The function's preconditions are the facts true on every path from entry.
@@ -1016,6 +1204,14 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
             // A floor of 0 in the interval maps too, so a non-negativity-preserving increment
             // (`count = count + 1`) keeps it, the fact alone is dropped when `count` is reassigned.
             flow.counters.insert(g.clone(), 0);
+        }
+        for (g, c) in &bounded {
+            flow.facts.push(Expr::Binary(
+                BinOp::Le,
+                Box::new(Expr::Var(g.clone())),
+                Box::new(Expr::Int(*c)),
+            ));
+            flow.ceilings.insert(g.clone(), *c);
         }
         bounds_block(&f.body, &f.name, &mut sizes, &mut flow, &f.params, funcs)?;
     }
@@ -1647,6 +1843,44 @@ mod tests {
                    fn use_it() { if count < 4 { t[count] = 1 } }\n\
                    fn main() -> i64 { use_it()\n0 }";
         assert!(bounds(src).is_err(), "a decremented global is not provably nonneg");
+    }
+
+    #[test]
+    fn a_guard_bounded_global_counter_bounds_a_loop_index() {
+        // `cnt` is only ever incremented UNDER the guard `if cnt < 8`, so it never exceeds 8, a
+        // whole-program ceiling. Combined with its non-negative floor, the loop `for i < cnt`
+        // indexes `buf[8]` in range (`i < cnt <= 8`) with NO hand-written bound.
+        let src = "let mut cnt = 0\n\
+                   let mut buf[8]\n\
+                   fn push(v: i64) { if cnt < 8 { buf[cnt] = v\ncnt = cnt + 1 } }\n\
+                   fn sum() -> i64 { let mut i = 0\nlet mut s = 0\nfor i < cnt { s = s + buf[i]\ni = i + 1 }\ns }\n\
+                   fn main() -> i64 { push(1)\nsum() }";
+        assert!(bounds(src).is_ok(), "a guard-bounded global counter should bound the loop");
+    }
+
+    #[test]
+    fn an_unguarded_global_increment_has_no_ceiling() {
+        // SOUNDNESS: one UNGUARDED `cnt = cnt + 1` anywhere means `cnt` can grow without bound, so
+        // `for i < cnt { buf[i] }` could overrun `buf[8]` and MUST be rejected, no ceiling is
+        // inferred when any increment escapes a guard.
+        let src = "let mut cnt = 0\n\
+                   let mut buf[8]\n\
+                   fn bump() { cnt = cnt + 1 }\n\
+                   fn sum() -> i64 { let mut i = 0\nlet mut s = 0\nfor i < cnt { s = s + buf[i]\ni = i + 1 }\ns }\n\
+                   fn main() -> i64 { bump()\nsum() }";
+        assert!(bounds(src).is_err(), "an unguarded increment leaves the counter unbounded");
+    }
+
+    #[test]
+    fn a_ceiling_larger_than_the_array_is_still_rejected() {
+        // SOUNDNESS: the guard is `cnt < 100`, so the inferred ceiling is 100, larger than the
+        // 8-element array, so `for i < cnt { buf[i] }` is still an overrun and must be rejected.
+        let src = "let mut cnt = 0\n\
+                   let mut buf[8]\n\
+                   fn push(v: i64) { if cnt < 100 { cnt = cnt + 1 } }\n\
+                   fn sum() -> i64 { let mut i = 0\nlet mut s = 0\nfor i < cnt { s = s + buf[i]\ni = i + 1 }\ns }\n\
+                   fn main() -> i64 { push(1)\nsum() }";
+        assert!(bounds(src).is_err(), "a ceiling above the array size is not in bounds");
     }
 
     #[test]
