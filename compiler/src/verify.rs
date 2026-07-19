@@ -1264,13 +1264,13 @@ fn arith_trustworthy(s: &Sym, cons: &[SymProp], int_types: &HashMap<String, (i12
 /// check (`check_constant_bounds`), and the reusable core of the eventual prove-or-error bounds.
 /// SOUND and NON-BREAKING: it returns true only when the negation is entailed; an index that
 /// merely MIGHT be out of range (the common unproven case) returns false and is left alone.
-pub fn index_provably_oob(idx: &Expr, n: i64, assumptions: &[Expr], params: &[Param]) -> bool {
+pub fn index_provably_oob(idx: &Expr, bound: &Expr, assumptions: &[Expr], params: &[Param]) -> bool {
     let env: HashMap<String, Sym> = params
         .iter()
         .map(|p| (p.name.clone(), Sym::Var(p.name.clone())))
         .collect();
-    let Some(i) = eval_expr(idx, &env) else {
-        return false; // a non-arithmetic index (a field/call): outside the linear fragment
+    let (Some(i), Some(hi)) = (eval_expr(idx, &env), eval_expr(bound, &env)) else {
+        return false; // a non-linear index or bound (a call, a computed length): can't reason
     };
     let asm: Vec<SymProp> = assumptions.iter().filter_map(|e| sym_prop(e, &env)).collect();
     let int_types: HashMap<String, (i128, i128)> = params
@@ -1280,7 +1280,8 @@ pub fn index_provably_oob(idx: &Expr, n: i64, assumptions: &[Expr], params: &[Pa
             _ => None,
         })
         .collect();
-    // Reject iff the assumptions force `idx < 0` (lower bound disproven) or `idx >= n` (upper).
+    // Reject iff the assumptions force `idx < 0` (lower bound disproven) or `idx >= bound` (upper).
+    // `bound` is a constant `N` for a fixed-size array or `s.len` for a slice.
     let lower = SymProp {
         op: BinOp::Ge,
         lhs: i.clone(),
@@ -1289,7 +1290,7 @@ pub fn index_provably_oob(idx: &Expr, n: i64, assumptions: &[Expr], params: &[Pa
     let upper = SymProp {
         op: BinOp::Lt,
         lhs: i,
-        rhs: Sym::Const(n),
+        rhs: hi,
     };
     matches!(prove(&lower, &asm, &int_types), Outcome::Disproven)
         || matches!(prove(&upper, &asm, &int_types), Outcome::Disproven)
