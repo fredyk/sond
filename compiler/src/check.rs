@@ -780,6 +780,32 @@ fn expr_range(e: &Expr, flow: &Flow) -> Option<(i64, i64)> {
             }
             _ => None,
         },
+        // The value of an `if` is one of its branch tails, so its range is the UNION of the two,
+        // each computed under that branch's guard (`x < 8` refines the else-branch's `x`). Handles
+        // the clamp idiom `if x >= 8 { 7 } else { x }`; a branch with statements, or a missing
+        // else, bails (no single value to range).
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            let else_branch = else_branch.as_ref()?;
+            if !then_branch.stmts.is_empty() || !else_branch.stmts.is_empty() {
+                return None;
+            }
+            let (then_tail, else_tail) = (then_branch.tail.as_ref()?, else_branch.tail.as_ref()?);
+            let mut tf = flow.clone();
+            for c in conjuncts(cond) {
+                seed_interval_bound(&mut tf, c);
+            }
+            let mut ef = flow.clone();
+            if let Some(neg) = negate_cond(cond) {
+                seed_interval_bound(&mut ef, &neg);
+            }
+            let (tlo, thi) = expr_range(then_tail, &tf)?;
+            let (elo, ehi) = expr_range(else_tail, &ef)?;
+            Some((tlo.min(elo), thi.max(ehi)))
+        }
         _ => None,
     }
 }
@@ -973,6 +999,14 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
             consts: global_consts.clone(),
             ..Default::default()
         };
+        // A precondition `x >= 0` / `x < N` also seeds the interval maps, so `expr_range` knows a
+        // parameter's floor/ceiling (not only the linear prover via facts), e.g. the branches of
+        // an `if`-expression clamp are ranged under it.
+        for req in &f.requires {
+            for conj in conjuncts(req) {
+                seed_interval_bound(&mut flow, conj);
+            }
+        }
         for g in &nonneg {
             flow.facts.push(Expr::Binary(
                 BinOp::Ge,
@@ -1578,6 +1612,17 @@ mod tests {
                    fn bump() { if count < 4 { t[count] = 1\ncount = count + 1 } }\n\
                    fn main() -> i64 { bump()\n0 }";
         assert!(bounds(src).is_ok(), "nonneg global counter should give the lower bound");
+    }
+
+    #[test]
+    fn an_if_expression_clamp_bounds_an_index() {
+        // `let i = if x >= 8 { 7 } else { x }` with `x >= 0` clamps `i` to [0, 7]: the then-branch
+        // is the constant 7, the else-branch is `x` under `x < 8` (and `x >= 0` from requires). The
+        // index range is the UNION of the two branch tails, each computed under its own guard.
+        let src = "let mut t[8]\n\
+                   fn at(x: i64) requires { x >= 0 } { let i = if x >= 8 { 7 } else { x }\nt[i] = 1 }\n\
+                   fn main() -> i64 { at(3)\n0 }";
+        assert!(bounds(src).is_ok(), "if-expression clamp should bound the index");
     }
 
     #[test]
