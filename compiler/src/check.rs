@@ -614,6 +614,32 @@ fn has_break(b: &Block) -> bool {
     }) || b.tail.as_ref().is_some_and(|t| in_expr(t))
 }
 
+/// Records the interval bound a `v OP const` proposition implies into the flow's counter/ceiling
+/// maps, a floor for `>=`/`>`, a ceiling for `<`/`<=`, so the interval analysis (`expr_range`)
+/// can use it to bound a derived index like `v >> 3`. Other shapes contribute nothing.
+fn seed_interval_bound(flow: &mut Flow, e: &Expr) {
+    if let Expr::Binary(op, l, r) = e
+        && let Expr::Var(v) = l.as_ref()
+        && let Some(k) = const_index(r)
+    {
+        match op {
+            BinOp::Lt => {
+                flow.ceilings.insert(v.clone(), k - 1);
+            }
+            BinOp::Le => {
+                flow.ceilings.insert(v.clone(), k);
+            }
+            BinOp::Gt => {
+                flow.counters.insert(v.clone(), k + 1);
+            }
+            BinOp::Ge => {
+                flow.counters.insert(v.clone(), k);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// If `e` is `v >= k` or `v > k` with `k` a constant, the monotonic floor it establishes for `v`:
 /// `k` (resp. `k + 1`).
 fn floor_from(e: &Expr) -> Option<(String, i64)> {
@@ -808,7 +834,7 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
             facts: f.requires.clone(),
             ..Default::default()
         };
-        bounds_block(&f.body, &f.name, &mut sizes, &mut flow, &f.params)?;
+        bounds_block(&f.body, &f.name, &mut sizes, &mut flow, &f.params, funcs)?;
     }
     Ok(())
 }
@@ -845,6 +871,7 @@ fn bounds_block(
     sizes: &mut HashMap<String, i64>,
     flow: &mut Flow,
     params: &[Param],
+    funcs: &[Function],
 ) -> Result<(), String> {
     for s in &b.stmts {
         match s {
@@ -854,7 +881,7 @@ fn bounds_block(
                 array_len,
                 ..
             } => {
-                bounds_expr(value, fname, sizes, flow, params)?;
+                bounds_expr(value, fname, sizes, flow, params, funcs)?;
                 // Rebinding the name drops any prior fact/const/counter about it.
                 flow.invalidate(name);
                 match array_len {
@@ -888,7 +915,7 @@ fn bounds_block(
                 target: Expr::Var(v),
                 value,
             } => {
-                bounds_expr(value, fname, sizes, flow, params)?;
+                bounds_expr(value, fname, sizes, flow, params, funcs)?;
                 // Classify the reassignment against `v`'s bounds captured BEFORE invalidation:
                 // an increment `v = v + k` keeps the floor (drops the ceiling), a decrement keeps
                 // the ceiling (drops the floor), a fresh constant is exact, and any other value
@@ -916,15 +943,21 @@ fn bounds_block(
             }
             Stmt::Assign { target, value } => {
                 // Assigning through an index/field: a memory write, no scalar rebinding.
-                bounds_expr(target, fname, sizes, flow, params)?;
-                bounds_expr(value, fname, sizes, flow, params)?;
+                bounds_expr(target, fname, sizes, flow, params, funcs)?;
+                bounds_expr(value, fname, sizes, flow, params, funcs)?;
             }
-            Stmt::Return(Some(v)) | Stmt::Expr(v) => bounds_expr(v, fname, sizes, flow, params)?,
-            Stmt::For { cond, body, .. } => {
-                // The user `invariant` clause is IGNORED: it is unverified, so trusting it would be
-                // unsound. The loop's sound facts are derived here instead.
+            Stmt::Return(Some(v)) | Stmt::Expr(v) => bounds_expr(v, fname, sizes, flow, params, funcs)?,
+            Stmt::For {
+                cond,
+                invariant,
+                body,
+            } => {
+                // The loop's SOUND facts are derived below (counter floors/ceilings, the
+                // condition). A user `invariant` clause is trusted ONLY if the prover VERIFIES it
+                // (init + preservation), trusting a verified invariant is sound, unlike an
+                // unverified one; an unverified/unverifiable clause is simply ignored.
                 if let Some(c) = cond {
-                    bounds_expr(c, fname, sizes, flow, params)?;
+                    bounds_expr(c, fname, sizes, flow, params, funcs)?;
                 }
                 let mut modified = HashSet::new();
                 assigned_vars(body, &mut modified);
@@ -976,9 +1009,31 @@ fn bounds_block(
                         }
                     }
                 }
+                // A VERIFIED invariant holds at the top of every iteration, so its propositions are
+                // seeded as facts, flow-sensitively, like the condition, so they drop as soon as a
+                // variable they mention is reassigned (matching where the invariant is guaranteed:
+                // at the iteration top, before the body's mutations). This is what lets the crypto
+                // down-counting loops prove `exp[bit >> 3]` from `invariant { bit >= 0; bit < 256 }`.
+                if !invariant.is_empty()
+                    && crate::verify::loop_invariant_verified(
+                        funcs,
+                        params,
+                        &flow.assumptions(),
+                        cond.as_ref(),
+                        invariant,
+                        body,
+                    )
+                {
+                    for inv in invariant {
+                        body_flow.facts.push(inv.clone());
+                        // Also feed the interval maps (`expr_range` reads them, not `facts`) so a
+                        // derived index such as `bit >> 3` can be bounded.
+                        seed_interval_bound(&mut body_flow, inv);
+                    }
+                }
                 // A declaration inside the loop does not escape it.
                 let mut inner = sizes.clone();
-                bounds_block(body, fname, &mut inner, &mut body_flow, params)?;
+                bounds_block(body, fname, &mut inner, &mut body_flow, params, funcs)?;
                 // After the loop, every reassigned variable is unknown.
                 for v in &modified {
                     flow.invalidate(v);
@@ -1001,7 +1056,7 @@ fn bounds_block(
         }
     }
     if let Some(t) = &b.tail {
-        bounds_expr(t, fname, sizes, flow, params)?;
+        bounds_expr(t, fname, sizes, flow, params, funcs)?;
     }
     Ok(())
 }
@@ -1012,6 +1067,7 @@ fn bounds_expr(
     sizes: &HashMap<String, i64>,
     flow: &mut Flow,
     params: &[Param],
+    funcs: &[Function],
 ) -> Result<(), String> {
     if let Expr::Index(base, idx) = e
         && let Expr::Var(a) = base.as_ref()
@@ -1061,28 +1117,28 @@ fn bounds_expr(
     }
     match e {
         Expr::Binary(_, l, r) | Expr::Index(l, r) => {
-            bounds_expr(l, fname, sizes, flow, params)?;
-            bounds_expr(r, fname, sizes, flow, params)
+            bounds_expr(l, fname, sizes, flow, params, funcs)?;
+            bounds_expr(r, fname, sizes, flow, params, funcs)
         }
         Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
-            bounds_expr(x, fname, sizes, flow, params)
+            bounds_expr(x, fname, sizes, flow, params, funcs)
         }
         Expr::Call(c, args) => {
-            bounds_expr(c, fname, sizes, flow, params)?;
+            bounds_expr(c, fname, sizes, flow, params, funcs)?;
             for a in args {
-                bounds_expr(&a.value, fname, sizes, flow, params)?;
+                bounds_expr(&a.value, fname, sizes, flow, params, funcs)?;
             }
             Ok(())
         }
         Expr::List(items) => {
             for it in items {
-                bounds_expr(it, fname, sizes, flow, params)?;
+                bounds_expr(it, fname, sizes, flow, params, funcs)?;
             }
             Ok(())
         }
         Expr::StructLit(_, fields) => {
             for (_, v) in fields {
-                bounds_expr(v, fname, sizes, flow, params)?;
+                bounds_expr(v, fname, sizes, flow, params, funcs)?;
             }
             Ok(())
         }
@@ -1091,20 +1147,20 @@ fn bounds_expr(
             then_branch,
             else_branch,
         } => {
-            bounds_expr(cond, fname, sizes, flow, params)?;
+            bounds_expr(cond, fname, sizes, flow, params, funcs)?;
             // Each branch reasons under its own guard on a clone; after the `if`, any variable a
             // branch reassigned is unknown.
             let mut then_flow = flow.clone();
             then_flow.facts.push(cond.as_ref().clone());
             let mut t = sizes.clone();
-            bounds_block(then_branch, fname, &mut t, &mut then_flow, params)?;
+            bounds_block(then_branch, fname, &mut t, &mut then_flow, params, funcs)?;
             if let Some(eb) = else_branch {
                 let mut else_flow = flow.clone();
                 if let Some(neg) = negate_cond(cond) {
                     else_flow.facts.push(neg);
                 }
                 let mut e2 = sizes.clone();
-                bounds_block(eb, fname, &mut e2, &mut else_flow, params)?;
+                bounds_block(eb, fname, &mut e2, &mut else_flow, params, funcs)?;
             }
             let mut modified = HashSet::new();
             assigned_vars(then_branch, &mut modified);
@@ -1117,11 +1173,11 @@ fn bounds_expr(
             Ok(())
         }
         Expr::Match { scrutinee, arms } => {
-            bounds_expr(scrutinee, fname, sizes, flow, params)?;
+            bounds_expr(scrutinee, fname, sizes, flow, params, funcs)?;
             for a in arms {
                 let mut m = sizes.clone();
                 let mut arm_flow = flow.clone();
-                bounds_block(&a.body, fname, &mut m, &mut arm_flow, params)?;
+                bounds_block(&a.body, fname, &mut m, &mut arm_flow, params, funcs)?;
             }
             let mut modified = HashSet::new();
             for a in arms {

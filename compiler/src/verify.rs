@@ -59,6 +59,140 @@ pub fn verify(funcs: &[Function]) -> Result<(), VerifyError> {
     Ok(())
 }
 
+/// Verifies a single loop's `invariant` (Hoare's init + preservation) in ISOLATION, so the bounds
+/// checker may soundly TRUST it. `params` are the enclosing function's parameters; `pre` the facts
+/// known on loop entry (its `requires`, outer guards, the counter's entry value). Returns true iff
+/// every invariant proposition holds on entry AND is preserved by one iteration, exactly the check
+/// full verification runs, so trusting the result is sound. Conservative: any bail (an unsupported
+/// construct, an unprovable step) yields false, and the bounds check falls back to its own facts.
+pub fn loop_invariant_verified(
+    all_funcs: &[Function],
+    params: &[Param],
+    pre: &[Expr],
+    cond: Option<&Expr>,
+    invariant: &[Expr],
+    body: &Block,
+) -> bool {
+    if invariant.is_empty() {
+        return false;
+    }
+    let contracts: HashMap<String, &Function> =
+        all_funcs.iter().map(|f| (f.name.clone(), f)).collect();
+    // The environment: every parameter plus every free variable named in the entry facts, the
+    // condition or the invariant, the loop counter and friends are locals, bound before the loop,
+    // so they must be seeded as free symbols here (the pre-loop statements are not re-executed).
+    let mut names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+    for e in pre {
+        collect_expr_vars(e, &mut names);
+    }
+    if let Some(c) = cond {
+        collect_expr_vars(c, &mut names);
+    }
+    for i in invariant {
+        collect_expr_vars(i, &mut names);
+    }
+    // Also every variable the body names, including locals bound BEFORE the loop (an array like
+    // `exp`, a running accumulator) that the skipped pre-loop statements would have introduced.
+    // Without them a `Var` lookup in the body fails and the whole verification bails.
+    collect_block_vars(body, &mut names);
+    let env: HashMap<String, Sym> = names
+        .iter()
+        .map(|n| (n.clone(), Sym::Var(n.clone())))
+        .collect();
+    // A fact about a variable the loop MODIFIES does not hold across iterations (it is havoc'd in
+    // preservation), so only the loop-invariant `pre` facts seed the reasoning context; the FULL
+    // `pre` (including the counter's entry value) seeds the INIT state, where entry values are
+    // valid.
+    let modified = modified_vars(body);
+    let requires: Vec<SymProp> = pre
+        .iter()
+        .filter(|e| !expr_mentions_any(e, &modified))
+        .filter_map(|e| sym_prop(e, &env))
+        .collect();
+    let init_cons: Vec<SymProp> = pre.iter().filter_map(|e| sym_prop(e, &env)).collect();
+    let named = |ty: &str| -> HashSet<String> {
+        params
+            .iter()
+            .filter(|p| matches!(&p.ty, Type::Named(n) if n == ty))
+            .map(|p| p.name.clone())
+            .collect()
+    };
+    let mut ctx = Ctx {
+        contracts: &contracts,
+        fresh: 0,
+        float_vars: named("f64"),
+        unsigned_vars: named("u64"),
+        int_types: int_types_of(params),
+        requires,
+        bail: None,
+    };
+    let init = State {
+        env,
+        cons: init_cons,
+        obligations: Vec::new(),
+        broke: false,
+    };
+    eval_loop(vec![init], cond, invariant, body, &mut ctx).is_some()
+}
+
+/// Collects every variable named anywhere in a block, statement values, targets, conditions, and
+/// nested blocks, so they can be seeded as free symbols before an isolated loop verification.
+fn collect_block_vars(block: &Block, out: &mut HashSet<String>) {
+    fn expr_vars(e: &Expr, out: &mut HashSet<String>) {
+        collect_expr_vars(e, out);
+        match e {
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                collect_block_vars(then_branch, out);
+                if let Some(eb) = else_branch {
+                    collect_block_vars(eb, out);
+                }
+            }
+            Expr::Match { arms, .. } => {
+                for a in arms {
+                    collect_block_vars(&a.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    for s in &block.stmts {
+        match s {
+            Stmt::Let { name, value, .. } => {
+                out.insert(name.clone());
+                expr_vars(value, out);
+            }
+            Stmt::Assign { target, value } => {
+                expr_vars(target, out);
+                expr_vars(value, out);
+            }
+            Stmt::Return(Some(v)) | Stmt::Expr(v) => expr_vars(v, out),
+            Stmt::For {
+                cond, body, ..
+            } => {
+                if let Some(c) = cond {
+                    expr_vars(c, out);
+                }
+                collect_block_vars(body, out);
+            }
+            _ => {}
+        }
+    }
+    if let Some(t) = &block.tail {
+        expr_vars(t, out);
+    }
+}
+
+/// Does `e` name any variable in `set`?
+fn expr_mentions_any(e: &Expr, set: &HashSet<String>) -> bool {
+    let mut vars = HashSet::new();
+    collect_expr_vars(e, &mut vars);
+    vars.iter().any(|v| set.contains(v))
+}
+
 /// Threaded state for the path evaluator: the callee contracts (for inter-procedural
 /// summaries) and a counter that mints fresh, distinct symbols for call results.
 struct Ctx<'a> {
@@ -683,6 +817,18 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
                         });
                     }
                     out.push((s2, q));
+                }
+            }
+            Some(out)
+        }
+        // Bitwise OR / XOR have no linear model of the result, an opaque fresh value (which
+        // un-bails a body that combines bits, e.g. a conditional-swap flag `swap = swap ^ k`). The
+        // operands are still evaluated for their own obligations.
+        Expr::Binary(BinOp::BitOr | BinOp::BitXor, l, r) => {
+            let mut out = Vec::new();
+            for (s1, _) in eval_expr_paths(l, state, ctx)? {
+                for (s2, _) in eval_expr_paths(r, s1, ctx)? {
+                    out.push((s2, ctx.fresh_var()));
                 }
             }
             Some(out)
