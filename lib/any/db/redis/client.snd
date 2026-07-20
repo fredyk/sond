@@ -1,0 +1,1148 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/db/redis/client.snd: Minimal TCP client for Redis using RESP.
+//
+// API:
+//   redis_connect(host, port) -> fd  (returns socket fd on success, -errno on failure)
+//   redis_close(fd)
+//   redis_send(fd, buf, n)         (send n bytes at buf, returns bytes sent)
+//   redis_read(fd, buf, n)         (recv up to n bytes into buf, returns bytes read)
+//   redis_command(buf, n, args, n_args) -> resp_buf_len  (build + send command, read RESP)
+//   redis_reset(buf)               (reset recv buffer position)
+//
+// Command helpers (builds RESP array of args and calls redis_command helpers):
+//   redis_ping(fd)          → resp value
+//   redis_set(fd, key, val) → resp value
+//   redis_get(fd, key)      → resp value
+//   redis_del(fd, keys, n_keys) → resp value
+//   redis_incr(fd, key)     → resp value
+//   redis_exists(fd, key)   → resp value
+//   redis_ttl(fd, key)      → resp value
+//   redis_expire(fd, key, seconds) → resp value
+
+include "x86_64/linux/net.snd"
+include "x86_64/linux/io.snd"
+include "any/strings.snd"
+include "any/db/redis/resp.snd"
+
+//  Connection helpers 
+
+// Parse a NUL-terminated dot-decimal IP "127.0.0.1" into a u32 host-order value.
+fn ip_from_cstr(p: i64) -> i64 {
+    let mut result = 0
+    let mut octet = 0
+    let mut i = 0
+    for {
+        let c = peek8(p + i)
+        if c == 0 || c == 46 {  // '.' or NUL
+            result = result * 256 + octet
+            octet = 0
+            if c == 0 { break }
+            octet = 0  // ready for next octet
+        } else if c >= 48 && c <= 57 {
+            octet = octet * 10 + (c - 48)
+        }
+        i = i + 1
+        if i > 15 { break }  // safety: max IPv4 length
+    }
+    result
+}
+
+// Create a TCP socket, connect to host:port, set recv timeout.  Returns fd or < 0 on error.
+pub fn redis_connect(host: i64, port: i64) -> i64 {
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { return fd }
+    let sa[2]  // sockaddr_in needs 16 bytes → pad to 2 i64s (16 bytes)
+    let ip = ip_from_cstr(host)
+    sockaddr_in_build(sa, ip, port)
+    if connect_sock(fd, sa, 16) < 0 {
+        close_fd(fd)
+        return -1
+    }
+    set_rcvtimeo(fd, 5)  // 5s timeout on recv
+    fd
+}
+
+// Close a Redis connection.
+pub fn redis_close(fd: i64) {
+    close_fd(fd)
+}
+
+// Send n bytes at buf to socket fd.  Returns bytes sent (0-errno).
+pub fn redis_send(fd: i64, buf: i64, n: i64) -> i64 {
+    sendto_sock(fd, buf, n, 0, 0, 0)
+}
+
+// Read up to n bytes from socket fd into buf.  Returns bytes read or -errno.
+pub fn redis_read(fd: i64, buf: i64, n: i64) -> i64 {
+    recvfrom_sock(fd, buf, n, 0, 0, 0)
+}
+
+//  High-level: send command + read response 
+
+// Read all available data from socket, appending to buf at pos.
+// Returns new position in buf.  Caller ensures buf has capacity.
+fn read_response(fd: i64, buf: i64, pos: i64, cap: i64) -> i64 {
+    let bufptr = peek64(buf + 8)  // buf_ptr from header
+    let capval = peek64(buf + 24) // cap from header
+    let have = pos
+    let available = capval - have
+    if available <= 0 { return have }
+    let rn = recvfrom_sock(fd, bufptr + have, available, 0, 0, 0)
+    if rn <= 0 { return have }
+    let mut new_pos = have + rn
+    // Keep reading more data (non-blocking, may come in chunks)
+    for {
+        let av2 = capval - new_pos
+        if av2 <= 0 { break }
+        let rn2 = recvfrom_sock(fd, bufptr + new_pos, av2, 0, 0, 0)
+        if rn2 <= 0 { break }
+        new_pos = new_pos + rn2
+    }
+    poke64(buf + 16, new_pos)  // update pos in header
+    new_pos
+}
+
+//  Connection struct (arena-allocated) 
+// Layout at handle: [buf_ptr(8), fd(8), pos(8), cap(8)] = 32 bytes
+
+// Create a Redis connection. `buf_cap` is the size of the response buffer.
+// Returns a handle to the connection struct (or 0 on failure).
+pub fn redis_connect_new(port: i64) -> i64 {
+    let handle = heap_alloc(32)  // [buf_ptr, fd, pos, cap]
+    let buf_cap = 4096
+    let buf_ptr = heap_alloc(buf_cap)
+    poke64(handle, buf_ptr)
+    poke64(handle + 8, 0)  // fd = 0 (not connected yet)
+    poke64(handle + 16, 0) // pos = 0
+    poke64(handle + 24, buf_cap)
+
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { return 0 }
+    let sa[2]
+    let ip = ip_from_cstr(cstr("127.0.0.1"))
+    sockaddr_in_build(sa, ip, port)
+    if connect_sock(fd, sa, 16) < 0 { close_fd(fd); return 0 }
+    set_rcvtimeo(fd, 5)
+    poke64(handle + 8, fd)
+    handle
+}
+
+// Close a connection.
+pub fn redis_connect_close(handle: i64) {
+    let fd = peek64(handle + 8)
+    close_fd(fd)
+}
+
+// Read all available data from socket into the connection buffer.
+pub fn redis_fill(handle: i64) -> i64 {
+    let fd = peek64(handle + 8)
+    let bufptr = peek64(handle)
+    let pos = peek64(handle + 16)
+    let cap = peek64(handle + 24)
+    let available = cap - pos
+    if available <= 0 { return pos }
+    let rn = recvfrom_sock(fd, bufptr + pos, available, 0, 0, 0)
+    if rn <= 0 { return pos }
+    let mut new_pos = pos + rn
+    for {
+        let av2 = cap - new_pos
+        if av2 <= 0 { break }
+        let rn2 = recvfrom_sock(fd, bufptr + new_pos, av2, 0, 0, 0)
+        if rn2 <= 0 { break }
+        new_pos = new_pos + rn2
+    }
+    poke64(handle + 16, new_pos)
+    new_pos
+}
+
+// Parse and return one RESP value from the connection buffer.
+// For simple string: first byte. For integer: the value. For bulk/array: buffer handle.
+// For nil: -1. For array: item count.
+pub fn redis_parse(handle: i64) -> i64 {
+    let bufptr = peek64(handle)
+    let pos = peek64(handle + 16)
+    let cap = peek64(handle + 24)
+
+    __resp_data = bufptr
+    __resp_len = cap
+    __resp_idx = pos
+
+    let result = resp_decode()
+
+    poke64(handle + 16, __resp_idx)
+    result
+}
+
+// Reset buffer position to 0 (ready for next request).
+pub fn redis_reset(handle: i64) {
+    poke64(handle + 16, 0)
+}
+
+//  BUILD COMMAND HELPERS 
+
+// Add a command argument to an items array.  items[idx*16] = addr, items[idx*16+8] = len.
+fn add_cmd_arg(items: i64, idx: i64, addr: i64, len: i64) {
+    poke64(items + idx * 16, addr)
+    poke64(items + idx * 16 + 8, len)
+}
+
+// Send a pre-encoded RESP command buffer (n bytes) to the server,
+// then read all available response data.  Returns response buffer length.
+pub fn redis_send_resp(fd: i64, buf: i64, cmd_buf: i64, cmd_len: i64) -> i64 {
+    sendto_sock(fd, cmd_buf, cmd_len, 0, 0, 0)
+    read_response(fd, buf, 0, peek64(buf + 24))  // read into pos 0, use cap
+}
+
+// Send a command built from args (each [addr, len] pair) and read response.
+// args is a pointer to [n*2] i64 slots alternating [addr, len].
+pub fn redis_command(buf: i64, fd: i64, n_args: i64, args: i64) -> i64 {
+    let encoded = bytes_new()
+    enc_array_of_strings(n_args, args)
+    let elen = bytes_len(encoded)
+    sendto_sock(fd, encoded, elen, 0, 0, 0)
+    read_response(fd, buf, 0, peek64(buf + 24))
+}
+
+//  CONVENIENCE COMMANDS 
+
+// Helper: encode a C-string pointer into a slot in an items array.
+fn ptr_to_item(items: i64, idx: i64, ptr: i64) {
+    poke64(items + idx * 16, ptr)
+    poke64(items + idx * 16 + 8, strlen(ptr))
+}
+
+// Send PING command.
+pub fn redis_ping(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("PING"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send GET key.
+pub fn redis_get(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("GET"), strlen(key))
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send SET key value.
+pub fn redis_set(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("SET"), strlen(key))
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, value, strlen(value))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send SET key value EX seconds.
+pub fn redis_setex(fd: i64, buf: i64, items: i64, key: i64, value: i64, secs: i64) -> i64 {
+    let tmp[20]
+    let slen = itoa(secs, tmp)
+    add_cmd_arg(items, 0, cstr("SET"), strlen(key))
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, value, strlen(value))
+    add_cmd_arg(items, 3, cstr("EX"), 2)
+    poke64(items + 4 * 16, tmp)
+    poke64(items + 4 * 16 + 8, slen)
+    redis_command(buf, fd, 5, items)
+}
+
+// Send SETEX key seconds value.
+pub fn redis_setex2(fd: i64, buf: i64, items: i64, key: i64, secs: i64, value: i64) -> i64 {
+    let tmp[20]
+    let slen = itoa(secs, tmp)
+    add_cmd_arg(items, 0, cstr("SETEX"), 5)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, tmp, slen)
+    add_cmd_arg(items, 3, value, strlen(value))
+    redis_command(buf, fd, 4, items)
+}
+
+// Send GETSET key value.
+pub fn redis_getset(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("GETSET"), 8)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, value, strlen(value))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send APPEND key value.
+pub fn redis_append(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("APPEND"), 6)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, value, strlen(value))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send STRLEN key.
+pub fn redis_strlen(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("STRLEN"), 6)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send INCR key.
+pub fn redis_incr(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("INCR"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send INCRBY key increment.
+pub fn redis_incrby(fd: i64, buf: i64, items: i64, key: i64, amount: i64) -> i64 {
+    let tmp[20]
+    let slen = itoa(amount, tmp)
+    add_cmd_arg(items, 0, cstr("INCRBY"), 6)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, tmp, slen)
+    redis_command(buf, fd, 3, items)
+}
+
+// Send DECR key.
+pub fn redis_decr(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("DECR"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send DECRBY key decrement.
+pub fn redis_decrby(fd: i64, buf: i64, items: i64, key: i64, amount: i64) -> i64 {
+    let tmp[20]
+    let slen = itoa(amount, tmp)
+    add_cmd_arg(items, 0, cstr("DECRBY"), 6)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, tmp, slen)
+    redis_command(buf, fd, 3, items)
+}
+
+// Send DEL key... (variable args).
+pub fn redis_del(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("DEL"), 3)
+    let mut slot = 1
+    let mut i = 0
+    for i < n_keys {
+        let key_ptr = peek64(keys + i * 8)
+        let klen = strlen(key_ptr)
+        poke64(items + slot * 16, key_ptr)
+        poke64(items + slot * 16 + 8, klen)
+        slot = slot + 1
+        i = i + 1
+    }
+    redis_command(buf, fd, 1 + n_keys, items)
+}
+
+// Send EXISTS key.
+pub fn redis_exists(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("EXISTS"), 6)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send TTL key.
+pub fn redis_ttl(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("TTL"), 3)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send EXPIRE key seconds.
+pub fn redis_expire(fd: i64, buf: i64, items: i64, key: i64, seconds: i64) -> i64 {
+    let tmp[20]
+    let slen = itoa(seconds, tmp)
+    add_cmd_arg(items, 0, cstr("EXPIRE"), 6)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, tmp, slen)
+    redis_command(buf, fd, 3, items)
+}
+
+// Send TYPE key.
+pub fn redis_type(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("TYPE"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send RENAME key newkey.
+pub fn redis_rename(fd: i64, buf: i64, items: i64, key: i64, newkey: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("RENAME"), 6)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, newkey, strlen(newkey))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send KEYS pattern.
+pub fn redis_keys(fd: i64, buf: i64, items: i64, pattern: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("KEYS"), 4)
+    add_cmd_arg(items, 1, pattern, strlen(pattern))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send FLUSHDB.
+pub fn redis_flushdb(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("FLUSHDB"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send DBSIZE.
+pub fn redis_dbsize(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("DBSIZE"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send SELECT index.
+pub fn redis_select(fd: i64, buf: i64, items: i64, index: i64) -> i64 {
+    let tmp[20]
+    let slen = itoa(index, tmp)
+    add_cmd_arg(items, 0, cstr("SELECT"), 6)
+    add_cmd_arg(items, 1, tmp, slen)
+    redis_command(buf, fd, 2, items)
+}
+
+// Send ECHO message.
+pub fn redis_echo(fd: i64, buf: i64, items: i64, msg: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("ECHO"), 4)
+    add_cmd_arg(items, 1, msg, strlen(msg))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send PING with message.
+pub fn redis_ping_msg(fd: i64, buf: i64, items: i64, msg: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("PING"), 4)
+    add_cmd_arg(items, 1, msg, strlen(msg))
+    redis_command(buf, fd, 2, items)
+}
+
+//  LIST COMMANDS 
+
+// Send LPUSH key value.
+pub fn redis_lpush(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("LPUSH"), 5)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, value, strlen(value))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send RPUSH key value.
+pub fn redis_rpush(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("RPUSH"), 5)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, value, strlen(value))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send LPOP key.
+pub fn redis_lpop(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("LPOP"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send RPOP key.
+pub fn redis_rpop(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("RPOP"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send LLEN key.
+pub fn redis_llen(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("LLEN"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send LRANGE key start stop.
+pub fn redis_lrange(fd: i64, buf: i64, items: i64, key: i64, start: i64, stop: i64) -> i64 {
+    let start_tmp[20]
+    let stop_tmp[20]
+    let start_len = itoa(start, start_tmp)
+    let stop_len = itoa(stop, stop_tmp)
+    add_cmd_arg(items, 0, cstr("LRANGE"), 6)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, start_tmp, start_len)
+    add_cmd_arg(items, 3, stop_tmp, stop_len)
+    redis_command(buf, fd, 4, items)
+}
+
+// Send LINDEX key index.
+pub fn redis_lindex(fd: i64, buf: i64, items: i64, key: i64, index: i64) -> i64 {
+    let idx_tmp[20]
+    let idx_len = itoa(index, idx_tmp)
+    add_cmd_arg(items, 0, cstr("LINDEX"), 6)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, idx_tmp, idx_len)
+    redis_command(buf, fd, 3, items)
+}
+
+// Send LSET key index value.
+pub fn redis_lset(fd: i64, buf: i64, items: i64, key: i64, index: i64, value: i64) -> i64 {
+    let idx_tmp[20]
+    let idx_len = itoa(index, idx_tmp)
+    add_cmd_arg(items, 0, cstr("LSET"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, idx_tmp, idx_len)
+    add_cmd_arg(items, 3, value, strlen(value))
+    redis_command(buf, fd, 4, items)
+}
+
+// Send LTRIM key start stop.
+pub fn redis_ltrim(fd: i64, buf: i64, items: i64, key: i64, start: i64, stop: i64) -> i64 {
+    let start_tmp[20]
+    let stop_tmp[20]
+    let start_len = itoa(start, start_tmp)
+    let stop_len = itoa(stop, stop_tmp)
+    add_cmd_arg(items, 0, cstr("LTRIM"), 5)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, start_tmp, start_len)
+    add_cmd_arg(items, 3, stop_tmp, stop_len)
+    redis_command(buf, fd, 4, items)
+}
+
+// Send LREM key count value.
+pub fn redis_lrem(fd: i64, buf: i64, items: i64, key: i64, count: i64, value: i64) -> i64 {
+    let cnt_tmp[20]
+    let cnt_len = itoa(count, cnt_tmp)
+    add_cmd_arg(items, 0, cstr("LREM"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, cnt_tmp, cnt_len)
+    add_cmd_arg(items, 3, value, strlen(value))
+    redis_command(buf, fd, 4, items)
+}
+
+//  HASH COMMANDS 
+
+// Send HSET key field value.
+pub fn redis_hset(fd: i64, buf: i64, items: i64, key: i64, field: i64, value: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("HSET"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, field, strlen(field))
+    add_cmd_arg(items, 3, value, strlen(value))
+    redis_command(buf, fd, 4, items)
+}
+
+// Send HGET key field.
+pub fn redis_hget(fd: i64, buf: i64, items: i64, key: i64, field: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("HGET"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, field, strlen(field))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send HDEL key field...
+pub fn redis_hdel(fd: i64, buf: i64, items: i64, key: i64, n_fields: i64, fields: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("HDEL"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    let mut slot = 2
+    let mut i = 0
+    for i < n_fields {
+        let fptr = peek64(fields + i * 8)
+        let flen = strlen(fptr)
+        poke64(items + slot * 16, fptr)
+        poke64(items + slot * 16 + 8, flen)
+        slot = slot + 1
+        i = i + 1
+    }
+    redis_command(buf, fd, 2 + n_fields, items)
+}
+
+// Send HGETALL key.
+pub fn redis_hgetall(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("HGETALL"), 7)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send HLEN key.
+pub fn redis_hlen(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("HLEN"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send HKEYS key.
+pub fn redis_hkeys(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("HKEYS"), 5)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send HVALS key.
+pub fn redis_hvals(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("HVALS"), 5)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send HEXISTS key field.
+pub fn redis_hexists(fd: i64, buf: i64, items: i64, key: i64, field: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("HEXISTS"), 7)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, field, strlen(field))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send HINCRBY key field increment.
+pub fn redis_hincrby(fd: i64, buf: i64, items: i64, key: i64, field: i64, amount: i64) -> i64 {
+    let amt_tmp[20]
+    let amt_len = itoa(amount, amt_tmp)
+    add_cmd_arg(items, 0, cstr("HINCRBY"), 7)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, field, strlen(field))
+    add_cmd_arg(items, 3, amt_tmp, amt_len)
+    redis_command(buf, fd, 4, items)
+}
+
+//  SET COMMANDS 
+
+// Send SADD key member.
+pub fn redis_sadd(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("SADD"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, member, strlen(member))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send SREM key member.
+pub fn redis_srem(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("SREM"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, member, strlen(member))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send SMEMBERS key.
+pub fn redis_smembers(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("SMEMBERS"), 8)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send SISMEMBER key member.
+pub fn redis_sismember(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("SISMEMBER"), 9)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, member, strlen(member))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send SCARD key.
+pub fn redis_scard(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("SCARD"), 5)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send SPOP key.
+pub fn redis_spop(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("SPOP"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send SRANDMEMBER key count.
+pub fn redis_srandmember(fd: i64, buf: i64, items: i64, key: i64, count: i64) -> i64 {
+    let cnt_tmp[20]
+    let cnt_len = itoa(count, cnt_tmp)
+    add_cmd_arg(items, 0, cstr("SRANDMEMBER"), 11)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, cnt_tmp, cnt_len)
+    redis_command(buf, fd, 3, items)
+}
+
+// Send SDIFF key...
+pub fn redis_sdiff(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("SDIFF"), 5)
+    let mut slot = 1
+    let mut i = 0
+    for i < n_keys {
+        let kptr = peek64(keys + i * 8)
+        let klen = strlen(kptr)
+        poke64(items + slot * 16, kptr)
+        poke64(items + slot * 16 + 8, klen)
+        slot = slot + 1
+        i = i + 1
+    }
+    redis_command(buf, fd, 1 + n_keys, items)
+}
+
+// Send SINTER key...
+pub fn redis_sinter(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("SINTER"), 6)
+    let mut slot = 1
+    let mut i = 0
+    for i < n_keys {
+        let kptr = peek64(keys + i * 8)
+        let klen = strlen(kptr)
+        poke64(items + slot * 16, kptr)
+        poke64(items + slot * 16 + 8, klen)
+        slot = slot + 1
+        i = i + 1
+    }
+    redis_command(buf, fd, 1 + n_keys, items)
+}
+
+// Send SUNION key...
+pub fn redis_sunion(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("SUNION"), 6)
+    let mut slot = 1
+    let mut i = 0
+    for i < n_keys {
+        let kptr = peek64(keys + i * 8)
+        let klen = strlen(kptr)
+        poke64(items + slot * 16, kptr)
+        poke64(items + slot * 16 + 8, klen)
+        slot = slot + 1
+        i = i + 1
+    }
+    redis_command(buf, fd, 1 + n_keys, items)
+}
+
+//  SORTED SET COMMANDS 
+
+// Send ZADD key score member.
+pub fn redis_zadd(fd: i64, buf: i64, items: i64, key: i64, score: i64, member: i64) -> i64 {
+    let score_tmp[32]
+    let score_len = itoa(score, score_tmp)
+    add_cmd_arg(items, 0, cstr("ZADD"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, score_tmp, score_len)
+    add_cmd_arg(items, 3, member, strlen(member))
+    redis_command(buf, fd, 4, items)
+}
+
+// Send ZRANGE key start stop.
+pub fn redis_zrange(fd: i64, buf: i64, items: i64, key: i64, start: i64, stop: i64) -> i64 {
+    let start_tmp[20]
+    let stop_tmp[20]
+    let start_len = itoa(start, start_tmp)
+    let stop_len = itoa(stop, stop_tmp)
+    add_cmd_arg(items, 0, cstr("ZRANGE"), 6)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, start_tmp, start_len)
+    add_cmd_arg(items, 3, stop_tmp, stop_len)
+    redis_command(buf, fd, 4, items)
+}
+
+// Send ZSCORE key member.
+pub fn redis_zscore(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("ZSCORE"), 6)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, member, strlen(member))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send ZCARD key.
+pub fn redis_zcard(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("ZCARD"), 5)
+    add_cmd_arg(items, 1, key, strlen(key))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send ZREM key member.
+pub fn redis_zrem(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("ZREM"), 4)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, member, strlen(member))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send ZRANK key member.
+pub fn redis_zrank(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("ZRANK"), 5)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, member, strlen(member))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send ZREVRANK key member.
+pub fn redis_zrevrank(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("ZREVRANK"), 8)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, member, strlen(member))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send ZINCRBY key increment member.
+pub fn redis_zincrby(fd: i64, buf: i64, items: i64, key: i64, increment: i64, member: i64) -> i64 {
+    let inc_tmp[32]
+    let inc_len = itoa(increment, inc_tmp)
+    add_cmd_arg(items, 0, cstr("ZINCRBY"), 7)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, inc_tmp, inc_len)
+    add_cmd_arg(items, 3, member, strlen(member))
+    redis_command(buf, fd, 4, items)
+}
+
+// Send ZCOUNT key min max.
+pub fn redis_zcount(fd: i64, buf: i64, items: i64, key: i64, min: i64, max: i64) -> i64 {
+    let min_tmp[32]
+    let max_tmp[32]
+    let min_len = itoa(min, min_tmp)
+    let max_len = itoa(max, max_tmp)
+    add_cmd_arg(items, 0, cstr("ZCOUNT"), 6)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, min_tmp, min_len)
+    add_cmd_arg(items, 3, max_tmp, max_len)
+    redis_command(buf, fd, 4, items)
+}
+
+// Send ZLEXCOUNT key min max.
+pub fn redis_zlexcount(fd: i64, buf: i64, items: i64, key: i64, min: i64, max: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("ZLEXCOUNT"), 9)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, min, strlen(min))
+    add_cmd_arg(items, 3, max, strlen(max))
+    redis_command(buf, fd, 4, items)
+}
+
+// Send ZREMRANGEBYRANK key start stop.
+pub fn redis_zremrangebyrank(fd: i64, buf: i64, items: i64, key: i64, start: i64, stop: i64) -> i64 {
+    let start_tmp[20]
+    let stop_tmp[20]
+    let start_len = itoa(start, start_tmp)
+    let stop_len = itoa(stop, stop_tmp)
+    add_cmd_arg(items, 0, cstr("ZREMRANGEBYRANK"), 15)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, start_tmp, start_len)
+    add_cmd_arg(items, 3, stop_tmp, stop_len)
+    redis_command(buf, fd, 4, items)
+}
+
+// Send ZREMRANGEBYSCORE key min max.
+pub fn redis_zremrangebyscore(fd: i64, buf: i64, items: i64, key: i64, min: i64, max: i64) -> i64 {
+    let min_tmp[32]
+    let max_tmp[32]
+    let min_len = itoa(min, min_tmp)
+    let max_len = itoa(max, max_tmp)
+    add_cmd_arg(items, 0, cstr("ZREMRANGEBYSCORE"), 16)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, min_tmp, min_len)
+    add_cmd_arg(items, 3, max_tmp, max_len)
+    redis_command(buf, fd, 4, items)
+}
+
+// Send ZREMRANGEBYLEX key min max.
+pub fn redis_zremrangebylex(fd: i64, buf: i64, items: i64, key: i64, min: i64, max: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("ZREMRANGEBYLEX"), 14)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, min, strlen(min))
+    add_cmd_arg(items, 3, max, strlen(max))
+    redis_command(buf, fd, 4, items)
+}
+
+// Send ZRANGEBYSCORE key min max.
+pub fn redis_zrangebyscore(fd: i64, buf: i64, items: i64, key: i64, min: i64, max: i64) -> i64 {
+    let min_tmp[32]
+    let max_tmp[32]
+    let min_len = itoa(min, min_tmp)
+    let max_len = itoa(max, max_tmp)
+    add_cmd_arg(items, 0, cstr("ZRANGEBYSCORE"), 13)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, min_tmp, min_len)
+    add_cmd_arg(items, 3, max_tmp, max_len)
+    redis_command(buf, fd, 4, items)
+}
+
+// Send ZRANGEBYLEX key min max.
+pub fn redis_zrangebylex(fd: i64, buf: i64, items: i64, key: i64, min: i64, max: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("ZRANGEBYLEX"), 11)
+    add_cmd_arg(items, 1, key, strlen(key))
+    add_cmd_arg(items, 2, min, strlen(min))
+    add_cmd_arg(items, 3, max, strlen(max))
+    redis_command(buf, fd, 4, items)
+}
+
+// Send ZINTERSTORE dst key...
+pub fn redis_zinterstore(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("ZINTERSTORE"), 11)
+    // dst is at slot 0, keys start at slot 1
+    let dst_ptr = peek64(keys + 0)  // first key is actually dst name
+    let dst_len = strlen(dst_ptr)
+    poke64(items, dst_ptr)
+    poke64(items + 8, dst_len)
+    let mut slot = 2
+    let mut i = 1  // skip first (dst)
+    let mut total = n_keys  // n_keys includes dst
+    for i < total {
+        let kptr = peek64(keys + i * 8)
+        let klen = strlen(kptr)
+        poke64(items + slot * 16, kptr)
+        poke64(items + slot * 16 + 8, klen)
+        slot = slot + 1
+        i = i + 1
+    }
+    redis_command(buf, fd, 2 + n_keys - 1, items)
+}
+
+// Send ZUNIONSTORE dst key...
+pub fn redis_zunionstore(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("ZUNIONSTORE"), 11)
+    let dst_ptr = peek64(keys + 0)
+    let dst_len = strlen(dst_ptr)
+    poke64(items, dst_ptr)
+    poke64(items + 8, dst_len)
+    let mut slot = 2
+    let mut i = 1
+    let mut total = n_keys
+    for i < total {
+        let kptr = peek64(keys + i * 8)
+        let klen = strlen(kptr)
+        poke64(items + slot * 16, kptr)
+        poke64(items + slot * 16 + 8, klen)
+        slot = slot + 1
+        i = i + 1
+    }
+    redis_command(buf, fd, 2 + n_keys - 1, items)
+}
+
+// Send ZMSCORE key member...
+pub fn redis_zmscore(fd: i64, buf: i64, items: i64, key: i64, n_members: i64, members: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("ZMSCORE"), 7)
+    add_cmd_arg(items, 1, key, strlen(key))
+    let mut slot = 2
+    let mut i = 0
+    for i < n_members {
+        let mptr = peek64(members + i * 8)
+        let mlen = strlen(mptr)
+        poke64(items + slot * 16, mptr)
+        poke64(items + slot * 16 + 8, mlen)
+        slot = slot + 1
+        i = i + 1
+    }
+    redis_command(buf, fd, 2 + n_members, items)
+}
+
+// ── SERVER COMMANDS ────────────────────────────────────────────────── 
+
+// Send INFO.
+pub fn redis_info(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("INFO"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send CONFIG GET param.
+pub fn redis_config_get(fd: i64, buf: i64, items: i64, param: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("CONFIG"), 6)
+    add_cmd_arg(items, 1, cstr("GET"), 3)
+    add_cmd_arg(items, 2, param, strlen(param))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send SAVE.
+pub fn redis_save(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("SAVE"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send BGSAVE.
+pub fn redis_bgsave(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("BGSAVE"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send LASTSAVE.
+pub fn redis_lastsave(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("LASTSAVE"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send SHUTDOWN.
+pub fn redis_shutdown(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("SHUTDOWN"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send DEBUG OBJECT key.
+pub fn redis_debug_object(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("DEBUG"), 5)
+    add_cmd_arg(items, 1, cstr("OBJECT"), 6)
+    add_cmd_arg(items, 2, key, strlen(key))
+    redis_command(buf, fd, 3, items)
+}
+
+// Send MONITOR (fires and forget, no response expected).
+pub fn redis_monitor(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("MONITOR"))
+    sendto_sock(fd, peek64(items), strlen(peek64(items)) + 5, 0, 0, 0)
+    0
+}
+
+// Send CLIENT LIST.
+pub fn redis_client_list(fd: i64, buf: i64, items: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("CLIENT"), 6)
+    add_cmd_arg(items, 1, cstr("LIST"), 4)
+    redis_command(buf, fd, 2, items)
+}
+
+// Send CLIENT KILL id.
+pub fn redis_client_kill(fd: i64, buf: i64, items: i64, id: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("CLIENT"), 6)
+    add_cmd_arg(items, 1, cstr("KILL"), 4)
+    add_cmd_arg(items, 2, cstr("ID"), 2)
+    add_cmd_arg(items, 3, id, strlen(id))
+    redis_command(buf, fd, 4, items)
+}
+
+// Send AUTH password.
+pub fn redis_auth(fd: i64, buf: i64, items: i64, password: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("AUTH"), 4)
+    add_cmd_arg(items, 1, password, strlen(password))
+    redis_command(buf, fd, 2, items)
+}
+
+// Send QUIT.
+pub fn redis_quit(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("QUIT"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send TIME.
+pub fn redis_time(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("TIME"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send UPTIME.
+pub fn redis_uptime(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("UPTIME"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send SLAVEOF host port.
+pub fn redis_slaveof(fd: i64, buf: i64, items: i64, host: i64, port: i64) -> i64 {
+    let port_tmp[20]
+    let port_len = itoa(port, port_tmp)
+    add_cmd_arg(items, 0, cstr("SLAVEOF"), 7)
+    add_cmd_arg(items, 1, host, strlen(host))
+    add_cmd_arg(items, 2, port_tmp, port_len)
+    redis_command(buf, fd, 3, items)
+}
+
+// Send WAIT num_slaves timeout.
+pub fn redis_wait(fd: i64, buf: i64, items: i64, num_slaves: i64, timeout: i64) -> i64 {
+    let ns_tmp[20]
+    let to_tmp[20]
+    let ns_len = itoa(num_slaves, ns_tmp)
+    let to_len = itoa(timeout, to_tmp)
+    add_cmd_arg(items, 0, cstr("WAIT"), 4)
+    add_cmd_arg(items, 1, ns_tmp, ns_len)
+    add_cmd_arg(items, 2, to_tmp, to_len)
+    redis_command(buf, fd, 3, items)
+}
+
+//  MULTI/EXEC (transaction commands) 
+
+// Send MULTI.
+pub fn redis_multi(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("MULTI"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send EXEC.
+pub fn redis_exec(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("EXEC"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send DISCARD.
+pub fn redis_discard(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("DISCARD"))
+    redis_command(buf, fd, 1, items)
+}
+
+// Send WATCH key...
+pub fn redis_watch(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("WATCH"), 5)
+    let mut slot = 1
+    let mut i = 0
+    for i < n_keys {
+        let kptr = peek64(keys + i * 8)
+        let klen = strlen(kptr)
+        poke64(items + slot * 16, kptr)
+        poke64(items + slot * 16 + 8, klen)
+        slot = slot + 1
+        i = i + 1
+    }
+    redis_command(buf, fd, 1 + n_keys, items)
+}
+
+// Send UNWATCH.
+pub fn redis_unwatch(fd: i64, buf: i64, items: i64) -> i64 {
+    ptr_to_item(items, 0, cstr("UNWATCH"))
+    redis_command(buf, fd, 1, items)
+}
+
+//  PUB/SUB COMMANDS 
+
+// Send SUBSCRIBE channel...
+pub fn redis_subscribe(fd: i64, buf: i64, items: i64, n_channels: i64, channels: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("SUBSCRIBE"), 9)
+    let mut slot = 1
+    let mut i = 0
+    for i < n_channels {
+        let chptr = peek64(channels + i * 8)
+        let chlen = strlen(chptr)
+        poke64(items + slot * 16, chptr)
+        poke64(items + slot * 16 + 8, chlen)
+        slot = slot + 1
+        i = i + 1
+    }
+    redis_command(buf, fd, 1 + n_channels, items)
+}
+
+// Send UNSUBSCRIBE channel...
+pub fn redis_unsubscribe(fd: i64, buf: i64, items: i64, n_channels: i64, channels: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("UNSUBSCRIBE"), 11)
+    let mut slot = 1
+    let mut i = 0
+    for i < n_channels {
+        let chptr = peek64(channels + i * 8)
+        let chlen = strlen(chptr)
+        poke64(items + slot * 16, chptr)
+        poke64(items + slot * 16 + 8, chlen)
+        slot = slot + 1
+        i = i + 1
+    }
+    redis_command(buf, fd, 1 + n_channels, items)
+}
+
+// Send PSUBSCRIBE pattern...
+pub fn redis_psubscribe(fd: i64, buf: i64, items: i64, n_patterns: i64, patterns: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("PSUBSCRIBE"), 10)
+    let mut slot = 1
+    let mut i = 0
+    for i < n_patterns {
+        let pptr = peek64(patterns + i * 8)
+        let plen = strlen(pptr)
+        poke64(items + slot * 16, pptr)
+        poke64(items + slot * 16 + 8, plen)
+        slot = slot + 1
+        i = i + 1
+    }
+    redis_command(buf, fd, 1 + n_patterns, items)
+}
+
+// Send PUNSUBSCRIBE pattern...
+pub fn redis_punsubscribe(fd: i64, buf: i64, items: i64, n_patterns: i64, patterns: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("PUNSUBSCRIBE"), 12)
+    let mut slot = 1
+    let mut i = 0
+    for i < n_patterns {
+        let pptr = peek64(patterns + i * 8)
+        let plen = strlen(pptr)
+        poke64(items + slot * 16, pptr)
+        poke64(items + slot * 16 + 8, plen)
+        slot = slot + 1
+        i = i + 1
+    }
+    redis_command(buf, fd, 1 + n_patterns, items)
+}
+
+// Send PUBLISH channel message.
+pub fn redis_publish(fd: i64, buf: i64, items: i64, channel: i64, message: i64) -> i64 {
+    add_cmd_arg(items, 0, cstr("PUBLISH"), 7)
+    add_cmd_arg(items, 1, channel, strlen(channel))
+    add_cmd_arg(items, 2, message, strlen(message))
+    redis_command(buf, fd, 3, items)
+}
+

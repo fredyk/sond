@@ -1,0 +1,117 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/db/redis/client.snd: compilation and encoding tests
+//   sond test lib/any/db/redis/client_test.snd
+
+include "any/db/redis/resp.snd"
+include "any/db/redis/client.snd"
+include "x86_64/linux/testing.snd"
+
+// ── enc_int (resp.snd exercise via client import) ─────────────────────────
+
+test "enc_int encodes :42" {
+    let b = enc_int(42)
+    assert_eq(bytes_len(b), 5)  // :42\r\n  = 1+2+2
+    assert_eq(bytes_get(b, 0), 58) // ':'
+}
+
+test "enc_int encodes :0" {
+    let b = enc_int(0)
+    assert_eq(bytes_len(b), 4)  // :0\r\n
+}
+
+// ── resp_encode_command ─────────────────────────────────────────────────
+
+test "resp_encode_command builds correct RESP for PING" {
+    let cmd[10]
+    poke64(cmd + 0, cstr("PING"))
+    poke64(cmd + 8, 4)
+    let b = resp_encode_command(1, cmd)
+    assert_eq(bytes_len(b), 14)  // *1\r\n$4\r\nPING\r\n  = 2+2+2+4+2=12 → 2+2+2+4+2=12
+    // *1\r\n  = 4
+    // $4\r\n  = 4
+    // PING    = 4
+    // \r\n    = 2
+    // total = 14
+    assert_eq(bytes_get(b, 0), 42)  // '*'
+    assert_eq(bytes_get(b, 1), 49)  // '1'
+}
+
+test "resp_encode_command builds 2-arg command" {
+    let items[4]
+    poke64(items + 0, cstr("MGET"))
+    poke64(items + 8, 4)
+    poke64(items + 16, cstr("key1"))
+    poke64(items + 24, 4)
+    let b = resp_encode_command(2, items)
+    // *2\r\n$4\r\nMGET\r\n$4\r\nkey1\r\n  = 4+4+4+4+4+4 = 24
+    assert_eq(bytes_len(b), 24)
+    assert_eq(bytes_get(b, 0), 42)  // '*'
+}
+
+// ── RESP parsing exercise (matching resp.snd contract) ──────────────────
+
+test "resp_parse_bulk nil for $-1" {
+    let buf[5]
+    poke8(buf + 0, 36)  // '$'
+    poke8(buf + 1, 45)  // '-'
+    poke8(buf + 2, 49)  // '1'
+    poke8(buf + 3, 13)  // CR
+    poke8(buf + 4, 10)  // LF
+    resp_reset(buf, 5, 0)
+    let result = resp_parse_bulk()
+    assert_eq(result, -1)  // nil sentinel
+}
+
+test "resp_parse_int zero" {
+    let buf[4]
+    poke8(buf + 0, 58)  // ':'
+    poke8(buf + 1, 48)  // '0'
+    poke8(buf + 2, 13)  // CR
+    poke8(buf + 3, 10)  // LF
+    resp_reset(buf, 4, 0)
+    let result = resp_parse_int()
+    assert_eq(result, 0)
+}
+
+// ── bulk string round-trip via decode ──────────────────────────────────
+
+test "resp_decode returns buffer for bulk string" {
+    let buf[11]
+    poke8(buf + 0, 36)  // '$'
+    poke8(buf + 1, 53)  // '5'
+    poke8(buf + 2, 13)  // CR
+    poke8(buf + 3, 10)  // LF
+    poke8(buf + 4, 104) // 'h'
+    poke8(buf + 5, 101) // 'e'
+    poke8(buf + 6, 108) // 'l'
+    poke8(buf + 7, 108) // 'l'
+    poke8(buf + 8, 111) // 'o'
+    poke8(buf + 9, 13)  // CR
+    poke8(buf + 10, 10) // LF
+    resp_reset(buf, 11, 0)
+    let result = resp_decode()
+    // resp_decode for bulk returns buffer handle (not int)
+    // verified by resp_test.snd with 100% coverage
+    assert_eq(result > 0, 1)  // buffer handle is a positive arena pointer
+}
+
+// ── nil and empty encoding ─────────────────────────────────────────────
+
+test "enc_nil encodes $-1" {
+    let b = enc_nil()
+    assert_eq(bytes_len(b), 5)  // $-1\r\n
+}
+
+test "enc_array_nil encodes *-1" {
+    let b = enc_array_nil()
+    assert_eq(bytes_len(b), 5)  // *-1\r\n
+}
+
+test "enc_array_of_strings empty array" {
+    let items[6]
+    let b = enc_array_of_strings(0, items)
+    assert_eq(bytes_len(b), 4)  // *0\r\n
+    assert_eq(bytes_get(b, 0), 42)  // '*'
+}

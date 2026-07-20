@@ -1,0 +1,415 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/db/redis/resp.snd
+//   sond test lib/any/db/redis/resp_test.snd
+
+include "any/db/redis/resp.snd"
+include "x86_64/linux/testing.snd"
+
+// ── integer encoding ─────────────────────────────────────────────────
+
+test "enc_int encodes :1000" {
+    let b = enc_int(1000)
+    assert_eq(bytes_len(b), 7)   // :1000\r\n
+    assert_eq(bytes_get(b, 0), 58)   // ':'
+    assert_eq(bytes_get(b, 1), 49)   // '1'
+    assert_eq(bytes_get(b, 5), 13)   // CR
+    assert_eq(bytes_get(b, 6), 10)   // LF
+}
+
+test "enc_int encodes :0" {
+    let b = enc_int(0)
+    assert_eq(bytes_len(b), 4)   // :0\r\n
+    assert_eq(bytes_get(b, 0), 58)
+    assert_eq(bytes_get(b, 1), 48)
+    assert_eq(bytes_get(b, 2), 13)
+    assert_eq(bytes_get(b, 3), 10)
+}
+
+test "enc_int encodes negative" {
+    let b = enc_int(-1)
+    assert_eq(bytes_len(b), 5)   // :-1\r\n
+    assert_eq(bytes_get(b, 0), 58)
+    assert_eq(bytes_get(b, 1), 45)
+    assert_eq(bytes_get(b, 2), 49)
+    assert_eq(bytes_get(b, 3), 13)
+    assert_eq(bytes_get(b, 4), 10)
+}
+
+test "enc_int encodes :98765" {
+    let b = enc_int(98765)
+    assert_eq(bytes_len(b), 8)   // :98765\r\n  = 1+5+2
+    assert_eq(bytes_get(b, 0), 58)
+    assert_eq(bytes_get(b, 7), 10)
+}
+
+// ── bulk string encoding ─────────────────────────────────────────────
+
+fn write_bytes(target: i64, src: i64, n: i64) {
+    let mut i = 0
+    for i < n {
+        poke8(target + i, peek8(src + i))
+        i = i + 1
+    }
+}
+
+test "enc_bulk_string encodes hello" {
+    let hello[6]
+    write_bytes(hello, cstr("hello"), 5)
+    let b = bytes_new()
+    enc_bulk_string(hello, 5, b)
+    assert_eq(bytes_len(b), 11)   // $5\r\nhello\r\n
+    assert_eq(bytes_get(b, 0), 36)   // '$'
+    assert_eq(bytes_get(b, 4), 104)  // h
+    assert_eq(bytes_get(b, 8), 111)  // o
+    assert_eq(bytes_get(b, 9), 13)   // CR
+    assert_eq(bytes_get(b, 10), 10)  // LF
+}
+
+test "enc_bulk_string encodes empty string" {
+    let empty[1]
+    poke8(empty, 0)
+    let b = bytes_new()
+    enc_bulk_string(empty, 0, b)
+    assert_eq(bytes_len(b), 6)   // $0\r\n\r\n  = 1+1+2+0+2
+    assert_eq(bytes_get(b, 0), 36)
+    assert_eq(bytes_get(b, 1), 48)
+    assert_eq(bytes_get(b, 2), 13)
+    assert_eq(bytes_get(b, 3), 10)
+    assert_eq(bytes_get(b, 4), 13)
+    assert_eq(bytes_get(b, 5), 10)
+}
+
+test "enc_array_of_strings: 2 items" {
+    let key[4]
+    write_bytes(key, cstr("foo"), 3)
+    let val[4]
+    write_bytes(val, cstr("bar"), 3)
+    let items[4]
+    poke64(items, key)        // byte 0
+    poke64(items + 8, 3)      // byte 8
+    poke64(items + 16, val)   // byte 16
+    poke64(items + 24, 3)     // byte 24
+    let b = enc_array_of_strings(2, items)
+    let want = bytes_from_cstr(cstr("*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"))
+    assert_eq(bytes_eq(b, want), 1)
+}
+
+// ── nil encoding ─────────────────────────────────────────────────────
+
+test "enc_nil encodes $-1" {
+    let b = enc_nil()
+    assert_eq(bytes_len(b), 5)   // $-1\r\n  = 1+3+2
+    assert_eq(bytes_get(b, 0), 36)
+    assert_eq(bytes_get(b, 3), 13)
+    assert_eq(bytes_get(b, 4), 10)
+}
+
+test "enc_array_nil encodes *-1" {
+    let b = enc_array_nil()
+    assert_eq(bytes_len(b), 5)   // *-1\r\n  = 1+3+2
+    assert_eq(bytes_get(b, 0), 42)  // '*'
+    assert_eq(bytes_get(b, 3), 13)
+    assert_eq(bytes_get(b, 4), 10)
+}
+
+// ── RESP integer parsing ─────────────────────────────────────────────
+
+test "parse integer :42" {
+    let buf[5]
+    poke8(buf + 0, 58)  // ':'
+    poke8(buf + 1, 52)  // '4'
+    poke8(buf + 2, 50)  // '2'
+    poke8(buf + 3, 13)  // CR
+    poke8(buf + 4, 10)  // LF
+    resp_reset(buf, 5, 0)
+    let result = resp_parse_int()
+    assert_eq(result, 42)
+}
+
+test "parse integer :0" {
+    let buf[4]
+    poke8(buf + 0, 58)
+    poke8(buf + 1, 48)
+    poke8(buf + 2, 13)
+    poke8(buf + 3, 10)
+    resp_reset(buf, 4, 0)
+    let result = resp_parse_int()
+    assert_eq(result, 0)
+}
+
+test "parse integer :99999" {
+    let buf[9]
+    poke8(buf + 0, 58)  // ':'
+    poke8(buf + 1, 57)  // '9' x5
+    poke8(buf + 2, 57)
+    poke8(buf + 3, 57)
+    poke8(buf + 4, 57)
+    poke8(buf + 5, 57)  // 5th nine
+    poke8(buf + 6, 13)  // CR
+    poke8(buf + 7, 10)  // LF
+    resp_reset(buf, 8, 0)
+    let result = resp_parse_int()
+    assert_eq(result, 99999)
+}
+
+// ── RESP bulk string parsing ─────────────────────────────────────────
+
+test "parse bulk string $5\r\nhello\r\n" {
+    let buf[11]
+    poke8(buf + 0, 36)   // '$'
+    poke8(buf + 1, 53)   // '5'
+    poke8(buf + 2, 13)   // CR
+    poke8(buf + 3, 10)   // LF
+    poke8(buf + 4, 104)  // h
+    poke8(buf + 5, 101)  // e
+    poke8(buf + 6, 108)  // l
+    poke8(buf + 7, 108)  // l
+    poke8(buf + 8, 111)  // o
+    poke8(buf + 9, 13)   // CR
+    poke8(buf + 10, 10)  // LF
+    resp_reset(buf, 11, 0)
+    let result = resp_parse_bulk()
+    assert_eq(bytes_len(result), 5)
+    assert_eq(bytes_get(result, 0), 104)  // h
+    assert_eq(bytes_get(result, 4), 111)  // o
+}
+
+test "parse bulk string $-1 (nil)" {
+    let buf[5]
+    poke8(buf + 0, 36)  // '$'
+    poke8(buf + 1, 45)  // '-'
+    poke8(buf + 2, 49)  // '1'
+    poke8(buf + 3, 13)  // CR
+    poke8(buf + 4, 10)  // LF
+    resp_reset(buf, 5, 0)
+    let result = resp_parse_bulk()
+    assert_eq(result, -1)  // nil sentinel
+}
+
+test "parse bulk string $0\r\n\r\n (empty)" {
+    let buf[6]
+    poke8(buf + 0, 36)
+    poke8(buf + 1, 48)  // '0'
+    poke8(buf + 2, 13)
+    poke8(buf + 3, 10)
+    poke8(buf + 4, 13)  // empty content + CRLF
+    poke8(buf + 5, 10)
+    resp_reset(buf, 6, 0)
+    let result = resp_parse_bulk()
+    assert_eq(bytes_len(result), 0)
+}
+
+// ── RESP simple string parsing (via resp_decode) ─────────────────────
+
+test "decode simple string +OK" {
+    let buf[5]
+    poke8(buf + 0, 43)  // '+'
+    poke8(buf + 1, 79)  // 'O'
+    poke8(buf + 2, 75)  // 'K'
+    poke8(buf + 3, 13)  // CR
+    poke8(buf + 4, 10)  // LF
+    resp_reset(buf, 5, 0)
+    let result = resp_decode()
+    assert_eq(result, 79)  // 'O'
+}
+
+test "decode simple string +PONG" {
+    let buf[7]
+    poke8(buf + 0, 43)
+    poke8(buf + 1, 80)  // P
+    poke8(buf + 2, 79)  // O
+    poke8(buf + 3, 78)  // G
+    poke8(buf + 4, 80)  // P
+    poke8(buf + 5, 13)
+    poke8(buf + 6, 10)
+    resp_reset(buf, 7, 0)
+    let result = resp_decode()
+    assert_eq(result, 80)  // 'P'
+}
+
+// ── RESP error parsing (via resp_decode) ─────────────────────────────
+
+test "decode error -ERR unknown command" {
+    let buf[21]
+    poke8(buf + 0, 45)  // '-'
+    poke8(buf + 1, 69)  // ERR unknown command
+    poke8(buf + 2, 82)
+    poke8(buf + 3, 82)
+    poke8(buf + 4, 32)
+    poke8(buf + 5, 117)
+    poke8(buf + 6, 110)
+    poke8(buf + 7, 107)
+    poke8(buf + 8, 110)
+    poke8(buf + 9, 111)
+    poke8(buf + 10, 119)
+    poke8(buf + 11, 32)
+    poke8(buf + 12, 99)
+    poke8(buf + 13, 109)
+    poke8(buf + 14, 109)
+    poke8(buf + 15, 97)
+    poke8(buf + 16, 110)
+    poke8(buf + 17, 100)
+    poke8(buf + 18, 13)  // CR
+    poke8(buf + 19, 10)  // LF
+    resp_reset(buf, 20, 0)
+    let result = resp_decode()
+    assert_eq(result, 69)  // 'E'
+}
+
+// ── RESP array parsing (via resp_decode) ─────────────────────────────
+
+test "decode array *3\r\n:1\r\n:2\r\n:3\r\n" {
+    let buf[16]
+    poke8(buf + 0, 42)  // '*'
+    poke8(buf + 1, 51)  // '3'
+    poke8(buf + 2, 13)
+    poke8(buf + 3, 10)
+    poke8(buf + 4, 58)  // ':'
+    poke8(buf + 5, 49)  // '1'
+    poke8(buf + 6, 13)
+    poke8(buf + 7, 10)
+    poke8(buf + 8, 58)  // ':'
+    poke8(buf + 9, 50)  // '2'
+    poke8(buf + 10, 13)
+    poke8(buf + 11, 10)
+    poke8(buf + 12, 58) // ':'
+    poke8(buf + 13, 51) // '3'
+    poke8(buf + 14, 13)
+    poke8(buf + 15, 10)
+    resp_reset(buf, 16, 0)
+    let result = resp_decode()
+    assert_eq(result, 3)  // 3 items
+}
+
+test "decode array *2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n" {
+    let buf[22]
+    poke8(buf + 0, 42)  // '*'
+    poke8(buf + 1, 50)  // '2'
+    poke8(buf + 2, 13)
+    poke8(buf + 3, 10)
+    poke8(buf + 4, 36)  // '$'
+    poke8(buf + 5, 51)  // '3'
+    poke8(buf + 6, 13)
+    poke8(buf + 7, 10)
+    poke8(buf + 8, 102) // f
+    poke8(buf + 9, 111) // o
+    poke8(buf + 10, 111)// o
+    poke8(buf + 11, 13)
+    poke8(buf + 12, 10)
+    poke8(buf + 13, 36) // '$'
+    poke8(buf + 14, 51) // '3'
+    poke8(buf + 15, 13)
+    poke8(buf + 16, 10)
+    poke8(buf + 17, 98) // b
+    poke8(buf + 18, 97) // a
+    poke8(buf + 19, 114)// r
+    poke8(buf + 20, 13)
+    poke8(buf + 21, 10)
+    resp_reset(buf, 22, 0)
+    let result = resp_decode()
+    assert_eq(result, 2)  // 2 items
+}
+
+test "decode array *-1 (nil array)" {
+    let buf[5]
+    poke8(buf + 0, 42)  // '*'
+    poke8(buf + 1, 45)  // '-'
+    poke8(buf + 2, 49)  // '1'
+    poke8(buf + 3, 13)  // CR
+    poke8(buf + 4, 10)  // LF
+    resp_reset(buf, 5, 0)
+    let result = resp_decode()
+    assert_eq(result, -1)  // nil sentinel
+}
+
+test "decode nested array *2\r\n*1\r\n$3\r\nfoo\r\n$3\r\nbar\r\n" {
+    let buf[24]
+    // *2\r\n  (array of 2)
+    poke8(buf + 0, 42)
+    poke8(buf + 1, 50)
+    poke8(buf + 2, 13)
+    poke8(buf + 3, 10)
+    // *1\r\n  (nested array of 1)
+    poke8(buf + 4, 42)
+    poke8(buf + 5, 49)
+    poke8(buf + 6, 13)
+    poke8(buf + 7, 10)
+    // $3\r\nfoo\r\n
+    poke8(buf + 8, 36)
+    poke8(buf + 9, 51)
+    poke8(buf + 10, 13)
+    poke8(buf + 11, 10)
+    poke8(buf + 12, 102)
+    poke8(buf + 13, 111)
+    poke8(buf + 14, 111)
+    poke8(buf + 15, 13)
+    poke8(buf + 16, 10)
+    // $3\r\nbar\r\n
+    poke8(buf + 17, 36)
+    poke8(buf + 18, 51)
+    poke8(buf + 19, 13)
+    poke8(buf + 20, 10)
+    poke8(buf + 21, 98)
+    poke8(buf + 22, 97)
+    poke8(buf + 23, 114)
+    poke8(buf + 24, 13)
+    poke8(buf + 25, 10)
+    resp_reset(buf, 26, 0)
+    let result = resp_decode()
+    assert_eq(result, 2)  // 2 items (nested array + bulk string)
+}
+
+// ── resp_reset ───────────────────────────────────────────────────────
+
+test "resp_reset sets cursor correctly" {
+    let buf[5]
+    poke8(buf + 0, 58)
+    poke8(buf + 1, 48)
+    poke8(buf + 2, 13)
+    poke8(buf + 3, 10)
+    resp_reset(buf, 5, 0)
+    let result = resp_parse_int()
+    assert_eq(result, 0)
+}
+
+// ── round-trip encoding ─────────────────────────────────────────────
+
+test "encode command SET foo bar" {
+    let key[4]
+    write_bytes(key, cstr("SET"), 3)
+    let val[4]
+    write_bytes(val, cstr("foo"), 3)
+    let val2[4]
+    write_bytes(val2, cstr("bar"), 3)
+    let items[6]
+    poke64(items + 0, key)
+    poke64(items + 8, 3)
+    poke64(items + 16, val)
+    poke64(items + 24, 3)
+    poke64(items + 32, val2)
+    poke64(items + 40, 3)
+    let b = resp_encode_command(3, items)
+    // *3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n  = 31 bytes
+    assert_eq(bytes_len(b), 31)
+    assert_eq(bytes_get(b, 0), 42)  // '*'
+    assert_eq(bytes_get(b, 1), 51)  // '3'
+}
+
+test "encode command PING" {
+    let key[5]
+    write_bytes(key, cstr("PING"), 4)
+    let items[2]
+    poke64(items + 0, key)
+    poke64(items + 8, 4)
+    let b = resp_encode_command(1, items)
+    // *1\r\n$4\r\nPING\r\n  = 4+10 = 14 bytes
+    assert_eq(bytes_len(b), 14)
+    assert_eq(bytes_get(b, 0), 42)  // '*'
+    assert_eq(bytes_get(b, 1), 49)  // '1'
+    assert_eq(bytes_get(b, 2), 13)
+    assert_eq(bytes_get(b, 3), 10)
+    assert_eq(bytes_get(b, 4), 36)  // '$'
+    assert_eq(bytes_get(b, 5), 52)  // '4'
+}

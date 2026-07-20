@@ -1,0 +1,288 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/db/redis/resp.snd: RESP (REdis Serialization Protocol) encoder & parser.
+// Implements RESP2.  Encoding is pure (takes input, returns output buffer).
+// Parsing uses module-level cursor so one resp_decode call parses exactly
+// one value and advances the cursor.
+//
+// Types:
+//   +  simple string  (+OK\r\n)
+//   -  error          (-ERR unknown command\r\n)
+//   :  integer        (:1000\r\n)
+//   $  bulk string    ($5\r\nhello\r\n), $-1 = nil
+//   *  array         (*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n), *-1 = nil array
+
+include "any/strings.snd"
+include "x86_64/linux/bytes.snd"
+
+// ── Parser cursor (module-level state, set per resp_decode call) ─────
+let mut __resp_data: i64  // pointer to raw RESP response bytes
+let mut __resp_len: i64   // total bytes available
+let mut __resp_idx: i64   // current read position
+
+// ── ENCODING ─────────────────────────────────────────────────────────
+
+// Helper: append decimal ASCII of n to buffer b.
+fn append_itoa(b: i64, n: i64) {
+    let tmp[32]
+    let len = itoa(n, tmp)
+    let mut i = 0
+    for i < len {
+        bytes_push(b, peek8(tmp + i))
+        i = i + 1
+    }
+}
+
+// Encode a byte-string at `addr` with length `len` as a RESP bulk string
+// into buffer `b`:  $<len>\r\n<bytes>\r\n
+pub fn enc_bulk_string(addr: i64, len: i64, b: i64) {
+    bytes_append_cstr(b, cstr("$"))
+    append_itoa(b, len)
+    bytes_append_cstr(b, cstr("\r\n"))
+    let mut i = 0
+    for i < len {
+        bytes_push(b, peek8(addr + i))
+        i = i + 1
+    }
+    bytes_append_cstr(b, cstr("\r\n"))
+}
+
+// Encode an integer as RESP:  :N\r\n
+pub fn enc_int(n: i64) -> i64 {
+    let b = bytes_new()
+    bytes_append_cstr(b, cstr(":"))
+    append_itoa(b, n)
+    bytes_append_cstr(b, cstr("\r\n"))
+    b
+}
+
+// Encode a nil bulk string:  $-1\r\n
+pub fn enc_nil() -> i64 {
+    bytes_from_cstr(cstr("$-1\r\n"))
+}
+
+// Encode a nil array:  *-1\r\n
+pub fn enc_array_nil() -> i64 {
+    bytes_from_cstr(cstr("*-1\r\n"))
+}
+
+// Encode a RESP array of N byte-strings.  `items`: pointer to [N*2] i64
+// slots, alternating [addr0, len0, addr1, len1, ...].
+// Builds:  *N\r\n<bulk0>\r\n<bulk1>\r\n ...
+pub fn enc_array_of_strings(n: i64, items: i64) -> i64 {
+    let b = bytes_new()
+    bytes_append_cstr(b, cstr("*"))
+    append_itoa(b, n)
+    bytes_append_cstr(b, cstr("\r\n"))
+    let mut i = 0
+    for i < n {
+        let addr = peek64(items + i * 16)
+        let slen = peek64(items + i * 16 + 8)
+        enc_bulk_string(addr, slen, b)
+        i = i + 1
+    }
+    b
+}
+
+// Build a full RESP command buffer.  `n` is the number of arguments and
+// `items`: pointer to [n*2] i64 slots alternating [addr, len].
+// Returns a byte buffer with the full encoded command.
+pub fn resp_encode_command(n: i64, items: i64) -> i64 {
+    enc_array_of_strings(n, items)
+}
+
+// ── PARSING HELPERS ─────────────────────────────────────────────────────
+
+// Skip \r\n at current position (if present). Used when read_line alone already
+// consumed the final CRLF (nil arrays etc). Safe as a no-op if no CRLF.
+fn __skip_crlf() {
+    if peek8(__resp_data + __resp_idx) == 13 {
+        __resp_idx = __resp_idx + 2
+    }
+}
+
+// Consume a RESP-encoded line value (the characters between a line type marker
+// and its terminating CRLF).  Puts content into `out` and returns the content
+// byte count (does NOT include the CR/LF).  On exit `__resp_idx` points
+// **at** the byte immediately after the CRLF.
+pub fn __read_line(out: i64) -> i64 {
+    let start = __resp_idx
+    for {
+        let c = peek8(__resp_data + __resp_idx)
+        if c == 13 { __resp_idx = __resp_idx + 2; break }  // CR LF
+        __resp_idx = __resp_idx + 1
+        if __resp_idx >= __resp_len { break }
+    }
+    let n = __resp_idx - start - 2  // 2 bytes consumed by CR LF
+    if n < 0 { n = 0 }
+    let mut i = start
+    let mut j = 0
+    for j < n {
+        bytes_push(out, peek8(__resp_data + i))
+        i = i + 1
+        j = j + 1
+    }
+    n
+}
+
+// Parse a RESP integer: :N\r\n  → return the integer value.
+pub fn resp_parse_int() -> i64 {
+    let digits = bytes_new()
+    __read_line(digits)
+    __read_int(digits)
+}
+
+// Parse a simple integer string (already read by __read_line, no CRLF included).
+fn __read_int(s: i64) -> i64 {
+    let end = bytes_len(s)
+    let mut val = 0
+    let mut negate = 0
+    let mut idx = 0
+
+    // If there are multiple bytes and the second byte is '-', treat it as negative.
+    // This handles RESP lines like "$-1" where '$' is at index 0 and '-' at index 1.
+    if end >= 2 && bytes_get(s, 1) == 45 {
+        negate = 1
+        idx = 2
+    } else if end >= 1 && bytes_get(s, 0) == 45 {
+        // Standalone "-N"
+        negate = 1
+        idx = 1
+    }
+
+    for idx < end {
+        let c = bytes_get(s, idx)
+        if c >= 48 && c <= 57 {
+            val = val * 10 + (c - 48)
+        }
+        idx = idx + 1
+    }
+    if negate == 1 { -val } else { val }
+}
+
+// Parse a RESP bulk string: $N...N\r\n  or  $-1 (nil).
+// Returns: a handle to a bytes buffer with the content, or -2 for nil.
+pub fn resp_parse_bulk() -> i64 {
+    let len_str = bytes_new()
+    __read_line(len_str)
+    let n = __read_int(len_str)
+    if n == -1 {
+        -1  // nil sentinel (-1 is the explicit RESP nil value)
+    } else {
+        let out = bytes_new()
+        let mut i = 0
+        for i < n {
+            bytes_push(out, peek8(__resp_data + __resp_idx))
+            __resp_idx = __resp_idx + 1
+            i = i + 1
+        }
+        // trailing CRLF already consumed by __read_line above
+        out
+    }
+}
+
+// Parse a RESP simple string: +text\r\n  → returns first byte of content.
+pub fn resp_parse_simple() -> i64 {
+    let out = bytes_new()
+    __read_line(out)
+    if bytes_len(out) > 0 { bytes_get(out, 0) } else { 0 }
+}
+
+// Skip a single RESP value at current cursor.  Recursively descends arrays.
+fn __skip_value() {
+    let typ = peek8(__resp_data + __resp_idx)
+    __resp_idx = __resp_idx + 1
+
+    if typ == 43 || typ == 45 || typ == 58 {
+        // simple string, error, or integer, line-delimited by CRLF
+        for {
+            let c = peek8(__resp_data + __resp_idx)
+            if c == 13 { break }
+            __resp_idx = __resp_idx + 1
+            if __resp_idx >= __resp_len { break }
+        }
+        __skip_crlf()
+    }
+    else if typ == 36 {
+        // bulk string, length-prefixed, CRLF-terminated
+        let len_str = bytes_new()
+        __read_line(len_str)
+        let n = __read_int(len_str)
+        if n >= 0 {
+            __resp_idx = __resp_idx + n
+            // trailing CRLF already consumed by __read_line
+        }
+    }
+    else if typ == 42 {
+        // array, count followed by N items
+        let count_str = bytes_new()
+        __read_line(count_str)
+        let cnt = __read_int(count_str)
+        if cnt >= 0 {
+            let mut i = 0
+            for i < cnt {
+                __skip_value()
+                i = i + 1
+            }
+        }
+    }
+}
+
+// Top-level: parse one RESP value from the buffer.
+// Sets __resp_idx past the parsed value.
+// Returns:
+//   simple string, first content byte (i64)
+//   error, first content byte
+//   bulk string, handle to bytes buffer with content, or -2 for nil
+//   integer, the integer value
+//   empty → -2
+//   array, number of child items,  or -2 for nil
+pub fn resp_decode() -> i64 {
+    if __resp_idx >= __resp_len {
+        return -1
+    }
+    let typ = peek8(__resp_data + __resp_idx)
+    __resp_idx = __resp_idx + 1
+
+    if typ == 43 {
+        let out = bytes_new()
+        __read_line(out)
+        if bytes_len(out) > 0 { bytes_get(out, 0) } else { 0 }
+    }
+    else if typ == 45 {
+        let out = bytes_new()
+        __read_line(out)
+        if bytes_len(out) > 0 { bytes_get(out, 0) } else { 0 }
+    }
+    else if typ == 58 {
+        resp_parse_int()
+    }
+    else if typ == 36 {
+        resp_parse_bulk()
+    }
+    else if typ == 42 {
+        let count_str = bytes_new()
+        __read_line(count_str)
+        let cnt = __read_int(count_str)
+        if cnt >= 0 {
+            let mut i = 0
+            for i < cnt {
+                __skip_value()
+                i = i + 1
+            }
+        }
+        cnt  // item count, or -2/-1 for nil
+    }
+    else {
+-1
+    }
+}
+
+// Reset the parser cursor to `start`, pointing at `len` bytes of data at `data`.
+// Call this before resp_decode().
+pub fn resp_reset(data: i64, len: i64, start: i64) {
+    __resp_data = data
+    __resp_len = len
+    __resp_idx = start
+}
