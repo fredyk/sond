@@ -413,3 +413,25 @@ test "encode command PING" {
     assert_eq(bytes_get(b, 4), 36)  // '$'
     assert_eq(bytes_get(b, 5), 52)  // '4'
 }
+test "two bulk strings in a row: the second one is reached" {
+    // $2\r\nab\r\n$2\r\ncd\r\n
+    // Parsing one bulk string has to leave the cursor on the next value, which
+    // means consuming the CRLF that follows the BODY. The CRLF that __read_line
+    // already ate belongs to the length line, not to this one.
+    let buf[16]
+    poke8(buf + 0, 36)   poke8(buf + 1, 50)   poke8(buf + 2, 13)   poke8(buf + 3, 10)
+    poke8(buf + 4, 97)   poke8(buf + 5, 98)   poke8(buf + 6, 13)   poke8(buf + 7, 10)
+    poke8(buf + 8, 36)   poke8(buf + 9, 50)   poke8(buf + 10, 13)  poke8(buf + 11, 10)
+    poke8(buf + 12, 99)  poke8(buf + 13, 100) poke8(buf + 14, 13)  poke8(buf + 15, 10)
+    resp_reset(buf, 16, 0)
+
+    let first = resp_parse_bulk()
+    assert_eq(bytes_len(first), 2)
+    assert_eq(bytes_get(first, 0), 97)   // a
+    assert_eq(bytes_get(first, 1), 98)   // b
+
+    let second = resp_parse_bulk()
+    assert_eq(bytes_len(second), 2)
+    assert_eq(bytes_get(second, 0), 99)  // c
+    assert_eq(bytes_get(second, 1), 100) // d
+}

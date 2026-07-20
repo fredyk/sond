@@ -177,7 +177,10 @@ pub fn resp_parse_bulk() -> i64 {
             __resp_idx = __resp_idx + 1
             i = i + 1
         }
-        // trailing CRLF already consumed by __read_line above
+        // The CRLF that __read_line consumed belonged to the length line.
+        // The body has its own, and leaving it behind puts the cursor two
+        // bytes short of the next value in the reply.
+        __skip_crlf()
         out
     }
 }
@@ -211,7 +214,9 @@ fn __skip_value() {
         let n = __read_int(len_str)
         if n >= 0 {
             __resp_idx = __resp_idx + n
-            // trailing CRLF already consumed by __read_line
+            // __read_line only consumed the LENGTH line's CRLF; the body has
+            // its own trailing CRLF that still needs to be skipped here.
+            __skip_crlf()
         }
     }
     else if typ == 42 {

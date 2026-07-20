@@ -162,12 +162,15 @@ pub fn redis_fill(handle: i64) -> i64 {
 // For nil: -1. For array: item count.
 pub fn redis_parse(handle: i64) -> i64 {
     let bufptr = peek64(handle)
-    let pos = peek64(handle + 16)
-    let cap = peek64(handle + 24)
+    // handle+16 ("pos") is redis_fill's bookkeeping field: the total number
+    // of bytes RECEIVED so far, i.e. the END of the valid data, not a decode
+    // start offset. Decoding always starts at 0 and is bounded by that many
+    // valid bytes, never by the buffer's full capacity.
+    let received = peek64(handle + 16)
 
     __resp_data = bufptr
-    __resp_len = cap
-    __resp_idx = pos
+    __resp_len = received
+    __resp_idx = 0
 
     let result = resp_decode()
 
@@ -222,14 +225,14 @@ pub fn redis_ping(fd: i64, buf: i64, items: i64) -> i64 {
 
 // Send GET key.
 pub fn redis_get(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, cstr("GET"), strlen(key))
+    add_cmd_arg(items, 0, cstr("GET"), 3)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send SET key value.
 pub fn redis_set(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
-    add_cmd_arg(items, 0, cstr("SET"), strlen(key))
+    add_cmd_arg(items, 0, cstr("SET"), 3)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, value, strlen(value))
     redis_command(buf, fd, 3, items)
@@ -239,7 +242,7 @@ pub fn redis_set(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
 pub fn redis_setex(fd: i64, buf: i64, items: i64, key: i64, value: i64, secs: i64) -> i64 {
     let tmp[20]
     let slen = itoa(secs, tmp)
-    add_cmd_arg(items, 0, cstr("SET"), strlen(key))
+    add_cmd_arg(items, 0, cstr("SET"), 3)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, value, strlen(value))
     add_cmd_arg(items, 3, cstr("EX"), 2)
@@ -261,7 +264,7 @@ pub fn redis_setex2(fd: i64, buf: i64, items: i64, key: i64, secs: i64, value: i
 
 // Send GETSET key value.
 pub fn redis_getset(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
-    add_cmd_arg(items, 0, cstr("GETSET"), 8)
+    add_cmd_arg(items, 0, cstr("GETSET"), 6)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, value, strlen(value))
     redis_command(buf, fd, 3, items)
@@ -856,11 +859,10 @@ pub fn redis_zrangebylex(fd: i64, buf: i64, items: i64, key: i64, min: i64, max:
 // Send ZINTERSTORE dst key...
 pub fn redis_zinterstore(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
     add_cmd_arg(items, 0, cstr("ZINTERSTORE"), 11)
-    // dst is at slot 0, keys start at slot 1
+    // Command name is slot 0; dst (the first entry of `keys`) goes in slot 1.
     let dst_ptr = peek64(keys + 0)  // first key is actually dst name
     let dst_len = strlen(dst_ptr)
-    poke64(items, dst_ptr)
-    poke64(items + 8, dst_len)
+    add_cmd_arg(items, 1, dst_ptr, dst_len)
     let mut slot = 2
     let mut i = 1  // skip first (dst)
     let mut total = n_keys  // n_keys includes dst
@@ -878,10 +880,10 @@ pub fn redis_zinterstore(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) 
 // Send ZUNIONSTORE dst key...
 pub fn redis_zunionstore(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
     add_cmd_arg(items, 0, cstr("ZUNIONSTORE"), 11)
+    // Command name is slot 0; dst (the first entry of `keys`) goes in slot 1.
     let dst_ptr = peek64(keys + 0)
     let dst_len = strlen(dst_ptr)
-    poke64(items, dst_ptr)
-    poke64(items + 8, dst_len)
+    add_cmd_arg(items, 1, dst_ptr, dst_len)
     let mut slot = 2
     let mut i = 1
     let mut total = n_keys
@@ -964,7 +966,13 @@ pub fn redis_debug_object(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
 // Send MONITOR (fires and forget, no response expected).
 pub fn redis_monitor(fd: i64, buf: i64, items: i64) -> i64 {
     ptr_to_item(items, 0, cstr("MONITOR"))
-    sendto_sock(fd, peek64(items), strlen(peek64(items)) + 5, 0, 0, 0)
+    // MONITOR is a normal RESP command; it must be encoded like every other
+    // helper before hitting the wire. Sending raw bytes straight off the
+    // "MONITOR" string literal (as this used to do, padded by a hardcoded
+    // `+ 5`) read past its NUL terminator into whatever the compiler placed
+    // next in .rodata: a buffer over-read, not a protocol detail.
+    let encoded = enc_array_of_strings(1, items)
+    sendto_sock(fd, peek64(encoded), bytes_len(encoded), 0, 0, 0)
     0
 }
 

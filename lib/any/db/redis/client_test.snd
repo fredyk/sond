@@ -190,18 +190,14 @@ test "resp_parse_simple returns 0 for an empty simple string" {
     assert_eq(result, 0)
 }
 
-test "__skip_value under-skips a bulk string body by 2 bytes (known bug)" {
-    // KNOWN BUG in resp.snd's __skip_value: its bulk-string branch only advances
-    // past the body (`__resp_idx = __resp_idx + n`), it never consumes the body's
-    // trailing CRLF the way __read_line does for the length line. The comment
-    // above that branch ("trailing CRLF already consumed by __read_line") is
-    // incorrect: __read_line only consumed the LENGTH line's CRLF. The cursor
-    // ends 2 bytes short of the value's true end (7, not 9), so any RESP array
-    // that skips a bulk-string element which is not the last item (e.g. via
-    // resp_decode counting an array's items) will misparse everything that
-    // follows it, shifted left by 2 bytes. This test locks in the CURRENT
-    // (buggy) behavior; it should be updated to expect 9 once __skip_value is
-    // fixed to call __skip_crlf (or equivalent) after the bulk body.
+test "__skip_value advances past a bulk string's trailing CRLF" {
+    // resp.snd's __skip_value bulk-string branch used to advance only past
+    // the body (`__resp_idx = __resp_idx + n`) without consuming the body's
+    // own trailing CRLF the way __read_line does for the length line, so the
+    // cursor ended 2 bytes short of the value's true end. Any RESP array that
+    // skips a bulk-string element which is not the last item would then
+    // misparse everything that follows it, shifted left by 2 bytes. Fixed by
+    // calling __skip_crlf() after the bulk body.
     let buf[9]
     poke8(buf + 0, 36)   // '$'
     poke8(buf + 1, 51)   // '3'
@@ -214,7 +210,7 @@ test "__skip_value under-skips a bulk string body by 2 bytes (known bug)" {
     poke8(buf + 8, 10)
     resp_reset(buf, 9, 0)
     __skip_value()
-    assert_eq(__resp_idx, 7)  // should be 9; see bug note above
+    assert_eq(__resp_idx, 9)
 }
 
 test "__skip_value skips a nil bulk string" {
@@ -433,11 +429,10 @@ test "redis_connect_new returns 0 when the peer refuses the connection" {
 }
 
 test "redis_connect/redis_send_resp/redis_send/redis_read round trip over a real socket" {
-    // Bypasses the redis_command encoding bug (see the KNOWN BUGS note at the
-    // end of this file) by building the wire bytes directly with
-    // resp_encode_command and sending them with the low-level primitives, so
-    // this test verifies the low-level plumbing (connect, send, recv, the
-    // read_response accumulation loop) against a real peer.
+    // Builds the wire bytes directly with resp_encode_command and sends them with
+    // the low-level primitives, so this exercises the plumbing on its own:
+    // connect, send, recv, and the read_response accumulation loop, against a
+    // real peer. The higher-level path through redis_command is covered separately.
     let port = 18863
     let srv = sock(AF_INET, SOCK_STREAM, 0)
     assert(srv >= 0)
@@ -506,21 +501,20 @@ test "redis_connect/redis_send_resp/redis_send/redis_read round trip over a real
     syscall(SYS_wait4, pid, st, 0, 0)
 }
 
-test "redis_connect_new/redis_fill/redis_parse/redis_connect_close round trip (known bug)" {
-    // KNOWN BUG: redis_fill and redis_parse disagree on what handle+16 ("pos")
+test "redis_connect_new/redis_fill/redis_parse/redis_connect_close round trip" {
+    // redis_fill and redis_parse used to disagree on what handle+16 ("pos")
     // means. redis_fill treats it as the total number of bytes RECEIVED so far
     // (the END of the valid data, used as the write offset for the next recv).
-    // redis_parse instead uses that same field as __resp_idx, the DECODE START
-    // offset, and sets __resp_len to the buffer's full capacity rather than the
-    // number of valid bytes. So after a successful fill, redis_parse starts
+    // redis_parse instead used that same field as __resp_idx, the DECODE START
+    // offset, and set __resp_len to the buffer's full capacity rather than the
+    // number of valid bytes. So after a successful fill, redis_parse started
     // reading right AFTER the data that was just received (at the first
     // untouched, zero-filled byte of the arena buffer) instead of at its start,
-    // and always sees a stray 0 byte there, which matches none of RESP's type
-    // markers, so resp_decode's "else" branch fires and returns -1: a reply can
-    // never be successfully decoded through this handle-based API as it stands.
-    // This test locks in that observed (broken) behavior; it should assert 42
-    // once redis_parse is fixed to start decoding from offset 0 with
-    // __resp_len set to the number of bytes actually received.
+    // and always saw a stray 0 byte there, which matches none of RESP's type
+    // markers, so resp_decode's "else" branch fired and returned -1: a reply
+    // could never be successfully decoded through this handle-based API. Fixed
+    // by having redis_parse start decoding from offset 0 with __resp_len set
+    // to the number of bytes actually received.
     let port = 18865
     let srv = sock(AF_INET, SOCK_STREAM, 0)
     assert(srv >= 0)
@@ -551,7 +545,7 @@ test "redis_connect_new/redis_fill/redis_parse/redis_connect_close round trip (k
     // so this call is slow but bounded.
     redis_fill(handle)
     let val = redis_parse(handle)
-    assert_eq(val, -1)  // should be 42; see the known-bug note above
+    assert_eq(val, 42)
     redis_reset(handle)
     assert_eq(peek64(handle + 16), 0)
     redis_connect_close(handle)
@@ -709,16 +703,11 @@ test "string commands: PING/GET/SET/SETEX/GETSET/APPEND/STRLEN/INCR*/DECR*" {
     redis_ping(fd, buf, items0)
     assert_eq(bytes_eq(resp_encode_command(1, items0), bytes_from_cstr(cstr("*1\r\n$4\r\nPING\r\n"))), 1)
 
-    // NOTE: redis_get/redis_set/redis_setex have a bug in client.snd: the
-    // length byte for their own command-name argument is computed as
-    // strlen(key) instead of the command name's own (constant) length
-    // (e.g. add_cmd_arg(items, 0, cstr("GET"), strlen(key)) instead of `3`).
-    // With any key whose length isn't coincidentally 3, this truncates or
-    // over-reads the command name (confirmed empirically: key="k" produces
-    // "$1\r\nG\r\n" instead of "$3\r\nGET\r\n"). A 3-character key is used below
-    // so the bug does not corrupt these particular assertions; it is not
-    // fixed here (test-file-only change), but is flagged in the KNOWN BUGS
-    // note at the end of this file.
+    // redis_get/redis_set/redis_setex used to compute the length byte for
+    // their own command-name argument as strlen(key) instead of the command
+    // name's own (constant) length. A 3-character key does not expose that
+    // (see the dedicated regression test below, which uses a key of a
+    // different length to pin the fix down).
     let items1 = heap_alloc(320)
     redis_get(fd, buf, items1, cstr("key"))
     assert_eq(bytes_eq(resp_encode_command(2, items1), bytes_from_cstr(cstr("*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n"))), 1)
@@ -761,22 +750,12 @@ test "string commands: PING/GET/SET/SETEX/GETSET/APPEND/STRLEN/INCR*/DECR*" {
     poke64(items4 + 2 * 16, r42)
     assert_eq(bytes_eq(resp_encode_command(4, items4), bytes_from_cstr(cstr("*4\r\n$5\r\nSETEX\r\n$2\r\nk1\r\n$2\r\n30\r\n$2\r\nv1\r\n"))), 1)
 
-    // KNOWN BUG: redis_getset passes a hardcoded length of 8 for its own
-    // command name, but "GETSET" is 6 characters
-    // (add_cmd_arg(items, 0, cstr("GETSET"), 8)), so it reads 2 bytes past the
-    // literal's NUL terminator. What those 2 bytes actually are depends on
-    // whatever the compiler placed next in .rodata (observed empirically as
-    // NUL followed by 'A', consistent with the next string literal in this
-    // binary), which is not a stable property of this function and would be
-    // wrong to hardcode into a byte-for-byte assertion. Only the parts that
-    // are actually specified are checked here: the total length (34, i.e. 2
-    // bytes longer than a correctly-encoded GETSET command would be) and the
-    // bulk length prefix plus the real 6-character command name.
+    // redis_getset used to pass a hardcoded length of 8 for its own command
+    // name, but "GETSET" is 6 characters, so it read 2 bytes past the
+    // literal's NUL terminator. Fixed to use the real length.
     let items5 = heap_alloc(320)
     redis_getset(fd, buf, items5, cstr("k1"), cstr("v1"))
-    let b5 = resp_encode_command(3, items5)
-    assert_eq(bytes_len(b5), 34)  // would be 32 with the correct length of 6
-    assert_eq(bytes_eq(bytes_slice(b5, 0, 14), bytes_from_cstr(cstr("*3\r\n$8\r\nGETSET"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items5), bytes_from_cstr(cstr("*3\r\n$6\r\nGETSET\r\n$2\r\nk1\r\n$2\r\nv1\r\n"))), 1)
 
     let items6 = heap_alloc(320)
     redis_append(fd, buf, items6, cstr("k1"), cstr("v1"))
@@ -817,6 +796,43 @@ test "string commands: PING/GET/SET/SETEX/GETSET/APPEND/STRLEN/INCR*/DECR*" {
     }
     poke64(items11 + 2 * 16, r112)
     assert_eq(bytes_eq(resp_encode_command(3, items11), bytes_from_cstr(cstr("*3\r\n$6\r\nDECRBY\r\n$2\r\nk1\r\n$1\r\n3\r\n"))), 1)
+}
+
+test "redis_get/redis_set/redis_setex use their own command name's length, not the key's" {
+    // redis_get/redis_set/redis_setex used to compute the length of their own
+    // command-name argument as strlen(key) instead of the command name's own
+    // constant length (e.g. add_cmd_arg(items, 0, cstr("GET"), strlen(key))
+    // instead of the constant 3). A key whose length differs from the command
+    // name's exposes this: pre-fix, a 1-character key made GET's own bulk
+    // string read only "G" instead of the full "GET". Fixed by hardcoding
+    // each command name's own length.
+    let fd = -1
+    let recvdata[64]
+    let buf[4]
+    poke64(buf + 8, recvdata)
+    poke64(buf + 24, 512)
+
+    let items0 = heap_alloc(320)
+    redis_get(fd, buf, items0, cstr("k"))
+    assert_eq(bytes_eq(resp_encode_command(2, items0), bytes_from_cstr(cstr("*2\r\n$3\r\nGET\r\n$1\r\nk\r\n"))), 1)
+
+    let items1 = heap_alloc(320)
+    redis_set(fd, buf, items1, cstr("k"), cstr("v"))
+    assert_eq(bytes_eq(resp_encode_command(3, items1), bytes_from_cstr(cstr("*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n"))), 1)
+
+    // Same stack-tmp hazard as redis_setex in the test above: copy the EX
+    // digits into a stable local buffer before calling resp_encode_command.
+    let items2 = heap_alloc(320)
+    redis_setex(fd, buf, items2, cstr("k"), cstr("v"), 60)
+    let r2[4]
+    let j2 = 0
+    let l2 = peek64(items2 + 4 * 16 + 8)
+    for j2 < l2 {
+        poke8(r2 + j2, peek8(peek64(items2 + 4 * 16) + j2))
+        j2 = j2 + 1
+    }
+    poke64(items2 + 4 * 16, r2)
+    assert_eq(bytes_eq(resp_encode_command(5, items2), bytes_from_cstr(cstr("*5\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n$2\r\nEX\r\n$2\r\n60\r\n"))), 1)
 }
 
 test "keyspace commands: DEL/EXISTS/TTL/EXPIRE/TYPE/RENAME/KEYS/FLUSHDB/DBSIZE/SELECT/ECHO/PING" {
@@ -1296,18 +1312,16 @@ test "sorted set range/score commands" {
     assert_eq(bytes_eq(resp_encode_command(4, items15), bytes_from_cstr(cstr("*4\r\n$7\r\nZMSCORE\r\n$2\r\nk1\r\n$2\r\nma\r\n$2\r\nmb\r\n"))), 1)
 }
 
-test "sorted set store commands (ZINTERSTORE/ZUNIONSTORE, known bug)" {
-    // KNOWN BUG: both functions overwrite items slot 0 (which
+test "sorted set store commands: ZINTERSTORE/ZUNIONSTORE" {
+    // Both functions used to overwrite items slot 0 (which
     // add_cmd_arg(items, 0, cstr("ZINTERSTORE"/"ZUNIONSTORE"), 11) had just
     // set) with the destination key via a raw poke64(items, dst_ptr), and
-    // never write slot 1 at all (the loop jumps straight from slot 1 to slot
-    // 2). The command NAME is therefore lost from the wire entirely, and a
-    // real Redis server would see the destination key where it expects
+    // never wrote slot 1 at all (the loop jumped straight from slot 1 to slot
+    // 2). The command NAME was therefore lost from the wire entirely, and a
+    // real Redis server would have seen the destination key where it expects
     // "ZINTERSTORE"/"ZUNIONSTORE", an empty string where it expects the first
-    // source key, and the real source keys shifted one slot. `items` is
-    // freshly heap_alloc'd (so slot 1 predictably zeroes to addr=0,len=0)
-    // to make this reproducible; confirmed empirically before writing this
-    // test. Locks in current (broken) behavior; update once fixed.
+    // source key, and the real source keys shifted one slot. Fixed by writing
+    // the destination key into slot 1 with add_cmd_arg instead.
     let fd = -1
     let recvdata[64]
     let buf[4]
@@ -1320,7 +1334,7 @@ test "sorted set store commands (ZINTERSTORE/ZUNIONSTORE, known bug)" {
     poke64(zkeys0 + 8, cstr("a"))
     poke64(zkeys0 + 16, cstr("b"))
     redis_zinterstore(fd, buf, items0, 3, zkeys0)
-    assert_eq(bytes_eq(resp_encode_command(4, items0), bytes_from_cstr(cstr("*4\r\n$3\r\ndst\r\n$0\r\n\r\n$1\r\na\r\n$1\r\nb\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items0), bytes_from_cstr(cstr("*4\r\n$11\r\nZINTERSTORE\r\n$3\r\ndst\r\n$1\r\na\r\n$1\r\nb\r\n"))), 1)
 
     let items1 = heap_alloc(320)
     let zkeys1[3]
@@ -1328,7 +1342,7 @@ test "sorted set store commands (ZINTERSTORE/ZUNIONSTORE, known bug)" {
     poke64(zkeys1 + 8, cstr("a"))
     poke64(zkeys1 + 16, cstr("b"))
     redis_zunionstore(fd, buf, items1, 3, zkeys1)
-    assert_eq(bytes_eq(resp_encode_command(4, items1), bytes_from_cstr(cstr("*4\r\n$3\r\ndst\r\n$0\r\n\r\n$1\r\na\r\n$1\r\nb\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items1), bytes_from_cstr(cstr("*4\r\n$11\r\nZUNIONSTORE\r\n$3\r\ndst\r\n$1\r\na\r\n$1\r\nb\r\n"))), 1)
 }
 
 test "server commands: INFO/CONFIG GET/SAVE/BGSAVE/LASTSAVE/SHUTDOWN/DEBUG OBJECT/CLIENT/AUTH/QUIT/TIME/UPTIME/SLAVEOF/WAIT" {
@@ -1366,10 +1380,11 @@ test "server commands: INFO/CONFIG GET/SAVE/BGSAVE/LASTSAVE/SHUTDOWN/DEBUG OBJEC
     redis_debug_object(fd, buf, items6, cstr("k1"))
     assert_eq(bytes_eq(resp_encode_command(3, items6), bytes_from_cstr(cstr("*3\r\n$5\r\nDEBUG\r\n$6\r\nOBJECT\r\n$2\r\nk1\r\n"))), 1)
 
-    // redis_monitor does not go through redis_command/RESP encoding at all: it
-    // sends `strlen("MONITOR") + 5` (12) raw bytes starting at the "MONITOR"
+    // redis_monitor used to bypass RESP encoding entirely and send
+    // `strlen("MONITOR") + 5` (12) raw bytes starting at the "MONITOR"
     // literal, i.e. 4 bytes past its NUL terminator -- a buffer over-read bug
-    // (flagged in the KNOWN BUGS note). With fd=-1 the syscall fails before
+    // (see the dedicated regression test below, which verifies the actual
+    // wire bytes over a real socket). With fd=-1 the syscall fails before
     // touching memory, so this only verifies it does not crash and returns 0.
     let items7 = heap_alloc(320)
     assert_eq(redis_monitor(fd, buf, items7), 0)
@@ -1432,6 +1447,42 @@ test "server commands: INFO/CONFIG GET/SAVE/BGSAVE/LASTSAVE/SHUTDOWN/DEBUG OBJEC
     }
     poke64(items15 + 2 * 16, r152)
     assert_eq(bytes_eq(resp_encode_command(3, items15), bytes_from_cstr(cstr("*3\r\n$4\r\nWAIT\r\n$1\r\n1\r\n$3\r\n100\r\n"))), 1)
+}
+
+test "redis_monitor sends a RESP-encoded command, not a raw over-read" {
+    // redis_monitor used to bypass RESP encoding entirely and send
+    // `strlen("MONITOR") + 5` (12) raw bytes starting at the "MONITOR"
+    // literal -- 4 bytes past its NUL terminator, a buffer over-read whose
+    // trailing content depended on whatever the compiler placed next in
+    // .rodata. Fixed to RESP-encode the command like every other helper
+    // before sending it, so exactly "*1\r\n$7\r\nMONITOR\r\n" (18 bytes) goes
+    // out. A UNIX-domain socketpair gives both ends of a real socket inside
+    // this single process, so the bytes actually placed on the wire can be
+    // read back and compared directly, without needing a forked peer.
+    let fds[1]
+    let rc = syscall(SYS_socketpair, 1, SOCK_STREAM, 0, fds)  // 1 = AF_UNIX
+    assert_eq(rc, 0)
+    let fd_a = peek32(fds)
+    let fd_b = peek32(fds + 4)
+
+    let recvdata[64]
+    let buf[4]
+    poke64(buf + 8, recvdata)
+    poke64(buf + 24, 512)
+    let items = heap_alloc(320)
+    redis_monitor(fd_a, buf, items)
+
+    let rbuf[32]
+    let n = recvfrom_sock(fd_b, rbuf, 32, 0, 0, 0)
+    let want = bytes_from_cstr(cstr("*1\r\n$7\r\nMONITOR\r\n"))
+    assert_eq(n, bytes_len(want))
+    let mut i = 0
+    for i < n {
+        assert_eq(peek8(rbuf + i), bytes_get(want, i))
+        i = i + 1
+    }
+    close_fd(fd_a)
+    close_fd(fd_b)
 }
 
 test "transaction commands: MULTI/EXEC/DISCARD/WATCH/UNWATCH" {
