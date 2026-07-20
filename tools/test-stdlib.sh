@@ -13,7 +13,12 @@ while IFS= read -r f; do
     printf '== %s\n' "${f#"$REPO"/}"
     "$SOND" test "$f" || fail=1
     echo
-done < <(grep -rl '^test "' "$REPO/lib" --include='*_test.snd' | sort)
+    # `git ls-files` rather than a recursive grep: on at least one developer machine `grep` is a
+    # wrapper that skips directories without saying so, and a test suite that silently stops
+    # looking is worse than no test suite. The index knows exactly what is tracked.
+done < <(cd "$REPO" && git ls-files 'lib/**/*_test.snd' 'lib/*_test.snd' \
+         | while IFS= read -r f; do grep -q '^test "' "$REPO/$f" && printf '%s/%s\n' "$REPO" "$f"; done \
+         | sort)
 
 if [ "$fail" -eq 0 ]; then
     echo "all standard-library tests passed with >= their coverage threshold"
