@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Token kinds for the Sond compiler lexer.
+// Mirrors compiler/src/lexer.rs (Token enum) exactly.
+// Value-carrying: Int=0, Decimal=1, Str=2, Bool=3, Ident=4
+// Value-less: punctuation/operators/keywords from 10+
+
+// Value-carrying
+let TK_INT = 0
+let TK_DECIMAL = 1
+let TK_STR = 2
+let TK_BOOL = 3
+let TK_IDENT = 4
+
+// Punctuation / operators
+let TK_SEMICOLON = 10
+let TK_PLUS = 11
+let TK_MINUS = 12
+let TK_STAR = 13
+let TK_SLASH = 14
+let TK_PERCENT = 15
+let TK_CARET = 16
+let TK_TILDE = 17
+let TK_SHL = 18
+let TK_SHR = 19
+let TK_LSHR = 20
+let TK_EQ = 21
+let TK_EQEQ = 22
+let TK_NE = 23
+let TK_LT = 24
+let TK_LE = 25
+let TK_GT = 26
+let TK_GE = 27
+let TK_ARROW = 28
+let TK_FAT_ARROW = 29
+let TK_AMP = 30
+let TK_AMP_AMP = 31
+let TK_PIPE = 32
+let TK_PIPE_PIPE = 33
+let TK_DOT = 34
+let TK_DOT_DOT = 35
+let TK_LPAREN = 36
+let TK_RPAREN = 37
+let TK_LBRACE = 38
+let TK_RBRACE = 39
+let TK_LBRACKET = 40
+let TK_RBRACKET = 41
+let TK_COMMA = 42
+let TK_COLON = 43
+
+// Contextual keyword token
+let TK_TEST = 44
+
+// Keywords (all value-less)
+let TK_LET_KW = 50
+let TK_FN_KW = 51
+let TK_FN_KW2 = 51
+let TK_INTERRUPT_KW = 52
+let TK_WRAPPING_KW = 53
+let TK_STRUCT_KW = 54
+let TK_ENUM_KW = 56
+let TK_MATCH_KW = 57
+let TK_AS_KW = 58
+let TK_IMPL_KW = 59
+let TK_PUB_KW = 60
+let TK_PRIV_KW = 61
+let TK_REQUIRES_KW = 62
+let TK_WHERE_KW = 63
+let TK_ENSURES_KW = 64
+let TK_INVARIANT_KW = 65
+let TK_EFFECTS_KW = 66
+let TK_RETURN_KW = 67
+let TK_IF_KW = 68
+let TK_ELSE_KW = 69
+let TK_FOR_KW = 70
+let TK_WHILE_KW = 71
+let TK_BREAK_KW = 72
+let TK_CONTINUE_KW = 73
+let TK_AND_KW = 74
+let TK_OR_KW = 75
+let TK_NOT_KW = 76
+let TK_IMPLIES_KW = 77
+let TK_IN_KW = 78
+let TK_TRUE_KW = 79
+let TK_FALSE_KW = 80
+
+// Utility: is this a value-carrying kind?
+fn tk_is_value(k: i64) -> i64 {
+    if k == TK_INT { 1 } else {
+    if k == TK_DECIMAL { 1 } else {
+    if k == TK_STR { 1 } else {
+    if k == TK_BOOL { 1 } else {
+    if k == TK_IDENT { 1 } else { 0 } } } } } }

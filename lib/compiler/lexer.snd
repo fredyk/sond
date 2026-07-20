@@ -1,0 +1,413 @@
+
+
+
+
+
+include "token.snd"
+include "x86_64/linux/vec.snd"
+include "x86_64/linux/bytes.snd"
+include "x86_64/linux/heap.snd"
+
+
+
+fn lx_is_digit(c: i64) -> i64 {
+    if c < 48 { 0 } else { if c > 57 { 0 } else { 1 } }
+}
+
+fn lx_is_alpha(c: i64) -> i64 {
+    if c == 95 { 1 }
+    else { if c >= 65 { if c <= 90 { 1 }
+        else { if c >= 97 { if c <= 122 { 1 } else { 0 } }
+        else { 0 } } } } }
+
+fn lx_is_alnum(c: i64) -> i64 {
+    if lx_is_alpha(c) == 1 { 1 } else { if lx_is_digit(c) == 1 { 1 } else { 0 } } }
+
+fn lx_is_hex(c: i64) -> i64 {
+    if lx_is_digit(c) == 1 { 1 }
+    else { if c >= 97 { if c <= 102 { 1 } else { 0 } }
+    else { if c >= 65 { if c <= 70 { 1 } else { 0 } }
+    else { 0 } } } }
+
+fn lx_is_ws(c: i64) -> i64 {
+    if c == 32 { 1 } else { if c == 9 { 1 }
+    else { if c == 10 { 1 } else { if c == 13 { 1 } else { 0 } } } } }
+
+
+
+fn ends_stmt(t: i64) -> i64 {
+    if tk_is_value(t) == 1 { 1 }
+    else { if t == TK_RPAREN { 1 }
+    else { if t == TK_RBRACE { 1 }
+    else { if t == TK_RBRACKET { 1 }
+    else { if t == TK_RETURN_KW { 1 }
+    else { if t == TK_BREAK_KW { 1 }
+    else { if t == TK_CONTINUE_KW { 1 }
+    else { 0 } } } } } } } }
+
+
+
+fn tk_push(v: i64, k: i64, val: i64) { vec_push(v, k); vec_push(v, val) }
+
+
+
+
+fn esc_n(c: i64) -> i64  { if c == 110 { 10 } else { 0 } }
+fn esc_t(c: i64) -> i64  { if c == 116 {  9 } else { 0 } }
+fn esc_r(c: i64) -> i64  { if c == 114 { 13 } else { 0 } }
+fn esc_Zn(c: i64) -> i64 { if c == 48 {  0 } else { 0 } }
+fn esc_bs(c: i64) -> i64 { if c == 92 { 92 } else { 0 } }
+fn esc_qt(c: i64) -> i64 { if c == 34 { 34 } else { 0 } }
+fn esc_sq(c: i64) -> i64 { if c == 39 { 39 } else { 0 } }
+
+fn process_escape(src: i64, pos: i64, buf: i64) -> i64 {
+    let esc = bytes_get(src, pos)
+
+    let v = esc_n(esc)
+    if v != 0 { bytes_push(buf, v); return pos + 1 }
+    let v2 = esc_t(esc)
+    if v2 != 0 { bytes_push(buf, v2); return pos + 1 }
+    let v3 = esc_r(esc)
+    if v3 != 0 { bytes_push(buf, v3); return pos + 1 }
+    let v4 = esc_Zn(esc)
+    if v4 != 0 { bytes_push(buf, v4); return pos + 1 }
+    let v5 = esc_bs(esc)
+    if v5 != 0 { bytes_push(buf, v5); return pos + 1 }
+    let v6 = esc_qt(esc)
+    if v6 != 0 { bytes_push(buf, v6); return pos + 1 }
+    let v7 = esc_sq(esc)
+    if v7 != 0 { bytes_push(buf, v7); return pos + 1 }
+
+    bytes_push(buf, esc)
+    pos + 1
+}
+
+fn char_esc_val(esc: i64) -> i64 {
+    let v = esc_n(esc)
+    if v != 0 { return v }
+    let v2 = esc_t(esc)
+    if v2 != 0 { return v2 }
+    let v3 = esc_r(esc)
+    if v3 != 0 { return v3 }
+    let v4 = esc_Zn(esc)
+    if v4 != 0 { return v4 }
+    let v5 = esc_bs(esc)
+    if v5 != 0 { return v5 }
+    let v6 = esc_qt(esc)
+    if v6 != 0 { return v6 }
+    let v7 = esc_sq(esc)
+    if v7 != 0 { return v7 }
+    esc
+}
+
+
+
+
+fn lx_hex_parse(src: i64, pos: i64, len: i64, out: i64) -> i64 {
+    let mut i = pos
+    let mut v: i64 = 0
+    for i < len {
+        let d = bytes_get(src, i)
+        if lx_is_hex(d) == 0 { poke64(out, i); return v }
+        v = v * 16
+        if lx_is_digit(d) == 1 { v = v + (d - 48) }
+        else { v = v + (d - 87) }
+        i = i + 1
+    }
+    poke64(out, i)
+    v
+}
+
+
+
+fn _kw_fn(s: i64, p: i64) -> i64  { if bytes_get(s,p) == 102 && bytes_get(s,p+1) == 110 { TK_FN_KW } else { 0 } }
+fn _kw_let(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 108 && bytes_get(s,p+1) == 101 && bytes_get(s,p+2) == 116 { TK_LET_KW } else { 0 } }
+fn _kw_for(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 102 && bytes_get(s,p+1) == 111 && bytes_get(s,p+2) == 114 { TK_FOR_KW } else { 0 } }
+fn _kw_if(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 105 && bytes_get(s,p+1) == 102 { TK_IF_KW } else { 0 } }
+fn _kw_as(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 97 && bytes_get(s,p+1) == 115 { TK_AS_KW } else { 0 } }
+fn _kw_or(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 111 && bytes_get(s,p+1) == 114 { TK_OR_KW } else { 0 } }
+fn _kw_in(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 105 && bytes_get(s,p+1) == 110 { TK_IN_KW } else { 0 } }
+fn _kw_pub(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 112 && bytes_get(s,p+1) == 117 && bytes_get(s,p+2) == 98 { TK_PUB_KW } else { 0 } }
+fn _kw_and(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 97 && bytes_get(s,p+1) == 110 && bytes_get(s,p+2) == 100 { TK_AND_KW } else { 0 } }
+fn _kw_not(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 110 && bytes_get(s,p+1) == 111 && bytes_get(s,p+2) == 116 { TK_NOT_KW } else { 0 } }
+
+
+fn _kw_test(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 116 && bytes_get(s,p+1) == 101 && bytes_get(s,p+2) == 115 && bytes_get(s,p+3) == 116 { TK_TEST } else { 0 } }
+fn _kw_true(s: i64, p: i64) -> i64 {  if bytes_get(s,p) == 116 && bytes_get(s,p+1) == 114 && bytes_get(s,p+2) == 117 && bytes_get(s,p+3) == 101 { TK_BOOL } else { 0 } }
+fn _kw_enum(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 101 && bytes_get(s,p+1) == 110 && bytes_get(s,p+2) == 117 && bytes_get(s,p+3) == 109 { TK_ENUM_KW } else { 0 } }
+fn _kw_impl(s: i64, p: i64) -> i64 {  if bytes_get(s,p) == 105 && bytes_get(s,p+1) == 109 && bytes_get(s,p+2) == 112 && bytes_get(s,p+3) == 108 { TK_IMPL_KW } else { 0 } }
+fn _kw_break(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 98 && bytes_get(s,p+1) == 114 && bytes_get(s,p+2) == 101 && bytes_get(s,p+3) == 97 { TK_BREAK_KW } else { 0 } }
+fn _kw_else(s: i64, p: i64) -> i64  { if bytes_get(s,p) == 101 && bytes_get(s,p+1) == 108 && bytes_get(s,p+2) == 115 && bytes_get(s,p+3) == 101 { TK_ELSE_KW } else { 0 } }
+
+fn _kw_match(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 109 && bytes_get(s,p+1) == 97 && bytes_get(s,p+2) == 116 && bytes_get(s,p+3) == 99 && bytes_get(s,p+4) == 104 { TK_MATCH_KW } else { 0 } }
+fn _kw_where(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 119 && bytes_get(s,p+1) == 104 && bytes_get(s,p+2) == 101 && bytes_get(s,p+3) == 114 && bytes_get(s,p+4) == 101 { TK_WHERE_KW } else { 0 } }
+fn _kw_priv(s: i64, p: i64) -> i64  { if bytes_get(s,p) == 112 && bytes_get(s,p+1) == 114 && bytes_get(s,p+2) == 105 && bytes_get(s,p+3) == 118 { TK_PRIV_KW } else { 0 } }
+fn _kw_bfalse(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 102 && bytes_get(s,p+1) == 97 && bytes_get(s,p+2) == 108 && bytes_get(s,p+3) == 115 && bytes_get(s,p+4) == 101 { TK_BOOL } else { 0 } }
+fn _kw_while(s: i64, p: i64) -> i64 {  if bytes_get(s,p) == 119 && bytes_get(s,p+1) == 104 && bytes_get(s,p+2) == 105 && bytes_get(s,p+3) == 108 && bytes_get(s,p+4) == 101 { TK_WHILE_KW } else { 0 } }
+
+fn _kw_struct(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 115 && bytes_get(s,p+1) == 116 && bytes_get(s,p+2) == 114 && bytes_get(s,p+3) == 117 && bytes_get(s,p+4) == 99 && bytes_get(s,p+5) == 116 { TK_STRUCT_KW } else { 0 } }
+fn _kw_return(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 114 && bytes_get(s,p+1) == 101 && bytes_get(s,p+2) == 116 && bytes_get(s,p+3) == 117 && bytes_get(s,p+4) == 114 && bytes_get(s,p+5) == 110 { TK_RETURN_KW } else { 0 } }
+
+fn _kw_ensures(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 101 && bytes_get(s,p+1) == 110 && bytes_get(s,p+2) == 115 && bytes_get(s,p+3) == 117 && bytes_get(s,p+4) == 114 && bytes_get(s,p+5) == 101 && bytes_get(s,p+6) == 115 { TK_ENSURES_KW } else { 0 } }
+fn _kw_effects(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 101 && bytes_get(s,p+1) == 102 && bytes_get(s,p+2) == 102 && bytes_get(s,p+3) == 101 && bytes_get(s,p+4) == 99 && bytes_get(s,p+5) == 116 && bytes_get(s,p+6) == 115 { TK_EFFECTS_KW } else { 0 } }
+
+fn _kw_continue(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 99 && bytes_get(s,p+1) == 111 && bytes_get(s,p+2) == 110 && bytes_get(s,p+3) == 116 && bytes_get(s,p+4) == 105 && bytes_get(s,p+5) == 110 && bytes_get(s,p+6) == 117 && bytes_get(s,p+7) == 101 { TK_CONTINUE_KW } else { 0 } }
+fn _kw_requires(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 114 && bytes_get(s,p+1) == 101 && bytes_get(s,p+2) == 113 && bytes_get(s,p+3) == 117 && bytes_get(s,p+4) == 105 && bytes_get(s,p+5) == 114 && bytes_get(s,p+6) == 101 && bytes_get(s,p+7) == 115 { TK_REQUIRES_KW } else { 0 } }
+fn _kw_wrapping(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 119 && bytes_get(s,p+1) == 114 && bytes_get(s,p+2) == 97 && bytes_get(s,p+3) == 112 && bytes_get(s,p+4) == 112 && bytes_get(s,p+5) == 105 && bytes_get(s,p+6) == 110 && bytes_get(s,p+7) == 103 { TK_WRAPPING_KW } else { 0 } }
+
+fn _kw_interrupt(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 105 && bytes_get(s,p+1) == 110 && bytes_get(s,p+2) == 116 && bytes_get(s,p+3) == 101 && bytes_get(s,p+4) == 114 && bytes_get(s,p+5) == 114 && bytes_get(s,p+6) == 117 && bytes_get(s,p+7) == 112 && bytes_get(s,p+8) == 116 { TK_INTERRUPT_KW } else { 0 } }
+fn _kw_invariant(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 105 && bytes_get(s,p+1) == 110 && bytes_get(s,p+2) == 118 && bytes_get(s,p+3) == 97 && bytes_get(s,p+4) == 114 && bytes_get(s,p+5) == 105 && bytes_get(s,p+6) == 97 && bytes_get(s,p+7) == 110 && bytes_get(s,p+8) == 116 { TK_INVARIANT_KW } else { 0 } }
+fn _kw_implies(s: i64, p: i64) -> i64 { if bytes_get(s,p) == 105 && bytes_get(s,p+1) == 109 && bytes_get(s,p+2) == 112 && bytes_get(s,p+3) == 108 && bytes_get(s,p+4) == 105 && bytes_get(s,p+5) == 101 && bytes_get(s,p+6) == 115 { TK_IMPLIES_KW } else { 0 } }
+fn _kw_ident(src: i64, pos: i64, len: i64) -> i64 {
+
+    if len == 2 {
+        let r = _kw_fn(src, pos); if r != 0 { return r }
+        let r = _kw_if(src, pos); if r != 0 { return r }
+        let r = _kw_as(src, pos); if r != 0 { return r }
+        let r = _kw_or(src, pos); if r != 0 { return r }
+        let r = _kw_in(src, pos); if r != 0 { return r }
+    }
+
+    if len == 3 {
+        let r = _kw_let(src, pos); if r != 0 { return r }
+        let r = _kw_for(src, pos); if r != 0 { return r }
+        let r = _kw_pub(src, pos); if r != 0 { return r }
+        let r = _kw_and(src, pos); if r != 0 { return r }
+        let r = _kw_not(src, pos); if r != 0 { return r }
+    }
+
+    if len == 4 {
+        let r = _kw_test(src, pos); if r != 0 { return r }
+        let r = _kw_true(src, pos); if r != 0 { return r }
+        let r = _kw_enum(src, pos); if r != 0 { return r }
+        let r = _kw_impl(src, pos); if r != 0 { return r }
+        let r = _kw_else(src, pos); if r != 0 { return r }
+        let r = _kw_priv(src, pos); if r != 0 { return r }
+    }
+
+    if len == 5 {
+        let r = _kw_match(src, pos); if r != 0 { return r }
+        let r = _kw_where(src, pos); if r != 0 { return r }
+        let r = _kw_bfalse(src, pos); if r != 0 { return r }
+        let r = _kw_while(src, pos); if r != 0 { return r }
+        let r = _kw_break(src, pos); if r != 0 { return r }
+    }
+
+    if len == 6 {
+        let r = _kw_struct(src, pos); if r != 0 { return r }
+        let r = _kw_return(src, pos); if r != 0 { return r }
+    }
+
+    if len == 7 {
+        let r = _kw_ensures(src, pos); if r != 0 { return r }
+        let r = _kw_effects(src, pos); if r != 0 { return r }
+        let r = _kw_implies(src, pos); if r != 0 { return r }
+    }
+
+    if len == 8 {
+        let r = _kw_continue(src, pos); if r != 0 { return r }
+        let r = _kw_requires(src, pos); if r != 0 { return r }
+        let r = _kw_wrapping(src, pos); if r != 0 { return r }
+    }
+
+    if len == 9 {
+        let r = _kw_interrupt(src, pos); if r != 0 { return r }
+        let r = _kw_invariant(src, pos); if r != 0 { return r }
+    }
+    0
+}
+
+
+
+pub fn tokenize(src: i64) -> i64 {
+    let mut tokens = vec_new()
+    let mut i = 0
+    let pos_buf = heap_alloc(8)
+    let len = bytes_len(src)
+
+    for i < len {
+        let c = bytes_get(src, i)
+
+
+        if lx_is_ws(c) == 1 {
+            if c == 10 {
+                let nl = vec_len(tokens)
+                if nl > 0 {
+                    let last = vec_get(tokens, nl - 1)
+                    if ends_stmt(last) == 1 { tk_push(tokens, TK_SEMICOLON, 0) }
+                }
+            }
+            i = i + 1
+            continue
+        }
+
+
+        if lx_is_digit(c) == 1 {
+            let mut i2 = i
+            let mut v: i64 = 0
+            if c == 48 && i2 + 1 < len && bytes_get(src, i2 + 1) == 120 {
+                i2 = i2 + 2
+                for i2 < len {
+                    let d = bytes_get(src, i2)
+                    if lx_is_hex(d) == 0 { break }
+                    if lx_is_digit(d) == 1 { v = v * 16 + (d - 48) } else if d >= 65 { if d <= 70 { v = v * 16 + (d - 55) } else { v = v * 16 + (d - 87) } }
+                    i2 = i2 + 1
+                }
+                tk_push(tokens, TK_INT, v)
+                i = i2
+                continue
+            }
+            let mut i2 = i
+            let mut v: i64 = 0
+            for i2 < len {
+                let d = bytes_get(src, i2)
+                if lx_is_digit(d) == 0 { break }
+                v = v * 10 + (d - 48)
+                i2 = i2 + 1
+            }
+
+            if i2 < len {
+                let dot = bytes_get(src, i2)
+                if dot == 46 && i2 + 1 < len && lx_is_digit(bytes_get(src, i2 + 1)) == 1 {
+                    i2 = i2 + 1
+                    for i2 < len {
+                        let d2 = bytes_get(src, i2)
+                        if lx_is_digit(d2) == 0 { break }
+                        i2 = i2 + 1
+                    }
+                    tk_push(tokens, TK_DECIMAL, i2)
+                    i = i2
+                    continue
+                }
+            }
+            tk_push(tokens, TK_INT, v)
+            i = i2
+            continue
+        }
+
+
+        if c == 34 {
+            i = i + 1
+            let buf = bytes_new()
+            let end_buf = heap_alloc(8)
+            for i < len {
+                let ch = bytes_get(src, i)
+                if ch == 34 {
+                    poke64(end_buf, i + 1)
+                    break
+                }
+                if ch == 92 {
+                    i = process_escape(src, i + 1, buf)
+                } else {
+                    bytes_push(buf, ch)
+                    i = i + 1
+                }
+            }
+            tk_push(tokens, TK_STR, buf)
+            i = peek64(end_buf)
+            continue
+        }
+
+
+        if c == 39 {
+            i = i + 1
+            if i < len && bytes_get(src, i) == 92 {
+                i = i + 1
+                if i < len {
+                    let code = char_esc_val(bytes_get(src, i))
+                    tk_push(tokens, TK_INT, code)
+                    i = i + 1
+                    if i < len && bytes_get(src, i) == 39 { i = i + 1 }
+                    continue
+                }
+            }
+            if i < len {
+                let code = bytes_get(src, i)
+                tk_push(tokens, TK_INT, code)
+                i = i + 1
+                if i < len && bytes_get(src, i) == 39 { i = i + 1 }
+                continue
+            }
+        }
+
+
+        if c == 47 && i + 1 < len && bytes_get(src, i + 1) == 47 {
+
+            i = i + 2
+            for i < len {
+                let d = bytes_get(src, i)
+                if d == 10 { break }
+                i = i + 1
+            }
+            continue
+        }
+
+
+        if lx_is_alpha(c) == 1 || c == 95 {
+            let start = i
+            i = i + 1
+            for i < len {
+                let d = bytes_get(src, i)
+                if lx_is_alnum(d) == 0 { break }
+                i = i + 1
+            }
+            let wid = i - start
+            let kw = _kw_ident(src, start, wid)
+            if kw == 0 {
+                tk_push(tokens, TK_IDENT, start)
+            } else {
+                tk_push(tokens, kw, 0)
+            }
+            continue
+        }
+
+
+        if i + 1 < len {
+            let c2 = bytes_get(src, i + 1)
+            if c == 61 && c2 == 61  { tk_push(tokens, TK_EQEQ, 0);  i = i + 2; continue }
+            if c == 33 && c2 == 61  { tk_push(tokens, TK_NE, 0);    i = i + 2; continue }
+            if c == 60 && c2 == 61  { tk_push(tokens, TK_LE, 0);    i = i + 2; continue }
+            if c == 62 && c2 == 61  { tk_push(tokens, TK_GE, 0);    i = i + 2; continue }
+            if c == 62 && c2 == 62 {
+                if i + 2 < len && bytes_get(src, i + 2) == 62 {
+                    tk_push(tokens, TK_LSHR, 0);
+                    i = i + 3; continue
+                }
+                tk_push(tokens, TK_SHR, 0);   i = i + 2; continue
+            }
+            if c == 38 && c2 == 38  { tk_push(tokens, TK_AMP_AMP, 0);  i = i + 2; continue }
+            if c == 124 && c2 == 124 { tk_push(tokens, TK_PIPE_PIPE, 0); i = i + 2; continue }
+            if c == 45 && c2 == 62  { tk_push(tokens, TK_ARROW, 0);   i = i + 2; continue }
+            if c == 61 && c2 == 62  { tk_push(tokens, TK_FAT_ARROW, 0); i = i + 2; continue }
+            if c == 46 && c2 == 46  { tk_push(tokens, TK_DOT_DOT, 0);  i = i + 2; continue }
+        }
+
+
+        if c == 43  { tk_push(tokens, TK_PLUS, 0);          i = i + 1; continue }
+        if c == 45  { tk_push(tokens, TK_MINUS, 0);        i = i + 1; continue }
+        if c == 42  { tk_push(tokens, TK_STAR, 0);         i = i + 1; continue }
+        if c == 47  { tk_push(tokens, TK_SLASH, 0);        i = i + 1; continue }
+        if c == 37  { tk_push(tokens, TK_PERCENT, 0);      i = i + 1; continue }
+        if c == 94  { tk_push(tokens, TK_CARET, 0);        i = i + 1; continue }
+        if c == 126 { tk_push(tokens, TK_TILDE, 0);        i = i + 1; continue }
+        if c == 60  { tk_push(tokens, TK_LT, 0);           i = i + 1; continue }
+        if c == 61  { tk_push(tokens, TK_EQ, 0);           i = i + 1; continue }
+        if c == 62  { tk_push(tokens, TK_GT, 0);           i = i + 1; continue }
+        if c == 38  { tk_push(tokens, TK_AMP, 0);          i = i + 1; continue }
+        if c == 124 { tk_push(tokens, TK_PIPE, 0);         i = i + 1; continue }
+        if c == 46  { tk_push(tokens, TK_DOT, 0);          i = i + 1; continue }
+        if c == 40  { tk_push(tokens, TK_LPAREN, 0);       i = i + 1; continue }
+        if c == 41  { tk_push(tokens, TK_RPAREN, 0);       i = i + 1; continue }
+        if c == 123 { tk_push(tokens, TK_LBRACE, 0);       i = i + 1; continue }
+        if c == 125 { tk_push(tokens, TK_RBRACE, 0);       i = i + 1; continue }
+        if c == 91  { tk_push(tokens, TK_LBRACKET, 0);     i = i + 1; continue }
+        if c == 93  { tk_push(tokens, TK_RBRACKET, 0);     i = i + 1; continue }
+        if c == 44  { tk_push(tokens, TK_COMMA, 0);        i = i + 1; continue }
+        if c == 58  { tk_push(tokens, TK_COLON, 0);        i = i + 1; continue }
+
+
+        i = i + 1
+    }
+
+    tokens
+}

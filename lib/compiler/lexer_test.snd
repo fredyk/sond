@@ -1,0 +1,450 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/compiler/lexer.snd
+
+include "lexer.snd"
+include "x86_64/linux/testing.snd"
+
+fn tok_count(toks: i64) -> i64 { vec_len(toks) / 2 }
+fn tok_kind(toks: i64, i: i64) -> i64 { vec_get(toks, i * 2) }
+fn tok_val(toks: i64, i: i64) -> i64 { vec_get(toks, i * 2 + 1) }
+
+// --- Numeric & value-carrying tokens ---
+
+test "integer 42" {
+    let b = bytes_new()
+    bytes_push(b, 52)
+    bytes_push(b, 50)
+    let t = tokenize(b)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 0)     // TK_INT
+    assert_eq(tok_val(t, 0), 42)
+}
+
+test "hex 0x3F" {
+    let b = bytes_new()
+    bytes_push(b, 48)
+    bytes_push(b, 120)
+    bytes_push(b, 51)
+    bytes_push(b, 70)
+    let t = tokenize(b)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 0)  // TK_INT
+    assert_eq(tok_val(t, 0), 63)  // 3*16+15
+}
+
+test "decimal 3.14" {
+    let b = bytes_new()
+    bytes_push(b, 51)
+    bytes_push(b, 46)
+    bytes_push(b, 49)
+    bytes_push(b, 52)
+    let t = tokenize(b)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 1)  // TK_DECIMAL
+}
+
+test "string hello" {
+    let b = bytes_new()
+    bytes_push(b, 34)
+    bytes_push(b, 104)
+    bytes_push(b, 101)
+    bytes_push(b, 108)
+    bytes_push(b, 108)
+    bytes_push(b, 111)
+    bytes_push(b, 34)
+    let t = tokenize(b)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 2)    // TK_STR
+    assert_ne(tok_val(t, 0), 0)     // bytes handle is non-zero
+}
+
+test "string with escape newline" {
+    let b = bytes_new()
+    bytes_push(b, 34)
+    bytes_push(b, 104)
+    bytes_push(b, 92)
+    bytes_push(b, 110)
+    bytes_push(b, 101)
+    bytes_push(b, 114)
+    bytes_push(b, 34)
+    let t = tokenize(b)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 2)  // TK_STR
+    let s = tok_val(t, 0)
+    assert_eq(bytes_get(s, 0), 104)  // h
+    assert_eq(bytes_get(s, 1), 10)   // \n
+    assert_eq(bytes_get(s, 2), 101)  // e
+    assert_eq(bytes_get(s, 3), 114)  // r
+    assert_eq(bytes_len(s), 4)       // h + \n + er
+}
+
+test "char literal X" {
+    let b = bytes_new()
+    bytes_push(b, 39)
+    bytes_push(b, 88)
+    bytes_push(b, 39)
+    let t = tokenize(b)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 0)      // TK_INT
+    assert_eq(tok_val(t, 0), 88)
+}
+
+test "char escape newline" {
+    let b = bytes_new()
+    bytes_push(b, 39)
+    bytes_push(b, 92)
+    bytes_push(b, 110)
+    bytes_push(b, 39)
+    let t = tokenize(b)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_val(t, 0), 10)
+}
+
+test "bool true" {
+    let b = bytes_new()
+    bytes_push(b, 116)
+    bytes_push(b, 114)
+    bytes_push(b, 117)
+    bytes_push(b, 101)
+    let t = tokenize(b)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 3)  // TK_BOOL
+}
+
+test "bool false" {
+    let b = bytes_new()
+    bytes_push(b, 102)
+    bytes_push(b, 97)
+    bytes_push(b, 108)
+    bytes_push(b, 115)
+    bytes_push(b, 101)
+    let t = tokenize(b)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 3)  // TK_BOOL
+}
+
+test "identifier x" {
+    let b = bytes_new()
+    bytes_push(b, 120)
+    let t = tokenize(b)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 4)  // TK_IDENT
+}
+
+// --- Keywords ---
+
+test "keyword fn" {
+    let b = bytes_new()
+    bytes_push(b, 102)
+    bytes_push(b, 110)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 51)  // TK_FN_KW
+}
+
+test "keyword let" {
+    let b = bytes_new()
+    bytes_push(b, 108)
+    bytes_push(b, 101)
+    bytes_push(b, 116)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 50)  // TK_LET_KW
+}
+
+test "keyword if" {
+    let b = bytes_new()
+    bytes_push(b, 105)
+    bytes_push(b, 102)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 68)  // TK_IF_KW
+}
+
+test "keyword for" {
+    let b = bytes_new()
+    bytes_push(b, 102)
+    bytes_push(b, 111)
+    bytes_push(b, 114)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 70)  // TK_FOR_KW
+}
+
+test "keyword else" {
+    let b = bytes_new()
+    bytes_push(b, 101)
+    bytes_push(b, 108)
+    bytes_push(b, 115)
+    bytes_push(b, 101)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 69)  // TK_ELSE_KW
+}
+
+test "keyword return" {
+    let b = bytes_new()
+    bytes_push(b, 114)
+    bytes_push(b, 101)
+    bytes_push(b, 116)
+    bytes_push(b, 117)
+    bytes_push(b, 114)
+    bytes_push(b, 110)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 67)  // TK_RETURN_KW
+}
+
+test "keyword break" {
+    let b = bytes_new()
+    bytes_push(b, 98)
+    bytes_push(b, 114)
+    bytes_push(b, 101)
+    bytes_push(b, 97)
+    bytes_push(b, 107)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 72)  // TK_BREAK_KW
+}
+
+test "keyword continue" {
+    let b = bytes_new()
+    bytes_push(b, 99)
+    bytes_push(b, 111)
+    bytes_push(b, 110)
+    bytes_push(b, 116)
+    bytes_push(b, 105)
+    bytes_push(b, 110)
+    bytes_push(b, 117)
+    bytes_push(b, 101)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 73)  // TK_CONTINUE_KW
+}
+
+test "keyword and" {
+    let b = bytes_new()
+    bytes_push(b, 97)
+    bytes_push(b, 110)
+    bytes_push(b, 100)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 74)  // TK_AND_KW
+}
+
+test "keyword or" {
+    let b = bytes_new()
+    bytes_push(b, 111)
+    bytes_push(b, 114)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 75)  // TK_OR_KW
+}
+
+test "keyword not" {
+    let b = bytes_new()
+    bytes_push(b, 110)
+    bytes_push(b, 111)
+    bytes_push(b, 116)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 76)  // TK_NOT_KW
+}
+
+test "keyword in" {
+    let b = bytes_new()
+    bytes_push(b, 105)
+    bytes_push(b, 110)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 78)  // TK_IN_KW
+}
+
+test "keyword as" {
+    let b = bytes_new()
+    bytes_push(b, 97)
+    bytes_push(b, 115)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 58)  // TK_AS_KW
+}
+
+test "keyword where" {
+    let b = bytes_new()
+    bytes_push(b, 119)
+    bytes_push(b, 104)
+    bytes_push(b, 101)
+    bytes_push(b, 114)
+    bytes_push(b, 101)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 63)  // TK_WHERE_KW
+}
+
+test "keyword test" {
+    let b = bytes_new()
+    bytes_push(b, 116)
+    bytes_push(b, 101)
+    bytes_push(b, 115)
+    bytes_push(b, 116)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 44)  // TK_TEST
+}
+
+test "keyword struct" {
+    let b = bytes_new()
+    bytes_push(b, 115)
+    bytes_push(b, 116)
+    bytes_push(b, 114)
+    bytes_push(b, 117)
+    bytes_push(b, 99)
+    bytes_push(b, 116)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 54)  // TK_STRUCT_KW
+}
+
+test "keyword enum" {
+    let b = bytes_new()
+    bytes_push(b, 101)
+    bytes_push(b, 110)
+    bytes_push(b, 117)
+    bytes_push(b, 109)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 56)  // TK_ENUM_KW
+}
+
+test "keyword match" {
+    let b = bytes_new()
+    bytes_push(b, 109)
+    bytes_push(b, 97)
+    bytes_push(b, 116)
+    bytes_push(b, 99)
+    bytes_push(b, 104)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 57)  // TK_MATCH_KW
+}
+
+test "keyword impl" {
+    let b = bytes_new()
+    bytes_push(b, 105)
+    bytes_push(b, 109)
+    bytes_push(b, 112)
+    bytes_push(b, 108)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 59)  // TK_IMPL_KW
+}
+
+test "keyword pub" {
+    let b = bytes_new()
+    bytes_push(b, 112)
+    bytes_push(b, 117)
+    bytes_push(b, 98)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 60)  // TK_PUB_KW
+}
+
+test "keyword priv" {
+    let b = bytes_new()
+    bytes_push(b, 112)
+    bytes_push(b, 114)
+    bytes_push(b, 105)
+    bytes_push(b, 118)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 61)  // TK_PRIV_KW
+}
+
+test "keyword requires" {
+    let b = bytes_new()
+    bytes_push(b, 114)
+    bytes_push(b, 101)
+    bytes_push(b, 113)
+    bytes_push(b, 117)
+    bytes_push(b, 105)
+    bytes_push(b, 114)
+    bytes_push(b, 101)
+    bytes_push(b, 115)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 62)  // TK_REQUIRES_KW
+}
+
+test "keyword ensures" {
+    let b = bytes_new()
+    bytes_push(b, 101)
+    bytes_push(b, 110)
+    bytes_push(b, 115)
+    bytes_push(b, 117)
+    bytes_push(b, 114)
+    bytes_push(b, 101)
+    bytes_push(b, 115)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 64)  // TK_ENSURES_KW
+}
+
+test "keyword invariant" {
+    let b = bytes_new()
+    bytes_push(b, 105)
+    bytes_push(b, 110)
+    bytes_push(b, 118)
+    bytes_push(b, 97)
+    bytes_push(b, 114)
+    bytes_push(b, 105)
+    bytes_push(b, 97)
+    bytes_push(b, 110)
+    bytes_push(b, 116)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 65)  // TK_INVARIANT_KW
+}
+
+test "keyword effects" {
+    let b = bytes_new()
+    bytes_push(b, 101)
+    bytes_push(b, 102)
+    bytes_push(b, 102)
+    bytes_push(b, 101)
+    bytes_push(b, 99)
+    bytes_push(b, 116)
+    bytes_push(b, 115)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 66)  // TK_EFFECTS_KW
+}
+
+test "keyword wrapping" {
+    let b = bytes_new()
+    bytes_push(b, 119)
+    bytes_push(b, 114)
+    bytes_push(b, 97)
+    bytes_push(b, 112)
+    bytes_push(b, 112)
+    bytes_push(b, 105)
+    bytes_push(b, 110)
+    bytes_push(b, 103)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 53)  // TK_WRAPPING_KW
+}
+
+test "keyword interrupt" {
+    let b = bytes_new()
+    bytes_push(b, 105)
+    bytes_push(b, 110)
+    bytes_push(b, 116)
+    bytes_push(b, 101)
+    bytes_push(b, 114)
+    bytes_push(b, 114)
+    bytes_push(b, 117)
+    bytes_push(b, 112)
+    bytes_push(b, 116)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 52)  // TK_INTERRUPT_KW
+}
+
+test "keyword implies" {
+    let b = bytes_new()
+    bytes_push(b, 105)
+    bytes_push(b, 109)
+    bytes_push(b, 112)
+    bytes_push(b, 108)
+    bytes_push(b, 105)
+    bytes_push(b, 101)
+    bytes_push(b, 115)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 77)  // TK_IMPLIES_KW
+}
+
+test "keyword while" {
+    let b = bytes_new()
+    bytes_push(b, 119)
+    bytes_push(b, 104)
+    bytes_push(b, 105)
+    bytes_push(b, 108)
+    bytes_push(b, 101)
+    assert_eq(tok_count(tokenize(b)), 1)
+    assert_eq(tok_kind(tokenize(b), 0), 71)  // TK_WHILE_KW
+}
