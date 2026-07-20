@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the Sond release tarball served at sond.dev/release/<channel>/:
 #   sond-x86_64-linux.tar.gz          : the whole toolchain in the ~/.local layout
-#                                       (bin/sondc, bin/sond, lib/sond/, share/sond/Sond.md)
+#                       (bin/sondc, bin/sond, lib/sond/, share/sond/Sond.md, share/man/man1/)
 #   sond-x86_64-linux.tar.gz.sha256   : its checksum (what install.sh verifies)
 #
 # Note: the extension is .tar.gz, not .tgz, on purpose: the deploy bundler excludes *.tgz as a
@@ -19,10 +19,16 @@ cargo build --release --manifest-path "$REPO/compiler/Cargo.toml"
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
-mkdir -p "$STAGE/bin" "$STAGE/lib/sond" "$STAGE/share/sond"
+mkdir -p "$STAGE/bin" "$STAGE/lib/sond" "$STAGE/share/sond" "$STAGE/share/man/man1"
 install -m 755 "$REPO/compiler/target/release/sondc" "$STAGE/bin/sondc"
 install -m 755 "$REPO/compiler/target/release/sond"  "$STAGE/bin/sond"
 cp -r "$REPO/lib/." "$STAGE/lib/sond/"
+
+# The man pages ship with the binary. tools/install.sh (building from source) has always
+# installed them, so `man sondc` worked there and silently did not for anyone who took the
+# one-line installer, which is the path the website recommends first.
+install -m 644 "$REPO/docs/man/sondc.1" "$STAGE/share/man/man1/sondc.1"
+install -m 644 "$REPO/docs/man/sond.1"  "$STAGE/share/man/man1/sond.1"
 
 echo "==> generating the language reference"
 SOND_MD_OUT="$STAGE/share/sond/Sond.md" "$REPO/tools/build-docs.sh"
