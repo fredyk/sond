@@ -7,7 +7,6 @@
 //   sond test lib/x86_64/linux/serial_test.snd
 
 include "x86_64/linux/serial.snd"
-include "any/strings.snd"
 include "x86_64/linux/testing.snd"
 
 // ioctls to allocate a pseudo-terminal pair, so the wrappers can be exercised
