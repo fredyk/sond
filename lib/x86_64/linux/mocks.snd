@@ -1,0 +1,341 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Mock testing helpers for Sond, controllable, deterministic doubles that replace real
+// wall-clock, randomness, partial-IO reads, HTTP network calls, and raw x86 I/O ports with
+// predictable values suitable for unit testing.
+//
+// Every mock is an opaque HANDLE (i64) pointing to an arena-allocated header whose internal
+// state (struct fields) can only be accessed through the library's public functions. Users
+// never inspect or mutate the header address directly.
+
+include "x86_64/linux/heap.snd"
+include "x86_64/linux/bytes.snd"
+include "x86_64/linux/vec.snd"
+include "x86_64/linux/http.snd"
+
+// ============================================================================
+// mock_clock: a hand-steppable clock
+// ============================================================================
+
+struct MockClock { now: i64 }
+
+// Create a mock clock starting at t0. Returns the handle.
+pub fn mock_clock_new(t0: i64) -> i64 {
+    let h = heap_alloc(8)       // struct MockClock { now }
+    poke64(h, t0)
+    h
+}
+
+// Return the current time of this mock clock.
+pub fn mock_clock_now(c: i64) -> i64 {
+    peek64(c)
+}
+
+// Advance this mock clock by delta.
+pub fn mock_clock_advance(c: i64, delta: i64) {
+    poke64(c, peek64(c) + delta)
+}
+
+// ============================================================================
+// mock_rng / mock_rng_from_bytes: deterministic pseudo-random streams
+// ============================================================================
+
+struct MockRng { state_a: i64, state_b: i64 }
+
+// Create an RNG seeded from a value. Returns a new RNG handle.
+pub fn mock_rng_new(seed: i64) -> i64 {
+    let h = heap_alloc(16)        // struct MockRng { state_a, state_b }
+    poke64(h, seed)               // state_a
+    poke64(h + 8, 0xdeadbeef + seed) // state_b
+    h
+}
+
+// Return the next value from the RNG, advancing internal state.
+pub fn mock_rng_next(r: i64) -> i64 {
+    let mut sa = peek64(r)
+    let mut sb = peek64(r + 8)
+
+    sa = sa ^ (sa >>> 16)
+    sa = sa * 0x7fdf74a9
+    sa = sa ^ (sa >>> 13)
+    poke64(r, sa)
+
+    sb = sb ^ (sb >>> 13)
+    sb = sb * 0x5894afa5
+    sb = sb ^ (sb >>> 16)
+    poke64(r + 8, sb)
+
+    sa + sb
+}
+
+struct MockRngBytes { buf: i64, offset: i64, cnt: i64 }
+
+// Create a from-bytes handle seeded from the given buffer.
+// `buf` points to `cnt` bytes that will be served as a deterministic stream.
+pub fn mock_rng_from_bytes(buf: i64, cnt: i64) -> i64 {
+    let h = heap_alloc(24)
+    poke64(h, buf)                // field 0: buf pointer
+    poke64(h + 8, 0)              // field 1: offset
+    poke64(h + 16, cnt)           // field 2: count
+    h
+}
+
+// Consume and return the next byte (0..255) from the pre-loaded stream, or 0 once the
+// stream is exhausted.
+pub fn mock_rng_from_bytes_next(r: i64) -> i64 {
+    let mut offset = peek64(r + 8)
+    let cnt = peek64(r + 16)
+    let buf = peek64(r)
+
+    if offset < cnt {
+        poke64(r + 8, offset + 1)
+        peek8(buf + offset)
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// mock_reader: a buffer reader with an advancing cursor
+// ============================================================================
+
+struct MockReader { data: i64, cursor: i64, limit: i64 }
+
+// Create a reader on the given buffer (a Bytes handle, e.g. from bytes_from_raw or
+// bytes_from_cstr). Returns a new handle.
+pub fn mock_reader_create(buf: i64) -> i64 {
+    let h = heap_alloc(24)
+    let len = bytes_len(buf)
+    poke64(h, buf)                // data
+    poke64(h + 8, 0)              // cursor
+    poke64(h + 16, len)           // limit
+    h
+}
+
+// Read the next n bytes from the reader and return a new buffer handle.
+pub fn mock_reader_read(rd: i64, n: i64) -> i64 {
+    let mut cursor = peek64(rd + 8)
+    let limit = peek64(rd + 16)
+    let data = peek64(rd)          // a Bytes handle: read through bytes_get, not raw peek8
+
+    let data_len = limit - cursor
+    let to_read = if n < data_len { n } else { data_len }
+
+    let out = bytes_new()
+    let mut i = 0
+    for i < to_read {
+        bytes_push(out, bytes_get(data, cursor))
+        cursor = cursor + 1
+        i = i + 1
+    }
+
+    poke64(rd + 8, cursor)
+    out
+}
+
+// Return the current cursor position.
+pub fn mock_reader_cursor(rd: i64) -> i64 {
+    peek64(rd + 8)
+}
+
+// Return the number of remaining unread bytes.
+pub fn mock_reader_remaining(rd: i64) -> i64 {
+    let cursor = peek64(rd + 8)
+    let limit = peek64(rd + 16)
+    if limit > cursor {
+        limit - cursor
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// mock_http: fake HTTP server on a route table
+// ============================================================================
+
+struct MockHttp { methods: i64, paths: i64, statuses: i64, bodies: i64 }
+
+// Create a new mock HTTP server. Returns handle, ready for routes.
+pub fn mock_http_new() -> i64 {
+    let h = heap_alloc(32)           // MockHttp { methods, paths, statuses, bodies }
+    poke64(h, vec_new())             // methods
+    poke64(h + 8, vec_new())         // paths
+    poke64(h + 16, vec_new())        // statuses
+    poke64(h + 24, vec_new())        // bodies
+    h
+}
+
+// Register a route: method + path -> status_code + body.
+pub fn mock_http_route(h: i64, method: i64, path: i64, status: i64, body: i64) {
+    vec_push(peek64(h), method)
+    vec_push(peek64(h + 8), path)
+    vec_push(peek64(h + 16), status)
+    vec_push(peek64(h + 24), body)
+}
+
+// Find the index of the route matching method + path, or -1 if none is registered.
+fn mock_http__find_route(methods: i64, paths: i64, request_method: i64, request_path: i64) -> i64 {
+    let n = vec_len(methods)
+    let mut i = 0
+    for i < n {
+        if bytes_eq(vec_get(methods, i), request_method) == 1 &&
+           bytes_eq(vec_get(paths, i), request_path) == 1 {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Handle an incoming HTTP request; returns a complete HTTP response buffer.
+pub fn mock_http_handle(h: i64, request_bytes: i64) -> i64 {
+    let req_method = http_method(request_bytes)
+    let req_path = http_path(request_bytes)
+    let methods = peek64(h)
+    let paths = peek64(h + 8)
+
+    let idx = mock_http__find_route(methods, paths, req_method, req_path)
+
+    if idx == 0 - 1 {
+        // 404 Not Found
+        let body = bytes_new()
+        bytes_append_int(body, 404)
+        http_response(cstr("404 Not Found"), body)
+    } else {
+        let statuses = peek64(h + 16)
+        let bodies = peek64(h + 24)
+        http_response(vec_get(statuses, idx), vec_get(bodies, idx))
+    }
+}
+
+// ============================================================================
+// mock_port: a double for x86 I/O ports (inb/outb/inw/outw/inl/outl), so a driver
+// that would otherwise need real hardware can be exercised in a hosted test.
+//
+// Storage is two independent logs over parallel Vecs, addressed by port number:
+//   - the "in" table (`in_ports`/`in_values`) holds the value primed with
+//     mock_port_set_in for each port; mock_port_in looks it up by linear scan and
+//     returns it, or 0 if that port was never primed (matches real hardware: an
+//     unconnected/unprogrammed bus line reads back all-zero bits).
+//   - the "out" log (`out_ports`/`out_values`) APPENDS every write in order, with no
+//     dedup and no overwrite, because a test needs to see every byte a driver wrote
+//     (e.g. a UART driver writing a whole string one byte at a time to its data
+//     port), not just the last one.
+//
+// The seam: a driver function takes the mock handle as a plain parameter instead of
+// calling inb/outb directly, so a test can hand it a mock_port instead of the real
+// port space. Example, a toy one-byte serial write and its test:
+//
+//   fn serial_putc_mock(p: i64, c: i64) {
+//       // real code would `outb(0x3F8, c)`; the seam passes the double instead
+//       mock_port_out(p, 0x3F8, c)
+//   }
+//
+//   test "driver writes exactly the bytes we expect, in order" {
+//       let p = mock_port_new()
+//       serial_putc_mock(p, 'H')
+//       serial_putc_mock(p, 'i')
+//       assert_eq(mock_port_writes(p, 0x3F8), 2)
+//       assert_eq(mock_port_write_at(p, 0x3F8, 0), 'H')
+//       assert_eq(mock_port_write_at(p, 0x3F8, 1), 'i')
+//   }
+//
+// A driver that also READS a port (e.g. polling a UART line-status register before
+// sending) is primed the same way: `mock_port_set_in(p, 0x3FD, 0x20)` makes the next
+// read of 0x3FD return 0x20, however many times the driver reads it, until the test
+// reprograms it with another mock_port_set_in call (mirrors a status register that
+// keeps reporting the same state until the emulated device's state changes).
+// ============================================================================
+
+struct MockPort { in_ports: i64, in_values: i64, out_ports: i64, out_values: i64 }
+
+// Create a new mock port space, with no ports primed and no writes recorded.
+pub fn mock_port_new() -> i64 {
+    let h = heap_alloc(32)            // MockPort { in_ports, in_values, out_ports, out_values }
+    poke64(h, vec_new())              // in_ports
+    poke64(h + 8, vec_new())          // in_values
+    poke64(h + 16, vec_new())         // out_ports
+    poke64(h + 24, vec_new())         // out_values
+    h
+}
+
+// Index of `port` in a Vec of port numbers, or -1 if absent.
+fn mock_port__index(ports: i64, port: i64) -> i64 {
+    let n = vec_len(ports)
+    let mut i = 0
+    for i < n {
+        if vec_get(ports, i) == port {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Prime what reading `port` returns from now on. Calling this again for the same
+// port replaces the previously primed value (last write wins), so a test can move a
+// fake device through states between reads.
+pub fn mock_port_set_in(p: i64, port: i64, value: i64) {
+    let ports = peek64(p)
+    let idx = mock_port__index(ports, port)
+    if idx == 0 - 1 {
+        vec_push(ports, port)
+        vec_push(peek64(p + 8), value)
+    } else {
+        vec_set(peek64(p + 8), idx, value)
+    }
+}
+
+// Read `port`: the value last given to mock_port_set_in for this port, or 0 if this
+// port was never primed.
+pub fn mock_port_in(p: i64, port: i64) -> i64 {
+    let idx = mock_port__index(peek64(p), port)
+    if idx == 0 - 1 {
+        0
+    } else {
+        vec_get(peek64(p + 8), idx)
+    }
+}
+
+// Record a write of `value` to `port`, appended to that port's write log (does not
+// overwrite earlier writes to the same port).
+pub fn mock_port_out(p: i64, port: i64, value: i64) {
+    vec_push(peek64(p + 16), port)
+    vec_push(peek64(p + 24), value)
+}
+
+// How many times `port` has been written to (mock_port_out calls with that port).
+pub fn mock_port_writes(p: i64, port: i64) -> i64 {
+    let ports = peek64(p + 16)
+    let n = vec_len(ports)
+    let mut count = 0
+    let mut i = 0
+    for i < n {
+        if vec_get(ports, i) == port {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    count
+}
+
+// The value of the i-th write to `port` (0-based), in the order the writes happened.
+// Caller ensures `i < mock_port_writes(p, port)`.
+pub fn mock_port_write_at(p: i64, port: i64, i: i64) -> i64 {
+    let ports = peek64(p + 16)
+    let values = peek64(p + 24)
+    let n = vec_len(ports)
+    let mut seen = 0
+    let mut j = 0
+    for j < n {
+        if vec_get(ports, j) == port {
+            if seen == i {
+                return vec_get(values, j)
+            }
+            seen = seen + 1
+        }
+        j = j + 1
+    }
+    0 - 1
+}

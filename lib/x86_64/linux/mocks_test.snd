@@ -1,0 +1,302 @@
+//   sond test lib/x86_64/linux/mocks_test.snd
+include "x86_64/linux/mocks.snd"
+include "x86_64/linux/testing.snd"
+
+// ---------------------------------------------------------------------------
+// mock_clock tests
+// ---------------------------------------------------------------------------
+test "clock starts at t0" {
+    let c = mock_clock_new(1000)
+    assert_eq(mock_clock_now(c), 1000)
+}
+
+test "clock advances by delta" {
+    let c = mock_clock_new(1000)
+    mock_clock_advance(c, 500)
+    assert_eq(mock_clock_now(c), 1500)
+}
+
+test "clock advances by a negative delta" {
+    let c = mock_clock_new(1000)
+    mock_clock_advance(c, -500)
+    assert_eq(mock_clock_now(c), 500)
+}
+
+// ---------------------------------------------------------------------------
+// mock_rng tests                                                              //
+// ---------------------------------------------------------------------------
+test "rng produces a deterministic first value" {
+    let r = mock_rng_new(42)
+    let v1 = mock_rng_next(r)
+    let v2 = mock_rng_next(r)
+    let v3 = mock_rng_next(r)
+    assert_ne(v1, 0)
+    assert_ne(v2, 0)
+    assert_ne(v3, 0)
+}
+
+test "rng produces different values across calls" {
+    let r = mock_rng_new(7)
+    let v1 = mock_rng_next(r)
+    let v2 = mock_rng_next(r)
+    assert_ne(v1, v2)
+}
+
+test "rng with same seed gives identical first result" {
+    let r1 = mock_rng_new(999999)
+    let r2 = mock_rng_new(999999)
+    assert_eq(mock_rng_next(r1), mock_rng_next(r2))
+}
+
+// ---------------------------------------------------------------------------
+// mock_rng_from_bytes tests                                                   //
+// ---------------------------------------------------------------------------
+test "from_bytes consumes bytes in order" {
+    // `let buf[5]` reserves 5 WORDS (buf[i] pokes 8 bytes each); mock_rng_from_bytes
+    // wants `cnt` tightly-PACKED bytes, so build the fixture with poke8 directly.
+    let buf[5]
+    poke8(buf + 0, 10)
+    poke8(buf + 1, 20)
+    poke8(buf + 2, 30)
+    poke8(buf + 3, 40)
+    poke8(buf + 4, 50)
+    let r = mock_rng_from_bytes(buf, 5)
+    assert_eq(mock_rng_from_bytes_next(r), 10)
+    assert_eq(mock_rng_from_bytes_next(r), 20)
+    assert_eq(mock_rng_from_bytes_next(r), 30)
+}
+
+test "from_bytes returns 0 when exhausted" {
+    let buf[2]
+    poke8(buf + 0, 100)
+    poke8(buf + 1, 200)
+    let r = mock_rng_from_bytes(buf, 2)
+    mock_rng_from_bytes_next(r)
+    mock_rng_from_bytes_next(r)
+    assert_eq(mock_rng_from_bytes_next(r), 0)
+}
+
+// ---------------------------------------------------------------------------
+// mock_reader tests                                                           //
+// ---------------------------------------------------------------------------
+test "reader created on buffer" {
+    let data[3]
+    poke8(data + 0, 65)
+    poke8(data + 1, 66)
+    poke8(data + 2, 67)
+    let rd = mock_reader_create(bytes_from_raw(data, 3))
+    assert_eq(mock_reader_cursor(rd), 0)
+    assert_eq(mock_reader_remaining(rd), 3)
+}
+
+test "reader reads n bytes and advances cursor" {
+    let data[3]
+    poke8(data + 0, 65)
+    poke8(data + 1, 66)
+    poke8(data + 2, 67)
+    let rd = mock_reader_create(bytes_from_raw(data, 3))
+    let buf = mock_reader_read(rd, 2)
+    assert_eq(bytes_len(buf), 2)
+    assert_eq(bytes_get(buf, 0), 65)
+    assert_eq(bytes_get(buf, 1), 66)
+    assert_eq(mock_reader_cursor(rd), 2)
+    assert_eq(mock_reader_remaining(rd), 1)
+}
+
+test "reader reads all remaining bytes" {
+    let data[3]
+    poke8(data + 0, 65)
+    poke8(data + 1, 66)
+    poke8(data + 2, 67)
+    let rd = mock_reader_create(bytes_from_raw(data, 3))
+    let buf = mock_reader_read(rd, 3)
+    assert_eq(bytes_len(buf), 3)
+    assert_eq(bytes_get(buf, 0), 65)
+    assert_eq(bytes_get(buf, 2), 67)
+    assert_eq(mock_reader_cursor(rd), 3)
+    assert_eq(mock_reader_remaining(rd), 0)
+}
+
+test "reader returns what it has when n > remaining" {
+    let data[2]
+    poke8(data + 0, 97)
+    poke8(data + 1, 98)
+    let rd = mock_reader_create(bytes_from_raw(data, 2))
+    let buf = mock_reader_read(rd, 100)
+    assert_eq(bytes_len(buf), 2)
+    assert_eq(bytes_get(buf, 0), 97)
+    assert_eq(bytes_get(buf, 1), 98)
+    assert_eq(mock_reader_remaining(rd), 0)
+}
+
+// ---------------------------------------------------------------------------
+// mock_http tests
+//
+// mock_http_route's method/path/body arguments are Bytes buffers (built with
+// bytes_from_cstr(cstr(...))): method and path are matched byte-for-byte against
+// http_method()/http_path()'s parsed output via bytes_eq, and body is fed straight
+// into http_response()'s bytes_append. `status` is the odd one out: it is a raw
+// cstr, passed straight through to http_response() exactly as http_test.snd does.
+// ---------------------------------------------------------------------------
+test "http route and handle GET /" {
+    let m = mock_http_new()
+
+    let method_handle = bytes_from_cstr(cstr("GET"))
+    let path_handle = bytes_from_cstr(cstr("/"))
+    let status_handle = cstr("200 OK")
+    let body_handle = bytes_from_cstr(cstr("Hello"))
+
+    mock_http_route(m, method_handle, path_handle, status_handle, body_handle)
+
+    let req = bytes_from_cstr(cstr("GET / HTTP/1.1"))
+    let resp = mock_http_handle(m, req)
+
+    let expect = http_response(cstr("200 OK"), bytes_from_cstr(cstr("Hello")))
+    assert_eq(bytes_eq(resp, expect), 1)
+}
+
+test "http route 404 for unmatched path" {
+    let m = mock_http_new()
+
+    mock_http_route(m, bytes_from_cstr(cstr("GET")), bytes_from_cstr(cstr("/")), cstr("200 OK"), bytes_from_cstr(cstr("Root")))
+
+    let req = bytes_from_cstr(cstr("GET /other HTTP/1.1"))
+    let resp = mock_http_handle(m, req)
+
+    let expect_body = bytes_new()
+    bytes_append_int(expect_body, 404)
+    let expect = http_response(cstr("404 Not Found"), expect_body)
+    assert_eq(bytes_eq(resp, expect), 1)
+}
+
+test "http routes and handles POST" {
+    let m = mock_http_new()
+
+    let body = bytes_from_cstr(cstr("CREATED"))
+    mock_http_route(m, bytes_from_cstr(cstr("POST")), bytes_from_cstr(cstr("/api/items")), cstr("201 Created"), body)
+
+    let req = bytes_from_cstr(cstr("POST /api/items HTTP/1.1"))
+    let resp = mock_http_handle(m, req)
+
+    assert_eq(bytes_len(resp) > 0, 1)
+    let expect_body = bytes_from_cstr(cstr("CREATED"))
+    assert_eq(bytes_eq(resp, http_response(cstr("201 Created"), expect_body)), 1)
+}
+
+test "different methods on same path" {
+    let m = mock_http_new()
+
+    mock_http_route(m, bytes_from_cstr(cstr("GET")), bytes_from_cstr(cstr("/items")), cstr("200 OK"), bytes_from_cstr(cstr("JSON")))
+    mock_http_route(m, bytes_from_cstr(cstr("POST")), bytes_from_cstr(cstr("/items")), cstr("201 Created"), bytes_from_cstr(cstr("")))
+
+    let resp_get = mock_http_handle(m, bytes_from_cstr(cstr("GET /items HTTP/1.1")))
+    let resp_post = mock_http_handle(m, bytes_from_cstr(cstr("POST /items HTTP/1.1")))
+
+    assert_eq(bytes_eq(resp_get, http_response(cstr("200 OK"), bytes_from_cstr(cstr("JSON")))), 1)
+    assert_eq(bytes_eq(resp_post, http_response(cstr("201 Created"), bytes_new())), 1)
+}
+
+test "complete http flow with method, path and status extraction" {
+    let m = mock_http_new()
+
+    let method_handle = bytes_from_cstr(cstr("PUT"))
+    let path_handle = bytes_from_cstr(cstr("/users/42"))
+    let status_handle = cstr("200 OK")
+    let body_handle = bytes_from_cstr(cstr("{\"name\":\"Alice\"}"))
+
+    mock_http_route(m, method_handle, path_handle, status_handle, body_handle)
+
+    let req = bytes_from_cstr(cstr("PUT /users/42 HTTP/1.1"))
+    let resp = mock_http_handle(m, req)
+
+    // The response ends with the exact JSON body bytes, in order.
+    let n = bytes_len(resp)
+    assert_eq(bytes_get(resp, n - 16), 123)   // '{' : start of the 16-byte body
+    assert_eq(bytes_get(resp, n - 1), 125)    // '}' : last byte of the response
+}
+
+// ---------------------------------------------------------------------------
+// mock_port tests
+// ---------------------------------------------------------------------------
+test "reading an unprimed port returns 0" {
+    let p = mock_port_new()
+    assert_eq(mock_port_in(p, 0x3F8), 0)
+}
+
+test "set_in primes what a read returns" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FD, 0x20)
+    assert_eq(mock_port_in(p, 0x3FD), 0x20)
+}
+
+test "set_in on one port does not affect another port" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FD, 0x20)
+    assert_eq(mock_port_in(p, 0x3F8), 0)
+}
+
+test "set_in again replaces the previously primed value" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FD, 0x20)
+    mock_port_set_in(p, 0x3FD, 0x60)
+    assert_eq(mock_port_in(p, 0x3FD), 0x60)
+}
+
+test "a primed value keeps being returned on repeated reads" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x60, 42)
+    assert_eq(mock_port_in(p, 0x60), 42)
+    assert_eq(mock_port_in(p, 0x60), 42)
+    assert_eq(mock_port_in(p, 0x60), 42)
+}
+
+test "a fresh port has zero recorded writes" {
+    let p = mock_port_new()
+    assert_eq(mock_port_writes(p, 0x3F8), 0)
+}
+
+test "out records one write" {
+    let p = mock_port_new()
+    mock_port_out(p, 0x3F8, 65)
+    assert_eq(mock_port_writes(p, 0x3F8), 1)
+    assert_eq(mock_port_write_at(p, 0x3F8, 0), 65)
+}
+
+test "out on one port does not count against another port" {
+    let p = mock_port_new()
+    mock_port_out(p, 0x3F8, 65)
+    assert_eq(mock_port_writes(p, 0x60), 0)
+}
+
+// This block plays the role of a toy driver that writes bytes to the fake COM1 data
+// port, one at a time (a real driver like `printk` would call `outb(0x3F8, c)`
+// directly instead of `mock_port_out`, the seam swapped in for the test; see the
+// worked example in the mock_port doc comment at the top of mocks.snd). No helper
+// `fn` is declared here on purpose: a `_test.snd` file's own top-level functions
+// (besides `test` blocks) become the compiler's coverage SCOPE (see
+// resolve_includes_scoped), so adding one here would stop mocks.snd's own functions
+// from being measured at all.
+test "a driver's writes land on the mock port in order" {
+    let p = mock_port_new()
+    mock_port_out(p, 0x3F8, 'H')
+    mock_port_out(p, 0x3F8, 'i')
+    mock_port_out(p, 0x3F8, '\n')
+
+    assert_eq(mock_port_writes(p, 0x3F8), 3)
+    assert_eq(mock_port_write_at(p, 0x3F8, 0), 'H')
+    assert_eq(mock_port_write_at(p, 0x3F8, 1), 'i')
+    assert_eq(mock_port_write_at(p, 0x3F8, 2), '\n')
+}
+
+test "a driver that polls a status register before writing" {
+    let p = mock_port_new()
+    // Line Status Register: bit 5 (0x20) set means "transmit holding register empty"
+    mock_port_set_in(p, 0x3FD, 0x20)
+
+    if (mock_port_in(p, 0x3FD) & 0x20) == 0x20 {
+        mock_port_out(p, 0x3F8, 'K')
+    }
+
+    assert_eq(mock_port_writes(p, 0x3F8), 1)
+    assert_eq(mock_port_write_at(p, 0x3F8, 0), 'K')
+}
