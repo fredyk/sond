@@ -27,7 +27,7 @@ fn main() -> i64 {
     for z < 32 { poke8(base + z, 0)  z = z + 1 }
     poke8(base + 0, 9)
 
-    // Q_S = X25519(sk, base), the server's ephemeral public key.
+    // Q_S = X25519(sk, base): the server's ephemeral public key.
     let qs[4]
     x25519(sk, base, qs)
 

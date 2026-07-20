@@ -9,7 +9,7 @@
 // the OASIS virtio 1.0 spec + the PCI spec; no third-party source copied.
 //
 // The one non-obvious trap: the 64-bit common_cfg fields (queue_desc/driver/device)
-// must be written as TWO 32-bit stores, VirtualBox's MMIO does not accept a 64-bit
+// must be written as TWO 32-bit stores; VirtualBox's MMIO does not accept a 64-bit
 // access there and a poke64 faults.
 
 fn pci_r(b: i64, d: i64, o: i64) -> i64 {

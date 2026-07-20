@@ -89,7 +89,7 @@ fn efi_main() -> i64 {
 
     // === serial_print "oper=" then serial_int(oper) ===
     serial_print("oper=")
-    // serial_int not in language surface, emit via serial_putc
+    // serial_int not in language surface; emit via serial_putc
     // Print decimal of oper (expected 1)
     let mut n = oper
     let mut digits[16]

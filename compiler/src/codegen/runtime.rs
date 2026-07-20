@@ -229,7 +229,7 @@ impl Codegen {
     /// allocator from the captured UEFI memory map (the largest EfiConventionalMemory
     /// region above 1 MiB, free RAM the firmware wasn't using, so it can't clobber
     /// our image, stack, or the map buffer), and `sond_alloc_bump` serves from it.
-    /// This is what lets `alloc`, hence virtio-net, TCP and SSH, keep working once
+    /// This is what lets `alloc` (hence virtio-net, TCP and SSH) keep working once
     /// the firmware (AllocatePool) is gone: the kernel owns memory now.
     pub(crate) fn emit_heap_helpers(&mut self) {
         if !self.uses_heap {

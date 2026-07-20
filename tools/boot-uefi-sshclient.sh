@@ -2,7 +2,7 @@
 # Boot a Sond UEFI binary with virtio-net + hostfwd 2222->22, then run the REAL
 # OpenSSH client against it and capture the -vvv trace. The oracle for the SSH
 # transport milestones beyond the banner: it shows how far a genuine SSH client
-# gets, banner exchange, SSH2_MSG_KEXINIT, key exchange, and so on.
+# gets: banner exchange, SSH2_MSG_KEXINIT, key exchange, and so on.
 #
 # Usage: boot-uefi-sshclient.sh <BOOTX64.EFI> [seconds]
 set -euo pipefail

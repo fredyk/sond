@@ -2,7 +2,7 @@
 # Boot a Sond UEFI binary with virtio-net + hostfwd 2222->22, and from the HOST
 # side knock on 127.0.0.1:2222 during the boot window so QEMU's slirp opens a TCP
 # connection to the guest's port 22. The OS's TCP server must answer the SYN with
-# a SYN-ACK. All NIC traffic is dumped to a pcap and the TCP exchange decoded -
+# a SYN-ACK. All NIC traffic is dumped to a pcap and the TCP exchange decoded:
 # the executable oracle for the TCP milestone (M3) on the road to SSH.
 #
 # Usage: boot-uefi-tcp.sh <BOOTX64.EFI> [seconds] [pcap]

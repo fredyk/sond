@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// f64, the FIRST value type in Sond distinct from i64, and the wedge that opens
+// f64: the FIRST value type in Sond distinct from i64, and the wedge that opens
 // typed codegen. Parameters and returns are System V SSE class (passed in %xmm0..),
 // arithmetic uses SSE (addsd/subsd/mulsd/divsd), integer operands are promoted with
 // cvtsi2sd. Compile `sondc floats.snd --shared -o libsondf.so` and call from Rust/Go/

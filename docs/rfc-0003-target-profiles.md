@@ -145,8 +145,8 @@ fn bad_example() -> Result<(), ErrorHW>
 
 **Verifier relaxations (ceremony only, soundness is NEVER relaxed):**
 - No capability is prohibited by default: the script can use whatever the system grants via the shebang line.
-- Contracts are optional: `requires`/`ensures` are not mandatory. But any contract you *do* write is verified with full soundness, an unprovable one is still a compile error, never a runtime surprise.
-- Effect annotations are optional: functions may leave effects implicit (the verifier infers them), but the effect system still holds, no undeclared effect escapes inference.
+- Contracts are optional: `requires`/`ensures` are not mandatory. But any contract you *do* write is verified with full soundness: an unprovable one is still a compile error, never a runtime surprise.
+- Effect annotations are optional: functions may leave effects implicit (the verifier infers them), but the effect system still holds: no undeclared effect escapes inference.
 - Top-level statements allowed: the script can have executable code directly (not just definitions).
 - **Soundness is not weakened.** Types, memory safety, exhaustiveness and every present contract are checked with the same soundness as in every other profile. The `script` profile lowers *required ceremony*, never the *strength of the guarantee*. Per the **Prime Directive** (RFC-0000: correctness always outranks ease of authorship), this supersedes this RFC's earlier draft line "the verifier will not require total soundness", that clause is void.
 

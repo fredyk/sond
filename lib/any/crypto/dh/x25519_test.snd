@@ -227,7 +227,7 @@ test "x25519: RFC 7748 §6.1 shared secret" {
     poke8(shared_exp + 28, 0x1e); poke8(shared_exp + 29, 0x16); poke8(shared_exp + 30, 0x17); poke8(shared_exp + 31, 0x42)
 
     // Each test runs in its own fork, so this test must set alice_priv and bob_pub
-    // itself, the writes from the public-key tests happened in other forks.
+    // itself: the writes from the public-key tests happened in other forks.
     poke8(alice_priv + 0, 0x77); poke8(alice_priv + 1, 0x07); poke8(alice_priv + 2, 0x6d); poke8(alice_priv + 3, 0x0a)
     poke8(alice_priv + 4, 0x73); poke8(alice_priv + 5, 0x18); poke8(alice_priv + 6, 0xa5); poke8(alice_priv + 7, 0x7d)
     poke8(alice_priv + 8, 0x3c); poke8(alice_priv + 9, 0x16); poke8(alice_priv + 10, 0xc1); poke8(alice_priv + 11, 0x72)

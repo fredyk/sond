@@ -34,7 +34,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
             // Integer or decimal literal. Decimals keep their raw lexeme so no
             // precision is lost here (Money is fixed-point, not f64).
             _ if c.is_ascii_digit() => {
-                // Hex literal `0x...`, ubiquitous in systems code (ports,
+                // Hex literal `0x...`: ubiquitous in systems code (ports,
                 // addresses, bit masks). Detected by a `0x`/`0X` prefix.
                 let is_hex = c == '0' && {
                     let mut ahead = chars.clone();
@@ -162,7 +162,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 tokens.push(keyword_or_ident(ident));
             }
 
-            // `/`, line comment `//` (RFC-0002 §3.2) or division `/`. For a
+            // `/`: line comment `//` (RFC-0002 §3.2) or division `/`. For a
             // comment, the trailing '\n' is left unconsumed so it can still
             // trigger implicit semicolon insertion, just like a code line.
             '/' => {
@@ -179,7 +179,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 }
             }
 
-            // `-`, arrow `->` or subtraction `-`.
+            // `-`: arrow `->` or subtraction `-`.
             '-' => {
                 chars.next();
                 if chars.peek() == Some(&'>') {
@@ -190,7 +190,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 }
             }
 
-            // `=`, equality `==`, match arrow `=>`, or assignment `=`.
+            // `=`: equality `==`, match arrow `=>`, or assignment `=`.
             '=' => {
                 chars.next();
                 match chars.peek() {

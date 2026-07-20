@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/x86_64/linux/udp.snd, UDP datagram sockets with ancillary-data (cmsg) support, for a
+// lib/x86_64/linux/udp.snd: UDP datagram sockets with ancillary-data (cmsg) support, for a
 // transparent proxy / relay. On top of net.snd it adds:
 //   - a DGRAM socket + the IP-level options a TPROXY relay needs (IP_TRANSPARENT, IP_FREEBIND,
 //     IP_RECVORIGDSTADDR);

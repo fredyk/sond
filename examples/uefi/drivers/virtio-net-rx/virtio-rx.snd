@@ -218,7 +218,7 @@ fn efi_main() -> i64 {
     build_arp(arp_buf)
     tx_send(arp_buf, 52)
 
-    // Poll RX used ring, send ARP multiple times to ensure we catch the reply
+    // Poll RX used ring; send ARP multiple times to ensure we catch the reply
     let avail_off = 16 * QSZ
     let used_off = rx_desc + (avail_off + 4 + QSZ * 2 + PAGE - 1) / PAGE * PAGE
     let mut old_used = peek16(used_off + 2)

@@ -1,4 +1,4 @@
-# Sond, Implemented Language Surface (what the compiler accepts TODAY)
+# Sond: Implemented Language Surface (what the compiler accepts TODAY)
 
 <!-- SOND-MD-BEGIN -->
 > **⭐ Prime Directive (permanent):** Sond is a language written by AI and used by AI.
@@ -50,8 +50,8 @@ fn efi_main() -> i64 {
 
 ## Types
 
-- `i64`, 64-bit signed integer. This is also used for pointers and characters.
-- `bool`, `true` / `false`.
+- `i64`: 64-bit signed integer. This is also used for pointers and characters.
+- `bool`: `true` / `false`.
 - String literals `"..."` exist only as arguments to `print`/`write`/`serial_print`.
 
 No `Money`/decimal, no strings-as-values, no arrays yet in codegen.
@@ -63,14 +63,14 @@ No `Money`/decimal, no strings-as-values, no arrays yet in codegen.
 - Booleans: `true`, `false`.
 - Arithmetic: `+`, `-`, `*`, `/` (integer division), `%` (remainder).
 - Bitwise/shift: `&`, `|`, `^`, `<<`, `>>`, `>>>`, and prefix `~` (bitwise NOT).
-  `>>` is ARITHMETIC (sign-preserving), `>>>` is LOGICAL (zero-fill), for crypto
+  `>>` is ARITHMETIC (sign-preserving), `>>>` is LOGICAL (zero-fill); for crypto
   rotations on high-bit-set values use `>>>`: `(x >>> n) | (x << (64 - n))`.
   These bind TIGHTER than arithmetic/comparisons, so `reg & 0x20 == 0x20` means
   `(reg & 0x20) == 0x20`.
 - Unary prefixes: `-x` (arithmetic negation), `~x` (bitwise NOT), `not b` (boolean).
 - Comparisons: `==`, `!=`, `<`, `>`, `<=`, `>=` → `bool`.
 - Logical: `&&`, `||` (short-circuit), and prefix `not` for boolean negation
-  (`not` is BOOLEAN only, for integer bit-complement use `~`).
+  (`not` is BOOLEAN only; for integer bit-complement use `~`).
 - Parentheses group as usual: `(a + b) * c`.
 - Function/builtin calls: `name(arg, arg)`.
 
@@ -107,11 +107,11 @@ return 0            // early return
 `if` is also an expression: `let m = if a > b { a } else { b }`; chains work (`else if`).
 
 ### Constraints (common gotchas)
-- **Functions are TOP-LEVEL only**, no `fn` inside another `fn`; factor helpers out.
-- **Parameters are IMMUTABLE**, to mutate, copy into a local: `let mut v = x`.
-- A stack array `let a[N]` is written with `a[i] = ...`, it needs NO `let mut` (the
+- **Functions are TOP-LEVEL only**: no `fn` inside another `fn`; factor helpers out.
+- **Parameters are IMMUTABLE**: to mutate, copy into a local: `let mut v = x`.
+- A stack array `let a[N]` is written with `a[i] = ...`; it needs NO `let mut` (the
   name is an address). Only scalar bindings you reassign need `let mut`.
-- No `println`, use `print`, `print_int`, `print_char`, `serial_print`.
+- No `println`; use `print`, `print_int`, `print_char`, `serial_print`.
 
 ## Module-level globals
 
@@ -145,23 +145,23 @@ SINGLE comparison (no `&&` yet, write several). `-> (name: Type)` binds the resu
 A parameter can carry a **`where` refinement**: `fn get(i: i64 where 0 <= i && i < 10)`
 is a `requires` on that param (`&&` splits into conjuncts), proves bounds/overflow.
 
-## Builtins, provided by the COMPILER itself (no `include` needed)
+## Builtins: provided by the COMPILER itself (no `include` needed)
 
 Everything below is emitted by the compiler directly and is ALWAYS available. Everything
 else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above).
 
 ### All targets
-- `print("literal")`, write a STRING LITERAL to the console EXACTLY as given, NO
+- `print("literal")`: write a STRING LITERAL to the console EXACTLY as given, NO
   automatic newline (hosted `write(1,…)`; UEFI `ConOut`). May contain `\n`; `print("")`
   writes nothing.
-- `print_int(n)`, print the integer `n` in decimal (no newline).
-- `peek64/32/16/8(ptr) -> i64`, load a 64/32/16/8-bit value from `ptr` (zero-extended).
-- `poke64/32/16/8(ptr, val)`, store the low 64/32/16/8 bits of `val` at `ptr`. Sized forms
+- `print_int(n)`: print the integer `n` in decimal (no newline).
+- `peek64/32/16/8(ptr) -> i64`: load a 64/32/16/8-bit value from `ptr` (zero-extended).
+- `poke64/32/16/8(ptr, val)`: store the low 64/32/16/8 bits of `val` at `ptr`. Sized forms
   are for packed hardware structures (a device ring: 32-bit length, 16-bit flags).
-- `let a[N]`, fixed-size array of N words on the stack (no allocator, every target);
+- `let a[N]`: fixed-size array of N words on the stack (no allocator, every target);
   index with `a[i]`; `a.len` is the size N (`for i < a.len`). A constant index outside
   `[0, N)` is a compile error. Tables: `K[64]`.
-- **`Slice`**, built-in length-carrying array `{ptr, len}`. `let s = Slice { ptr: a, len:
+- **`Slice`**: built-in length-carrying array `{ptr, len}`. `let s = Slice { ptr: a, len:
   a.len }`; pass so a fn knows the length (`fn sum(s: Slice)`); `s.len`, index `s[i]` /
   `s[i] = v`. Sub-slice `s[lo:hi]` is a VIEW, no copy (`s[:hi]`/`s[lo:]`/`s[:]`). Built in.
 - **Structs** (all fields i64, one word each). `struct Point { x: i64, y: i64 }`;
@@ -174,41 +174,41 @@ else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above
   crypto table (`K[64]`, S-boxes) in `.data`, readable everywhere.
 - `a[i]` reads / `a[i] = v` writes the 8-byte WORD at `a + i*8` (sugar over peek64/poke64);
   for BYTE buffers keep peek8/poke8. `a` is any address.
-- `write(fd, "literal") -> i64`, raw `write` syscall (hosted/freestanding only).
+- `write(fd, "literal") -> i64`: raw `write` syscall (hosted/freestanding only).
 
 ### Port I/O (drivers), all targets, ring-0 (UEFI/kernel) at runtime
-- `outb(port, val)` / `outw(port, val)` / `outl(port, val)`, write a byte/word/dword to an I/O PORT.
-- `inb(port) -> i64` / `inw(port) -> i64` / `inl(port) -> i64`, read a byte/word/dword from an I/O PORT.
+- `outb(port, val)` / `outw(port, val)` / `outl(port, val)`: write a byte/word/dword to an I/O PORT.
+- `inb(port) -> i64` / `inw(port) -> i64` / `inl(port) -> i64`: read a byte/word/dword from an I/O PORT.
 
 The 32-bit `outl`/`inl` are for PCI config space (address→0xCF8, datum at 0xCFC). I/O ports
 are a SEPARATE address space: for a device register use `inb`/`outb`, NOT `peek8`/`poke8`
 (those hit RAM). Hex literals allowed: `0x3F8`.
 
 ### UEFI target only (`--uefi`)
-- `print_char(c)`, print one character (its code point) via `ConOut`.
-- `readkey() -> i64`, block until a key is pressed, return its character code.
-- `alloc(size) -> i64`, allocate `size` bytes, return the address (use with
+- `print_char(c)`: print one character (its code point) via `ConOut`.
+- `readkey() -> i64`: block until a key is pressed, return its character code.
+- `alloc(size) -> i64`: allocate `size` bytes, return the address (use with
   `peek*`/`poke*`). Firmware `AllocatePool` before `exit_boot_services()`, Sond's own
   bump heap over the UEFI memory map after, so it keeps working in the kernel.
-- `serial_print("literal")` / `serial_putc(byte)`, write to the COM1 serial port
+- `serial_print("literal")` / `serial_putc(byte)`: write to the COM1 serial port
   by direct hardware I/O. Works before and after `exit_boot_services()`.
-- `exit_boot_services()`, drop the UEFI firmware; Sond becomes a bare-metal kernel. Seeds
+- `exit_boot_services()`: drop the UEFI firmware; Sond becomes a bare-metal kernel. Seeds
   Sond's own heap from the memory map, so `alloc`/`print` KEEP WORKING (`print` falls back
   to COM1). Only `readkey` stops.
-- `halt()`, stop the CPU forever (end a kernel).
-- `asm("instruction")`, inline assembly (AT&T), one instruction verbatim: `asm("cli")`,
+- `halt()`: stop the CPU forever (end a kernel).
+- `asm("instruction")`: inline assembly (AT&T), one instruction verbatim: `asm("cli")`,
   `asm("int $0x20")`. You own the registers. The escape hatch when no builtin covers it.
 
 ### Kernel: interrupts (`--uefi`, after `exit_boot_services`)
-- `interrupt fn name() { ... }`, interrupt handler: saves/restores GP regs, returns `iretq`.
+- `interrupt fn name() { ... }`: interrupt handler: saves/restores GP regs, returns `iretq`.
   A hardware IRQ must ack it (`outb(0x20, 0x20)`).
-- `addr_of(name) -> i64`, a function's address (IDT gates; function pointers).
-- `lidt(ptr)`, load the IDT register from a 10-byte pseudo-descriptor at `ptr`.
-- `read_cs() -> i64`, the current code-segment selector. ISR: `examples/uefi/kernel/timer-interrupt/`.
-- `swtch(old_ctx_ptr, new_ctx)`, context switch (save/restore callee regs + `%rsp`). From a
+- `addr_of(name) -> i64`: a function's address (IDT gates; function pointers).
+- `lidt(ptr)`: load the IDT register from a 10-byte pseudo-descriptor at `ptr`.
+- `read_cs() -> i64`: the current code-segment selector. ISR: `examples/uefi/kernel/timer-interrupt/`.
+- `swtch(old_ctx_ptr, new_ctx)`: context switch (save/restore callee regs + `%rsp`). From a
   timer ISR → preemptive multitasking: `examples/uefi/kernel/preempt-two-tasks/`.
 
-## Testing (MANDATORY, a program without tests does not build)
+## Testing (MANDATORY: a program without tests does not build)
 
 `sond build`, `sond run` and `sond test` all enforce a coverage gate: a program is
 REJECTED unless its `test "..." { }` blocks exercise ≥80% of its own functions' basic
@@ -220,7 +220,7 @@ fn double(x: i64) -> i64 { x + x }
 test "double works" { assert_eq(double(21), 42) }
 ```
 
-- `test "name" { ... }`, a test block. Each runs in a FORKED child, so one failing or
+- `test "name" { ... }`: a test block. Each runs in a FORKED child, so one failing or
   crashing assertion is isolated and reported per test; the suite keeps going.
 - `assert(cond)` / `assert_eq(actual, expected)` / `assert_ne(a, b)` (from `testing.snd`)
   abort the test on failure. Only i64 values are compared.

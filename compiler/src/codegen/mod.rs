@@ -22,7 +22,7 @@ const SSE_ARG_REGS: [&str; 8] = [
 ];
 
 /// The value kind the codegen distinguishes. Integers/pointers are INTEGER class (live
-/// in `%rax`/`%rdi..`) and carry SIGNEDNESS, `I64` (signed) vs `U64` (unsigned), which
+/// in `%rax`/`%rdi..`) and carry SIGNEDNESS (`I64` (signed) vs `U64` (unsigned)), which
 /// selects the right shift/divide/compare instruction (killing the `>>`/`>>>` footgun).
 /// `F64` is the SSE class (`%xmm0..`). Everything in Sond is `I64` unless typed `u64`/`f64`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -468,7 +468,7 @@ fn collect_arrays_in_expr(expr: &Expr, out: &mut Vec<(String, i64)>) {
             }
         }
         // An `if` (with array decls in its branches) can sit anywhere an expression
-        // can, including a call argument or an operand, so the walk must reach every
+        // can (including a call argument or an operand), so the walk must reach every
         // sub-expression, not just `if`. (Missing this left arrays declared inside an
         // `if` used as a call arg with no reserved frame slot.)
         Expr::Call(callee, args) => {
@@ -503,7 +503,7 @@ fn collect_locals_in_expr(expr: &Expr, out: &mut Vec<String>) {
             }
         }
         // A `let`-binding `if` (e.g. a lowered `match … { Some(x) => .. }`) can appear
-        // in any expression position, a call argument, an operand, so its locals must
+        // in any expression position (a call argument, an operand), so its locals must
         // be reserved wherever it sits. Walking only `if` missed a `match` used as a
         // call argument, leaving its bound payload with no frame slot ("unknown variable").
         Expr::Call(callee, args) => {
@@ -822,8 +822,8 @@ impl Codegen {
         }
     }
 
-    /// The by-value word count of a return type IF it is a small (1–2 word) struct/enum
-    ///, the sizes returnable in registers (RAX:RDX). `None` otherwise (scalar, float,
+    /// The by-value word count of a return type IF it is a small (1-2 word) struct/enum:
+    /// the sizes returnable in registers (RAX:RDX). `None` otherwise (scalar, float,
     /// unit, or a struct too large for registers, which is not yet supported).
     fn ret_struct_words(&self, ret: &Option<Type>) -> Option<i64> {
         match ret {
@@ -861,7 +861,7 @@ impl Codegen {
             }
             let value = self.const_eval(&g.init).unwrap_or_else(|| {
                 panic!(
-                    "global `{}` initializer must be a constant, initialize it to 0 \
+                    "global `{}` initializer must be a constant: initialize it to 0 \
                      and assign the computed value inside a function (e.g. in efi_main)",
                     g.name
                 )

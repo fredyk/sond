@@ -9,7 +9,7 @@
 // Clean-room from the OASIS virtio 1.0 spec, RFC 826 (ARP) and the PCI spec.
 //
 // Trap (same as virtio-modern-tx): the 64-bit common_cfg addresses must be written
-// as two 32-bit stores, VirtualBox MMIO faults on a 64-bit access.
+// as two 32-bit stores; VirtualBox MMIO faults on a 64-bit access.
 
 fn pci_r(b: i64, d: i64, o: i64) -> i64 {
     outl(0xCF8, 0x80000000 | (b << 16) | (d << 11) | (o & 0xFC))
@@ -138,7 +138,7 @@ fn efi_main() -> i64 {
         let bi = peek64(rxd + 0)
         let et = (peek8(bi + 12 + 12) << 8) | peek8(bi + 12 + 13)
         print("received a frame, ethertype=") print_int(et) print("\r\n")
-        if et == 2054 { print("PASS: got the ARP reply (0x0806), RX+TX both work\r\n") }
+        if et == 2054 { print("PASS: got the ARP reply (0x0806); RX+TX both work\r\n") }
         else { print("FAIL: unexpected ethertype\r\n") }
     } else { print("FAIL: no RX frame\r\n") }
     halt()

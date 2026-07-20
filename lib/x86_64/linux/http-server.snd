@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// http-server.snd, reusable primitives for a static-file HTTP server in Sond (hosted Linux).
+// http-server.snd: reusable primitives for a static-file HTTP server in Sond (hosted Linux).
 // The accept loop and routing stay in each application (they differ); this module provides the
 // pieces every one of them repeated: a path-safety check, the file size, a bodyless status
 // reply, and streaming a file as a 200 with a caller-chosen Content-Type.

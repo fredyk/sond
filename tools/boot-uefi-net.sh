@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boot a Sond UEFI binary in QEMU with a REAL virtio-net NIC, the fast (dev)
+# Boot a Sond UEFI binary in QEMU with a REAL virtio-net NIC: the fast (dev)
 # counterpart to boot-vbox.sh for the networking milestones (M1/M2 on the road
 # to SSH). Same NIC type (virtio) as VirtualBox so the driver is identical.
 #

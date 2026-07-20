@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/x86_64/linux/syscall-nums.snd, Linux x86-64 syscall numbers.
+// lib/x86_64/linux/syscall-nums.snd: Linux x86-64 syscall numbers.
 //
 // Public API (globals, read-only):
 //   SYS_read, SYS_write, SYS_open, SYS_close, SYS_fstat, SYS_mmap,

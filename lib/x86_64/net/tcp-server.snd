@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/x86_64/net/tcp-server.snd, a minimal TCP SERVER on port 22 over the
+// lib/x86_64/net/tcp-server.snd: a minimal TCP SERVER on port 22 over the
 // virtio-net driver, for the UEFI target (boot-services mode). Clean-room from
 // RFCs 791/793/826, factored from the verified M4a example. Original work; no
 // third-party source copied.
@@ -27,7 +27,7 @@ let T_B1 = 0
 let T_B2 = 2
 let T_B3 = 15
 // Our MAC is the NIC's real hardware address (vnet_mac), read from the device by
-// the driver, hypervisors assign their own and filter inbound unicast on it.
+// the driver; hypervisors assign their own and filter inbound unicast on it.
 
 let mut t_sseq = 0x12345678
 let mut t_cack = 0

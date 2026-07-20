@@ -1,4 +1,4 @@
-//! `sond`, the Sond toolchain driver (in the spirit of `go` / `cargo`).
+//! `sond`: the Sond toolchain driver (in the spirit of `go` / `cargo`).
 //!
 //! It orchestrates the `sondc` compiler:
 //!   sond test  <file.snd>   build the file's `test "..." { .. }` blocks and run them
@@ -139,7 +139,7 @@ fn main() -> ExitCode {
             };
             if !run_gated_tests(&sondc, file, min_coverage(&args)) {
                 eprintln!(
-                    "sond: build blocked, the program's tests must pass with at least {}% coverage \
+                    "sond: build blocked: the program's tests must pass with at least {}% coverage \
                      before it can be built",
                     min_coverage(&args)
                 );
@@ -164,7 +164,7 @@ fn main() -> ExitCode {
             };
             if !run_gated_tests(&sondc, file, min_coverage(&args)) {
                 eprintln!(
-                    "sond: run blocked, the program's tests must pass with at least {}% coverage",
+                    "sond: run blocked: the program's tests must pass with at least {}% coverage",
                     min_coverage(&args)
                 );
                 return ExitCode::FAILURE;

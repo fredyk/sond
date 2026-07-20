@@ -25,22 +25,22 @@ pub enum Token {
     Let,
     /// `fn`
     Fn,
-    /// `interrupt`, qualifier for an interrupt handler function (ISR): saves all
+    /// `interrupt`: qualifier for an interrupt handler function (ISR): saves all
     /// GP registers and returns with `iretq` instead of `ret`.
     Interrupt,
-    /// `wrapping fn`, a function whose integer arithmetic is defined to wrap mod 2^N (the crypto
+    /// `wrapping fn`: a function whose integer arithmetic is defined to wrap mod 2^N (the crypto
     /// substrate), exempt from the overflow-checking that is a compile error elsewhere.
     Wrapping,
     /// `struct`
     Struct,
     Test,
-    /// `enum`, a sum type (closed set of variants).
+    /// `enum`: a sum type (closed set of variants).
     Enum,
-    /// `as`, an explicit numeric conversion (`x as u8`, `n as f64`).
+    /// `as`: an explicit numeric conversion (`x as u8`, `n as f64`).
     As,
-    /// `match`, pattern match on a sum type (exhaustive).
+    /// `match`: pattern match on a sum type (exhaustive).
     Match,
-    /// `=>`, a match arm separator.
+    /// `=>`: a match arm separator.
     FatArrow,
     /// `impl`
     Impl,
@@ -50,7 +50,7 @@ pub enum Token {
     Priv,
     /// `requires`
     Requires,
-    /// `where`, a refinement predicate on a parameter's type (`i: i64 where 0 <= i`)
+    /// `where`: a refinement predicate on a parameter's type (`i: i64 where 0 <= i`)
     Where,
     /// `ensures`
     Ensures,
@@ -150,7 +150,7 @@ pub enum Token {
     DotDot,
     /// `->`
     Arrow,
-    /// `;`, statement terminator. May be written explicitly or inserted
+    /// `;`: statement terminator. May be written explicitly or inserted
     /// implicitly at end of line (RFC-0002 §3.5, Go-style).
     Semicolon,
 }

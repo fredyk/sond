@@ -93,7 +93,7 @@ fn write_dhcp_discover(buf: i64, xid: i64, macoff: i64) -> i64 {
     // Clear entire buffer first
     zero_buf(buf, 576)
 
-    // BOOTP header, op (offset 0)
+    // BOOTP header: op (offset 0)
     poke8(buf + 0, 1)
 
     // htype (offset 1) = 1 (Ethernet)
@@ -105,7 +105,7 @@ fn write_dhcp_discover(buf: i64, xid: i64, macoff: i64) -> i64 {
     // hops (offset 3) = 0
     poke8(buf + 3, 0)
 
-    // xid, big-endian 32-bit (offset 4)
+    // xid: big-endian 32-bit (offset 4)
     put_be32(buf, 4, xid)
 
     // secs/flags at offset 8 (big-endian), secs=0, flags=0

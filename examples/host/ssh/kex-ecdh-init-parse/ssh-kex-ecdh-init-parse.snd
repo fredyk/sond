@@ -2,7 +2,7 @@
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
 // Parse a KEX_ECDH_INIT message (RFC 5656 / curve25519-sha256) and extract Q_C,
-// the client's ephemeral public key, the input the server KEX crypto needs.
+// the client's ephemeral public key: the input the server KEX crypto needs.
 // Clean-room from the RFC wire format; no third-party source copied.
 //
 // SSH binary packet (RFC 4253 6): [packet_length:be32][padding_length:1][payload][padding]

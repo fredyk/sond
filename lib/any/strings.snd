@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/any/strings.snd, string/byte manipulation helpers for C2/C3 layers.
+// lib/any/strings.snd: string/byte manipulation helpers for C2/C3 layers.
 // All functions work on byte buffers addressed by i64 pointers.
 // No allocator in hosted mode: buffers are passed by address.
 

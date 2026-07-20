@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// SUM TYPES, the "illegal states unrepresentable" mechanism (what Go never had).
+// SUM TYPES: the "illegal states unrepresentable" mechanism (what Go never had).
 // An `enum` is a closed set of variants; a `match` on it MUST handle every one, or the
 // compiler REJECTS the program:
-//   sondc: non-exhaustive match on `Shape`, missing ["Triangle"]. …
+//   sondc: non-exhaustive match on `Shape`: missing ["Triangle"]. …
 // So an AI (or a human) can never silently forget a case. A variant lowers to its
 // integer tag (declaration order); across the .so it is an i64.
 

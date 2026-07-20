@@ -5,7 +5,7 @@
 //! Compiles a single-function Sond source file to a native Linux/amd64
 //! executable. By default it is hosted (linked with `cc`) and the function's
 //! value becomes the process exit code. With `--freestanding` it links a static,
-//! libc-free binary with its own `_start`, the shape of an initramfs `/init`
+//! libc-free binary with its own `_start`: the shape of an initramfs `/init`
 //! (the `kernel` profile). This is the tangible x86-64 compiler; it grows
 //! alongside the backend.
 
@@ -58,7 +58,7 @@ fn main() -> ExitCode {
     let emit_header = args.iter().any(|a| a == "--emit-header");
 
     // Resolve `include "lib.snd"` directives (source-level, deduped) so multi-file
-    // programs, a reusable library and the code that uses it, compile as one. `cov_scope`
+    // programs (a reusable library and the code that uses it) compile as one. `cov_scope`
     // is the set of functions coverage should measure (the entry's own code, not its
     // already-tested transitive dependencies).
     let (src, cov_scope) = match sondc::resolve::resolve_includes_scoped(std::path::Path::new(input))
@@ -82,8 +82,8 @@ fn main() -> ExitCode {
     } else {
         "host"
     };
-    // Test builds (`--test`, with or without `--coverage`/`--min-coverage`) are ephemeral -
-    // synthesized per invocation and run once, and their output depends on flags not in the
+    // Test builds (`--test`, with or without `--coverage`/`--min-coverage`) are ephemeral
+    // (synthesized per invocation and run once), and their output depends on flags not in the
     // cache key (the source alone). Never cache them, so a changed threshold or mode always
     // rebuilds.
     let is_test_build = args.iter().any(|a| a == "--test");
@@ -132,7 +132,7 @@ fn main() -> ExitCode {
     let coverage = args.iter().any(|a| a == "--coverage");
     if test_mode && !funcs.iter().any(|f| f.is_test) {
         eprintln!(
-            "sondc: no `test` blocks found, Sond requires tests giving at least 80% coverage \
+            "sondc: no `test` blocks found: Sond requires tests giving at least 80% coverage \
              to build. Add `test \"...\" {{ ... }}` blocks (and `include \
              \"x86_64/linux/testing.snd\"`)."
         );
@@ -218,12 +218,12 @@ fn main() -> ExitCode {
     }
 
     // A Sond program is a set of `fn` declarations. If parsing produced none, the
-    // source starts with something else (e.g. a top-level `let`, module-level
+    // source starts with something else (e.g. a top-level `let`: module-level
     // statements are not supported). Fail clearly instead of emitting a broken
     // binary that references an undefined entry point.
     if funcs.is_empty() {
         eprintln!(
-            "sondc: no functions found, a Sond program is made of `fn` declarations \
+            "sondc: no functions found: a Sond program is made of `fn` declarations \
              (top-level statements such as `let` at module scope are not supported yet)"
         );
         return ExitCode::FAILURE;
@@ -232,7 +232,7 @@ fn main() -> ExitCode {
     // The oracle: prove the contracts before emitting anything. A postcondition
     // that cannot hold is a compile error, the program is rejected, not run.
     if let Err(e) = verify(&funcs) {
-        eprintln!("sondc: contract violation, {}", e.message);
+        eprintln!("sondc: contract violation: {}", e.message);
         return ExitCode::FAILURE;
     }
 

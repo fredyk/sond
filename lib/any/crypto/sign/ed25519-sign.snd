@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
-// Ed25519 signing (RFC 8032 §5.1.6), Test 1 signature verification
+// Ed25519 signing (RFC 8032 §5.1.6): Test 1 signature verification
 
 include "any/crypto/group/ed25519-group.snd"
 include "any/crypto/scalar/ed25519-scalar.snd"

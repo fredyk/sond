@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/x86_64/drivers/net/virtio-net.snd, a reusable virtio-net driver for the
+// lib/x86_64/drivers/net/virtio-net.snd: a reusable virtio-net driver for the
 // UEFI target (boot-services mode). Supports BOTH the legacy interface (I/O BAR +
 // PFN queue register, e.g. QEMU) and the MODERN virtio 1.0 interface (MMIO
 // common_cfg, e.g. VirtualBox's transitional device, which ignores the legacy PFN
@@ -159,7 +159,7 @@ fn rx_poll_modern(out_buf: i64) -> i64 {
     let cur = peek16(rx_used + 2)
     if cur == rx_used_seen {
         // VirtualBox's transitional virtio device only pulls from the RX queue when
-        // notified, the single notify at init is not enough to deliver UNSOLICITED
+        // notified: the single notify at init is not enough to deliver UNSOLICITED
         // inbound frames (verified: without this, the guest never sees the host's ARP
         // request or a TCP SYN; it only ever received replies right after its own TX).
         // Re-kick RX periodically from the idle poll path so the device stays armed.
@@ -200,7 +200,7 @@ pub fn rx_poll(out_buf: i64) -> i64 {
     if modern == 1 { rx_poll_modern(out_buf) } else { rx_poll_legacy(out_buf) }
 }
 // The NIC's own MAC address, byte `i` (0..5), read from the device at init. The
-// network stack must use THIS as its source/identity, hypervisors assign their own
+// network stack must use THIS as its source/identity; hypervisors assign their own
 // MAC (VirtualBox uses 08:00:27:xx) and the device filters incoming unicast on it,
 // so a hardcoded address would have its frames dropped. Valid after vnet_init().
 pub fn vnet_mac(i: i64) -> i64 { peek8(mac_addr + i) }

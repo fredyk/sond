@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/x86_64/linux/proc.snd, execute external commands (fork+execve+wait4).
+// lib/x86_64/linux/proc.snd: execute external commands (fork+execve+wait4).
 // The CALLER builds argv (an array of i64 pointers terminated by 0), because Sond lacks a
 // heap alloc and a local array cannot be returned (dangling pointer). No & operator: the wait4
 // status is collected in a local array and read with peek32.

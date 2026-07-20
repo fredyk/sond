@@ -68,7 +68,7 @@ impl Parser {
                     | Token::Test
             )
         ) {
-            // `impl Type { fn m(self, ..) { .. } }`, methods become free functions
+            // `impl Type { fn m(self, ..) { .. } }`: methods become free functions
             // named `Type_m` with `self` typed as the struct; calls `p.m(a)` are
             // lowered to `Type_m(p, a)` by desugar.
             if self.peek() == Some(&Token::Impl) {
@@ -154,7 +154,7 @@ impl Parser {
         std::mem::take(&mut self.enums)
     }
 
-    /// Parses `enum Name { A, B(T), C }`, a sum type; each variant is a bare tag or
+    /// Parses `enum Name { A, B(T), C }`: a sum type; each variant is a bare tag or
     /// carries a single payload type in parentheses (`Some(i64)`). Trailing comma allowed.
     fn parse_enum(&mut self) -> EnumDef {
         let vis = self.parse_visibility();
@@ -188,7 +188,7 @@ impl Parser {
         }
     }
 
-    /// Parses `struct Name { field: Type, ... }`, a record type. Trailing comma
+    /// Parses `struct Name { field: Type, ... }`: a record type. Trailing comma
     /// allowed; fields reuse the `name: Type` shape of a parameter.
     fn parse_struct(&mut self) -> StructDef {
         let vis = self.parse_visibility();
@@ -492,7 +492,7 @@ impl Parser {
         self.expect(Token::Let);
         let mutable = self.eat(Token::Ident("mut".to_string()));
         let name = self.expect_ident();
-        // `let name[N]`, a fixed-size stack array of N words (N a literal).
+        // `let name[N]`: a fixed-size stack array of N words (N a literal).
         let array_len = if self.eat(Token::LBracket) {
             let n = match self.advance() {
                 Token::Int(n) => n,
@@ -508,7 +508,7 @@ impl Parser {
         } else {
             None
         };
-        // `let x = value`, or `let mut x` / `let a[N]` with no initializer (0) -
+        // `let x = value`, or `let mut x` / `let a[N]` with no initializer (0),
         // the C-style "declare now, assign later" that AI writers reach for.
         let value = if self.eat(Token::Eq) {
             self.parse_expr()
@@ -620,7 +620,7 @@ impl Parser {
     }
 }
 
-/// `name = name + 1`, a loop-counter increment statement.
+/// `name = name + 1`: a loop-counter increment statement.
 fn assign_inc(name: &str) -> Stmt {
     Stmt::Assign {
         target: Expr::Var(name.to_string()),

@@ -450,7 +450,7 @@ impl Codegen {
                 self.uses_serial = true;
                 self.uses_serial_int = true;
             }
-            // halt(): stop the CPU forever (hlt in a loop). How a kernel ends -
+            // halt(): stop the CPU forever (hlt in a loop). How a kernel ends,
             // nothing to return to once boot services are gone.
             "halt" if self.uefi => {
                 assert!(args.is_empty(), "halt takes no arguments");
@@ -475,8 +475,8 @@ impl Codegen {
                 }
             }
             // inb/inw/inl(port) -> i64: read a byte/word/dword from an I/O port.
-            // The 32-bit `inl` writes %eax, which zero-extends into %rax on x86-64
-            //, so the returned value is already the clean unsigned dword.
+            // The 32-bit `inl` writes %eax, which zero-extends into %rax on x86-64,
+            // so the returned value is already the clean unsigned dword.
             "inb" | "inw" | "inl" => {
                 assert_eq!(args.len(), 1, "{name} expects (port)");
                 self.expr(&args[0].value); // port -> %rax

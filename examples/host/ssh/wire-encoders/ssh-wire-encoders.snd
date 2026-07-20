@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
-// SSH wire-format encoders, RFC 4251 §5 primitives in Sond
+// SSH wire-format encoders: RFC 4251 §5 primitives in Sond
 
 // Write a uint32 as 4 big-endian bytes at p
 fn put_u32(p: i64, v: i64) {
@@ -95,7 +95,7 @@ fn mpint_enc(p: i64, v: i64) -> i64 {
         i = i - 1
     }
 
-    // Check if MSB of first data byte is set, if so, prepend 0x00
+    // Check if MSB of first data byte is set; if so, prepend 0x00
     let first_byte = peek8(p + 4)
     if first_byte & 0x80 != 0 {
         // Shift all data right by 1 byte

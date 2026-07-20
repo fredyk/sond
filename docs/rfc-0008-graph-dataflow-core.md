@@ -11,18 +11,18 @@
 
 ## 1. The thesis: linearity is an artifact of the human writer, not of computation
 
-Programming languages are lines of statements, `a; b; c`, because a human reads and writes
+Programming languages are lines of statements (`a; b; c`) because a human reads and writes
 one thing at a time, top to bottom. But **nothing that actually runs is linear**:
 
-- The CPU executes **out-of-order**, superscalar, speculative, it reorders your instructions
+- The CPU executes **out-of-order**, superscalar, speculative: it reorders your instructions
   and runs many at once, preserving only the *illusion* of your order (the "as-if" rule).
 - The compiler, internally, **discards your linear text** and builds a **dependency graph**
   (the *sea-of-nodes* IR of HotSpot/V8). It optimizes over the graph and re-serializes to
   linear instructions at the very end, only because the ISA and the human expect it.
 
 So the sequence lives in exactly two places: the **source text** and the **illusion of one
-thread**. Both are conveniences for a human. When the author is an AI, which holds a whole
-graph in view at once and does not read top-to-bottom, the sequential source is pure
+thread**. Both are conveniences for a human. When the author is an AI (which holds a whole
+graph in view at once and does not read top-to-bottom), the sequential source is pure
 overhead, and worse: **it imposes a FALSE order.** You write `a; b; c` even when `b` does not
 depend on `a`. Every such line **over-serializes**: it invents a dependency that does not
 exist in the data, purely so a human can follow a single thread.
@@ -30,7 +30,7 @@ exist in the data, purely so a human can follow a single thread.
 This RFC proposes the AI-native alternative: **the program is the dependency graph itself.**
 The only order is *real* data- and effect-dependency; everything else runs concurrently; and
 the compiler **proves** the result is independent of schedule. It is not "add parallel
-instructions", it is *stop pretending computation is a line*.
+instructions"; it is *stop pretending computation is a line*.
 
 ## 2. Prior art (and why it is evidence, not competition)
 
@@ -44,7 +44,7 @@ turns into an advantage**: too hard for a human to write or reason about.
 - **Hardware description** (Verilog/VHDL): describing hardware *is* writing pure concurrency;
   notoriously hard precisely because there is no single thread to trace.
 - **Content-addressed code** (Unison): a definition is identified by the hash of its AST, not
-  by name or file position, no order, no files, no naming conflicts. A graph of definitions.
+  by name or file position: no order, no files, no naming conflicts. A graph of definitions.
 
 Common trait: **machine-friendly, human-hostile.** Their failure with humans is the strongest
 argument that the paradigm is right for an AI author, *if* the missing piece is supplied.
@@ -57,8 +57,8 @@ of interleavings. Humans do not fail at writing parallel code; they fail at **ve
 
 Verifying is exactly what Sond does. A sound prover that can show *"these two nodes touch
 disjoint state, run them in any order"* converts a humanly-inviable paradigm into one that is
-**correct by construction**. RFC-0000's whole thesis, *when the AI writes, the bottleneck is
-verification*, **is the enabling condition for this paradigm.** The graph core is the natural
+**correct by construction**. RFC-0000's whole thesis (*when the AI writes, the bottleneck is
+verification*) **is the enabling condition for this paradigm.** The graph core is the natural
 destination of the vision, not a departure from it.
 
 ## 4. Sond is already halfway there
@@ -66,13 +66,13 @@ destination of the vision, not a departure from it.
 Three features Sond already commits to remove most sequential order *today*:
 
 1. **Immutability by default** (RFC-0000 §3.3): with no mutable state, the order between two
-   expressions **cannot** be observed, it is already semantically irrelevant.
+   expressions **cannot** be observed: it is already semantically irrelevant.
 2. **Explicit effects** (RFC-0000 §5.3): the *only* places where order can matter are marked.
    Two pure nodes never conflict; only declared effects can.
 3. **Contracts + local reasoning**: every node already carries `requires`/`ensures`, so it
    composes against its interface, not against a global timeline.
 
-Strip mutable state and hidden effects, which Sond already does, and **~90% of the
+Strip mutable state and hidden effects (which Sond already does) and **~90% of the
 sequential order you would write is false**; it was never a real dependency. The graph core
 simply *stops writing the false order down.*
 
@@ -94,12 +94,12 @@ let result = graph {
 ```
 
 `fx` and `fy` share no dependency, so they are concurrent; `z` waits for both. There is **no
-line order**, reordering the three `node` lines changes nothing. The author (human or AI)
+line order**: reordering the three `node` lines changes nothing. The author (human or AI)
 states *what depends on what*, never *when*.
 
 Sequential code is the **degenerate case**: a chain `node b = f(a); node c = g(b)` is a graph
 that happens to be a single path. So the graph core *subsumes* the linear surface rather than
-replacing it, existing linear functions are graphs of one path and keep working unchanged.
+replacing it: existing linear functions are graphs of one path and keep working unchanged.
 
 ### 5.2 Effects impose the only other edges
 
@@ -127,11 +127,11 @@ it, so capability-scoping directly widens provable parallelism.
 A graph is admissible only if its observable result is **the same under every valid schedule**
 (confluence). This is the core verification obligation, and it decomposes cleanly:
 
-- **Pure nodes**: confluence is *free*, referential transparency means value depends only on
+- **Pure nodes**: confluence is *free*: referential transparency means value depends only on
   inputs, never on timing.
 - **Conflicting effects**: the prover must either (a) show the effects **commute** (order does
   not change the observable outcome), or (b) accept the **serializing edge** it inserted
-  (§5.2) as the resolution. If neither holds, a genuine race whose result depends on timing -
+  (§5.2) as the resolution. If neither holds (a genuine race whose result depends on timing),
   the graph is **rejected at compile time**, exactly as an unprovable contract is today.
 
 So nondeterminism is not a runtime hazard to test for; it is a **compile error**. This is the
@@ -142,7 +142,7 @@ graph-core analogue of "a postcondition it cannot prove does not compile."
 A data race requires two concurrent accesses to the same location, one a write. In the graph
 core: pure nodes touch no shared location; effectful nodes that *could* race on a resource
 receive a serializing effect edge (§5.2) before they are allowed to be concurrent. Therefore a
-scheduled graph is race-free **by the same proof that admitted it**, the runtime needs no
+scheduled graph is race-free **by the same proof that admitted it**: the runtime needs no
 locks for correctness, only for the effect edges the compiler already made explicit.
 
 ### 5.5 Execution model
@@ -168,7 +168,7 @@ NodeDecl  ::= "node" Ident "=" Expr [ "effects" "[" IdentList "]" ]
 ```
 
 `node` and `graph` are new keywords. A `NodeDecl` binds an SSA-style value (single
-assignment, it fits immutability-by-default with zero new aliasing rules). Dependency edges
+assignment; it fits immutability-by-default with zero new aliasing rules). Dependency edges
 are the free variables of each node's `Expr` that are other nodes; effect edges are computed
 from the `effects` clauses and the capability set in scope.
 
@@ -194,7 +194,7 @@ fn settle(batch: Invoices) -> (r: Report)
 
 `vat`, `irpf` and `audit` run at once (no shared data, disjoint effects); `rep` joins the two
 pure results; `saved` follows `rep`. The `ensures { r.vat >= 0 }` is proven over the graph the
-same way it is over a linear body, the contract does not care about schedule, because §5.3
+same way it is over a linear body: the contract does not care about schedule, because §5.3
 guarantees the schedule is irrelevant.
 
 ## 8. Fit with the qwen3.6 ceiling (RFC-0000 acceptance test)
@@ -209,7 +209,7 @@ two nodes that race, and the input that shows it*), so the red→green loop conv
 
 ## 9. The honest limits (no hand-waving)
 
-- **Amdahl is real.** The critical path, the longest chain of *true* dependencies, is an
+- **Amdahl is real.** The critical path (the longest chain of *true* dependencies) is an
   irreducible floor. The graph core removes **false** serialization, not the real kind; a
   computation that genuinely depends step-by-step gains nothing, and should not.
 - **Effects still serialize.** Two writes to the same resource are ordered, period. The win is
@@ -244,5 +244,5 @@ two nodes that race, and the input that shows it*), so the red→green loop conv
 
 *This RFC is exploratory. It does not change the implemented surface; it describes the
 destination the existing guarantees (immutability, effects, contracts, a sound oracle) were
-already pointing at, the point where Sond stops being a better line of statements and becomes
+already pointing at: the point where Sond stops being a better line of statements and becomes
 the language whose programs are proven graphs.*

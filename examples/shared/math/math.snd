@@ -2,7 +2,7 @@
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
 // A Sond SHARED LIBRARY. Compile with `sondc math.snd --shared -o libsondmath.so`
-// and import the public functions from C, C++, Go, Rust or Python, Sond already uses
+// and import the public functions from C, C++, Go, Rust or Python; Sond already uses
 // the System V AMD64 C ABI, so a `pub fn` is a C-callable symbol. `priv` functions are
 // hidden. Methods `impl T { fn m }` export as `T_m`.
 

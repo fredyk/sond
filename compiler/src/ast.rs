@@ -8,7 +8,7 @@
 pub enum Type {
     /// A named type, e.g. `Money`.
     Named(String),
-    /// A pointer to a struct, written `*Point`, a MUTABLE, shareable handle,
+    /// A pointer to a struct, written `*Point`: a MUTABLE, shareable handle,
     /// declared up front (Sond has no `&` address-of). Same runtime representation
     /// as the value form (a base address); it differs only in the STATIC
     /// mutability rules: a value struct received as a parameter cannot have its
@@ -43,8 +43,8 @@ pub struct Arg {
 }
 
 /// A top-level record type: `struct Name { field: Type, ... }`. Fields reuse
-/// `Param` (a `name: Type` pair). Struct values give OS code real shape, a task
-/// control block, a packet header, a socket, instead of flat arrays over globals.
+/// `Param` (a `name: Type` pair). Struct values give OS code real shape (a task
+/// control block, a packet header, a socket) instead of flat arrays over globals.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDef {
     pub vis: Visibility,
@@ -216,21 +216,21 @@ pub enum Expr {
     Unary(UnOp, Box<Expr>),
     /// Infix binary operation, e.g. `a >= b`, `a implies b`.
     Binary(BinOp, Box<Expr>, Box<Expr>),
-    /// `if cond { .. } else { .. }`, an expression (its branches are blocks
+    /// `if cond { .. } else { .. }`: an expression (its branches are blocks
     /// whose tail expression is the branch value).
     If {
         cond: Box<Expr>,
         then_branch: Box<Block>,
         else_branch: Option<Box<Block>>,
     },
-    /// `match scrutinee { Variant => block, ... }`, a pattern match over a sum type.
+    /// `match scrutinee { Variant => block, ... }`: a pattern match over a sum type.
     /// The compiler REQUIRES every variant of the enum to be covered (exhaustive);
     /// each arm is a block whose tail is that arm's value.
     Match {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
     },
-    /// `expr as Type`, an explicit numeric conversion (integer truncate/extend, or
+    /// `expr as Type`: an explicit numeric conversion (integer truncate/extend, or
     /// `cvtsi2sd`/`cvttsd2si` between an integer and `f64`).
     Cast(Box<Expr>, Type),
 }
@@ -247,7 +247,7 @@ pub struct MatchArm {
 
 /// One variant of a sum type: a name and an OPTIONAL payload type. `payload` is
 /// `Some(ty)` for a data-carrying variant (`Some(i64)`), `None` for a bare tag
-/// (`None`). A payloaded variant is the foundation of `Option`/`Result`, the
+/// (`None`). A payloaded variant is the foundation of `Option`/`Result`: the
 /// nil-safety mechanism that makes "forgot to check for absence" unrepresentable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumVariant {
@@ -255,7 +255,7 @@ pub struct EnumVariant {
     pub payload: Option<Type>,
 }
 
-/// A sum type: `enum Name { A, B(T), C }`, a value is exactly one of the variants,
+/// A sum type: `enum Name { A, B(T), C }`: a value is exactly one of the variants,
 /// each optionally carrying a payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDef {

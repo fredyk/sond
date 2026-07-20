@@ -1,4 +1,4 @@
-# Sond, VS Code syntax highlighting
+# Sond: VS Code syntax highlighting
 
 A TextMate grammar that highlights the Sond programming language (`.snd`, `.sond`):
 keywords, contracts (`requires`/`ensures`/`effects`), word operators (`and`/`or`/`implies`/`in`),

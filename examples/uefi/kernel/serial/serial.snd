@@ -1,5 +1,5 @@
 // Direct COM1 serial output on bare UEFI: serial_print writes bytes straight to
-// the 16550 UART port (0x3F8) with no firmware help, the console a real kernel
+// the 16550 UART port (0x3F8) with no firmware help: the console a real kernel
 // keeps after ExitBootServices, when ConOut is gone.
 //   sondc examples/uefi-serial/serial.snd --uefi -o BOOTX64.EFI && tools/boot-uefi.sh BOOTX64.EFI
 fn efi_main() -> i64 {

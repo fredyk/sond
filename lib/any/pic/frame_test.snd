@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// Tests for pic/frame.snd, the PIC-cluster wire framing.
+// Tests for pic/frame.snd: the PIC-cluster wire framing.
 // Frame layout: [STX=0x02][node][code][len][payload...][checksum]
 // checksum = XOR over node, code, len and every payload byte.
 // These vectors MUST match the Go host (internal/proto) and the PIC firmware.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/any/crypto/hash/sha3.snd, SHA-3 and SHAKE (FIPS 202).
+// lib/any/crypto/hash/sha3.snd: SHA-3 and SHAKE (FIPS 202).
 // Keccak-f[1600] permutation + sponge construction.
 //
 // Public API:
@@ -238,7 +238,7 @@ fn keccak_sponge(rate: i64, domain: i64, msg: i64, msg_len: i64, out: i64, out_l
     }
 
     // Final block: the remaining bytes, then pad10*1 (domain byte at the tail of the
-    // message, 0x80 at the last byte of the block, they coincide when rem == rate-1).
+    // message, 0x80 at the last byte of the block; they coincide when rem == rate-1).
     let rem = msg_len - off
     let blk[25]
     let mut j = 0

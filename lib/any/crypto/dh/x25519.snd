@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
-// X25519 key exchange, RFC 7748 §5 clean library interface
+// X25519 key exchange: RFC 7748 §5 clean library interface
 
 // ── Field representation: 32-byte little-endian limb layout ──
 

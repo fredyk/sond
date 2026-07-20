@@ -3,7 +3,7 @@
 //! pass/fail tally.
 //!
 //! Each test runs in its own `fork`ed process, so a failing `assert` (which exits nonzero)
-//! or an outright crash (a trap) takes down only that child, the parent `wait4`s, records
+//! or an outright crash (a trap) takes down only that child; the parent `wait4`s, records
 //! the outcome, and moves on. The process exit code is the number of failed tests (0 when
 //! all pass). This relies on the testing library (`assert`, `__test_report`) and the Linux
 //! syscall numbers, both pulled in when the source `include`s `x86_64/linux/testing.snd`.

@@ -78,7 +78,7 @@ fn tcpcsum(ip: i64, tp: i64, tlen: i64) -> i64 {
 
 fn efi_main() -> i64 {
     // Leave the firmware BEFORE touching the network: from here on the memory comes
-    // from Sond's own heap and logs go to COM1, the NIC is driven by a kernel, not a
+    // from Sond's own heap and logs go to COM1: the NIC is driven by a kernel, not a
     // UEFI app. The whole driver→TCP→SSH stack runs with Boot Services gone.
     exit_boot_services()
     let ok = vnet_init()

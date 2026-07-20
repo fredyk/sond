@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/x86_64/net/dhcp.snd, a minimal DHCP client (RFC 2131) over the virtio-net
+// lib/x86_64/net/dhcp.snd: a minimal DHCP client (RFC 2131) over the virtio-net
 // driver. dhcp_lease() performs the DISCOVER -> OFFER -> REQUEST -> ACK handshake
 // and returns 1 on success, 0 on failure. On success `dhcp_ip` holds the leased
 // IPv4 address (as a 32-bit big-endian integer).

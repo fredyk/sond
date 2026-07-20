@@ -65,7 +65,7 @@ impl Parser {
                     }
                     continue;
                 }
-                // `expr as Type`, an explicit conversion; binds tighter than infix.
+                // `expr as Type`: an explicit conversion; binds tighter than infix.
                 Some(Token::As) => {
                     self.advance();
                     let ty = self.parse_type();
@@ -184,7 +184,7 @@ impl Parser {
                     else_branch,
                 }
             }
-            // `match scrutinee { Variant => body, ... }`, each arm's body is a block
+            // `match scrutinee { Variant => body, ... }`: each arm's body is a block
             // `{ .. }` or a bare expression. Exhaustiveness is checked after parsing.
             Token::Match => {
                 let saved = self.no_struct_lit;
@@ -305,7 +305,7 @@ impl Parser {
     }
 }
 
-/// Binding power of prefix `not`, tighter than `and`/`or`, looser than `in`
+/// Binding power of prefix `not`: tighter than `and`/`or`, looser than `in`
 /// and comparisons (RFC-0001 §4.16: `not` sits between `and` and `in`).
 const NOT_BP: u8 = 8;
 /// Binding power of prefix `-` (negation), tighter than `*`/`/`.

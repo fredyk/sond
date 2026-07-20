@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build the Sond release tarball served at sond.dev/release/<channel>/:
-#   sond-x86_64-linux.tar.gz         , the whole toolchain in the ~/.local layout
+#   sond-x86_64-linux.tar.gz          : the whole toolchain in the ~/.local layout
 #                                       (bin/sondc, bin/sond, lib/sond/, share/sond/Sond.md)
-#   sond-x86_64-linux.tar.gz.sha256  , its checksum (what install.sh verifies)
+#   sond-x86_64-linux.tar.gz.sha256   : its checksum (what install.sh verifies)
 #
-# Note: the extension is .tar.gz, not .tgz, on purpose, the deploy bundler excludes *.tgz as a
+# Note: the extension is .tar.gz, not .tgz, on purpose: the deploy bundler excludes *.tgz as a
 # build artifact, so the tarball must not match that glob to reach the sond.dev container.
 #
 # Usage: tools/release.sh [out-dir]   (default: dist/release/)

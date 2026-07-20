@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// A real HTTP request/response over a loopback TCP socket, end to end in Sond, the byte
+// A real HTTP request/response over a loopback TCP socket, end to end in Sond: the byte
 // buffer, the arena, the HTTP layer and the socket wrappers working together. A forked child
 // is the client (sends a GET, checks the status line); the parent is the server (accepts,
 // parses the path, echoes it in a 200 response). Exit code 0 iff the client verified the

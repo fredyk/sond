@@ -78,7 +78,7 @@ fn add_limbs(a: i64, b: i64) {
 }
 
 // ---------------------------------------------------------------------------
-// Internal: mul_mod_p, multiply two 5-limb numbers mod 2^130-5, result in a
+// Internal: mul_mod_p multiplies two 5-limb numbers mod 2^130-5, result in a
 //           tmp must be at least 9 words (72 bytes)
 // ---------------------------------------------------------------------------
 
@@ -125,10 +125,10 @@ fn mul_mod_p(a: i64, b: i64, tmp: i64) {
 
 // ---------------------------------------------------------------------------
 // CLIBRARY INTERFACE: poly1305_mac
-//   msg_ptr , pointer to message bytes
-//   len     , message length in bytes
-//   key_ptr , pointer to 32-byte key (r || s)
-//   tag_ptr , pointer to 16-byte output buffer for the tag
+//   msg_ptr:  pointer to message bytes
+//   len:      message length in bytes
+//   key_ptr:  pointer to 32-byte key (r || s)
+//   tag_ptr:  pointer to 16-byte output buffer for the tag
 // ---------------------------------------------------------------------------
 
 fn poly1305_mac(msg_ptr: i64, len: i64, key_ptr: i64, tag_ptr: i64) {

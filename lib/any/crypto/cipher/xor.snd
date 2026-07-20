@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/any/crypto/cipher/xor.snd, a reusable repeating-key XOR stream cipher.
+// lib/any/crypto/cipher/xor.snd: a reusable repeating-key XOR stream cipher.
 // Portable (arch: any). Include with: include "any/crypto/cipher/xor.snd".
 // xor_crypt XORs `len` bytes at `buf` in place with the `keylen`-byte key at `key`;
 // calling it twice with the same key is a round-trip (encrypt then decrypt).

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// tests/strings_test.snd, tests for lib/any/strings.snd
+// tests/strings_test.snd: tests for lib/any/strings.snd
 //
 // Each test builds a byte buffer with poke8, calls a function from
 // strings.snd, and checks the result.  The last expression of main

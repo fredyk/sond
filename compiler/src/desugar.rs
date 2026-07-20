@@ -7,7 +7,7 @@
 //!
 //! Methods (`impl Point { fn m(self, ..) { .. } }`) are parsed into free functions
 //! named `Point_m` with a `self` receiver typed as the struct. Here we lower a
-//! method CALL `p.m(a)` to `Point_m(p, a)`, a minimal OOP over the flat namespace,
+//! method CALL `p.m(a)` to `Point_m(p, a)`: a minimal OOP over the flat namespace,
 //! again with no new codegen.
 //!
 //! First slices (grown by TDD): field access on struct-typed locals and params,
@@ -47,7 +47,7 @@ const PAYLOAD: &str = "__payload";
 ///   A constructor `Some(v)` becomes the struct literal `Opt { __tag: 0, __payload: v }`;
 ///   a bare `None` becomes `Opt { __tag: 1, __payload: 0 }`; and `match` reads `.__tag`,
 ///   binding `.__payload` inside a `Some(x) => ..` arm. This reuses the struct word-array
-///   codegen entirely, no new backend, and is the `Option`/`Result` (nil-safety) base.
+///   codegen entirely (no new backend), and is the `Option`/`Result` (nil-safety) base.
 ///
 /// The last arm of a `match` is the unconditional `else` (sound because exhaustiveness
 /// was checked beforehand).
@@ -292,7 +292,7 @@ fn arm_block(scrutinee: &Expr, arm: &MatchArm) -> Block {
 
 /// Hoists every struct literal that appears in an EXPRESSION position, a call
 /// argument, an operand, a branch tail: anywhere except the direct initializer of a
-/// `let`, into a preceding `let __litN = <lit>`, replacing the literal with `__litN`.
+/// `let`: into a preceding `let __litN = <lit>`, replacing the literal with `__litN`.
 /// After this pass a struct literal exists ONLY as a `let` initializer, which the struct
 /// pass already lowers to an allocated word-array, so a constructor works in any
 /// position: `f(Some(42))`, `return Some(x)`, `if c { None } else { Some(y) }`. Runs
@@ -336,8 +336,8 @@ fn hoist_block(b: &mut Block, counter: &mut usize) {
     }
     b.stmts = out;
     // The block's tail: hoist nested literals into appended temps (evaluated after the
-    // statements, before the tail). If the tail IS a literal, it becomes that temp's var
-    //, so a struct-literal branch tail turns into a struct address a backend can return.
+    // statements, before the tail). If the tail IS a literal, it becomes that temp's var,
+    // so a struct-literal branch tail turns into a struct address a backend can return.
     if let Some(tail) = &mut b.tail {
         let mut hoists: Vec<Stmt> = Vec::new();
         hoist_in_expr(tail, &mut hoists, counter);
@@ -680,7 +680,7 @@ fn desugar_expr(
             };
             if let Some(sname) = slice_name {
                 // A constant NEGATIVE index counts from the end: `s[-k]` → `s[s.len - k]`
-                // (`s.len + i` since i is negative). Only constant negatives are normalized -
+                // (`s.len + i` since i is negative). Only constant negatives are normalized,
                 // a variable index pays no runtime branch.
                 if is_negative_const(i) {
                     let idx = std::mem::replace(&mut **i, Expr::Int(0));
@@ -809,8 +809,8 @@ pub fn inject_builtin_structs(structs: &mut Vec<StructDef>) {
 const SLICE_TYPE: &str = "Slice";
 
 /// Lowers `a.len` on a fixed-size array `let a[N]` (or a module-level `let K[N] = ..`) to the
-/// compile-time constant `N`. An array's length is statically known, arrays are fixed-size
-/// frame/`.data` regions, so `.len` is pure front-end sugar, resolved here (before every check
+/// compile-time constant `N`. An array's length is statically known (arrays are fixed-size
+/// frame/`.data` regions), so `.len` is pure front-end sugar, resolved here (before every check
 /// and codegen) exactly like struct field access. This gives refactor-safe iteration
 /// (`for i < a.len`) and lets the constant-bounds check fold `a[a.len - 1]`. A future
 /// length-carrying slice type would make `.len` a runtime field; for these fixed arrays it is
@@ -831,7 +831,7 @@ pub fn lower_array_len(funcs: &mut [Function], globals: &[Global]) {
 }
 
 /// Collects every `let name[N]` array size reachable in a body (function-scoped, matching the
-/// codegen frame model where each array, including one declared inside a branch or loop, gets
+/// codegen frame model where each array (including one declared inside a branch or loop) gets
 /// its own reserved slot).
 fn collect_array_sizes_block(b: &Block, out: &mut HashMap<String, i64>) {
     for s in &b.stmts {
@@ -987,7 +987,7 @@ fn len_expr(e: &mut Expr, sizes: &HashMap<String, i64>) {
     }
 }
 
-/// Lowers a slice range `base[lo:hi]` (Python-style) to a sub-`Slice` VIEW, no copy, over the
+/// Lowers a slice range `base[lo:hi]` (Python-style) to a sub-`Slice` VIEW (no copy), over the
 /// same backing store: `Slice { ptr: base.ptr + lo*8, len: hi - lo }`. Omitted bounds default to
 /// `lo = 0` and `hi = base.len`. Runs before struct lowering + hoisting, so the produced
 /// `Slice { .. }` literal is hoisted and lowered like any other. Ranges apply to a `Slice` base
@@ -1383,7 +1383,7 @@ mod tests {
 
     #[test]
     fn slice_of_a_slice_composes() {
-        // `s[1:5][1:3]`, a view of a view. s[1:5]=20,30,40,50; then [1:3]=30,40; sum=70.
+        // `s[1:5][1:3]`: a view of a view. s[1:5]=20,30,40,50; then [1:3]=30,40; sum=70.
         let out = compile_and_capture(
             "fn sum(s: Slice) -> i64 {\n\
              let mut i = 0\n\

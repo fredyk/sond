@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/x86_64/linux/io.snd, file I/O on Linux syscalls. No allocator: caller provides buffers.
+// lib/x86_64/linux/io.snd: file I/O on Linux syscalls. No allocator: caller provides buffers.
 // API: open_file(path,flags,mode)->fd|-errno ; read_buf(fd,buf,n) ; write_buf(fd,buf,n) ; close_fd(fd)
 
 include "syscall-nums.snd"

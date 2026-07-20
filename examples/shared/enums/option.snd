@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// PAYLOADED SUM TYPES, the nil-safety mechanism (`Option`/`Result`).
+// PAYLOADED SUM TYPES: the nil-safety mechanism (`Option`/`Result`).
 // A variant may CARRY a value: `Some(i64)` holds a number, `None` holds nothing.
 // The only way to READ the carried value is through `match`, which binds it:
 //
@@ -22,10 +22,10 @@ pub fn unwrap_or(o: Opt, fallback: i64) -> i64 {
     }
 }
 
-// RETURNING an Option by value, the most common use. A division with no valid result returns
+// RETURNING an Option by value: the most common use. A division with no valid result returns
 // `None` instead of crashing; the caller is FORCED to handle the absence. Signed division has TWO
 // undefined cases the compiler makes us handle: `b == 0` (a trap) and `i64::MIN / -1` (the quotient
-// `2^63` overflows). Guarding both is what lets `a / b` be PROVEN safe, the checked-arithmetic
+// `2^63` overflows). Guarding both is what lets `a / b` be PROVEN safe: the checked-arithmetic
 // obligation, discharged by these branch guards. (A small enum is returned in registers, like any
 // ≤16-byte struct.)
 pub fn safe_div(a: i64, b: i64) -> Opt {
@@ -67,14 +67,14 @@ fn main() -> i64 {
     let some = Some(42)
     let none = None
     print_int(unwrap_or(some, 0))   // 42, the carried value
-    print_int(unwrap_or(none, 7))   // 7 , the fallback
+    print_int(unwrap_or(none, 7))   // 7, the fallback
     print_int(is_some(some))        // 1
     print_int(is_some(none))        // 0
 
     let ok = Ok(100)
     let err = Err(5)
     print_int(code_of(ok))          // 100, the success value
-    print_int(code_of(err))         // 905, 900 + error code 5
+    print_int(code_of(err))         // 905 (900 + error code 5)
 
     let d = safe_div(84, 2)         // Some(42), returned by value
     print_int(unwrap_or(d, 0))      // 42

@@ -4,7 +4,7 @@
 // A growable byte buffer over the arena allocator, the workhorse for parsing and building
 // wire data (HTTP requests/responses, tokens, output) and the basis for dynamic strings.
 //
-// A `Bytes` is a HANDLE: an i64 pointing at a 3-word header in the arena, [data, len, cap].
+// A `Bytes` is a HANDLE: an i64 pointing at a 3-word header in the arena: [data, len, cap].
 // `data` points at the backing buffer (also in the arena); `len` is bytes used; `cap` is the
 // buffer's capacity. The handle stays valid across growth (only the header's `data` field is
 // repointed), so callers hold a stable i64. There is no free (the arena reclaims in bulk).

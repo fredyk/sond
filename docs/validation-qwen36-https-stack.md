@@ -96,11 +96,11 @@ This is a long-term north; the ladder defines the build order of the compiler an
 
 ## The harness: total isolation of the AI under test (JMV)
 
-For the experiment to be honest, qwen3.6 must learn Sond **exactly like a real user would, from the
+For the experiment to be honest, qwen3.6 must learn Sond **exactly like a real user would: from the
 docs, never from the compiler source**. Reading the source would be cheating: it could reverse-engineer
 what the compiler accepts instead of following the specification. The harness enforces this:
 
-1. **The only language knowledge given to qwen3.6 is `~/.local/share/sond/Sond.md`**, the full docs
+1. **The only language knowledge given to qwen3.6 is `~/.local/share/sond/Sond.md`**: the full docs
    bundle produced by `tools/build-docs.sh`. Nothing else. It never sees `compiler/` or any Rust source.
 2. **qwen3.6 runs in an isolated scratch dir `/tmp/<example>/`**, with `--dir` pointing there and no
    read access to the repository. It writes its Sond program into that temp folder.
@@ -109,7 +109,7 @@ what the compiler accepts instead of following the specification. The harness en
    qwen3.6 code may loop/OOM/fork-bomb).
 4. **Audit the isolation, don't assume it.** For the first workers launched, inspect opencode's session
    store `~/.local/share/opencode/opencode.db` (SQLite) and confirm that every file the worker read /
-   every path in its tool calls is **only `~/.local/share/sond/Sond.md`**, no `compiler/`, no repo
+   every path in its tool calls is **only `~/.local/share/sond/Sond.md`**: no `compiler/`, no repo
    source, nothing else. Query the session messages/tool-calls and grep for any path outside the
    allowed one. If anything else leaked into its context, the run is invalid and is redone with tighter
    `--dir`/permission isolation.
@@ -117,7 +117,7 @@ what the compiler accepts instead of following the specification. The harness en
    rate), and each **leak** (a wrong body the verifier let through) becomes a contract to harden.
 
 This isolation guarantees the result reflects "can a weak AI build correct Sond software guided only by
-the spec and the compiler's verdicts?", the real question, and not "can it copy the compiler's tests?".
+the spec and the compiler's verdicts?" (the real question) and not "can it copy the compiler's tests?".
 
 ---
 
@@ -132,21 +132,21 @@ The experiment was run: qwen3.6, isolated (knowing only the language reference, 
 the RFCs online), writing Sond programs and, for verifiable outputs, compiling and running
 its own code against known answers before delivering. Twelve rounds, dozens of programs.
 Two oracles were used: the **compiler-oracle** (contracts + static verification) for safety,
-and an **executable oracle** (run and compare to a known vector) for algorithm correctness -
+and an **executable oracle** (run and compare to a known vector) for algorithm correctness;
 the second turned out to be essential and was added mid-experiment.
 
 **What the weak model built correctly, on bare UEFI or on the host:**
-- **Protocol framing**, Ethernet/ARP (RFC 826), IPv4 header + Internet checksum (RFC 791),
+- **Protocol framing**: Ethernet/ARP (RFC 826), IPv4 header + Internet checksum (RFC 791),
   ICMP echo (RFC 792), TCP segment + handshake state machine (RFC 793), DHCP DISCOVER
   (RFC 2131), DNS query (RFC 1035).
-- **Drivers**, a 16550 UART driver, an 8254 PIT timer, first-class port I/O.
-- **Data structures / tools**, a ring buffer over mutable globals, a hexdump, a FAT16
+- **Drivers**: a 16550 UART driver, an 8254 PIT timer, first-class port I/O.
+- **Data structures / tools**: a ring buffer over mutable globals, a hexdump, a FAT16
   directory-entry parser, UTF-8 decoding, Base64 encode/decode, hex encode.
-- **Simple cryptography / checksums, bit-exact**, CRC-32, CRC-16, Adler-32, FNV-1a, djb2,
+- **Simple cryptography / checksums, bit-exact**: CRC-32, CRC-16, Adler-32, FNV-1a, djb2,
   RC4 (a real stream cipher), Luhn.
 
 **Where it hit a hard ceiling:**
-- **Large cryptographic hash primitives (SHA-256, SHA-1)**, even with fixed-size stack
+- **Large cryptographic hash primitives (SHA-256, SHA-1)**: even with fixed-size stack
   arrays for the tables, the exact constants provided, and the executable oracle available,
   qwen3.6 did not converge to a correct 64/80-round hash. The algorithms are too long and
   bit-exact for the weak model to get entirely right, and it did not reliably complete the
@@ -160,11 +160,11 @@ sigma functions, 64 distinct round constants), not raw length: ChaCha's single u
 operation repeated 80 times is fine. SHA-256/SHA-1 (64/80 rounds) never matched the standard
 test vectors (`ba7816bf...`, `a9993e...`), even with stack arrays, the constants
 provided, the executable oracle, and explicit debugging guidance. But the boundary is
-*narrower* than first recorded: the **ChaCha20 quarter-round**, a real modern ARX cipher
-primitive, came out **correct** (`3928658676 ...`), as did RC4, the Poly1305 clamp, and
+*narrower* than first recorded: the **ChaCha20 quarter-round** (a real modern ARX cipher
+primitive) came out **correct** (`3928658676 ...`), as did RC4, the Poly1305 clamp, and
 every checksum. (An earlier note that ChaCha failed was *my* error: a hand-mistyped
 expected value; the same false-negative bit the ARP-cache MAC and the MAC parser, where
-qwen was right and my arithmetic wrong, compute expected values programmatically, never
+qwen was right and my arithmetic wrong; compute expected values programmatically, never
 by hand.) AES was never tested, so no claim is made about it.
 
 **Conclusion.** The pipeline (weak model + research + self-compile + executable oracle)
@@ -193,6 +193,6 @@ oracle and the self-compile loop were sufficient all along; only the writer need
 capacity for that one class of long, structurally-varied primitive. This confirms the
 operating strategy for the SSH crypto wall (M4): use qwen3.6 for the tractable bulk and a
 stronger model (`deepseek`/`mimo`) for the few hard primitives (SHA-256, X25519), with the
-executable oracle validating each against its published test vector. The thesis, *AI code
-is cheap to distrust because the oracle decides*, holds regardless of which model writes;
+executable oracle validating each against its published test vector. The thesis (*AI code
+is cheap to distrust because the oracle decides*) holds regardless of which model writes;
 a stronger writer simply clears a taller primitive in fewer rounds.

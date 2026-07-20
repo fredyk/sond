@@ -1,7 +1,7 @@
 # Sond shared libraries (`.so`), importable from C, C++, Go, Rust, Python
 
 Sond compiles to a C-ABI shared object. Its functions already use the System V AMD64
-calling convention, so a `pub fn` is a plain C-callable symbol, no glue, no wrappers.
+calling convention, so a `pub fn` is a plain C-callable symbol: no glue, no wrappers.
 
 ```sh
 sondc math.snd  --shared -o libsondmath.so
@@ -18,17 +18,17 @@ nm -D --defined-only libsondmath.so     # the exported symbols (pub fn only)
 | Sond | C type | How it is passed |
 |------|--------|------------------|
 | `i64` (all Sond ints) | `int64_t` | value, in a register, trivial |
-| `struct T { ... }` | `struct { int64_t ...; }` (one `int64_t` per field, in order) | **by pointer**, Sond receives a struct as its base address |
+| `struct T { ... }` | `struct { int64_t ...; }` (one `int64_t` per field, in order) | **by pointer**: Sond receives a struct as its base address |
 | `*T` (pointer struct) | `T*` | pointer; mutate the caller's struct to "return" one |
 | C string | `char*` (take an `i64`, read with `peek8`; return `cstr("...")`) | pointer to NUL-terminated bytes |
-| float / double |, | **not yet**: Sond has no float type (would need SSE/xmm) |
+| float / double | n/a | **not yet**: Sond has no float type (would need SSE/xmm) |
 
 Returning a struct = fill a caller-owned one through a `*T` out-pointer (the robust
 C-ABI pattern), e.g. `pub fn point_translate(p: *Point, dx: i64, dy: i64)`.
 
 ## Import snippets (all verified to print the right numbers)
 
-**Python (ctypes)**, always set `restype`/`argtypes` (`c_int64`), or a 64-bit return truncates:
+**Python (ctypes)**: always set `restype`/`argtypes` (`c_int64`), or a 64-bit return truncates:
 ```python
 import ctypes
 lib = ctypes.CDLL("./libsondmath.so")
@@ -40,7 +40,7 @@ lib.rect_area.argtypes = [ctypes.POINTER(Rect)]; lib.rect_area.restype = ctypes.
 print(lib.rect_area(ctypes.byref(Rect(4, 5))))   # 20
 ```
 
-**C / C++**, one dual header (`sondmath.h`) with `extern "C"` guards serves both:
+**C / C++**: one dual header (`sondmath.h`) with `extern "C"` guards serves both:
 ```c
 #include "sondmath.h"
 sond_add(2, 3);                      /* 5 */
@@ -51,7 +51,7 @@ c++ main.cpp -L. -lsondmath -Wl,-rpath,'$ORIGIN' -o app     # C++: extern "C" vi
 # runtime instead:  void* h = dlopen("./libsondmath.so", RTLD_NOW); dlsym(h, "sond_add");
 ```
 
-**Rust**, `extern "C"`, link with `-l sondmath` (or the `libloading` crate at runtime):
+**Rust**: `extern "C"`, link with `-l sondmath` (or the `libloading` crate at runtime):
 ```rust
 extern "C" { fn sond_add(a: i64, b: i64) -> i64; }
 fn main() { println!("{}", unsafe { sond_add(2, 3) }); }   // 5
@@ -60,7 +60,7 @@ fn main() { println!("{}", unsafe { sond_add(2, 3) }); }   // 5
 rustc main.rs -L. -l sondmath -C link-arg=-Wl,-rpath,'$ORIGIN' -o app
 ```
 
-**Go**, cgo (below) or, recommended for a pure C `.so`, `github.com/ebitengine/purego`:
+**Go**: cgo (below) or, recommended for a pure C `.so`, `github.com/ebitengine/purego`:
 ```go
 /*
 #cgo LDFLAGS: -L. -lsondmath -Wl,-rpath,${SRCDIR}

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/any/crypto/cipher/chacha20.snd, ChaCha20 stream cipher (RFC 8439).
+// lib/any/crypto/cipher/chacha20.snd: ChaCha20 stream cipher (RFC 8439).
 // Clean-room from the RFC. All in i64; u32s are kept masked to 32 bits.
 //
 // API:

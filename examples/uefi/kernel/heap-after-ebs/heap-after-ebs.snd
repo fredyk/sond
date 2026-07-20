@@ -3,7 +3,7 @@
 //
 // The loader↔kernel boundary: after exit_boot_services() the firmware is gone
 // (AllocatePool is dead), yet a kernel must still allocate memory. This is the
-// executable oracle for a heap that SURVIVES ExitBootServices, alloc() must serve
+// executable oracle for a heap that SURVIVES ExitBootServices: alloc() must serve
 // from Sond's own bump allocator over the captured UEFI memory map, not Boot
 // Services. RED before the compiler change: alloc() after EBS returns unusable
 // memory (AllocatePool undefined post-EBS) -> prints ALLOC-BAD or hangs.

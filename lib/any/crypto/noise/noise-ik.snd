@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/any/crypto/noise/noise-ik.snd, handshake Noise IK, suite
+// lib/any/crypto/noise/noise-ik.snd: handshake Noise IK, suite
 // Noise_IK_25519_ChaChaPoly_SHA256 (Noise Protocol Framework rev 34).
 // Authenticates client(initiator)+relay(responder), provides forward secrecy, and hides the
 // client's static identity from observers. Composes X25519 + SHA-256 +

@@ -123,7 +123,7 @@ fn tokenizes_a_string() {
 
 #[test]
 fn tokenizes_a_sond_fragment() {
-    // `let base = 42`, a real end-to-end Sond fragment.
+    // `let base = 42`: a real end-to-end Sond fragment.
     assert_eq!(
         tokenize("let base = 42"),
         vec![
@@ -230,7 +230,7 @@ fn tokenizes_boolean_literals() {
 
 #[test]
 fn tokenizes_a_contract_line() {
-    // `tax_base >= 0.00`, a real requires clause line.
+    // `tax_base >= 0.00`: a real requires clause line.
     assert_eq!(
         tokenize("tax_base >= 0.00"),
         vec![

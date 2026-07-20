@@ -27,8 +27,8 @@ fn parses_a_test_block() {
 
 #[test]
 fn test_is_a_contextual_keyword_usable_as_an_identifier() {
-    // `test` is a keyword only in `test "name" { .. }` position (a test block). Elsewhere, a
-    // function name, a variable, a parameter, it is an ordinary identifier. (Gate finding: an
+    // `test` is a keyword only in `test "name" { .. }` position (a test block). Elsewhere (a
+    // function name, a variable, a parameter), it is an ordinary identifier. (Gate finding: an
     // independent AI hit "expected identifier, got Test" writing `fn test()`.)
     let f = parse_fn("fn test(test: i64) -> i64 { let test = 1\ntest }");
     assert_eq!(f.name, "test", "a function may be named `test`");
@@ -94,7 +94,7 @@ fn parses_interrupt_handler_qualifier() {
 
 #[test]
 fn parses_a_struct_declaration() {
-    // `struct Point { x: i64, y: i64 }`, a top-level record type, collected
+    // `struct Point { x: i64, y: i64 }`: a top-level record type, collected
     // separately from functions (like globals). Fields reuse `Param` (name: Type).
     let mut p = Parser::new(tokenize("struct Point { x: i64, y: i64 }"));
     let funcs = p.parse_program();
@@ -120,7 +120,7 @@ fn parses_a_struct_declaration() {
 
 #[test]
 fn parses_the_simplest_function() {
-    // `fn f() -> Money { }`, no params, a return type, empty body.
+    // `fn f() -> Money { }`: no params, a return type, empty body.
     assert_eq!(
         parse_fn("fn f() -> Money { }"),
         Function {
@@ -213,7 +213,7 @@ fn parses_a_let_statement_and_a_tail_expression() {
 
 #[test]
 fn parses_an_assignment_statement() {
-    // `source.balance = 0.00`, Field target, decimal value.
+    // `source.balance = 0.00`: Field target, decimal value.
     let f = parse_fn("fn f() { source.balance = 0.00\n}");
     assert_eq!(f.body.stmts.len(), 1);
     assert!(matches!(f.body.stmts[0], Stmt::Assign { .. }));
@@ -349,8 +349,8 @@ fn if_statement_without_else_is_not_called_by_the_next_paren_line() {
 #[test]
 fn list_literal_last_element_needs_no_trailing_comma() {
     // The last element may sit on its own line with NO trailing comma before `]`
-    // (how a hand-written table ends). The implicit `;` at that newline, inserted
-    // because the line ends in a value, must be skipped, not mistaken for the end.
+    // (how a hand-written table ends). The implicit `;` at that newline (inserted
+    // because the line ends in a value) must be skipped, not mistaken for the end.
     let e = parse_e("[\n  10,\n  20,\n  30\n]");
     assert_eq!(
         e,
@@ -466,7 +466,7 @@ fn parses_field_access_and_call() {
 
 #[test]
 fn parses_a_call_with_positional_and_keyword_args() {
-    // `round(x, decimals=2)`, RFC-0002 examples use keyword args.
+    // `round(x, decimals=2)`: RFC-0002 examples use keyword args.
     assert_eq!(
         parse_e("round(x, decimals=2)"),
         Expr::Call(

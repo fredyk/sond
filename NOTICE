@@ -1,4 +1,4 @@
-Sond, a verification-oriented programming language for the AI era
+Sond: a verification-oriented programming language for the AI era
 Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not
@@ -17,7 +17,7 @@ specifications (IETF RFCs, NIST FIPS publications, and academic papers). No
 third-party source code was copied or adapted. Under the idea/expression
 dichotomy (Directive 2009/24/EC art. 1.2; Spain, art. 96.4 TRLPI; U.S.,
 17 U.S.C. 102(b); CJEU C-406/10 SAS v. WPL), an algorithm is not protected by
-copyright, only a specific source expression is, so these re-derived
+copyright (only a specific source expression is), so these re-derived
 implementations carry only this project's own license.
 
 The specification each file implements is cited in that file's header. Where

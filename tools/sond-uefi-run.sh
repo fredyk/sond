@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sond-uefi-run <file.snd>, compile to a UEFI app, boot it in QEMU/OVMF headless,
+# sond-uefi-run <file.snd>: compile to a UEFI app, boot it in QEMU/OVMF headless,
 # and print its serial output (OVMF menu noise stripped). The executable oracle for
 # UEFI kernels: a worker runs this, reads the output, and iterates until correct.
 set -euo pipefail

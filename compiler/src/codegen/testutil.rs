@@ -63,7 +63,7 @@ pub(crate) fn compile_and_capture(src: &str) -> String {
 }
 
 /// Compiles a freestanding program (no libc) and runs it. The binary is
-/// statically linked with its own `_start`, the shape of a Sond `/init`.
+/// statically linked with its own `_start`: the shape of a Sond `/init`.
 pub(crate) fn compile_and_run_freestanding(src: &str) -> (i32, bool) {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let asm = emit_freestanding(&Parser::new(tokenize(src)).parse_program());

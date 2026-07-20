@@ -23,7 +23,7 @@ weaken a guarantee. This directive stands above all others and does not expire.
 
 **The one bound on that difficulty:** the language must *always* remain writable by a
 **qwen3.6-class model** (a modest AI) working in the compiler's red→green oracle loop.
-That is the difficulty ceiling, push every guarantee as hard as possible *up to* the
+That is the difficulty ceiling: push every guarantee as hard as possible *up to* the
 point where such a model can still produce valid programs against the oracle, and no
 harder. A guarantee that no in-scope AI can actually satisfy is not a guarantee, it is
 a wall. It follows that the oracle must be fast and its rejections legible, because a
@@ -33,7 +33,7 @@ modest model reaches correctness by *iteration*, not on the first try.
 difficulty is *tolerable* if launching a qwen3.6-class model **up to three times** over
 a given codebase gets it to ship a new user-facing feature *using* that Sond feature,
 without collapsing (looping, diverging, or giving up). If qwen still collapses on the
-third attempt, the feature is **too hard**, redesign it (raise its ergonomics or the
+third attempt, the feature is **too hard**: redesign it (raise its ergonomics or the
 oracle's feedback) *without weakening its guarantee*. This makes the difficulty ceiling
 a test you can run, not an opinion.
 
@@ -43,8 +43,8 @@ modest AI reaches correctness by *iteration*, the quality of the compiler's reje
 failed, and exactly where), **actionable** (a counterexample input, the missing
 invariant/contract, a concrete suggested fix), **machine-legible** (structured output an
 AI parses reliably), and **fast**. A guarantee whose violation is reported opaquely is
-worthless to qwen3.6, it will collapse the three-attempt test. Corollary: **better
-feedback raises the difficulty ceiling**, the harder a feature, the more the compiler
+worthless to qwen3.6: it will collapse the three-attempt test. Corollary: **better
+feedback raises the difficulty ceiling**: the harder a feature, the more the compiler
 must guide. Feedback quality and the difficulty ceiling are coupled; invest in the
 oracle's diagnostics as heavily as in its soundness.
 

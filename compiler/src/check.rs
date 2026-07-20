@@ -1,8 +1,8 @@
-//! Static struct-mutability checks, the value/pointer rules.
+//! Static struct-mutability checks: the value/pointer rules.
 //!
 //! A struct passed BY VALUE (`p: Point`) is immutable in a function that RECEIVED
 //! it: only the function that CREATED it (where it is a local) may set its fields.
-//! To share a struct for mutation you declare it a POINTER (`p: *Point`) up front -
+//! To share a struct for mutation you declare it a POINTER (`p: *Point`) up front;
 //! Sond has no `&` address-of. So assigning to `p.field` is a COMPILE ERROR when
 //! `p` is a value-struct parameter. This kills the Go footgun (silently mutating a
 //! value you thought was shared, then debugging for hours) at compile time.
@@ -14,8 +14,8 @@ use crate::ast::{
 };
 
 /// Exhaustiveness: every `match` on a sum type must cover ALL of its enum's variants,
-/// use only variants that exist, and not repeat one. A missing case is a COMPILE ERROR
-///, the guarantee that makes sum types "illegal states unrepresentable" (the thing an
+/// use only variants that exist, and not repeat one. A missing case is a COMPILE ERROR:
+/// the guarantee that makes sum types "illegal states unrepresentable" (the thing an
 /// AI can no longer forget). Runs BEFORE enum desugaring, on the original `match`.
 pub fn check_enum_matches(funcs: &[Function], enums: &[EnumDef]) -> Result<(), String> {
     for f in funcs {
@@ -82,7 +82,7 @@ fn check_matches_expr(e: &Expr, enums: &[EnumDef], fname: &str) -> Result<(), St
                 .collect();
             if !missing.is_empty() {
                 return Err(format!(
-                    "function `{fname}`: non-exhaustive match on `{}`, missing {missing:?}. \
+                    "function `{fname}`: non-exhaustive match on `{}`: missing {missing:?}. \
                      Sond requires every variant to be handled.",
                     owner.name
                 ));
@@ -470,7 +470,7 @@ fn const_fold(e: &Expr, fname: &str) -> Result<Option<i64>, String> {
                     };
                     res.map(Some).ok_or_else(|| {
                         format!(
-                            "function `{fname}`: constant integer overflow in `{a} {sym} {b}`, \
+                            "function `{fname}`: constant integer overflow in `{a} {sym} {b}`: \
                              the result does not fit in i64"
                         )
                     })
@@ -482,7 +482,7 @@ fn const_fold(e: &Expr, fname: &str) -> Result<Option<i64>, String> {
     }
 }
 /// (C) on-ramp for #2 (unchecked `a[i]`, RFC-0012 §6): reject `a[K]` into a fixed-size array
-/// `let a[N]` when K is a COMPILE-TIME CONSTANT outside `[0, N)`, a provable stack overrun
+/// `let a[N]` when K is a COMPILE-TIME CONSTANT outside `[0, N)`: a provable stack overrun
 /// (an off-by-one, a wrong literal). Only PROVABLE out-of-bounds are rejected; a variable index
 /// is left to the prover and the coming refinement types. Non-breaking: no valid program indexes
 /// a known-size array with a constant out of range. Mirrors `check_constant_overflow`.
@@ -637,7 +637,7 @@ fn conjuncts(e: &Expr) -> Vec<&Expr> {
 }
 
 /// Records the interval bound a `v OP const` proposition implies into the flow's counter/ceiling
-/// maps, a floor for `>=`/`>`, a ceiling for `<`/`<=`, so the interval analysis (`expr_range`)
+/// maps (a floor for `>=`/`>`, a ceiling for `<`/`<=`), so the interval analysis (`expr_range`)
 /// can use it to bound a derived index like `v >> 3`. Other shapes contribute nothing.
 fn seed_interval_bound(flow: &mut Flow, e: &Expr) {
     if let Expr::Binary(op, l, r) = e
@@ -684,7 +684,7 @@ fn floor_from(e: &Expr) -> Option<(String, i64)> {
     }
 }
 
-/// If `value` is `v + K` or `K + v` with `K` a positive constant, returns `K`, the shape of a
+/// If `value` is `v + K` or `K + v` with `K` a positive constant, returns `K`: the shape of a
 /// monotonic increasing counter step.
 fn increment_of(v: &str, value: &Expr) -> Option<i64> {
     let Expr::Binary(BinOp::Add, l, r) = value else {
@@ -701,7 +701,7 @@ fn increment_of(v: &str, value: &Expr) -> Option<i64> {
     (k > 0).then_some(k)
 }
 
-/// If `value` is `v - K` with `K` a positive constant, returns `K`, a monotonic DECREASING step.
+/// If `value` is `v - K` with `K` a positive constant, returns `K`: a monotonic DECREASING step.
 fn decrement_of(v: &str, value: &Expr) -> Option<i64> {
     let Expr::Binary(BinOp::Sub, l, r) = value else {
         return None;
@@ -737,7 +737,7 @@ fn expr_range(e: &Expr, flow: &Flow) -> Option<(i64, i64)> {
         }
         Expr::Binary(op, l, r) => match op {
             BinOp::BitAnd => {
-                // `e & (2^k - 1)` ∈ [0, mask] for any `e`, the mask keeps only the low bits.
+                // `e & (2^k - 1)` ∈ [0, mask] for any `e`: the mask keeps only the low bits.
                 let m = const_index(l).or_else(|| const_index(r))?;
                 (m >= 0 && (m & m.wrapping_add(1)) == 0).then_some((0, m))
             }
@@ -878,7 +878,7 @@ fn is_monotonic_decounter(v: &str, b: &Block) -> bool {
 }
 
 /// Does assigning `value` to a global known `>= 0` keep it `>= 0`? True for `g = c`, `g = g + c`,
-/// `g = g * c` with a non-negative constant `c`, the shapes a counter/length ever takes.
+/// `g = g * c` with a non-negative constant `c`: the shapes a counter/length ever takes.
 fn rhs_preserves_nonneg(value: &Expr, g: &str) -> bool {
     if matches!(const_index(value), Some(v) if v >= 0) {
         return true;
@@ -957,7 +957,7 @@ fn block_assigns_preserve_nonneg(b: &Block, g: &str) -> bool {
 /// Module-level mutable scalar globals PROVABLY `>= 0` in every function: initialised to a
 /// non-negative constant and only ever assigned a non-negativity-preserving value across the
 /// WHOLE program. A counter that starts at 0 and only increments is the canonical case, so a
-/// later `t[count]` (or `let i = count; t[i]`) needs no hand-written `count >= 0`, the floor is
+/// later `t[count]` (or `let i = count; t[i]`) needs no hand-written `count >= 0`: the floor is
 /// a whole-module invariant no per-function walk can see. Sound: an unproven mutation (a
 /// decrement, an opaque RHS) drops the global from the set.
 fn nonnegative_globals(funcs: &[Function], globals: &[Global]) -> HashSet<String> {
@@ -1244,7 +1244,7 @@ fn negate_cond(e: &Expr) -> Option<Expr> {
     Some(Expr::Binary(nop, l.clone(), r.clone()))
 }
 
-/// Replaces free `Var(name)` nodes per `map`, used to instantiate a callee's `ensures` at a
+/// Replaces free `Var(name)` nodes per `map`: used to instantiate a callee's `ensures` at a
 /// call site (its return name becomes the binding, its parameters become the arguments).
 fn subst_vars(e: &Expr, map: &HashMap<String, Expr>) -> Expr {
     match e {
@@ -1289,7 +1289,7 @@ fn mentions_any(e: &Expr, names: &HashSet<String>) -> bool {
 }
 
 /// Instantiates a callee's `ensures` at a `let name = f(args)` binding and returns the sound
-/// facts about `name`, the return name mapped to `name`, and (only for all-positional calls)
+/// facts about `name`: the return name mapped to `name`, and (only for all-positional calls)
 /// each parameter mapped to its argument. A clause still mentioning an unmapped parameter is
 /// dropped (it could alias a caller variable). This is what carries a bounded allocator return
 /// (`fu_alloc`/`fu_find`, `-> (r) ensures { r >= 0; r < N }`) to the index at the call site.
@@ -1613,7 +1613,7 @@ fn bounds_expr(
                         )
                     {
                         return Err(format!(
-                            "function `{fname}`: cannot prove this index is in bounds for `{a}` of size {n}, bound it with a `where`/`requires`/loop condition to 0..{n}"
+                            "function `{fname}`: cannot prove this index is in bounds for `{a}` of size {n}; bound it with a `where`/`requires`/loop condition to 0..{n}"
                         ));
                     }
                 }
@@ -1625,7 +1625,7 @@ fn bounds_expr(
             let asm = flow.assumptions();
             if !crate::verify::index_proven_in_bounds(idx, &bound, &asm, params) {
                 return Err(format!(
-                    "function `{fname}`: cannot prove this index is in bounds for slice `{a}`, bound it with a `where`/`requires`/loop condition to 0..{a}.len"
+                    "function `{fname}`: cannot prove this index is in bounds for slice `{a}`; bound it with a `where`/`requires`/loop condition to 0..{a}.len"
                 ));
             }
         }
@@ -1707,8 +1707,8 @@ fn bounds_expr(
     }
 }
 
-/// Folds a compile-time-constant integer index, `Int`, unary negation, and `+`/`-`/`*` of
-/// constants, or `None` if it is not constant. Overflow is not our concern (it is caught by
+/// Folds a compile-time-constant integer index (`Int`, unary negation, and `+`/`-`/`*` of
+/// constants), or `None` if it is not constant. Overflow is not our concern (it is caught by
 /// `check_constant_overflow`), so folding wraps and always yields a value.
 fn const_index(e: &Expr) -> Option<i64> {
     match e {
@@ -1920,8 +1920,8 @@ mod tests {
 
     #[test]
     fn a_loop_bounded_by_a_global_constant_proves() {
-        // A module-level `let N = 64` used as a loop bound over an array of the same size, the
-        // idiom `for i < TABLE_SIZE { table[i] }`, must prove: the global constant is resolved to
+        // A module-level `let N = 64` used as a loop bound over an array of the same size (the
+        // idiom `for i < TABLE_SIZE { table[i] }`) must prove: the global constant is resolved to
         // its value, so `i < 64` bounds `table[64]`.
         let src = "let N = 8\nfn f() -> i64 { let a[8]\nlet mut i = 0\nfor i < N { a[i] = 0\ni = i + 1 }\n0 }";
         assert!(bounds(src).is_ok(), "a loop bounded by a global const should prove");
@@ -1951,7 +1951,7 @@ mod tests {
 
     #[test]
     fn accepts_a_variable_index_proven_in_bounds() {
-        // `0 <= i < 4`, the access is provably safe.
+        // `0 <= i < 4`: the access is provably safe.
         assert!(
             bounds("fn f(i: i64) -> i64 requires { i >= 0; i < 4 } { let a[4]\na[i] }").is_ok()
         );
@@ -2101,7 +2101,7 @@ mod tests {
 
     #[test]
     fn accepts_a_bitmask_index_confined_to_the_array() {
-        // `a[i & 7]` ∈ [0, 8) for any `i`, a power-of-two-minus-one mask, no sign obligation.
+        // `a[i & 7]` ∈ [0, 8) for any `i`: a power-of-two-minus-one mask, no sign obligation.
         assert!(bounds(
             "fn f(i: i64) -> i64 { let a[8]\na[i & 7] = 0\na[0] }"
         )

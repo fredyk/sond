@@ -52,7 +52,7 @@ pub fn emit_header(
         blocks.push(b);
     }
     let mut out =
-        String::from("// Auto-generated Sond header, public interface only. Do not edit.\n\n");
+        String::from("// Auto-generated Sond header. Public interface only, do not edit.\n\n");
     out.push_str(&blocks.join("\n"));
     out
 }
@@ -106,7 +106,7 @@ fn decl_matches(line: &str, kind: &str, name: &str) -> bool {
         .is_some_and(|r| !r.starts_with(|c: char| c.is_alphanumeric() || c == '_'))
 }
 
-/// The signature line of a public function, name, parameters, return type, and
+/// The signature line of a public function: name, parameters, return type, and
 /// its contract (`requires`/`ensures`), but no body. The contract is the point:
 /// a consumer type/contract-checks against it without seeing the implementation.
 fn signature(f: &Function) -> String {

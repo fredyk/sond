@@ -144,7 +144,7 @@ new contract. If it breaks, it does not compile.
 
 The full format is large; it lands in slices, each one useful on its own and each keeping the
 existing flat `include` working (additive, never a breaking migration). The FIRST slice delivers
-the thing a reader notices immediately, **qualified referencing** (`module.function` instead of a
+the thing a reader notices immediately: **qualified referencing** (`module.function` instead of a
 flat C-style global namespace), which is exactly the friendly-name layer of §3.5. Content
 hashing (§3.1), contract re-verification (§3.3) and the capability manifest (§3.4) ride on top of
 it in later slices; none of them changes the call-site surface, so the namespacing designed here

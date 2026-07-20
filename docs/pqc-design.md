@@ -81,7 +81,7 @@ No cross-module coupling between ML-KEM and ML-DSA (besides shared shake.snd).
 
 ## 3 FIPS 203: ML-KEM
 
-### 3.1 mlkem-poly.snd, Core Polynomial Module (mod q=3329)
+### 3.1 mlkem-poly.snd: Core Polynomial Module (mod q=3329)
 
 Polynomials: 256 i64 words. Each a[i] in [0, 3329) after reduction.
 
@@ -128,11 +128,11 @@ Packs polynomials into byte arrays. 256 coeffs * 12 bits = 384 bytes per poly.
 | Function | Description | Output size |
 |----------|-------------|-------------|
 | mlkem_encode_poly(out, a) | 12-bit pack, 1 poly | 384 B |
-| mlkem_decode(r, a) | 12-bit unpack, 1 poly |, |
+| mlkem_decode(r, a) | 12-bit unpack, 1 poly | N/A |
 | mlkem_encode_pk(out, t, k) | k polys | 384k B |
 | mlkem_encode_ct(out, u, v, k) | k+1 polys (plain) | 384*(k+1) B |
-| mlkem_decode_ct_u(out, u, k) | Decode u vector (compressed) |, |
-| mlkem_decode_ct_v(out, v, k) | Decode v vector (compressed) |, |
+| mlkem_decode_ct_u(out, u, k) | Decode u vector (compressed) | N/A |
+| mlkem_decode_ct_v(out, v, k) | Decode v vector (compressed) | N/A |
 
 Compressed ciphertext (FIPS 203 Appendix A Table 3):
 
@@ -143,7 +143,7 @@ Compressed ciphertext (FIPS 203 Appendix A Table 3):
 
 Ciphertext size = 320 * k + 128. Verified: ML-KEM-512: 768, ML-KEM-768: 1088, ML-KEM-1024: 1568.
 
-### 3.3 mlkem-pke.snd, K-PKE Core
+### 3.3 mlkem-pke.snd: K-PKE Core
 
 | Function | Reference | Description |
 |----------|-----------|-------------|
@@ -153,7 +153,7 @@ Ciphertext size = 320 * k + 128. Verified: ML-KEM-512: 768, ML-KEM-768: 1088, ML
 gen_A: matrix A (k x k polys) generated from seed rho via PRF (FIPS 203 Section 7.2.1,
 SHAKE128 with domain separator).
 
-### 3.4 mlkem-kem.snd, Top-Level ML-KEM API
+### 3.4 mlkem-kem.snd: Top-Level ML-KEM API
 
 | Function | Reference | Description |
 |----------|-----------|-------------|
@@ -197,7 +197,7 @@ let MLDSA_ZETA = 17  // primitive 256th root of unity mod q
 |----------|-------------|-----------|
 | mlkem_reduce(a) | Barrett: a mod 8380417 | FIPS 7.1.1 (adapted) |
 | mlkem_mont_mul(a, b) | a * b * R^-1 mod q, R=2^15 | FIPS 7.1.1 |
-| mlkem_mont_sq(a) | a * a * R^-1 mod q |, |
+| mlkem_mont_sq(a) | a * a * R^-1 mod q | N/A |
 | mlkem_montgomery_reduce(t) | Reduce 2-word to Montgomery form | FIPS 7.1.1 |
 | mlkem_poly_add(r, a, b) | r[i] = (a[i]+b[i]) mod q | FIPS 4.3, Alg 2/3 |
 | mlkem_poly_sub(r, a, b) | r[i] = (a[i]-b[i]+q) mod q | FIPS 4.3, Alg 2/3 |
@@ -205,8 +205,8 @@ let MLDSA_ZETA = 17  // primitive 256th root of unity mod q
 | mlkem_poly_decompress(r, a, d) | Decompress d-bit coeffs | FIPS 4.3, Alg 6 |
 | mlkem_poly_ntt(r, a) | Forward NTT (Montgomery domain) | FIPS 4.4, Alg 20 |
 | mlkem_poly_intt(r, a) | Inverse NTT (Montgomery to ring) | FIPS 4.4, Alg 22 |
-| mlkem_poly_pointwise(r, a, b) | r[i] = a[i] * b[i] mod q (Montgomery) |, |
-| mlkem_poly_negate(r, a) | r[i] = (q - a[i]) mod q |, |
+| mlkem_poly_pointwise(r, a, b) | r[i] = a[i] * b[i] mod q (Montgomery) | N/A |
+| mlkem_poly_negate(r, a) | r[i] = (q - a[i]) mod q | N/A |
 
 The Dilithium NTT uses basemul (FIPS 204 Alg 19): a special 2x2 butterfly that
 computes [a+b, (a-b)*zeta] in one pass. reducedntt (Alg 20) applies basemul at
@@ -227,12 +227,12 @@ each butterfly step.
 ExpandMask (FIPS 204 Alg 28): consumes output from bit position 1 of the SHAKE
 bitstream, not bit 0.
 
-### 4.3 mldsa-pke.snd, PQPKE
+### 4.3 mldsa-pke.snd: PQPKE
 
 Similar to K-PKE but l rows, L columns, different compression parameters, Dilithium NTT.
 Implements FIPS 204 Algorithms 7 (Encrypt) and 8 (Decrypt).
 
-### 4.4 mldsa-sig.snd, ML-DSA Signature API
+### 4.4 mldsa-sig.snd: ML-DSA Signature API
 
 | Function | Reference | Description |
 |----------|-----------|-------------|
@@ -296,7 +296,7 @@ The total signature size is:
 
 ---
 
-## 5 shake.snd, SHAKE128 / SHAKE256 XOF (NEW)
+## 5 shake.snd: SHAKE128 / SHAKE256 XOF (NEW)
 
 Two options:
 A. Implement full Keccak-f[1600] permutation from scratch (like chacha20.snd).

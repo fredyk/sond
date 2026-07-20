@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
-// SSH curve25519-sha256 exchange hash H, build concat, hash, verify against oracle.
+// SSH curve25519-sha256 exchange hash H: build concat, hash, verify against oracle.
 
 include "any/crypto/hash/sha256.snd"
 

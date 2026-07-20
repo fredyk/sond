@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// pic-cluster.snd, the PIC compute-cluster host, entirely in Sond.
+// pic-cluster.snd: the PIC compute-cluster host, entirely in Sond.
 //
 // Drives a PIC16F684 node over a USB-serial bridge (e.g. a CP2102 at
 // /dev/ttyUSB0): opens the line raw 9600 8N1, PINGs the node, then asks it to
 // add two bytes (ADD8). The wire framing is lib/any/pic/frame.snd and the line
-// handling is lib/x86_64/linux/serial.snd, this program is just the glue that
+// handling is lib/x86_64/linux/serial.snd; this program is just the glue that
 // a PC uses to offload work onto the microcontrollers.
 //
 //   sondc examples/host/pic/pic-cluster/pic-cluster.snd -o /tmp/pic-cluster && /tmp/pic-cluster

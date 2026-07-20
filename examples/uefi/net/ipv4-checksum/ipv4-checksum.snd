@@ -118,7 +118,7 @@ fn efi_main() -> i64 {
     poke8(buf + 10, cs >> 8)
     poke8(buf + 11, cs & 0xFF)
 
-    // Verify the checksum, should return 1
+    // Verify the checksum: should return 1
     let valid = verify_checksum(buf, ihl)
     print_int(valid)
     print("")

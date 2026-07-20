@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/x86_64/linux/net.snd, Linux socket wrappers over syscall.
+// lib/x86_64/linux/net.snd: Linux socket wrappers over syscall.
 //
 // API:
 //   sock(domain, type, proto) -> fd|-errno

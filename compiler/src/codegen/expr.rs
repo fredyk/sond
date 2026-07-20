@@ -189,7 +189,7 @@ impl Codegen {
     }
 
     /// Compares two `f64` operands with `ucomisd`, leaving a 0/1 bool in `%rax`.
-    /// Uses the unsigned condition codes ucomisd sets (CF/ZF). (NaN is unordered -
+    /// Uses the unsigned condition codes ucomisd sets (CF/ZF). (NaN is unordered,
     /// `<`/`>` on a NaN read as this simple mapping; full NaN semantics come with the
     /// type checker.)
     fn fcompare(&mut self, op: &BinOp, l: &Expr, r: &Expr) {
@@ -214,7 +214,7 @@ impl Codegen {
         self.line("    movzbq %al, %rax");
     }
 
-    /// Canonicalizes a narrow integer in `%rax` to its 64-bit form, sign-extend
+    /// Canonicalizes a narrow integer in `%rax` to its 64-bit form: sign-extend
     /// (signed) or zero-extend (unsigned) from the type's width, so `u32`/`i32` values
     /// wrap at 32 bits and are always held sign/zero-extended. A no-op for 64-bit.
     pub(crate) fn canon(&mut self, ty: Ty) {

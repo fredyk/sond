@@ -14,10 +14,10 @@ fn efi_main() -> i64 {
     0
 }
 // To verify the interactive echo headless, feed keystrokes AFTER OVMF's boot
-// timeout (piping stdin at once loses them, the boot manager consumes them). Use
+// timeout (piping stdin at once loses them; the boot manager consumes them). Use
 // a FIFO and type once efi_main is running:
 //   mkfifo /tmp/qin
 //   qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd \
 //     -drive format=raw,file=fat:rw:$ESP,media=disk -nographic -m 256 < /tmp/qin &
 //   exec 3>/tmp/qin; sleep 12; printf 'helloq' >&3
-// The console echoes "hello" and quits on 'q', the keyboard read on bare metal.
+// The console echoes "hello" and quits on 'q': the keyboard read on bare metal.

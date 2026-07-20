@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/x86_64/linux/capture.snd, run_capture: fork+pipe+execve to capture the
+// lib/x86_64/linux/capture.snd: run_capture: fork+pipe+execve to capture the
 // child's stdout into a caller-provided buffer. No allocator on Sond side.
 //
 // API: run_capture(path, argv, buf, buflen) -> nbytes (0 on error/empty).

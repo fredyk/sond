@@ -1,4 +1,4 @@
-//! Source-level `include` resolution, the pragmatic, Go-simple package on-ramp.
+//! Source-level `include` resolution: the pragmatic, Go-simple package on-ramp.
 //!
 //! A program can pull in a reusable library with a top-level line
 //! `include "path.snd"` (path relative to the including file). The compiler splices
@@ -91,7 +91,7 @@ fn extract_fn_name(line: &str) -> Option<String> {
 /// Resolves an include path, in order: relative to the including file, then a `lib/`
 /// root found by walking up the tree, then the system library `~/.local/lib/sond/`.
 /// The system root lets an isolated program (e.g. a sandboxed AI worker) pull in the
-/// shared libraries by their canonical path, `include "any/crypto/cipher/xor.snd"` -
+/// shared libraries by their canonical path (`include "any/crypto/cipher/xor.snd"`),
 /// while seeing only the `.snd` libraries, never the compiler's own source.
 fn resolve_target(dir: &Path, rel: &str) -> PathBuf {
     let direct = dir.join(rel);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/x86_64/linux/serial.snd, raw serial-line access over Linux syscalls.
+// lib/x86_64/linux/serial.snd: raw serial-line access over Linux syscalls.
 //
 // Opens a tty (e.g. a USB-serial bridge at /dev/ttyUSB0), puts it in raw
 // 8N1 mode at a chosen baud, and moves bytes with read/write. No allocator:
@@ -61,7 +61,7 @@ fn serial_config(fd: i64, baud: i64, vmin: i64, vtime: i64) -> i64 {
     syscall(SYS_ioctl, fd, TCSETS, buf)
 }
 
-// serial_flush discards any bytes queued in either direction, call it before
+// serial_flush discards any bytes queued in either direction; call it before
 // a fresh request/response exchange so stale line noise can't be mis-framed.
 fn serial_flush(fd: i64) -> i64 {
     syscall(SYS_ioctl, fd, TCFLSH, TCIOFLUSH)

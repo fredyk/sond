@@ -4,7 +4,7 @@
 // The builtin testing library. `assert` / `assert_eq` abort the running process with a
 // nonzero exit status the moment a check fails, printing what went wrong. `sond test`
 // runs each `test "..." { .. }` block in a FORKED child, so one failing (or crashing)
-// assertion is isolated and reported per test, the suite keeps going.
+// assertion is isolated and reported per test; the suite keeps going.
 //
 // Hosted Linux: failure is signalled with the `exit` syscall (the child's nonzero status
 // is what the runner's parent reads). Only i64 values are compared for now.

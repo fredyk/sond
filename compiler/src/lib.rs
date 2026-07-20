@@ -1,4 +1,4 @@
-//! `sondc`, the reference compiler for the Sond language.
+//! `sondc`: the reference compiler for the Sond language.
 //!
 //! Built bottom-up with strict TDD (red → green → refactor): first the lexer
 //! (tokenizer), then the parser (AST), then the contract verifier. Each layer

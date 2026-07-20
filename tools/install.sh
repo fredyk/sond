@@ -12,7 +12,7 @@ install -m 755 "$REPO/compiler/target/release/sond" "$HOME/.local/bin/sond"
 # Publish the .snd libraries at a stable system path (a symlink to lib/), so
 # isolated programs can `include "any/..."` them without seeing the compiler source.
 # COPY (not symlink) the .snd libraries so an isolated worker can include them
-# but has NO path back to the compiler source, a symlink would leak the repo dir.
+# but has NO path back to the compiler source: a symlink would leak the repo dir.
 rm -rf "$HOME/.local/lib/sond"
 mkdir -p "$HOME/.local/lib/sond"
 cp -r "$REPO/lib/." "$HOME/.local/lib/sond/"

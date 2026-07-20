@@ -1,22 +1,22 @@
-# Sond, constraints for writing code that COMPILES (read before writing .snd)
+# Sond: constraints for writing code that COMPILES (read before writing .snd)
 
 Sond is a new language; its syntax is NOT Rust/Go/C even where it looks similar. These are the
 mistakes a model makes every time. ALWAYS verify by compiling: `./compiler/target/debug/sondc f.snd -o /tmp/x`.
 
 ## What does NOT exist (won't compile)
-- **`pub`**, there is no visibility. Just `fn name(...)`. Flat namespace (everything is visible via `include`).
-- **Overloading**, one name = ONE function. Do NOT define `fn f(a)` and `fn f(a, b)`. Use distinct names.
-- **`&x` as "address of x"**, `&` is ONLY bitwise AND. There is no address-of operator for a variable.
+- **`pub`**: there is no visibility. Just `fn name(...)`. Flat namespace (everything is visible via `include`).
+- **Overloading**: one name = ONE function. Do NOT define `fn f(a)` and `fn f(a, b)`. Use distinct names.
+- **`&x` as "address of x"**: `&` is ONLY bitwise AND. There is no address-of operator for a variable.
   For an out-param (e.g. the status of `wait4`): use a local array `let st[1]`, pass `st` (it is an
   address), and read it back with `peek32(st)` / `peek64(st)`.
-- **Returning the address of a LOCAL array**, `let a[3] ... return a` leaves a DANGLING pointer (the
+- **Returning the address of a LOCAL array**: `let a[3] ... return a` leaves a DANGLING pointer (the
   stack frame is freed on return). Build buffers/argv in the CALLER and pass them by address.
-- **Strings as values**, `"..."` literals are ONLY valid as an argument to `print`/`write`/`serial_print`.
+- **Strings as values**: `"..."` literals are ONLY valid as an argument to `print`/`write`/`serial_print`.
   For a path/arg (open/execve), build it byte by byte with `poke8(buf+i, code)` and a trailing `\0`. (Once
   the `cstr("...")` builtin exists, use it for this.)
-- **Nested functions**, `fn` is TOP-LEVEL only. Lift helpers out to the top level.
-- **Mutable parameters**, parameters are immutable. To mutate: `let mut v = x`.
-- **`let mut a[N]`** for arrays, arrays take no `mut` (the name is already an address). Use `let a[N]`.
+- **Nested functions**: `fn` is TOP-LEVEL only. Lift helpers out to the top level.
+- **Mutable parameters**: parameters are immutable. To mutate: `let mut v = x`.
+- **`let mut a[N]`** for arrays: arrays take no `mut` (the name is already an address). Use `let a[N]`.
 
 ## What IS there
 - Types: `i64` (also pointer and char) and `bool`. No decimals, no string values.

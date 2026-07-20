@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boot a Sond UEFI application in QEMU via OVMF firmware, BARE UEFI, no OS.
+# Boot a Sond UEFI application in QEMU via OVMF firmware: BARE UEFI, no OS.
 # The firmware loads /EFI/BOOT/BOOTX64.EFI directly. Serial console to stdout.
 # Usage: boot-uefi.sh <BOOTX64.EFI>
 set -euo pipefail

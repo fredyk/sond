@@ -33,7 +33,7 @@ fn main() -> i64 {
     poke8(qc + 24, 0xad) poke8(qc + 25, 0xfc) poke8(qc + 26, 0x7e) poke8(qc + 27, 0x14)
     poke8(qc + 28, 0x6f) poke8(qc + 29, 0x88) poke8(qc + 30, 0x2b) poke8(qc + 31, 0x4f)
 
-    // K = X25519(server_private, Q_C), the shared secret.
+    // K = X25519(server_private, Q_C): the shared secret.
     let k[4]
     x25519(sk, qc, k)
 

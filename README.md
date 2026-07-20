@@ -16,7 +16,7 @@ an AI writes in it, it never has to come back to the code to fix a bug later.*
 
 **The one bound on the difficulty:** the language must always remain writable by a
 **qwen3.6-class model** working in the compiler's red→green oracle loop. That is the
-difficulty ceiling, push every guarantee as hard as possible up to the point where a
+difficulty ceiling: push every guarantee as hard as possible up to the point where a
 modest AI can still produce valid programs against the oracle, and no harder.
 
 ## Thesis
@@ -41,15 +41,15 @@ oracle in a tight loop.
 
 There is a real compiler, `sondc` (Rust, built bottom-up with strict TDD):
 
-- **Static contract verification**, `requires`/`ensures` are proven at compile
+- **Static contract verification**: `requires`/`ensures` are proven at compile
   time over a decidable fragment; **sound by default**: a contract the prover cannot
   verify is rejected, never trusted to a runtime check. (`src/verify.rs`.)
-- **A capable systems language**, `i64`/`bool`, functions and calls (stack-passed
+- **A capable systems language**: `i64`/`bool`, functions and calls (stack-passed
   args beyond 6), `if`/`else`/`else if`, `for` loops, module-level globals, word-array
   indexing `a[i]`; the full operator set (`+ - * / % & | ^ << >> ~ && ||`, comparisons);
   hex/char/string literals; raw memory (`peek`/`poke`, `alloc`), port I/O
   (`inb`/`outb`), and inline assembly (`asm`).
-- **Three code-generation targets**, a hosted ELF (`sondc x.snd`), a freestanding
+- **Three code-generation targets**: a hosted ELF (`sondc x.snd`), a freestanding
   libc-free `/init` (`--freestanding`), and a **UEFI** PE32+ application (`--uefi`)
   that **boots on bare hardware with no OS underneath** (verified in QEMU/OVMF), all
   the way through `ExitBootServices` into a bare-metal kernel talking to COM1.
@@ -58,7 +58,7 @@ There is a real compiler, `sondc` (Rust, built bottom-up with strict TDD):
 ## How it is validated
 
 The compiler is stress-tested by having a deliberately weak model (qwen3.6) write
-Sond programs in isolation, it knows only the language reference, researches the
+Sond programs in isolation; it knows only the language reference, researches the
 relevant RFCs online, and must compile (and, for verifiable outputs, *run and check*
 against known answers) its own code before delivering it. The compiler-oracle proves
 safety; an executable oracle catches algorithm errors. See [`examples/`](examples/)
@@ -67,14 +67,14 @@ ICMP/TCP/DHCP/DNS), and bit-exact checksums/crypto (CRC-32, Adler-32, FNV-1a, ..
 
 ## Documentation
 
-- [RFC-0000: Language vision](docs/rfc-0000-vision.md), the foundational design.
+- [RFC-0000: Language vision](docs/rfc-0000-vision.md): the foundational design.
 - The design arc (exploratory), where the guarantees are heading:
   [RFC-0008 graph core](docs/rfc-0008-graph-dataflow-core.md) (a program as a proven dependency
   graph) · [RFC-0009 on-chain targets](docs/rfc-0009-onchain-targets.md) (Solana SBF + Ethereum
   EVM) · [RFC-0010 concurrency](docs/rfc-0010-concurrency.md) (data races unrepresentable) ·
   [RFC-0011 effects & capabilities](docs/rfc-0011-effects-capabilities.md) (the keystone the
   first three rest on).
-- [Implemented language surface](docs/implemented-language-surface.md), what `sondc`
+- [Implemented language surface](docs/implemented-language-surface.md): what `sondc`
   accepts today.
 - Further RFCs (grammar, Go idiom, target profiles, package format, FFI) under `docs/`.
 
@@ -107,7 +107,7 @@ copy, with no path back to this repository.
 **Pinning:** the installed copy *is* the pinned version. To move to a specific Sond
 version, re-run `install.sh` from the desired commit/tag (formal versioning is ahead).
 
-**`Sond.md`** is the compact language reference, the single document an AI (or human)
+**`Sond.md`** is the compact language reference: the single document an AI (or human)
 needs to write correct Sond. It is **generated** (never hand-written) by `tools/build-docs.sh`
 from the marked `SOND-MD` regions of the design docs, capped at 12 KB, and installed to
 `~/.local/share/sond/Sond.md`. Point your model or editor at it.
@@ -135,8 +135,8 @@ assertion or a crash is isolated and the suite still reports a full pass/fail ta
 **Tests are mandatory to build.** Sond will not ship untested code: `sond build
 program.snd` runs the program's tests and produces a binary **only if** every test passes
 and coverage is at least the threshold (default 80%, `--min-coverage=N`). `sond test
-lib.snd` applies the same gate to a library. Below the threshold, or with no tests at all
-- nothing is built.
+lib.snd` applies the same gate to a library. Below the threshold, or with no tests at all,
+nothing is built.
 
 ```
 sond build app.snd          # coverage 5/5 (100%) → builds; under 80% → blocked

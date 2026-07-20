@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// Tests for serial.snd, the termios builder for a raw 9600 8N1 line.
+// Tests for serial.snd: the termios builder for a raw 9600 8N1 line.
 // The struct byte layout is the kernel `struct termios` (asm-generic, NCCS=19,
 // 36 bytes) consumed by the TCSETS ioctl, so we assert it byte-for-byte.
 //   sond test lib/x86_64/linux/serial_test.snd
@@ -102,7 +102,7 @@ test "serial: open+config+write+read round-trip over a pty" {
     let slave = serial_open(ptspath)
     assert(slave >= 0)
 
-    // The kernel accepts our termios iff TCSETS returns 0, validates the layout.
+    // The kernel accepts our termios iff TCSETS returns 0: validates the layout.
     assert_eq(serial_config(slave, B9600, 0, 5), 0)
     serial_flush(slave)
 

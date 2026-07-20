@@ -1,4 +1,4 @@
-//! Static contract verification, the point of Sond's contracts.
+//! Static contract verification: the point of Sond's contracts.
 //!
 //! A runtime check is just an assert: it passes for the inputs you happened to
 //! try and blows up months later, in production, on the one you didn't. The whole
@@ -135,8 +135,8 @@ pub fn loop_invariant_verified(
     eval_loop(vec![init], cond, invariant, body, &mut ctx).is_some()
 }
 
-/// Collects every variable named anywhere in a block, statement values, targets, conditions, and
-/// nested blocks, so they can be seeded as free symbols before an isolated loop verification.
+/// Collects every variable named anywhere in a block (statement values, targets, conditions, and
+/// nested blocks), so they can be seeded as free symbols before an isolated loop verification.
 fn collect_block_vars(block: &Block, out: &mut HashSet<String>) {
     fn expr_vars(e: &Expr, out: &mut HashSet<String>) {
         collect_expr_vars(e, out);
@@ -208,8 +208,8 @@ struct Ctx<'a> {
     /// exempt (codegen combines types "unsigned wins").
     unsigned_vars: HashSet<String>,
     /// The inclusive `[min, max]` range (as i128) of each integer-typed parameter's declared
-    /// type. Overflow reasoning bounds a `+`/`-`/`*` against its result type's range, `i32 + 1`
-    /// must fit in `[i32::MIN, i32::MAX]`, not merely in i64, so a narrow-width sum that leaves
+    /// type. Overflow reasoning bounds a `+`/`-`/`*` against its result type's range (`i32 + 1`
+    /// must fit in `[i32::MIN, i32::MAX]`, not merely in i64), so a narrow-width sum that leaves
     /// its type but stays inside i64 is correctly rejected.
     int_types: HashMap<String, (i128, i128)>,
     /// The function's preconditions as constraints, available to reasoning done during symbolic
@@ -217,7 +217,7 @@ struct Ctx<'a> {
     requires: Vec<SymProp>,
     /// Why the evaluator left the verifiable fragment, if it did. The evaluator bails by
     /// returning `None`; this records the FIRST (deepest) reason so the diagnostic names the
-    /// actual construct, `a `for` loop without an `invariant``, instead of a generic list.
+    /// actual construct (`a `for` loop without an `invariant``), instead of a generic list.
     bail: Option<String>,
 }
 
@@ -312,7 +312,7 @@ fn verify_function(
             "the body uses a construct the verifier does not support yet".to_string()
         });
         return reject(format!(
-            "cannot prove its contract, {detail}. Sond does not accept a contract it \
+            "cannot prove its contract: {detail}. Sond does not accept a contract it \
              cannot verify."
         ));
     };
@@ -357,7 +357,7 @@ fn verify_function(
                 }
                 Outcome::Unknown => {
                     return reject(format!(
-                        "cannot prove postcondition `{}`{}{}, Sond rejects a contract it \
+                        "cannot prove postcondition `{}`{}{}: Sond rejects a contract it \
                          cannot verify (add the assumptions it needs, or strengthen the prover)",
                         show_prop(&p),
                         where_clause,
@@ -411,7 +411,7 @@ struct Path {
 /// the evaluator bails (rejects) rather than risk an exponential blow-up, sound.
 const MAX_PATHS: usize = 256;
 
-/// Evaluates a block to the set of paths through it, one per branch combination, each
+/// Evaluates a block to the set of paths through it (one per branch combination), each
 /// carrying its branch conditions, call obligations and the symbolic value it yields.
 /// `None` if the body leaves the verifiable fragment (a loop, an early return, a field
 /// assignment, an uncontracted call): sound by default, the caller then rejects.
@@ -471,15 +471,15 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
                 }
                 next
             }
-            // A statement-position `if` (or `match`) is evaluated for its EFFECTS, the mutations
-            // its branches make and the obligations they raise, NOT ignored. Ignoring it was
+            // A statement-position `if` (or `match`) is evaluated for its EFFECTS (the mutations
+            // its branches make and the obligations they raise), NOT ignored. Ignoring it was
             // unsound: a branch that assigns (e.g. `if c { x = -1 }`) would silently not update the
             // state, so an invariant a branch violates was spuriously "preserved". Its value is
             // discarded; a missing `else` is a no-op branch carrying only the negated guard.
             Stmt::Expr(e @ (Expr::If { .. } | Expr::Match { .. })) => eval_effect(e, live, ctx)?,
             // Any other statement-position expression (a value, or an uncontracted call like
-            // `print_int`) has no effect on the scalar state the prover tracks, Sond has no
-            // reference-to-local, so a call cannot reassign a caller's local, and no contract to
+            // `print_int`) has no effect on the scalar state the prover tracks (Sond has no
+            // reference-to-local, so a call cannot reassign a caller's local), and no contract to
             // enforce, so it is soundly discarded.
             Stmt::Expr(_) => live,
             // A loop is verified via its invariant (init + preservation), then continues
@@ -611,7 +611,7 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
             // IEEE-754 float division never traps, only integer division must be guarded.
             let is_float = expr_is_float(r, &ctx.float_vars);
             // Signed integer division (`idivq`) also traps on `i64::MIN / -1` (quotient
-            // overflow, #DE). It is UNSIGNED, and so exempt, when either operand is `u64`
+            // overflow, #DE). It is UNSIGNED (and so exempt) when either operand is `u64`
             // (codegen combines types "unsigned wins"); float is exempt too.
             let is_signed_int = !is_float
                 && !expr_is_unsigned(l, &ctx.unsigned_vars)
@@ -751,8 +751,8 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
             Some(out)
         }
         // Right shift `e >> k` / `e >>> k` = `e / 2^k` for a non-negative `e`: the result is opaque
-        // (floor division is non-linear) but carries the same sign/magnitude facts as `/` -
-        // `0 <= q`, `2^k*q <= e`, `e < 2^k*(q+1)`, which a bounded operand turns into a tight
+        // (floor division is non-linear) but carries the same sign/magnitude facts as `/`
+        // (`0 <= q`, `2^k*q <= e`, `e < 2^k*(q+1)`), which a bounded operand turns into a tight
         // range (`x < 256` gives `x >> 3 < 32`). Without a non-negative operand the facts do not
         // hold (an arithmetic `>>` of a negative value is negative), so they are only added then.
         Expr::Binary(BinOp::Shr | BinOp::LShr, l, r) => {
@@ -849,7 +849,7 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
         // is an opaque fresh variable, NOT a fragment exit. The base and index are still
         // evaluated for their own obligations (a division in the index must be proven safe) and to
         // fork on any branch they contain. Each read is a DISTINCT fresh value: two reads are not
-        // assumed equal (sound, the array/struct may have changed between them).
+        // assumed equal (sound: the array/struct may have changed between them).
         Expr::Index(base, index) => {
             let mut out = Vec::new();
             for (s1, _) in eval_expr_paths(base, state, ctx)? {
@@ -873,8 +873,8 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
 }
 
 /// Verifies a loop by its invariant (Hoare's while rule) and returns the continuation
-/// state for each incoming path. For each path: (1) INIT, the invariant holds now; (2)
-/// PRESERVATION, assuming the invariant and the loop condition, one body iteration
+/// state for each incoming path. For each path: (1) INIT: the invariant holds now; (2)
+/// PRESERVATION: assuming the invariant and the loop condition, one body iteration
 /// re-establishes the invariant (over fresh values of the variables it modifies); then
 /// the continuation HAVOCs those variables and assumes `invariant ∧ ¬condition`. `None`
 /// (reject) if init or preservation cannot be proved, or the body leaves the fragment.
@@ -893,7 +893,7 @@ fn eval_loop(
         for inv in invariant {
             let p = sym_prop(inv, &st.env)?;
             if !matches!(prove(&p, &st.cons, &int_types), Outcome::Proven) {
-                return ctx.bail("a loop invariant that does not hold on entry, check the `invariant { .. }`");
+                return ctx.bail("a loop invariant that does not hold on entry; check the `invariant { .. }`");
             }
         }
         // (2) PRESERVATION: havoc the modified variables to arbitrary values, assume the
@@ -935,7 +935,7 @@ fn eval_loop(
             for inv in invariant {
                 let p = sym_prop(inv, &bs.env)?;
                 if !matches!(prove(&p, &bs.cons, &int_types), Outcome::Proven) {
-                    return ctx.bail("a loop invariant not preserved by the body, strengthen the `invariant { .. }`");
+                    return ctx.bail("a loop invariant not preserved by the body; strengthen the `invariant { .. }`");
                 }
             }
         }
@@ -1155,8 +1155,8 @@ fn expr_is_unsigned(e: &Expr, unsigned: &HashSet<String>) -> bool {
     }
 }
 
-/// An obligation is discharged if its primary proposition is proven, or, for a disjunctive
-/// safety obligation, its alternative is. Proving EITHER rules out the unsafe case.
+/// An obligation is discharged if its primary proposition is proven, or (for a disjunctive
+/// safety obligation) its alternative is. Proving EITHER rules out the unsafe case.
 fn obligation_holds(
     ob: &Obligation,
     asm: &[SymProp],
@@ -1336,7 +1336,7 @@ impl Lin {
         self.coeffs.retain(|_, &mut c| c != 0);
         self
     }
-    /// Scale by `f`, or `None` on i128 overflow (the caller then bails conservatively -
+    /// Scale by `f`, or `None` on i128 overflow (the caller then bails conservatively,
     /// never wrapping into a wrong answer).
     fn scale(&self, f: i128) -> Option<Lin> {
         let mut coeffs = BTreeMap::new();
@@ -1641,7 +1641,7 @@ fn overflow_safe(result: &Sym, cons: &[SymProp], int_types: &HashMap<String, (i1
             .copied()
             .unwrap_or((i64::MIN as i128, i64::MAX as i128))
     };
-    // Add each variable's implicit range, the result's and the assumptions', so the
+    // Add each variable's implicit range (the result's and the assumptions'), so the
     // entailment can chain them (e.g. `r < n` with `n <= MAX`).
     let mut vars: std::collections::HashSet<String> = e.coeffs.keys().cloned().collect();
     for c in &a {
@@ -1659,7 +1659,7 @@ fn overflow_safe(result: &Sym, cons: &[SymProp], int_types: &HashMap<String, (i1
     }
     // The result's type range: the intersection of the ranges of the variables it is built from
     // (a well-typed expression's operands share a width, so this is that type's range; mixed
-    // widths, a type error elsewhere, only tighten it). Default to i64 when it has no variable.
+    // widths (a type error elsewhere) only tighten it). Default to i64 when it has no variable.
     let (mut rlo, mut rhi) = (i64::MIN as i128, i64::MAX as i128);
     let mut typed = false;
     for v in e.coeffs.keys() {
@@ -1695,7 +1695,7 @@ fn arith_trustworthy(s: &Sym, cons: &[SymProp], int_types: &HashMap<String, (i12
     }
 }
 
-/// Is `0 <= idx < n` DISPROVEN under `assumptions`, i.e. is the index PROVABLY out of bounds
+/// Is `0 <= idx < n` DISPROVEN under `assumptions`: i.e. is the index PROVABLY out of bounds
 /// for an array of size `n`, given the facts in scope (a function's `requires`, the branch guards
 /// and loop conditions on the path to the access)? This exposes the prover to the bounds check so
 /// it can reject a VARIABLE index that must be out of range, the analog of the constant-index
@@ -1766,7 +1766,7 @@ fn index_props(
     Some((lower, upper, asm, int_types))
 }
 
-/// Do the assumptions FORCE the index out of `[0, bound)`, a provable overrun? (The lenient
+/// Do the assumptions FORCE the index out of `[0, bound)`: a provable overrun? (The lenient
 /// check: reject only what is disproven.)
 pub fn index_provably_oob(idx: &Expr, bound: &Expr, assumptions: &[Expr], params: &[Param]) -> bool {
     let Some((lower, upper, asm, it)) = index_props(idx, bound, assumptions, params) else {
@@ -1853,7 +1853,7 @@ fn index_bounded_by_structure(
     }
 }
 
-/// Is the index PROVEN to lie in `[0, bound)`, `0 <= idx` and `idx < bound` both discharged?
+/// Is the index PROVEN to lie in `[0, bound)`: `0 <= idx` and `idx < bound` both discharged?
 /// (The strict check: accept only what is proven; anything unproven is a compile error. This is
 /// checked-by-default bounds.)
 pub fn index_proven_in_bounds(
@@ -1923,7 +1923,7 @@ fn signed_range_width(lo: i128, hi: i128) -> Option<u32> {
         .find(|&w| lo == -(1i128 << (w - 1)) && hi == (1i128 << (w - 1)) - 1)
 }
 
-/// Sign-extend the low `w` bits of `v`, i.e. wrap `v` into a signed `w`-bit type, exactly as
+/// Sign-extend the low `w` bits of `v`: i.e. wrap `v` into a signed `w`-bit type, exactly as
 /// the machine's narrow arithmetic does.
 fn canon_signed(v: i64, w: u32) -> i64 {
     let s = 64 - w;
@@ -1951,7 +1951,7 @@ fn node_signed_width(s: &Sym, int_types: &HashMap<String, (i128, i128)>) -> Opti
 }
 
 /// Evaluates a symbolic value under a concrete assignment, using WRAPPING arithmetic at each
-/// operation's real type width, the machine's semantics, so a witness is faithful to how the
+/// operation's real type width (the machine's semantics), so a witness is faithful to how the
 /// compiled code runs (an `i32 + 1` at `i32::MAX` wraps to `i32::MIN`, not 2^31).
 fn eval_sym(s: &Sym, env: &BTreeMap<String, i64>, int_types: &HashMap<String, (i128, i128)>) -> Option<i64> {
     let narrow = |raw: i64| match node_signed_width(s, int_types) {
@@ -2007,12 +2007,12 @@ fn collect_consts(s: &Sym, out: &mut BTreeSet<i64>) {
     }
 }
 
-/// Searches for a concrete input that satisfies every assumption yet breaks `goal`, a real,
+/// Searches for a concrete input that satisfies every assumption yet breaks `goal`: a real,
 /// VERIFIED counterexample (evaluated with wrapping i64, so it is exactly what the machine
 /// does). Bounded: only up to 3 free variables, over a small candidate set seeded from the
 /// constants in play plus the type's extremes; returns `None` (and the diagnostic simply
 /// omits a counterexample) rather than overclaim when none is found in budget. A returned
-/// witness is never a false positive, it is checked to actually violate the goal.
+/// witness is never a false positive; it is checked to actually violate the goal.
 fn find_counterexample(
     goal: &SymProp,
     assumptions: &[SymProp],
@@ -2209,7 +2209,7 @@ mod tests {
 
     #[test]
     fn uses_a_disequality_to_tighten_an_integer_bound() {
-        // `bit != 0` with `bit >= 0` forces `bit >= 1` over ℤ, so `bit - 1 >= 0`, the exact step
+        // `bit != 0` with `bit >= 0` forces `bit >= 1` over ℤ, so `bit - 1 >= 0`: the exact step
         // a down-counting loop's `if bit == 0 { break }` guard gives before `bit = bit - 1`.
         let f = parse(
             "fn f(bit: i64 where bit >= 0 && bit != 0) -> (r: i64) ensures { r >= 0 } { bit - 1 }",
@@ -2220,7 +2220,7 @@ mod tests {
     #[test]
     fn a_disequality_alone_does_not_prove_a_bound() {
         // Without the `>= 0`, `bit != 0` does not bound `bit - 1` below (bit could be very
-        // negative), must NOT be proven.
+        // negative); must NOT be proven.
         let f = parse("fn f(bit: i64 where bit != 0) -> (r: i64) ensures { r >= 0 } { bit - 1 }");
         assert!(verify(&f).is_err());
     }
@@ -2299,7 +2299,7 @@ mod tests {
 
     #[test]
     fn proves_a_shifted_bound_from_a_precondition() {
-        // 0 < x < 1000 entails x + 1 > 1, the linear prover must shift a bound, which the
+        // 0 < x < 1000 entails x + 1 > 1: the linear prover must shift a bound, which the
         // exact-match prover could not do. The upper bound is needed for soundness: `x + 1`
         // must be proven not to overflow (an unbounded `x > 0` alone is rejected, see
         // `rejects_a_proof_that_relies_on_signed_overflow`).
@@ -2378,7 +2378,7 @@ mod tests {
 
     #[test]
     fn proves_the_range_of_a_bitmask() {
-        // `x & m` lands in [0, m] for any `x` when `m >= 0`, the low-bits confinement.
+        // `x & m` lands in [0, m] for any `x` when `m >= 0`: the low-bits confinement.
         let m = parse("fn f(x: i64) -> (r: i64) ensures { r >= 0; r <= 7 } { x & 7 }");
         assert!(verify(&m).is_ok());
     }
@@ -2473,7 +2473,7 @@ mod tests {
 
     #[test]
     fn splits_a_conjunctive_assumption_to_bound_an_index() {
-        // A SINGLE `&&` fact, `count >= 0 && count < 4`, must bound `count` for size 4.
+        // A SINGLE `&&` fact (`count >= 0 && count < 4`) must bound `count` for size 4.
         // Written as one conjunction (as an `if a && b { .. }` guard or a `requires { a && b }`
         // yields), not two `;`-separated props. Before the fix the whole `And` was dropped
         // because it is not itself a comparison, so neither conjunct reached the linear engine.
@@ -2532,7 +2532,7 @@ mod tests {
 
     #[test]
     fn rejects_when_one_branch_violates_the_postcondition() {
-        // The else-branch returns -1, breaking `r >= 0`, one bad path rejects the whole.
+        // The else-branch returns -1, breaking `r >= 0`: one bad path rejects the whole.
         let funcs = parse(
             "fn f(x: i64) -> (r: i64) ensures { r >= 0 } { if x >= 0 { x } else { 0 - 1 } }",
         );
@@ -2592,7 +2592,7 @@ mod tests {
     #[test]
     fn rejection_shows_a_concrete_counterexample() {
         // `r >= 0` with r = x and no precondition is unprovable. Per the Prime Directive
-        // (feedback mandate: "actionable, a counterexample input"), the diagnostic must
+        // (feedback mandate: "actionable: a counterexample input"), the diagnostic must
         // exhibit a concrete input that breaks the contract, not just say it failed.
         let funcs = parse("fn f(x: i64) -> (r: i64) ensures { r >= 0 } { x }");
         let err = verify(&funcs).expect_err("x may be negative");
@@ -2663,7 +2663,7 @@ mod tests {
 
     #[test]
     fn unsigned_div_needs_only_nonzero() {
-        // Unsigned division (`divq`) never has the MIN/-1 overflow, so `y != 0` suffices -
+        // Unsigned division (`divq`) never has the MIN/-1 overflow, so `y != 0` suffices,
         // the overflow obligation must NOT be raised for u64.
         let funcs =
             parse("fn q(x: u64, y: u64) -> (r: u64) requires { y != 0 } { x / y }");
@@ -2781,7 +2781,7 @@ mod tests {
     #[test]
     fn accepts_a_division_guarded_by_a_precondition() {
         // `requires { b > 0 }` discharges BOTH obligations of a signed division: the divisor
-        // is nonzero and (b != -1) it cannot overflow. (`b != 0` alone is no longer enough -
+        // is nonzero and (b != -1) it cannot overflow. (`b != 0` alone is no longer enough,
         // see `rejects_signed_min_div_minus_one`.)
         let funcs = parse("fn d(a: i64, b: i64) -> i64 requires { b > 0 } { a / b }");
         assert!(verify(&funcs).is_ok());

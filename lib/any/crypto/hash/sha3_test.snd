@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/any/crypto/hash/sha3_test.snd, SHA-3 / SHAKE tests against NIST FIPS 202 vectors.
+// lib/any/crypto/hash/sha3_test.snd: SHA-3 / SHAKE tests against NIST FIPS 202 vectors.
 
 include "any/crypto/hash/sha3.snd"
 include "x86_64/linux/testing.snd"
@@ -78,7 +78,7 @@ test "shake256_empty_32" {
     assert_eq(buf_eq_hex(out, 32, "46b9dd2b0ba88d13233b3feb743eeb243fcd52ea62b81b82b50c27646ed5762f"), 1)
 }
 
-// SHAKE256 of "" (64 bytes), full NIST vector
+// SHAKE256 of "" (64 bytes): full NIST vector
 test "shake256_empty_64" {
     let out[64]
     shake256(0, 0, out, 64)

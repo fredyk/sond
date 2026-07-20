@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/any/pic/frame.snd, wire framing for the PIC compute cluster.
+// lib/any/pic/frame.snd: wire framing for the PIC compute cluster.
 //
 // A node is driven over a serial link with fixed little frames:
 //   [STX=0x02][node][code][len][payload_0 .. payload_{len-1}][checksum]
 // The checksum is a bytewise XOR over node, code, len and the payload, so a
 // single flipped bit on the (noisy, bit-banged) line is caught by the receiver.
 // No allocator: the caller owns the output buffer. This layout is the contract
-// shared by the Go host, the Sond host and the on-chip firmware, keep them equal.
+// shared by the Go host, the Sond host and the on-chip firmware; keep them equal.
 
 let PIC_STX = 0x02
 

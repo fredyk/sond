@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// An AUTHENTICATED, ENCRYPTED HTTP exchange over a real loopback socket, the HTTPS-shaped
+// An AUTHENTICATED, ENCRYPTED HTTP exchange over a real loopback socket: the HTTPS-shaped
 // litmus milestone, end to end in Sond. A forked client and the parent server run a Noise-IK
 // handshake over TCP (client knows the server's static public key), derive session keys, and
 // then carry one HTTP request/response encrypted with ChaCha20-Poly1305. Exit 0 iff the

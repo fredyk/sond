@@ -8,15 +8,15 @@ clean as an open-source codebase that ships cryptography.
 
 Both are permissive. The decisive difference is **patents**:
 
-- **MIT** grants copyright permission only. It is *silent* on patents, a
+- **MIT** grants copyright permission only. It is *silent* on patents: a
   contributor could contribute code and later assert a patent against users.
 - **Apache-2.0 §3** adds an **express, royalty-free patent grant** from every
   contributor to every user, plus a **retaliation clause**: anyone who starts
   patent litigation over the software loses their grant.
 
 For a language/compiler that other people build on *and* that ships crypto,
-that patent grant is the protection worth having. The one trade-off, Apache-2.0
-is incompatible with GPLv2-*only* projects, is marginal for a new language, and
+that patent grant is the protection worth having. The one trade-off (Apache-2.0
+is incompatible with GPLv2-*only* projects) is marginal for a new language, and
 Apache-2.0 is fully compatible with GPLv3/LGPLv3.
 
 ## The idea/expression rule (why re-implementations are ours)
@@ -24,7 +24,7 @@ Apache-2.0 is fully compatible with GPLv3/LGPLv3.
 Copyright protects a *specific source expression*, never an **algorithm, idea,
 method, or interface**. Re-implementing SHA-256, ChaCha20, CRC-32, the Kyber
 Barrett reduction, or TCP/SSH framing **from its specification** produces an
-original work owned by this project, it carries only Sond's Apache-2.0 license,
+original work owned by this project: it carries only Sond's Apache-2.0 license,
 with **no third-party license obligation**. Legal basis: Directive 2009/24/EC
 art. 1.2; Spain art. 96.4 TRLPI; U.S. 17 U.S.C. 102(b); CJEU *SAS v. WPL*
 (C-406/10, 2012), which held functionality, programming languages, and data
@@ -38,15 +38,15 @@ royalty-free** under the patent licenses NIST negotiated in FIPS 203.
 
 1. **Unpatented algorithms only, verified by the worker itself.** Only implement
    algorithms that are **patent-free or royalty-free** (unpatented IETF RFCs, NIST
-   FIPS, public domain). The AI worker **must research online first**, locate the
-   official spec (RFC/FIPS/paper) *and* check the algorithm's patent status -
+   FIPS, public domain). The AI worker **must research online first**: locate the
+   official spec (RFC/FIPS/paper) *and* check the algorithm's patent status,
    before writing any code. At the slightest doubt an algorithm may be patented,
    it is **not implemented**. Copyright is never the risk when re-implementing; a
    **method patent** is, and a clean re-implementation does not evade it (cf. the
    Unisys GIF/LZW patent).
 2. **Clean-room only.** Implement from the *prose* of the spec. **Never paste**
    a third-party implementation, nor an RFC's ABNF grammar / pseudocode block /
-   test vector *verbatim*, RFC "Code Components" (post-2008) are Revised-BSD
+   test vector *verbatim*: RFC "Code Components" (post-2008) are Revised-BSD
    licensed via the IETF Trust, and copying them verbatim drags that attribution.
    Re-derive them instead.
 2. **NIST/FIPS test vectors are free** (U.S. government work, public domain,

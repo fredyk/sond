@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/any/crypto/ssh-kex.snd, the reusable server side of the SSH
+// lib/any/crypto/ssh-kex.snd: the reusable server side of the SSH
 // curve25519-sha256 key exchange (RFC 5656 / RFC 4253 §8). Composes the verified
 // X25519, SHA-256 and Ed25519 primitives. A live SSH server includes this and
 // calls server_kex() with the client's ephemeral public key Q_C and its own fixed

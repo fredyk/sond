@@ -15,8 +15,8 @@ fn get_be16(buf: i64, off: i64) -> i64 {
 }
 
 // Build an ARP request frame in the given buffer.
-//   sip , sender IP as 32-bit integer (e.g. 0xC0A80102 = 192.168.1.2)
-//   tip , target IP as 32-bit integer (e.g. 0xC0A80101 = 192.168.1.1)
+//   sip  : sender IP as 32-bit integer (e.g. 0xC0A80102 = 192.168.1.2)
+//   tip  : target IP as 32-bit integer (e.g. 0xC0A80101 = 192.168.1.1)
 //
 // Ethernet header (14 bytes):
 //   offset 0 : destination MAC  (broadcast ff:ff:ff:ff:ff:ff)
@@ -147,7 +147,7 @@ fn efi_main() -> i64 {
     // Build an ARP request: sip=192.168.1.2 (0xC0A80102), tip=192.168.1.1 (0xC0A80101)
     build_arp_request(buf, 0xC0A80102, 0xC0A80101)
 
-    // Print the ethertype, expected 2054 (= 0x0806)
+    // Print the ethertype: expected 2054 (= 0x0806)
     print("ethertype =")
     print_int(parse_ethertype(buf))
 

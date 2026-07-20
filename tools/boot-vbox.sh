@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boot a Sond UEFI application in VirtualBox HEADLESS (VBoxHeadless), BARE UEFI,
+# Boot a Sond UEFI application in VirtualBox HEADLESS (VBoxHeadless): BARE UEFI,
 # no OS underneath. This is the FINAL validation target: QEMU is used for fast
 # iteration during development, VirtualBox for the real end-to-end proof.
 #
@@ -41,7 +41,7 @@ mmd   -i "$IMG" ::/EFI ::/EFI/BOOT
 mcopy -i "$IMG" "$EFI" ::/EFI/BOOT/BOOTX64.EFI
 
 # --- 2. Wrap it in a GPT disk with a real EFI System Partition. VirtualBox's EFI
-#     firmware (unlike OVMF) will NOT boot a bare-FAT image, it needs a
+#     firmware (unlike OVMF) will NOT boot a bare-FAT image: it needs a
 #     partitioned disk with an ESP (type EF00) for the fallback loader to run.
 DISK="$WORK/disk.raw"
 first=2048                                   # 1 MiB alignment
@@ -74,7 +74,7 @@ else
   VBoxManage modifyvm "$VM" --natpf1 "ssh,tcp,127.0.0.1,$PORT,,22"
 fi
 # Optional fixed NIC MAC (SOND_VBOX_MAC, 12 hex digits). VirtualBox otherwise assigns
-# an 08:00:27:xx address, which the virtio device filters on, set this to match the
+# an 08:00:27:xx address, which the virtio device filters on; set this to match the
 # MAC the guest OS uses (e.g. 525400123456, QEMU's default) so unicast is delivered.
 if [ -n "${SOND_VBOX_MAC:-}" ]; then
   VBoxManage modifyvm "$VM" --macaddress1 "$SOND_VBOX_MAC"
