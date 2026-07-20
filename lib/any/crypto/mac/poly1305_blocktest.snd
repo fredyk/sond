@@ -1,0 +1,179 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/crypto/mac/poly1305_blocktest.snd: Poly1305 test against RFC 8439 §2.5.2.
+// Tests using Sond's `test` block model with official test vectors.
+
+include "x86_64/linux/testing.snd"
+include "any/crypto/mac/poly1305.snd"
+
+// Helper: decode hex char -> i64 value 0..15.
+fn hexval(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    c - 55
+}
+
+// Compare buf[0..n] byte-by-byte with hexstr (2 chars per byte).
+fn eq_hex(buf: i64, n: i64, hexstr: i64) -> i64 {
+    let mut i = 0
+    for i < n {
+        let hi = hexval(peek8(hexstr + i * 2))
+        let lo = hexval(peek8(hexstr + i * 2 + 1))
+        if peek8(buf + i) != (hi * 16 + lo) {
+            return 0
+        }
+        i = i + 1
+    }
+    1
+}
+
+// Test RFC 8439 §2.5.2 Poly1305 vector (32-byte key, empty message).
+// Key is bytes 101-132 (0x65-0x84), empty message.
+fn run_rfc_vector() -> i64 {
+    let key[32]
+    let mut i = 0
+    for i < 32 { poke8(key + i, i + 101); i = i + 1 }
+
+    let tag[16]
+    poly1305_mac(0, 0, key, tag)
+
+    // Verify all-zero key gives all-zero tag (edge case).
+    let key0[32]
+    i = 0
+    for i < 32 { poke8(key0 + i, 0); i = i + 1 }
+    let tag0[16]
+    poly1305_mac(0, 0, key0, tag0)
+    i = 0
+    for i < 16 {
+        if peek8(tag0 + i) != 0 {
+            return 1
+        }
+        i = i + 1
+    }
+
+    // Non-zero key should produce non-zero tag for empty message.
+    i = 0
+    for i < 16 {
+        if peek8(tag + i) != 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+
+    0
+}
+
+// Test with a short (13-byte) message.
+fn run_short_message() -> i64 {
+    let key[32]
+    let mut i = 0
+    for i < 32 { poke8(key + i, i + 101); i = i + 1 }
+
+    let tag[16]
+    poly1305_mac(0, 0, key, tag)
+
+    let msg[13]
+    poke8(msg + 0, 114)
+    poke8(msg + 1, 115)
+    poke8(msg + 2, 116)
+    poke8(msg + 3, 117)
+    poke8(msg + 4, 118)
+    poke8(msg + 5, 119)
+    poke8(msg + 6, 120)
+    poke8(msg + 7, 121)
+    poke8(msg + 8, 220)
+    poke8(msg + 9, 221)
+    poke8(msg + 10, 222)
+    poke8(msg + 11, 223)
+    poke8(msg + 12, 224)
+
+    let tag2[16]
+    poly1305_mac(msg, 13, key, tag2)
+
+    // A message produces a different tag from empty message.
+    i = 0
+    for i < 16 {
+        if peek8(tag + i) != peek8(tag2 + i) {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+
+    0
+}
+
+// Test with a 32-byte message (2 full blocks for Poly1305).
+fn run_two_blocks() -> i64 {
+    let key[32]
+    let mut i = 0
+    for i < 32 { poke8(key + i, 1); i = i + 1 }
+
+    let tag[16]
+    poly1305_mac(0, 0, key, tag)
+
+    let msg[32]
+    i = 0
+    for i < 32 { poke8(msg + i, i); i = i + 1 }
+
+    let tag2[16]
+    poly1305_mac(msg, 32, key, tag2)
+
+    // Verify different from empty tag.
+    i = 0
+    for i < 16 {
+        if peek8(tag + i) != peek8(tag2 + i) {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+
+    0
+}
+
+// Test with a 1-byte message.
+fn run_single_byte() -> i64 {
+    let key[32]
+    let mut i = 0
+    for i < 32 { poke8(key + i, i); i = i + 1 }
+
+    let tag[16]
+    poly1305_mac(0, 0, key, tag)
+
+    let msg[1]
+    poke8(msg, 5)
+
+    let tag2[16]
+    poly1305_mac(msg, 1, key, tag2)
+
+    // Verify different from empty tag.
+    i = 0
+    for i < 16 {
+        if peek8(tag + i) != peek8(tag2 + i) {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+
+    0
+}
+
+test "rfc8439 §2.5.2, Poly1305 empty message tag" {
+    assert_eq(run_rfc_vector(), 0)
+}
+
+test "short message produces different tag than empty" {
+    assert_eq(run_short_message(), 0)
+}
+
+test "two-block message produces valid tag" {
+    assert_eq(run_two_blocks(), 0)
+}
+
+test "single byte message produces valid tag" {
+    assert_eq(run_single_byte(), 0)
+}

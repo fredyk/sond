@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/crypto/pqc/mlkem-encode.snd: ML-KEM (FIPS 203) encoding primitives.
+
+let MLKEM_Q = 3329
+let MLKEM_N = 256
+
+fn compress_d(x: i64, d: i64) -> i64 {
+    if d >= 13 { x % MLKEM_Q } else {
+        let p2 = 1 << d; let halfQ = MLKEM_Q / 2
+        ((p2 * x + halfQ) / MLKEM_Q) % p2
+    }
+}
+fn decompress_d(x: i64, d: i64) -> i64 {
+    if d >= 13 { x % MLKEM_Q } else {
+        let p2 = 1 << d; let half = p2 / 2
+        ((MLKEM_Q * x + half) / p2) % MLKEM_Q
+    }
+}
+fn byteEncode_d(out: i64, in_: i64, n: i64, d: i64) -> i64 {
+    let mut ob = 0; let mut i = 0
+    for i < n {
+        let mut j = 0
+        for j < d {
+            let bi = ob + j
+            let byteIdx = bi / 8
+            let bitInByte = bi % 8
+            let bit = (in_[i] >>> j) & 1
+            poke8(out + byteIdx, peek8(out + byteIdx) | (bit << bitInByte))
+            j = j + 1
+        }
+        ob = ob + d; i = i + 1
+    }
+    (ob + 7) / 8
+}
+fn byteDecode_d(out: i64, in_: i64, n: i64, d: i64) {
+    let mut i = 0
+    for i < n {
+        let mut bit = 0; let mut val = 0
+        for bit < d {
+            let bi = i * d + bit
+            let byteIdx = bi / 8
+            let bitInByte = bi % 8
+            let bitVal = (peek8(in_ + byteIdx) >>> bitInByte) & 1
+            val = val | (bitVal << bit)
+            bit = bit + 1
+        }
+        out[i] = val; i = i + 1
+    }
+}
+fn _cbd(a: i64, buf: i64, n: i64, eta: i64, cursor: i64) {
+    let mut bitOff = cursor[1]
+    let mut i = 0
+    for i < n {
+        let mut a1 = 0; let mut a2 = 0; let mut j = 0
+        for j < eta {
+            a1 = a1 + ((peek8(buf + bitOff / 8) >>> bitOff % 8) & 1)
+            bitOff = bitOff + 1; j = j + 1
+        }
+        j = 0
+        for j < eta {
+            a2 = a2 + ((peek8(buf + bitOff / 8) >>> bitOff % 8) & 1)
+            bitOff = bitOff + 1; j = j + 1
+        }
+        a[i] = a1 - a2; i = i + 1
+    }
+    cursor[1] = bitOff
+}
+fn cbd_eta2(a: i64, buf: i64, n: i64, cursor: i64) { _cbd(a, buf, n, 2, cursor) }
+fn cbd_eta3(a: i64, buf: i64, n: i64, cursor: i64) { _cbd(a, buf, n, 3, cursor) }
+fn sample_ntt(a: i64, buf: i64, n: i64, cursor: i64) {
+    let mut bitOff = cursor[1]
+    let mut i = 0
+    for i < n {
+        let b0 = peek8(buf + bitOff / 8)
+        let b1 = peek8(buf + bitOff / 8 + 1)
+        let b2 = peek8(buf + bitOff / 8 + 2)
+        let x = b0 | (b1 << 8) | (b2 << 16)
+        bitOff = bitOff + 24
+        a[i] = x % MLKEM_Q
+        i = i + 1
+    }
+    cursor[1] = bitOff
+}
