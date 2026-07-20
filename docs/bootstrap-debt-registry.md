@@ -122,4 +122,21 @@ accounting → no language change; runs against the existing example suite.
   that "harder to write → impossible to be wrong" is buildable within the qwen3.6 ceiling.
 - Immutability by default (`let` vs `let mut`); immutable parameters.
 
+## Money is binary floating point today
+
+`decimal.rs` implements exact fixed-point arithmetic, mantissa over a power of ten, and the lexer
+keeps a decimal literal's raw lexeme specifically so no precision is lost before it gets there.
+Only the interpreter uses any of it. Native codegen types `Expr::Decimal` as `Ty::F64` and emits
+the literal through `s.parse::<f64>()`, so a compiled program does its money in binary floating
+point, which is the one representation the design says it must never use.
+
+Two things are wrong and they are separable. The first is that the native path contradicts the
+intent: `Money` should lower to the fixed-point representation `decimal.rs` already defines. The
+second is quieter and worse, which is that nothing complains. `print_int(10.25)` compiles and
+prints the float's bits, so a value of the wrong class crosses into an integer parameter with no
+diagnostic at all.
+
+Until the first is done, the language reference tells people not to use decimals for money. That
+is a warning in a document, which is exactly the kind of guarantee this project exists to replace.
+
 *This registry is itself a guarantee: nothing on it is allowed to become "just how Sond is".*

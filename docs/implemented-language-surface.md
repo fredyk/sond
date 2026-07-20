@@ -54,7 +54,7 @@ fn efi_main() -> i64 {
 - `bool`: `true` / `false`.
 - String literals `"..."` exist only as arguments to `print`/`write`/`serial_print`.
 
-No `Money`/decimal, no strings-as-values, no arrays yet in codegen.
+Decimals (`10.25`) compile as `f64`, NOT as exact `Money` yet: do not use them for money.
 
 ## Expressions
 
@@ -130,16 +130,17 @@ A function can carry a contract, PROVEN AT COMPILE TIME for every input (not che
 runtime). If it cannot prove a postcondition the compiler REJECTS the program, so only
 add a contract the prover can verify.
 
-The prover today handles **straight-line integer bodies** (let-bindings, `+ - *`, a tail
-expression, no loops or calls) and decides comparison propositions from the preconditions.
+The prover handles straight-line bodies, loops whose `invariant` it VERIFIES (init and
+preservation, not merely trusts), and calls: a caller must prove the callee's `requires`, and
+its `ensures` flows back.
 Rules of thumb that WILL verify:
 - constant results: `ensures { r == 42 } { 6 * 7 }`;
 - arithmetic identities: `ensures { r == x + x } { x + x }`;
 - passing a precondition through: `requires { x > 0 } ensures { r > 0 } { x }`.
 
 Syntax: `fn f(x: i64) -> (q: i64) requires { x >= 0 } ensures { q >= 0 } { x }`.
-`requires`/`ensures` hold propositions (newline/`;` separated, implicit AND); each is a
-SINGLE comparison (no `&&` yet, write several). `-> (name: Type)` binds the result so
+`requires`/`ensures` hold propositions (newline or `;` separated, implicit AND); `&&` inside
+one is split into conjuncts. `-> (name: Type)` binds the result so
 `ensures` can name it; parameters are in scope in both.
 
 A parameter can carry a **`where` refinement**: `fn get(i: i64 where 0 <= i && i < 10)`
