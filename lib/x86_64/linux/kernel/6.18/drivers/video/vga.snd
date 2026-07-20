@@ -12,11 +12,25 @@
 // Linux naming convention (vgacon).  Usage: include "drivers/video/vga.snd"
 // from your kernel module.  The driver is a bare-metal library, no efi_main.
 // Tested on bare-metal: QEMU/OVMF, booted as UEFI app.
+//
+// The seam: every function that touches the framebuffer reads/writes through
+// the module global `vga_fb` instead of the hardware constant directly. It
+// defaults to VGA_MEMORY (real hardware), so production behavior is
+// unchanged, but a hosted test can point it at ordinary stack/heap memory
+// (`vga_fb = some_buffer`) before calling vgacon_clear_screen / vgacon_scroll
+// / vgacon_putchar's write path, because the Sondc test harness does not map
+// 0xB8000 and a direct write there segfaults the test.
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 // VGA text-mode memory location (base + 256-byte I/O page shift)
 let VGA_MEMORY = 0xB8000
+
+// The framebuffer address the driver actually reads/writes. Defaults to the
+// real hardware address (duplicated as a literal, not `= VGA_MEMORY`,
+// because the compiler only accepts a literal constant in a global
+// initializer); see the seam note above.
+let mut vga_fb: i64 = 0xB8000
 
 // 80 columns, 25 rows
 let VGA_COLS = 80
@@ -53,11 +67,12 @@ pub fn vgacon_set_cursor(col: i64, row: i64) {
 }
 
 // Internal helper, only used by scroll (writes zero to the entire screen).
-// Not tested directly because peek8/poke8 at 0xB8000 segfault in Sondc test mode.
+// Writes through vga_fb (see the seam note above the constants), so a test
+// can point it at ordinary memory and read the zeroed cells back.
 fn vgacon_clear_screen() {
     let mut i = 0
     for i < VGA_NUM_CELLS {
-        poke16(VGA_MEMORY + i * 2, 0)
+        poke16(vga_fb + i * 2, 0)
         i = i + 1
     }
 }
@@ -66,8 +81,15 @@ fn vgacon_clear_screen() {
 
 fn vgacon_scroll() {
     // Move every line up by one row.
-    let mut src = 2 * VGA_COLS   // 160 (byte offset of row 1)
-    let mut dst = 0               // byte offset of row 0
+    //
+    // Bug found while adding test coverage: src/dst used to be bare row
+    // offsets (0, 160, ...) with no framebuffer base added, so this copied
+    // from/to low physical memory near address 0 instead of the actual
+    // video memory, the only line that added the base was the last one
+    // (clearing the bottom row), which used the 0xB8000 literal directly
+    // instead of the vga_fb seam. Both are fixed together here.
+    let mut src = vga_fb + 2 * VGA_COLS   // byte offset of row 1
+    let mut dst = vga_fb                   // byte offset of row 0
     let mut i = 0
     for i < VGA_ROWS - 1 {
         let mut j = 0
@@ -80,7 +102,7 @@ fn vgacon_scroll() {
         dst = dst + VGA_COLS * 2
         i = i + 1
     }
-    poke16(0xB8000 + (VGA_ROWS - 1) * VGA_COLS * 2, 0)
+    poke16(vga_fb + (VGA_ROWS - 1) * VGA_COLS * 2, 0)
 }
 
 // Check whether the cursor will scroll when we advance it.
@@ -145,7 +167,7 @@ pub fn vgacon_putchar(ch: i64, attr: i64) {
         let cell = cur_row * VGA_COLS + cur_col
         let offset = cell * 2
         let word = ch | (attr << 8)
-        poke16(VGA_MEMORY + offset, word)
+        poke16(vga_fb + offset, word)
 
         cur_col = cur_col + 1
         if cur_col >= VGA_COLS {

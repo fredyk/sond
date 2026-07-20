@@ -191,6 +191,183 @@ test "alloc_page returns 0 when all pages are free" {
 // Test: kmalloc works across many objects (multiple slabs)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Test: kmalloc rejects invalid sizes without touching the page allocator
+// ---------------------------------------------------------------------------
+
+test "kmalloc rejects n <= 0" {
+    let reg = __setup_allocator(2)
+    assert(reg != 0)
+    assert_eq(kmalloc(0), 0)
+    assert_eq(kmalloc(-5), 0)
+}
+
+test "kmalloc rejects objects larger than MAX_OBJECT (509 bytes)" {
+    let reg = __setup_allocator(2)
+    assert(reg != 0)
+    // 510 rounds up to 512, which is > MAX_OBJECT (509).
+    assert_eq(kmalloc(510), 0)
+}
+
+// ---------------------------------------------------------------------------
+// Test: kfree(0) is a documented no-op
+// ---------------------------------------------------------------------------
+
+test "kfree(0) does not crash and leaves the allocator usable" {
+    let reg = __setup_allocator(2)
+    assert(reg != 0)
+    kfree(0)
+    let a = kmalloc(16)
+    assert(a != 0)
+}
+
+// ---------------------------------------------------------------------------
+// Test: kfree on one of several live objects keeps the slab alive
+// (the __slab_alloced(cur) == 0 branch inside kfree must NOT fire)
+// ---------------------------------------------------------------------------
+
+test "kfree on one live object of several does not discard the slab" {
+    let reg = __setup_allocator(2)
+    assert(reg != 0)
+
+    let a = kmalloc(16)
+    let b = kmalloc(16)
+    assert(a != 0)
+    assert(b != 0)
+
+    kfree(a)   // b is still allocated, the slab must survive
+
+    // b must still be valid and writable.
+    poke64(b, 999)
+    assert_eq(peek64(b), 999)
+
+    // A same-size alloc should still succeed (room remains in the slab).
+    let c = kmalloc(16)
+    assert(c != 0)
+}
+
+// ---------------------------------------------------------------------------
+// Test: __slab_discard unlinking a NON-head slab (prev != 0 branch)
+// ---------------------------------------------------------------------------
+//
+// __alloc_slab always links new slabs at the HEAD of __slab_list, so the
+// first slab created ends up behind the second one. Fully draining the
+// first slab (while the second, the head, stays alive) forces kfree's walk
+// to unlink a slab that is not __slab_list itself.
+
+test "kfree fully draining a non-head slab unlinks it correctly" {
+    let reg = __setup_allocator(3)
+    assert(reg != 0)
+
+    // 500-byte objects: sz rounds to 504, so 7 fit in one 4KiB slab page
+    // ((4096 - 24) / (504 + 8) = 7). The 8th forces a second slab.
+    let firsts[7]
+    let mut i = 0
+    for i < 7 {
+        let p = kmalloc(500)
+        assert(p != 0)
+        firsts[i] = p
+        i = i + 1
+    }
+
+    // This one lands in a brand-new slab, which becomes the new head.
+    let anchor = kmalloc(500)
+    assert(anchor != 0)
+
+    // Drain every object from the first (now non-head) slab.
+    i = 0
+    for i < 7 {
+        kfree(firsts[i])
+        i = i + 1
+    }
+
+    // The pool must still work normally: a fresh alloc succeeds, and the
+    // still-live object in the surviving (head) slab is untouched.
+    let after = kmalloc(500)
+    assert(after != 0)
+    poke64(anchor, 12345)
+    assert_eq(peek64(anchor), 12345)
+}
+
+// ---------------------------------------------------------------------------
+// Test: kmalloc returns 0 once the page pool is exhausted
+// (the __alloc_slab() == 0 branch inside kmalloc)
+// ---------------------------------------------------------------------------
+
+test "kmalloc returns 0 when a new slab is needed but no page remains" {
+    let reg = __setup_allocator(1)   // exactly one page for the whole pool
+    assert(reg != 0)
+
+    let mut i = 0
+    for i < 7 {
+        let p = kmalloc(500)
+        assert(p != 0)
+        i = i + 1
+    }
+    // The single page is now fully committed to one slab; the 8th
+    // allocation needs a second page, and there isn't one.
+    assert_eq(kmalloc(500), 0)
+}
+
+// ---------------------------------------------------------------------------
+// Test: alloc_page before any page_alloc_init call
+// ---------------------------------------------------------------------------
+
+test "alloc_page returns 0 before the allocator is initialized" {
+    // Each test forks from the program's pristine start state, so __npages
+    // is still its zero default here, exercising the __npages <= 0 guard.
+    assert_eq(alloc_page(), 0)
+}
+
+// ---------------------------------------------------------------------------
+// Test: free_page's invalid-address guards (each is a separate branch)
+// ---------------------------------------------------------------------------
+
+test "free_page ignores a misaligned address" {
+    let reg = __setup_allocator(2)
+    assert(reg != 0)
+    let p1 = alloc_page()
+    assert(p1 != 0)
+
+    free_page(p1 + 1)   // misaligned: off % PAGE_SIZE != 0, must be a no-op
+
+    // Both pages are still considered allocated: p1 was never actually
+    // freed, so only one more page should be available.
+    let p2 = alloc_page()
+    assert(p2 != 0)
+    assert_ne(p1, p2)
+    assert_eq(alloc_page(), 0)
+}
+
+test "free_page ignores an address before the managed range" {
+    let reg = __setup_allocator(2)
+    assert(reg != 0)
+    let base = reg + 4096   // __setup_allocator reserves the first page for the bitmap
+
+    free_page(base - 4096)   // off < 0, must be a no-op
+
+    // The allocator must be completely unaffected: both pages still free.
+    let p1 = alloc_page()
+    let p2 = alloc_page()
+    assert(p1 != 0)
+    assert(p2 != 0)
+    assert_eq(alloc_page(), 0)
+}
+
+test "free_page ignores an aligned address past the managed range" {
+    let reg = __setup_allocator(2)
+    assert(reg != 0)
+    let base = reg + 4096
+
+    free_page(base + 2 * PAGE_SIZE)   // aligned, but idx (2) >= __npages (2)
+
+    let p1 = alloc_page()
+    let p2 = alloc_page()
+    assert(p1 != 0)
+    assert(p2 != 0)
+    assert_eq(alloc_page(), 0)
+}
+
 test "kmalloc spans multiple slab pages" {
     // 16 pages can hold many objects (508 per slab), so kmalloc(64)
     // will use multiple slab pages in sequence.

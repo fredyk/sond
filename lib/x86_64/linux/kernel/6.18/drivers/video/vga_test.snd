@@ -2,13 +2,14 @@
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
 // lib/x86_64/linux/kernel/6.18/drivers/video/vga_test.snd -
-// Tests for the VGA text console cursor logic.
+// Tests for the VGA text console cursor logic, and for the framebuffer
+// write path (clear, scroll, putchar, puts) via the vga_fb seam.
 //
-// Note: Sondc test harness does not map 0xB8000, so tests that exercise
-// poke8/poke16 at the VGA framebuffer or scroll (which reads/writes 0xB8000)
-// segfault in the child.  We test cursor position arithmetic on its own
-// (which is the pure core) and keep vgacon_init to a zero-clear only
-// when fully_clear==0, avoiding 0xB8000 access entirely during tests.
+// Note: Sondc test harness does not map 0xB8000, so a test would segfault if
+// it exercised the real hardware address. vga.snd's vga_fb seam (see its doc
+// comment) lets these tests point the driver at an ordinary stack buffer
+// instead, so vgacon_clear_screen / vgacon_scroll / vgacon_putchar's write
+// path can be exercised for real, not just skipped.
 
 include "x86_64/linux/testing.snd"
 include "vga.snd"
@@ -147,4 +148,89 @@ test "backspace at (0,0) stays at (0,0)" {
     vgacon_putchar(8, 0x07)
     assert_eq(vgacon_get_col(), 0)
     assert_eq(vgacon_get_row(), 0)
+}
+
+// ── Framebuffer write path (vga_fb pointed at a stack buffer) ──────────────
+//
+// VGA_NUM_CELLS (2000) * 2 bytes = 4000 bytes = 500 words; fb[500] gives
+// exactly that much room, addressed byte-wise through peek8/poke8/poke16.
+
+test "vgacon_clear_screen zeroes every cell" {
+    let fb[500]
+    vga_fb = fb
+    // Seed non-zero so the assertion actually exercises the clear loop
+    // instead of trusting the stack happened to start at zero.
+    poke16(fb, 0xBEEF)
+    poke16(fb + (VGA_NUM_CELLS - 1) * 2, 0xBEEF)
+    vgacon_clear()
+    assert_eq(peek16(fb), 0)
+    assert_eq(peek16(fb + (VGA_NUM_CELLS - 1) * 2), 0)
+    assert_eq(vgacon_get_col(), 0)
+    assert_eq(vgacon_get_row(), 0)
+}
+
+test "vgacon_init(1) also clears the framebuffer" {
+    let fb[500]
+    vga_fb = fb
+    poke16(fb, 0xBEEF)
+    vgacon_init(1)
+    assert_eq(peek16(fb), 0)
+}
+
+test "vgacon_putchar writes the char and attribute into the cell" {
+    let fb[500]
+    vga_fb = fb
+    vgacon_init(0)
+    vgacon_set_cursor(5, 2)
+    vgacon_putchar('A', 0x07)
+    let cell = 2 * VGA_COLS + 5
+    let word = 'A' | (0x07 << 8)
+    assert_eq(peek16(fb + cell * 2), word)
+    assert_eq(vgacon_get_col(), 6)
+    assert_eq(vgacon_get_row(), 2)
+}
+
+test "vgacon_puts writes consecutive characters at VGA_ATTR" {
+    let fb[500]
+    vga_fb = fb
+    vgacon_init(0)
+    vgacon_puts("Hi")
+    assert_eq(peek16(fb), 'H' | (VGA_ATTR << 8))
+    assert_eq(peek16(fb + 2), 'i' | (VGA_ATTR << 8))
+    assert_eq(vgacon_get_col(), 2)
+    assert_eq(vgacon_get_row(), 0)
+}
+
+test "vgacon_scroll moves row 1 into row 0 and clears the last row" {
+    let fb[500]
+    vga_fb = fb
+    vgacon_init(1)   // real clear, so the last-row assertion below is meaningful
+    // Plant a marker in row 1 (byte offset VGA_COLS*2) before scrolling.
+    let marker = 0x4142   // 'A' | ('B' << 8)
+    poke16(fb + VGA_COLS * 2, marker)
+    // Also mark the last row, so we can prove scroll actually zeroes it
+    // rather than it merely being untouched-and-still-zero from the clear.
+    poke16(fb + (VGA_ROWS - 1) * VGA_COLS * 2, 0xBEEF)
+    vgacon_set_cursor(0, VGA_ROWS - 1)   // bottom row
+    vgacon_putchar(10, 0x07)             // newline from the bottom triggers scroll
+    // Row 1's content is now row 0's content.
+    assert_eq(peek16(fb), marker)
+    // The new bottom row was cleared by the scroll.
+    assert_eq(peek16(fb + (VGA_ROWS - 1) * VGA_COLS * 2), 0)
+    assert_eq(vgacon_get_col(), 0)
+    assert_eq(vgacon_get_row(), 0)
+}
+
+// ── efi_main: the standalone demo entry, exercised end-to-end ─────────────
+// Pointing vga_fb at a stack buffer first makes even efi_main's own
+// vgacon_puts calls safe to run under the hosted test harness.
+
+test "efi_main runs the full demo and returns 0" {
+    let fb[500]
+    vga_fb = fb
+    assert_eq(efi_main(), 0)
+    // The demo ends with vgacon_puts("\n--- End of VGA demo ---\n"), so the
+    // cursor should have advanced off column 0 (proves the puts calls ran,
+    // not just that the function returned early).
+    assert(vgacon_get_row() > 0)
 }

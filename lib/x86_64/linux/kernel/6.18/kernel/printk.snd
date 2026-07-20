@@ -9,11 +9,23 @@
 // console (COM1, 8250 UART, 0x3F8).
 //
 // Usage: include "printk.snd" from your kernel module.
-// Call printk(level, msg) where msg is a NUL-terminated buffer.
+// Call printk(dev, level, msg) where msg is a NUL-terminated buffer.
 //
-// Note: this file is self-contained and does NOT include 8250.snd, so it
-// compiles standalone with --emit-header. For full functionality on real
-// hardware, serial8250_init() must be called first (from the UART driver).
+// Note: this file does NOT include 8250.snd, so it compiles standalone with
+// --emit-header. For full functionality on real hardware, serial8250_init()
+// must be called first (from the UART driver).
+//
+// The seam: every function down to printk_send_byte takes a `dev` parameter
+// instead of calling outb/inb on 0x3F8/0x3FB directly. `dev == 0` means "use
+// the real COM1 hardware" (production and printk_demo pass 0); any other
+// value is a handle from mock_port_new() (lib/x86_64/linux/mocks.snd), and
+// the byte goes through mock_port_out/mock_port_in instead. This is what
+// lets a hosted test assert the exact "<4>message\n" byte sequence printk
+// writes, on a machine with no COM1 (the reason this file was at 0% coverage
+// before the seam existed: outb executed from ring 3 in a hosted test process
+// is a privileged instruction and simply crashes).
+
+include "x86_64/linux/mocks.snd"
 
 // ── Log levels (match Linux 6.18 / printk levels) ──────────────────────────
 
@@ -31,17 +43,25 @@ let KERN_DEBUG   = 7   // debug-level messages
 // LSR bit 5 = Transmitter Holding Register Empty
 // We use the literal 32 (1 << 5) to avoid naming conflicts with 8250.snd's LSR_THRE.
 
-// Wait for THR to be empty (LSR bit 5)
-fn printk_send_byte(byte: i64) {
+// Wait for THR to be empty (LSR bit 5), then send one byte.
+// `dev`: 0 for the real COM1 hardware (inb/outb on 0x3FB/0x3F8), or a
+// mock_port handle so a test can prime the LSR and record the write instead.
+fn printk_send_byte(dev: i64, byte: i64) {
     for {
-        if inb(0x3FB) & 32 != 0 { break }
+        let lsr = if dev == 0 { inb(0x3FB) } else { mock_port_in(dev, 0x3FB) }
+        if lsr & 32 != 0 { break }
     }
-    outb(0x3F8, byte)
+    if dev == 0 {
+        outb(0x3F8, byte)
+    } else {
+        mock_port_out(dev, 0x3F8, byte)
+    }
 }
 
 // ── printk core ─────────────────────────────────────────────────────────────
 
 // printk, the core logging function.
+// dev: 0 for real COM1 hardware, or a mock_port handle (see printk_send_byte).
 // level: KERN_* constant (0..7)
 // msg: NUL-terminated buffer in memory containing the message text.
 //
@@ -54,62 +74,64 @@ fn printk_send_byte(byte: i64) {
 //   - support log-level filtering (console_loglevel)
 //   - fall back to other consoles (console_drivers)
 //   - print CPU/PID/timestamp metadata
-fn printk(level: i64, msg: i64) {
+fn printk(dev: i64, level: i64, msg: i64) {
     // Emit level tag: '<' + digit + '>'
-    printk_send_byte(60)   // '<' = 0x3C
-    printk_send_byte(level + 48)  // digit '0'..'7' = ASCII 48..55
-    printk_send_byte(62)   // '>' = 0x3E
+    printk_send_byte(dev, 60)   // '<' = 0x3C
+    printk_send_byte(dev, level + 48)  // digit '0'..'7' = ASCII 48..55
+    printk_send_byte(dev, 62)   // '>' = 0x3E
 
     // Emit message byte by byte from NUL-terminated buffer
     let mut i = 0
     for {
         let ch = peek8(msg + i)
         if ch == 0 { break }
-        printk_send_byte(ch)
+        printk_send_byte(dev, ch)
         i = i + 1
     }
 
     // Emit '\n' to terminate the line
-    printk_send_byte(10)  // LF
+    printk_send_byte(dev, 10)  // LF
 }
 
 // ── Convenience macros, Linux naming convention & semantics ────────────────
+// Each takes the same `dev` seam as printk/printk_send_byte and just forwards it.
 
-fn pr_emerg(msg: i64) {
-    printk(KERN_EMERG, msg)
+fn pr_emerg(dev: i64, msg: i64) {
+    printk(dev, KERN_EMERG, msg)
 }
 
-fn pr_alert(msg: i64) {
-    printk(KERN_ALERT, msg)
+fn pr_alert(dev: i64, msg: i64) {
+    printk(dev, KERN_ALERT, msg)
 }
 
-fn pr_crit(msg: i64) {
-    printk(KERN_CRIT, msg)
+fn pr_crit(dev: i64, msg: i64) {
+    printk(dev, KERN_CRIT, msg)
 }
 
-fn pr_err(msg: i64) {
-    printk(KERN_ERR, msg)
+fn pr_err(dev: i64, msg: i64) {
+    printk(dev, KERN_ERR, msg)
 }
 
-fn pr_warn(msg: i64) {
-    printk(KERN_WARNING, msg)
+fn pr_warn(dev: i64, msg: i64) {
+    printk(dev, KERN_WARNING, msg)
 }
 
-fn pr_notice(msg: i64) {
-    printk(KERN_NOTICE, msg)
+fn pr_notice(dev: i64, msg: i64) {
+    printk(dev, KERN_NOTICE, msg)
 }
 
-fn pr_info(msg: i64) {
-    printk(KERN_INFO, msg)
+fn pr_info(dev: i64, msg: i64) {
+    printk(dev, KERN_INFO, msg)
 }
 
-fn pr_debug(msg: i64) {
-    printk(KERN_DEBUG, msg)
+fn pr_debug(dev: i64, msg: i64) {
+    printk(dev, KERN_DEBUG, msg)
 }
 
 // ── Standalone demo ────────────────────────────────────────────────────────
 // To compile standalone: sondc kernel/printk.snd --uefi -o printk-demo.efi
 // On real hardware, serial8250_init() must be called before using printk.
+// dev == 0 throughout: this demo only ever talks to real COM1 hardware.
 
 // (No attribute here: Sond has no `#[...]` syntax. An unknown one is silently
 //  swallowed by the lexer today, and it takes the next declaration with it.)
@@ -120,10 +142,16 @@ fn printk_demo() -> i64 {
     outb(0x3F9, 0x00)
     outb(0x3FB, 0x03)
     outb(0x3FA, 0xC7)
-    printk(KERN_INFO, "boot: printk ready\n")
-    printk(KERN_WARNING, "printk works with all levels\n")
-    pr_info("via pr_info\n")
-    pr_err("via pr_err\n")
-    pr_warn("via pr_warn\n")
+    // printk() always appends its own trailing '\n' (see its doc comment),
+    // so the message text below must NOT carry one, or the real COM1 output
+    // would show a blank line after every entry. (Bug found while adding
+    // test coverage: these five calls used to end their literals in "\n",
+    // doubling up with printk's own LF and never showing up in any test
+    // because this file had 0% coverage before the mock_port seam existed.)
+    printk(0, KERN_INFO, "boot: printk ready")
+    printk(0, KERN_WARNING, "printk works with all levels")
+    pr_info(0, "via pr_info")
+    pr_err(0, "via pr_err")
+    pr_warn(0, "via pr_warn")
     0
 }

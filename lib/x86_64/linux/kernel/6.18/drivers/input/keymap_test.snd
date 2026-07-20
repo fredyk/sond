@@ -53,6 +53,74 @@ test "0x14 maps to 't' (116)" {
     assert_eq(scancode_to_ascii(0x14), 116)
 }
 
+// The remaining letters below are each a separate branch in the if-chain
+// (scancode_to_ascii sets `code` from a fresh `if sc == X` per letter), so
+// every one needs its own test to reach that branch's true path.
+
+test "0x20 maps to 'd' (100)" {
+    assert_eq(scancode_to_ascii(0x20), 100)
+}
+
+test "0x22 maps to 'g' (103)" {
+    assert_eq(scancode_to_ascii(0x22), 103)
+}
+
+test "0x23 maps to 'h' (104)" {
+    assert_eq(scancode_to_ascii(0x23), 104)
+}
+
+test "0x17 maps to 'i' (105)" {
+    assert_eq(scancode_to_ascii(0x17), 105)
+}
+
+test "0x24 maps to 'j' (106)" {
+    assert_eq(scancode_to_ascii(0x24), 106)
+}
+
+test "0x25 maps to 'k' (107)" {
+    assert_eq(scancode_to_ascii(0x25), 107)
+}
+
+test "0x26 maps to 'l' (108)" {
+    assert_eq(scancode_to_ascii(0x26), 108)
+}
+
+test "0x31 maps to 'n' (110)" {
+    assert_eq(scancode_to_ascii(0x31), 110)
+}
+
+test "0x18 maps to 'o' (111)" {
+    assert_eq(scancode_to_ascii(0x18), 111)
+}
+
+test "0x19 maps to 'p' (112)" {
+    assert_eq(scancode_to_ascii(0x19), 112)
+}
+
+test "0x10 maps to 'q' (113)" {
+    assert_eq(scancode_to_ascii(0x10), 113)
+}
+
+test "0x13 maps to 'r' (114)" {
+    assert_eq(scancode_to_ascii(0x13), 114)
+}
+
+test "0x16 maps to 'u' (117)" {
+    assert_eq(scancode_to_ascii(0x16), 117)
+}
+
+test "0x2F maps to 'v' (118)" {
+    assert_eq(scancode_to_ascii(0x2F), 118)
+}
+
+test "0x2D maps to 'x' (120)" {
+    assert_eq(scancode_to_ascii(0x2D), 120)
+}
+
+test "0x15 maps to 'y' (121)" {
+    assert_eq(scancode_to_ascii(0x15), 121)
+}
+
 test "0x00 (unknown key) maps to 0" {
     assert_eq(scancode_to_ascii(0x00), 0)
 }

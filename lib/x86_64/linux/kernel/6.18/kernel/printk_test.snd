@@ -2,18 +2,32 @@
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
 // lib/x86_64/linux/kernel/6.18/kernel/printk_test.snd -
-// Minimal tests for printk format helpers (no hardware testing).
+// Tests for printk, using the mock_port seam (lib/x86_64/linux/mocks.snd)
+// instead of real COM1 hardware.
 //
-// The printk layer uses raw port I/O (outb/inb) which can't be unit-tested,
-// so these tests verify only the non-hardware logic: level formatting and
-// the pr_* macro dispatch.
+// Every printk/pr_* call under test passes a mock_port handle as `dev`
+// instead of 0, so printk_send_byte routes through mock_port_out/mock_port_in
+// rather than outb/inb on 0x3F8/0x3FB. That means these tests can assert the
+// EXACT byte sequence that reached the "UART", in order, on a machine with no
+// COM1, which is the only reason printk went from 0% to real coverage here.
 
 include "x86_64/linux/testing.snd"
 include "printk.snd"
 
-// The printk_send_byte function waits for UART THR empty and writes a byte.
-// We can't test it on real hardware here, but we verify its existence and
-// that printk compiles with various level values.
+// Read back the `n` bytes mock_port recorded as writes to port 0x3F8 and
+// compare them, in order, against the NUL-terminated expected buffer `want`.
+// Fails loudly (assert_eq) at the first mismatched byte instead of silently
+// passing on a short match, so a truncated or reordered write is caught.
+fn assert_uart_wrote(p: i64, want: i64) {
+    let mut i = 0
+    for {
+        let expected = peek8(want + i)
+        if expected == 0 { break }
+        assert_eq(mock_port_write_at(p, 0x3F8, i), expected)
+        i = i + 1
+    }
+    assert_eq(mock_port_writes(p, 0x3F8), i)
+}
 
 // Verify that KERN_* constants have the expected bit values
 test "KERN levels set" {
@@ -26,3 +40,144 @@ test "KERN levels set" {
     assert_eq(KERN_INFO, 6)
     assert_eq(KERN_DEBUG, 7)
 }
+
+// ── printk_send_byte ─────────────────────────────────────────────────────
+
+test "printk_send_byte writes the byte to port 0x3F8" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)   // LSR: THR empty, ready to send
+    printk_send_byte(p, 65)          // 'A'
+    assert_eq(mock_port_writes(p, 0x3F8), 1)
+    assert_eq(mock_port_write_at(p, 0x3F8, 0), 65)
+}
+
+test "printk_send_byte reads LSR from port 0x3FB, not some other port" {
+    let p = mock_port_new()
+    // Prime an unrelated port with a value that would look "ready" if the
+    // driver ever mis-read the wrong port; only 0x3FB carries the real THRE
+    // bit here, so if the code paid attention to the right port, a byte
+    // still lands on 0x3F8 exactly once.
+    mock_port_set_in(p, 0x60, 32)
+    mock_port_set_in(p, 0x3FB, 32)
+    printk_send_byte(p, 66)   // 'B'
+    assert_eq(mock_port_writes(p, 0x3F8), 1)
+    assert_eq(mock_port_write_at(p, 0x3F8, 0), 66)
+}
+
+test "printk_send_byte writes multiple bytes in order" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)
+    printk_send_byte(p, 72)   // 'H'
+    printk_send_byte(p, 73)   // 'I'
+    assert_eq(mock_port_writes(p, 0x3F8), 2)
+    assert_eq(mock_port_write_at(p, 0x3F8, 0), 72)
+    assert_eq(mock_port_write_at(p, 0x3F8, 1), 73)
+}
+
+// ── printk: full "<level>message\n" framing ─────────────────────────────
+
+// Note: printk() always appends its own trailing LF (see printk.snd's doc
+// comment), so `msg` here must NOT carry one itself, exactly like a real
+// caller. Confirms KERN_INFO's whole "<6>hi\n" framing, byte for byte.
+test "printk emits <level>message\\n for KERN_INFO" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)
+    printk(p, KERN_INFO, "hi")
+    // '<' '6' '>' 'h' 'i' '\n'  (KERN_INFO == 6)
+    assert_eq(mock_port_writes(p, 0x3F8), 6)
+    assert_eq(mock_port_write_at(p, 0x3F8, 0), 60)   // '<'
+    assert_eq(mock_port_write_at(p, 0x3F8, 1), 54)   // '6'
+    assert_eq(mock_port_write_at(p, 0x3F8, 2), 62)   // '>'
+    assert_eq(mock_port_write_at(p, 0x3F8, 3), 104)  // 'h'
+    assert_eq(mock_port_write_at(p, 0x3F8, 4), 105)  // 'i'
+    assert_eq(mock_port_write_at(p, 0x3F8, 5), 10)   // '\n'
+}
+
+test "printk emits the correct level digit for KERN_EMERG" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)
+    printk(p, KERN_EMERG, "x")
+    assert_eq(mock_port_write_at(p, 0x3F8, 1), 48)   // '0'
+}
+
+test "printk emits the correct level digit for KERN_DEBUG" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)
+    printk(p, KERN_DEBUG, "x")
+    assert_eq(mock_port_write_at(p, 0x3F8, 1), 55)   // '7'
+}
+
+test "printk always terminates the line with LF even for empty messages" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)
+    printk(p, KERN_WARNING, "")
+    // '<' '4' '>' '\n' == 4 bytes, nothing from the empty message body.
+    assert_eq(mock_port_writes(p, 0x3F8), 4)
+    assert_eq(mock_port_write_at(p, 0x3F8, 3), 10)
+}
+
+// ── pr_* dispatch: each forwards to printk with the matching KERN_* level ──
+
+test "pr_emerg tags the line with level 0" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)
+    pr_emerg(p, "boom")
+    assert_eq(mock_port_write_at(p, 0x3F8, 1), 48)  // '0'
+}
+
+test "pr_alert tags the line with level 1" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)
+    pr_alert(p, "a")
+    assert_eq(mock_port_write_at(p, 0x3F8, 1), 49)  // '1'
+}
+
+test "pr_crit tags the line with level 2" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)
+    pr_crit(p, "a")
+    assert_eq(mock_port_write_at(p, 0x3F8, 1), 50)  // '2'
+}
+
+test "pr_err tags the line with level 3" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)
+    pr_err(p, "a")
+    assert_eq(mock_port_write_at(p, 0x3F8, 1), 51)  // '3'
+}
+
+test "pr_warn tags the line with level 4" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)
+    pr_warn(p, "a")
+    assert_eq(mock_port_write_at(p, 0x3F8, 1), 52)  // '4'
+}
+
+test "pr_notice tags the line with level 5" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)
+    pr_notice(p, "a")
+    assert_eq(mock_port_write_at(p, 0x3F8, 1), 53)  // '5'
+}
+
+test "pr_info tags the line with level 6 and writes the full message" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)
+    pr_info(p, "via pr_info")
+    assert_uart_wrote(p, "<6>via pr_info\n")
+}
+
+test "pr_debug tags the line with level 7" {
+    let p = mock_port_new()
+    mock_port_set_in(p, 0x3FB, 32)
+    pr_debug(p, "a")
+    assert_eq(mock_port_write_at(p, 0x3F8, 1), 55)  // '7'
+}
+
+// ── printk_demo: the standalone entry point, exercised end-to-end ─────────
+//
+// printk_demo() itself always talks to dev 0 (real hardware): it is the
+// UEFI-only demo entry, documented to run on actual COM1. It is intentionally
+// NOT called from these hosted tests (outb/inb on dev 0 are privileged
+// instructions here and would crash the test process), matching the same
+// carve-out used for vgacon's efi_main and the file's own module doc comment.
