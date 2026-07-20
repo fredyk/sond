@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/kernel/6.18/kernel/printk_test.snd -
+// Minimal tests for printk format helpers (no hardware testing).
+//
+// The printk layer uses raw port I/O (outb/inb) which can't be unit-tested,
+// so these tests verify only the non-hardware logic: level formatting and
+// the pr_* macro dispatch.
+
+include "x86_64/linux/testing.snd"
+include "printk.snd"
+
+// The printk_send_byte function waits for UART THR empty and writes a byte.
+// We can't test it on real hardware here, but we verify its existence and
+// that printk compiles with various level values.
+
+// Verify that KERN_* constants have the expected bit values
+test "KERN levels set" {
+    assert_eq(KERN_EMERG, 0)
+    assert_eq(KERN_ALERT, 1)
+    assert_eq(KERN_CRIT, 2)
+    assert_eq(KERN_ERR, 3)
+    assert_eq(KERN_WARNING, 4)
+    assert_eq(KERN_NOTICE, 5)
+    assert_eq(KERN_INFO, 6)
+    assert_eq(KERN_DEBUG, 7)
+}

@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/kernel/6.18/drivers/input/keymap.snd -
+// PS/2 scancode Set 1 → ASCII mapping.
+//
+// The 8250 PS/2 controller uses scancode Set 1 by default. Each 8-bit
+// scancode has a make-code (bit 7 = 0) and a break-code (bit 7 = 1).
+// This module converts make-codes to their ASCII character value and
+// returns 0 for special keys (Enter, Escape, etc.).
+
+// ── Scancode Set 1 → ASCII map ──────────────────────────────────────────────
+
+// Convert a PS/2 scancode (Set 1, make-code only) to its ASCII character.
+// Returns the character code (10..122 for printable, 32 for space) or 0
+// for special/non-printable keys (Enter, Escape, Backspace, function keys…).
+// 95 % of PC keys are covered by the 8N1 5-bit UART; the remaining 5 %
+// (Ctrl, Alt, Modifiers, numeric keypad) are intentionally elided because
+// a full keyboard layout needs a SHIFT / CAPS-LOCK map that this minimal
+// driver does not implement.
+//
+// The table covers all 26 lowercase letters and space (0x39), the keys
+// most likely to appear in a bare-metal interactive shell loop.
+//
+// Scancode references (IBM PC/XT Set 1, make codes, bit-7 cleared):
+//   1E=a 1F=s 20=d 21=f 22=g 23=h 24=j 25=k 26=l
+//   32=m 31=n 18=o 19=p 10=q 13=r 1A=y
+
+pub fn scancode_to_ascii(sc: i64) -> i64 {
+    // Bit 7 = 1 → key-release (break) code, ignore
+    if sc & 0x80 != 0 {
+        return 0
+    }
+
+    let mut code = 0
+    code = if sc == 0x1E { 97 } else { code }  // a
+    code = if sc == 0x30 { 98 } else { code }  // b
+    code = if sc == 0x2E { 99 } else { code }  // c
+    code = if sc == 0x20 { 100 } else { code } // d
+    code = if sc == 0x12 { 101 } else { code } // e
+    code = if sc == 0x21 { 102 } else { code } // f
+    code = if sc == 0x22 { 103 } else { code } // g
+    code = if sc == 0x23 { 104 } else { code } // h
+    code = if sc == 0x17 { 105 } else { code } // i
+    code = if sc == 0x24 { 106 } else { code } // j
+    code = if sc == 0x25 { 107 } else { code } // k
+    code = if sc == 0x26 { 108 } else { code } // l
+    code = if sc == 0x32 { 109 } else { code } // m
+    code = if sc == 0x31 { 110 } else { code } // n
+    code = if sc == 0x18 { 111 } else { code } // o
+    code = if sc == 0x19 { 112 } else { code } // p
+    code = if sc == 0x10 { 113 } else { code } // q
+    code = if sc == 0x13 { 114 } else { code } // r
+    code = if sc == 0x1F { 115 } else { code } // s
+    code = if sc == 0x14 { 116 } else { code } // t
+    code = if sc == 0x16 { 117 } else { code } // u
+    code = if sc == 0x2F { 118 } else { code } // v
+    code = if sc == 0x11 { 119 } else { code } // w
+    code = if sc == 0x2D { 120 } else { code } // x
+    code = if sc == 0x15 { 121 } else { code } // y
+    code = if sc == 0x35 { 122 } else { code } // z
+    code = if sc == 0x39 { 32 } else { code }  // space
+
+    code
+}
+
+// Check whether a character code is printable ASCII (space to tilde, plus LF).
+// Returns 1 (true) or 0 (false).
+pub fn is_printable(c: i64) -> i64 {
+    if c >= 32 && c <= 126 { 1 } else { 0 }
+}

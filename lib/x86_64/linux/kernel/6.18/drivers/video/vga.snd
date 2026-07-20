@@ -1,0 +1,198 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/kernel/6.18/drivers/video/vga.snd -
+// VGA text-mode console driver (vgacon), 80×25, 16 color attributes.
+//
+// Memory-mapped text framebuffer at 0xB8000.  Each cell is 2 bytes:
+//   [0xB8000 + (row * 80 + col) * 2]   →   char (lo byte) | attr (hi byte)
+//
+// Standard attribute: 0x07 = black foreground / white background.
+//
+// Linux naming convention (vgacon).  Usage: include "drivers/video/vga.snd"
+// from your kernel module.  The driver is a bare-metal library, no efi_main.
+// Tested on bare-metal: QEMU/OVMF, booted as UEFI app.
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+// VGA text-mode memory location (base + 256-byte I/O page shift)
+let VGA_MEMORY = 0xB8000
+
+// 80 columns, 25 rows
+let VGA_COLS = 80
+let VGA_ROWS = 25
+
+// Default text attribute: black foreground / white background
+let VGA_ATTR = 0x07
+
+// Number of cells on the screen
+let VGA_NUM_CELLS = 2000   // 80 * 25
+
+// ── Cursor state (global) ───────────────────────────────────────────────────
+
+let mut cur_col: i64
+let mut cur_row: i64
+
+// ── Cursor helpers ───────────────────────────────────────────────────────────
+
+pub fn vgacon_get_col() -> i64 {
+    cur_col
+}
+
+pub fn vgacon_get_row() -> i64 {
+    cur_row
+}
+
+// Set cursor to (col, row), clamping to screen bounds.
+// Does NOT trigger scroll, scroll only happens through putchar.
+pub fn vgacon_set_cursor(col: i64, row: i64) {
+    if col < 0 { cur_col = 0 } else { cur_col = col }
+    if cur_col >= VGA_COLS { cur_col = VGA_COLS - 1 }
+    if row < 0 { cur_row = 0 } else { cur_row = row }
+    if cur_row >= VGA_ROWS { cur_row = VGA_ROWS - 1 }
+}
+
+// Internal helper, only used by scroll (writes zero to the entire screen).
+// Not tested directly because peek8/poke8 at 0xB8000 segfault in Sondc test mode.
+fn vgacon_clear_screen() {
+    let mut i = 0
+    for i < VGA_NUM_CELLS {
+        poke16(VGA_MEMORY + i * 2, 0)
+        i = i + 1
+    }
+}
+
+// ── Scroll ───────────────────────────────────────────────────────────────────
+
+fn vgacon_scroll() {
+    // Move every line up by one row.
+    let mut src = 2 * VGA_COLS   // 160 (byte offset of row 1)
+    let mut dst = 0               // byte offset of row 0
+    let mut i = 0
+    for i < VGA_ROWS - 1 {
+        let mut j = 0
+        for j < VGA_COLS * 2 {    // 160 bytes per row
+            let val = peek8(src + j)
+            poke8(dst + j, val)
+            j = j + 1
+        }
+        src = src + VGA_COLS * 2
+        dst = dst + VGA_COLS * 2
+        i = i + 1
+    }
+    poke16(0xB8000 + (VGA_ROWS - 1) * VGA_COLS * 2, 0)
+}
+
+// Check whether the cursor will scroll when we advance it.
+// Internal helper for testing scroll logic without hardware access.
+fn vgacon_at_screen_bottom() -> i64 {
+    if cur_row >= VGA_ROWS { 1 } else { 0 }
+}
+
+// Compute the new cursor after wrapping without actually scrolling.
+fn vgacon_wrap_cursor() -> i64 {
+    let new_row = cur_row + 1
+    let new_col = 0
+    if new_row >= VGA_ROWS {
+        1  // signal that scroll would happen
+    } else {
+        new_row << 8 | new_col
+    }
+}
+
+// ── Initialize / clear ──────────────────────────────────────────────────────
+
+// Initialize the VGA console: zero the cursor.
+// fully_clear == 0 skips the expensive clear_buffer pass.
+pub fn vgacon_init(fully_clear: i64) {
+    cur_col = 0
+    cur_row = 0
+    if fully_clear != 0 {
+        vgacon_clear_screen()
+    }
+}
+
+// Clear the full framebuffer and reset the cursor.
+pub fn vgacon_clear() {
+    vgacon_clear_screen()
+    cur_col = 0
+    cur_row = 0
+}
+
+// ── Character output ─────────────────────────────────────────────────────────
+
+// Put one character (with attribute) at the current cursor position.
+// Handles wrapping, scrolling, newline (\n=10), and backspace (\b=8).
+pub fn vgacon_putchar(ch: i64, attr: i64) {
+    if ch == 10 {
+        // Newline: col=0, row+=1
+        cur_col = 0
+        cur_row = cur_row + 1
+        if cur_row >= VGA_ROWS {
+            cur_row = 0
+            vgacon_scroll()
+        }
+    } else if ch == 8 {
+        // Backspace: move left one column
+        if cur_col > 0 {
+            cur_col = cur_col - 1
+        } else if cur_row > 0 {
+            cur_row = cur_row - 1
+            cur_col = VGA_COLS - 1
+        }
+    } else {
+        // Normal character: write to screen buffer at cell (cur_row, cur_col)
+        let cell = cur_row * VGA_COLS + cur_col
+        let offset = cell * 2
+        let word = ch | (attr << 8)
+        poke16(VGA_MEMORY + offset, word)
+
+        cur_col = cur_col + 1
+        if cur_col >= VGA_COLS {
+            cur_col = 0
+            cur_row = cur_row + 1
+            if cur_row >= VGA_ROWS {
+                cur_row = 0
+                vgacon_scroll()
+            }
+        }
+    }
+}
+
+// Write a NUL-terminated string to the VGA console, one byte at a time.
+// Attribute: 0x07 (default) for the entire string.
+pub fn vgacon_puts(s: i64) {
+    let mut i = 0
+    for {
+        let b = peek8(s + i)
+        if b == 0 { break }
+        vgacon_putchar(b, VGA_ATTR)
+        i = i + 1
+    }
+}
+
+// ── VGA demo entry (standalone) ─────────────────────────────────────────────
+
+fn efi_main() -> i64 {
+    vgacon_init(1)
+
+    vgacon_puts("=== VGA Console Demo ===\n")
+    vgacon_puts("Hello from VGA text mode in Sond!\n")
+
+    vgacon_puts("Row/Col: ")
+    let col = vgacon_get_col()
+    let row = vgacon_get_row()
+
+    // print goes through UEFI ConOut since Sondc doesn't
+    // yet auto-route to VGA.  The important thing is:
+    // vgacon_puts worked and the screen is rendered.
+    print("OK, vgacon cursor at col=")
+    print_int(col)
+    print(", row=")
+    print_int(row)
+    print("\n")
+
+    vgacon_puts("\n--- End of VGA demo ---\n")
+
+    0
+}

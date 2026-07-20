@@ -1,0 +1,167 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/kernel/6.18/drivers/tty/serial/8250.snd -
+// 8250/16550 UART driver for COM1 (base 0x3F8), Linux-style API.
+//
+// Register offsets from base port (x86_64 Linux 6.18 convention):
+//   0x00  THR  / RBR  (Transmit Holding Register / Receiver Buffer)
+//   0x01  IER  (Interrupt Enable Register)
+//   0x02  IIR  (Interrupt Identification Register)
+//   0x03  LCR  (Line Control Register)
+//   0x04  MCR  (Modem Control Register)
+//   0x05  LSR  (Line Status Register)
+//   0x06  MSR  (Modem Status Register)
+//   0x08  SCR  (Scratch Register)
+//
+// Usage: include "drivers/tty/serial/8250.snd" from your kernel module.
+// The driver is a bare-metal library, no efi_main. Use the UEFI app
+// examples/uefi/kernel/serial/serial-demo.snd for a standalone demo.
+
+// ── LSR bits ────────────────────────────────────────────────────────────────
+
+let LSR_DR   = 0
+let LSR_OE   = 1
+let LSR_PE   = 2
+let LSR_FE   = 3
+let LSR_BI   = 4
+let LSR_THRE = 5
+let LSR_TEMT = 6
+let LSR_FIFO = 7
+
+// ── LCR bits ────────────────────────────────────────────────────────────────
+
+let LCR_SBC  = 6  // Set Break Control
+let LCR_SPAR = 5  // Stick Parity   (8250 only)
+let LCR_PAR  = 4  // Parity Enable
+let LCR_STP  = 3  // Stop Bits
+let LCR_WLS  = 1  // Word Length Select (00=5, 01=6, 10=7, 11=8)
+let LCR_SBRK = 7  // Set Break (alias)
+let LCR_DLAB = 7  // Divisor Latch Access Bit
+
+// ── IER bits ────────────────────────────────────────────────────────────────
+
+let IER_MSI = 4    // Modem Status Interrupt
+let IER_THRI = 0   // Transmitter Holding Register Empty
+let IER_RDI = 1    // Receiver Data Available
+let IER_RLSI = 2   // Receiver Line Status
+
+// ── MCR bits ────────────────────────────────────────────────────────────────
+
+let MCR_DTR  = 0   // Data Terminal Ready
+let MCR_RTS  = 1   // Request to Send
+let MCR_OUT1 = 2   // Output 1
+let MCR_OUT2 = 3   // Output 2 (enables interrupt to host)
+let MCR_LOOP = 4   // Loopback mode
+
+// ── FCR bits (16550 and later, write to offset 0x02 on 8250 to access) ────
+
+let FCR_ENABLE      = 0  // FIFO Enable
+let FCR_CLEAR_RCVR  = 1  // Clear Receiver FIFO
+let FCR_CLEAR_XMIT  = 2  // Clear Transmitter FIFO
+let FCR_DMA_SELECT  = 3  // DMA Select
+let FCR_TRIGGER_1   = 00  // 1 byte threshold
+let FCR_TRIGGER_4   = 01  // 4 bytes threshold
+let FCR_TRIGGER_8   = 10  // 8 bytes threshold
+let FCR_TRIGGER_14  = 11  // 14 bytes threshold
+
+// ── COM1 base I/O port ─────────────────────────────────────────────────────
+
+let PORT_8250 = 0x3F8
+
+// ── Register access ────────────────────────────────────────────────────────
+
+// Read a register from the UART at base port + offset
+pub fn serial8250_read(reg_offset: i64) -> i64 {
+    inb(PORT_8250 + reg_offset)
+}
+
+// Write a value to a register on the UART at base port + offset
+pub fn serial8250_write(reg_offset: i64, val: i64) {
+    outb(PORT_8250 + reg_offset, val)
+}
+
+// ── Transmitter ─────────────────────────────────────────────────────────────
+
+// Wait until the THR is empty (LSR bit 5, THRE set), returns 0 or non-zero
+fn serial8250_tx_empty() -> i64 {
+    serial8250_read(0x05) & (1 << LSR_THRE)
+}
+
+// Send one byte to the UART THR register
+pub fn serial8250_putc(c: i64) {
+    for {
+        let status = serial8250_tx_empty()
+        if status != 0 {
+            break
+        }
+    }
+    serial8250_write(0x00, c)
+}
+
+// Write a NUL-terminated string byte by byte to the UART.
+// Stops at byte value 0 (no explicit length parameter).
+pub fn serial8250_puts(s: i64) {
+    let mut i = 0
+    for {
+        let ch = peek8(s + i)
+        if ch == 0 {
+            break
+        }
+        serial8250_putc(ch)
+        i = i + 1
+    }
+}
+
+// ── Receiver ────────────────────────────────────────────────────────────────
+
+// Return the line status register value (caller checks bits)
+pub fn serial8250_get_lsr() -> i64 {
+    serial8250_read(0x05)
+}
+
+// Check if the receiver has data available (LSR bit 0, DR)
+pub fn serial8250_has_data() -> i64 {
+    serial8250_read(0x05) & (1 << LSR_DR)
+}
+
+// Read one byte from the receiver buffer (blocking)
+pub fn serial8250_getc() -> i64 {
+    for {
+        let status = serial8250_has_data()
+        if status != 0 {
+            break
+        }
+    }
+    serial8250_read(0x00)
+}
+
+// ── Initialization ──────────────────────────────────────────────────────────
+
+// Initialize the 8250/16550 UART at COM1:
+//   - Disable all interrupts
+//   - Set baud rate divisor to 3 (115200 bps at 1.8432 MHz)
+//   - 8N1 mode (8 data bits, 1 stop, no parity)
+//   - Enable and clear FIFO (16550)
+//   - Assert DTR and RTS
+pub fn serial8250_init() {
+    // Disable interrupts: DLAB=0, IMR=0
+    serial8250_write(0x01, 0x00)
+    // Also disable at port 0x3F9 (secondary interrupt control)
+    outb(0x3F9, 0x00)
+
+    // Set DLAB=1 to access divisor latch
+    serial8250_write(0x03, 0x80)
+    // Divisor: DLL=3, DLH=0 → 115200 baud at 1.8432 MHz clock
+    serial8250_write(0x00, 3)
+    serial8250_write(0x01, 0)
+
+    // 8N1: 8 data bits, 1 stop bit, no parity; clear DLAB
+    serial8250_write(0x03, 0x03)
+
+    // Enable and clear FIFO (16550 FCR): enable, clear RX/TX, 14-byte threshold
+    serial8250_write(0x02, 0xC7)
+
+    // Assert DTR and RTS, enable OUT2 (host interrupt)
+    serial8250_write(0x04, 0x0B)
+}

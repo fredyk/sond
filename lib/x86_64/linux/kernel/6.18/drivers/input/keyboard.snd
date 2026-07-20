@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/kernel/6.18/drivers/input/keyboard.snd -
+// PS/2 keyboard driver (input subsystem), high-level API.
+//
+// This module sits on top of i8042 and keymap. It exposes Linux-style
+// input-subsystem naming (kbd_ prefix) for reading characters from PS/2.
+//
+// kbd_getchar() blocks until a key is pressed and returns its ASCII
+// code, filtering out non-printable and special keys.
+//
+// Usage: include "keyboard.snd" from your kernel module.
+// Ensure i8042_init() has been called before using any kbd_ function.
+//
+// This file is self-contained and does NOT include i8042.snd or keymap.snd,
+// so it compiles standalone with --emit-header. On real hardware the caller
+// must have included both dependencies before invoking kbd_getchar().
+
+include "i8042.snd"
+include "keymap.snd"
+
+// ── Keyboard input API ──────────────────────────────────────────────────────
+
+// Wait for a key press on the PS/2 keyboard and return its ASCII code.
+// Blocks (spinning on i8042_read) if no key is available.
+// Only printable characters (a-z, space) are returned; special keys
+// are silently skipped so that callers get exactly what they need.
+pub fn kbd_getchar() -> i64 {
+    for {
+        // i8042_read blocks until the output buffer has a byte.
+        let sc = raw_scancode()
+
+        // Convert scancode → ASCII via keymap
+        let ch = scancode_to_ascii(sc)
+
+        // Only return printable characters
+        let p = is_printable(ch)
+        if p != 0 {
+            return ch
+        }
+    }
+}
+
+// Read a raw scancode from the PS/2 controller, waiting until one is available.
+// This bypasses the keymap, only use internally.
+// Uses i8042_Read() which blocks until the output buffer is full.
+fn raw_scancode() -> i64 {
+    let st = i8042_read()
+    if st == 0 {
+        return 0
+    }
+    let mut sc = st
+    // If the first byte is 0xE0, it is an LED ACK or prefix.  The LED ACK is
+    // followed by the LED-state byte.  An 0xE0 prefix would mean the next byte
+    // is part of an extended scancode.  We keep it simple: skip 0xE0 prefix and
+    // return the next byte as the scancode (bare-metal shell rarely needs extend eds).
+    if sc == 224 {
+        sc = i8042_read()
+    }
+    sc
+}

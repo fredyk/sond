@@ -1,0 +1,197 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/kernel/6.18/mm/kmalloc.snd
+//
+// A simple byte allocator (kmalloc / kfree) built on top of the page
+// allocator.  Each slab page is carved into fixed-size chunks.  A
+// per-object header stores the original request size so that kfree
+// can recompute the chunk index and return the page to the free pool
+// once the slab is fully reclaimed.
+//
+// Slab layout (per 4096-byte page):
+//   offset  0-7:   next pointer (free-list node)
+//   offset  8-15:  free-slot index: howmany 8-byte slots remain
+//   offset 16-23:  bump pointer (u64): one past last object's + its size
+//   offset 24-31:  size header (u64): stored before first user block
+//   offset 32+:    user objects (8-byte aligned)
+//
+// Each user object of size `n` is preceded by its size value at
+// `ptr - 8`, which sits between the current and next bump.
+// Maximum usable object size: (4096 - 24) / 8 = 509 bytes.
+// Larger allocations must go through alloc_page() directly.
+
+include "page_alloc.snd"
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+// 8-byte alignment for all objects and headers.
+let ALIGN = 8
+
+// Maximum object size that fits in a single slab page.
+// The first object starts at slab+32 (bump starts at 24, +8 header).
+// Max objects per slab: (4096 - 32) / 8 = 508 plus one 8-byte header.
+// So we reserve 24 bytes of slab overhead (not incl. one per-object header).
+let MAX_OBJECT = 509
+
+// ---------------------------------------------------------------------------
+// Globals
+// ---------------------------------------------------------------------------
+
+// Head of the slab list (pages with at least one free object).
+// Each slab stores its next-pointer at offset 0.
+let mut __slab_list: i64
+
+// Drop every slab this allocator knows about.
+//
+// The slab list holds raw addresses into the page pool. Whoever re-initialises
+// that pool (page_alloc_init) invalidates all of them at once, and a stale head
+// makes the scan in kmalloc walk freed memory: it follows whatever bytes now sit
+// at offset 0 of a reused page and never reaches the null terminator. Call this
+// alongside page_alloc_init so the two halves of the allocator are reset
+// together.
+pub fn kmalloc_init() {
+    __slab_list = 0
+}
+
+// ---------------------------------------------------------------------------
+// Helpers, slab metadata access
+// ---------------------------------------------------------------------------
+
+// Pointer to next slab in the list (or 0 = end-of-list).
+fn __slab_next(sl: i64) -> i64       { peek64(sl) }
+fn __slab_set_next(sl: i64, v: i64) { poke64(sl, v) }
+
+// Number of objects allocated from this slab (incremented on alloc, decremented on free).
+fn __slab_alloced(sl: i64) -> i64      { peek64(sl + 8) }
+fn __slab_set_alloced(sl: i64, v: i64) { poke64(sl + 8, v) }
+
+// Bump pointer: address one past the last object + its 8-byte size header.
+fn __slab_bump(sl: i64) -> i64       { peek64(sl + 16) }
+fn __slab_set_bump(sl: i64, v: i64) { poke64(sl + 16, v) }
+
+// Offset into the slab where user data starts: bump starts at 24, first
+// object gets a 8-byte header (at 24-31), so first user data is at 32.
+// The size header at `obj-8` is within the slab but separate from
+// metadata at offsets 0..24.
+fn __slab_user_base() -> i64 { 32 }
+
+// Allocate a fresh slab page from the page allocator and link it
+// at the head of __slab_list.  Returns 0 (i64) if no pages are
+// available.
+fn __alloc_slab() -> i64 {
+    let pg = alloc_page()
+    if pg == 0 {
+        return 0
+    }
+    __slab_set_next(pg, __slab_list)
+    __slab_set_alloced(pg, 0)       // no objects allocated yet
+    __slab_set_bump(pg, pg + 24)    // first size header goes at pg+24
+    __slab_list = pg
+    pg
+}
+
+// Remove a slab from the linked list entirely and free its page.
+// Called only when a slab is fully drained (alloced count reaches 0).
+fn __slab_discard(sl: i64) {
+    let mut prev: i64 = 0
+    let mut cur: i64  = __slab_list
+    for {
+        if cur == 0 { break }
+        if cur == sl {
+            if prev == 0 {
+                __slab_list = __slab_next(cur)
+            } else {
+                __slab_set_next(prev, __slab_next(cur))
+            }
+            break
+        }
+        prev = cur
+        cur = __slab_next(cur)
+    }
+    free_page(sl)
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+// Allocate *n* bytes.  Returns a pointer to user memory (8-byte
+// aligned), or 0 if allocation fails.  Objects larger than 509 bytes
+// must go through alloc_page() directly.
+pub fn kmalloc(n: i64) -> i64 {
+    if n <= 0 {
+        return 0
+    }
+    let sz = (n + 7) & (0 - 8)       // round up to 8-byte alignment
+    if sz > MAX_OBJECT {
+        return 0
+    }
+
+    // Scan existing slabs for one with room.
+    let mut cur: i64 = __slab_list
+    for {
+        if cur == 0 { break }
+        let bump_val = __slab_bump(cur)
+        // The bump pointer is where the next size-header goes.
+        // User data is at bump_val + 8 (8 bytes after size header).
+        // Must fit within [32, 4096) of the slab page.
+        if bump_val + sz + 8 <= cur + PAGE_SIZE {
+            // Room found, allocate from this slab.
+            let hdr = bump_val            // address for the size header
+            let obj = bump_val + 8        // address for user data
+            __slab_set_bump(cur, bump_val + sz + 8)
+            // Store size at hdr so kfree can find it.
+            poke64(hdr, sz)
+            // Increment allocated count.
+            __slab_set_alloced(cur, __slab_alloced(cur) + 1)
+            return obj
+        }
+        cur = __slab_next(cur)
+    }
+
+    // No existing slab has room, allocate a new one.
+    let new_slab = __alloc_slab()
+    if new_slab == 0 {
+        return 0
+    }
+
+    // Allocate from freshly created slab.
+    let bump_val = __slab_bump(new_slab)
+    let hdr = bump_val
+    let obj = bump_val + 8
+    __slab_set_bump(new_slab, bump_val + sz + 8)
+    poke64(hdr, sz)
+    __slab_set_alloced(new_slab, 1)
+    obj
+}
+
+// Free a block previously returned by kmalloc.
+//
+// `ptr`: pointer returned by kmalloc (0 is a no-op).  The caller
+//        must not free the same pointer twice.
+pub fn kfree(ptr: i64) {
+    if ptr == 0 {
+        return
+    }
+    // Walk the slab list to find which slab owns `ptr`.  A slab covers
+    // [base+32, __slab_bump(base)).
+    let mut cur: i64 = __slab_list
+    for {
+        if cur == 0 { break }
+        let base = cur
+        let bump_val = __slab_bump(cur)
+        if ptr >= base + __slab_user_base() && ptr < bump_val {
+            // Found the slab.  Decrement allocated count.
+            __slab_set_alloced(cur, __slab_alloced(cur) - 1)
+            if __slab_alloced(cur) == 0 {
+                // Fully drained, discard page and remove from list.
+                __slab_discard(base)
+            }
+            break
+        }
+        cur = __slab_next(cur)
+    }
+}

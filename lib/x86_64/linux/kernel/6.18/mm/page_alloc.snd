@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/kernel/6.18/mm/page_alloc.snd
+//
+// A 4 KiB page allocator over a given physical range [base, base +
+// npages * 4096).  A per-page bitmap (one bit per page, packed into
+// bytes) tracks which pages are in use.
+//
+// This is pure logic, no heap, no syscall.  The bitmap itself must
+// be provided by the caller via a pre-allocated `bitmap` pointer so
+// the init function has nothing dynamic to do.  This keeps the
+// allocator safe to use as the very first allocator in a freestanding
+// kernel before any general-purpose heap exists.
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+// 2^12 = 4096, every managed chunk is one page.
+let PAGE_SIZE = 4096
+
+// ---------------------------------------------------------------------------
+// Globals (zero by default, init fns set them properly)
+// ---------------------------------------------------------------------------
+
+// Pointer to the bitmap buffer supplied by the caller.
+// Bits: 0 = free, 1 = allocated.  Bit *i* represents page *i*.
+let mut __bitmap_ptr: i64
+
+// Start address of the physical range we manage.
+let mut __page_base: i64
+
+// Number of pages (and thus bits) in the bitmap.
+let mut __npages: i64
+
+// ---------------------------------------------------------------------------
+// Helpers, bitmap operations
+// ---------------------------------------------------------------------------
+
+// Set bit index `bit` in the bitmap (mark page as allocated).
+fn __bitmap_set(bit: i64) {
+    let byte_off = bit / 8
+    let bit_off  = bit % 8
+    let mask = 1 << bit_off
+    poke8(__bitmap_ptr + byte_off, peek8(__bitmap_ptr + byte_off) | mask)
+}
+
+// Clear bit index `bit` in the bitmap (mark page as free).
+fn __bitmap_clear(bit: i64) {
+    let byte_off = bit / 8
+    let bit_off  = bit % 8
+    let mask = ~(1 << bit_off)
+    poke8(__bitmap_ptr + byte_off, peek8(__bitmap_ptr + byte_off) & mask)
+}
+
+// Find the first free page (first zero bit) in [0, __npages).
+// Returns the zero-based index, or -1 if all pages are in use.
+fn __bitmap_find_first_free() -> i64 {
+    let mut i = 0
+    for i < __npages {
+        let byte_i = i / 8
+        let bit_i  = i % 8
+        let byte_val = peek8(__bitmap_ptr + byte_i)
+        // Check each bit of the current byte (up to 8 bits, then move on).
+        let mut bi = i
+        let mut bit_count = 0
+        for bi < __npages && bit_count < 8 {
+            let b = bi % 8
+            if (byte_val & (1 << b)) == 0 {
+                return bi
+            }
+            bi = bi + 1
+            bit_count = bit_count + 1
+        }
+        i = bi
+        if i >= __npages {
+            break
+        }
+    }
+    -1
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+// Initialise the allocator with an explicit physical range
+// [base, base + npages * 4096).
+//
+// `bitmap`: caller-allocated bitmap buffer (⌈npages/8⌉ bytes, zeroed).
+//           Must NOT overlap with [base, base+npages*4096).
+// `base`:   starting physical address of the managed range.
+// `npages`: number of 4 KiB pages in the range (> 0).
+//
+// After calling this, alloc_page() and free_page() are ready to use.
+pub fn page_alloc_init(bitmap: i64, base: i64, npages: i64) {
+    __bitmap_ptr = bitmap
+    __page_base  = base
+    __npages     = npages
+}
+
+// Allocate a single 4 KiB page from the managed range.
+// Returns the physical address of the page's first byte, or 0 if
+// there are no free pages remaining.
+pub fn alloc_page() -> i64 {
+    if __npages <= 0 {
+        return 0
+    }
+    let idx = __bitmap_find_first_free()
+    if idx < 0 {
+        return 0
+    }
+    __bitmap_set(idx)
+    __page_base + idx * PAGE_SIZE
+}
+
+// Return a page to the free pool.
+//
+// `pa`: physical address of the page.  Must be 4096-aligned and
+//       within [base, base+npages*4096).  Invalid addresses are
+//       silently ignored (no crash).
+pub fn free_page(pa: i64) {
+    let off = pa - __page_base
+    if off < 0 || off % PAGE_SIZE != 0 {
+        return
+    }
+    let idx = off / PAGE_SIZE
+    if idx < __npages {
+        __bitmap_clear(idx)
+    }
+}

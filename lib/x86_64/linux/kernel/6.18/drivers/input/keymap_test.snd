@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/kernel/6.18/drivers/input/keymap_test.snd -
+// Tests for the PS/2 scancode → ASCII keymap.
+// Covers lowercase letters, space, break-code detection, and
+// unrecognized-key handling to reach the 80 % basic-block coverage gate.
+
+include "x86_64/linux/testing.snd"
+include "keymap.snd"
+
+test "0x1E maps to 'a' (97)" {
+    assert_eq(scancode_to_ascii(0x1E), 97)
+}
+
+test "0x30 maps to 'b' (98)" {
+    assert_eq(scancode_to_ascii(0x30), 98)
+}
+
+test "0x2E maps to 'c' (99)" {
+    assert_eq(scancode_to_ascii(0x2E), 99)
+}
+
+test "0x1F maps to 's' (115)" {
+    assert_eq(scancode_to_ascii(0x1F), 115)
+}
+
+test "0x32 maps to 'm' (109)" {
+    assert_eq(scancode_to_ascii(0x32), 109)
+}
+
+test "0x35 maps to 'z' (122)" {
+    assert_eq(scancode_to_ascii(0x35), 122)
+}
+
+test "0x39 maps to space (32)" {
+    assert_eq(scancode_to_ascii(0x39), 32)
+}
+
+test "0x12 maps to 'e' (101)" {
+    assert_eq(scancode_to_ascii(0x12), 101)
+}
+
+test "0x21 maps to 'f' (102)" {
+    assert_eq(scancode_to_ascii(0x21), 102)
+}
+
+test "0x11 maps to 'w' (119)" {
+    assert_eq(scancode_to_ascii(0x11), 119)
+}
+
+test "0x14 maps to 't' (116)" {
+    assert_eq(scancode_to_ascii(0x14), 116)
+}
+
+test "0x00 (unknown key) maps to 0" {
+    assert_eq(scancode_to_ascii(0x00), 0)
+}
+
+test "0x7F (unknown high scancode) maps to 0" {
+    assert_eq(scancode_to_ascii(0x7F), 0)
+}
+
+test "break code (bit 7 set) returns 0" {
+    // 0x1E | 0x80 = 0x9E is the break-key for 'a'
+    assert_eq(scancode_to_ascii(0x9E), 0)
+}
+
+test "break code for space returns 0" {
+    // 0x39 | 0x80 = 0xB9 is the break-key for space
+    assert_eq(scancode_to_ascii(0xB9), 0)
+}
+
+test "is_printable returns 1 for space" {
+    assert_eq(is_printable(32), 1)
+}
+
+test "is_printable returns 1 for lowercase letters" {
+    assert_eq(is_printable(97), 1)  // a
+    assert_eq(is_printable(122), 1) // z
+}
+
+test "is_printable returns 0 for control chars" {
+    assert_eq(is_printable(0), 0)
+    assert_eq(is_printable(10), 0)  // newline
+    assert_eq(is_printable(27), 0) // ESC
+}
+
+test "is_printable returns 0 for non-ASCII" {
+    assert_eq(is_printable(127), 0)
+    assert_eq(is_printable(255), 0)
+}

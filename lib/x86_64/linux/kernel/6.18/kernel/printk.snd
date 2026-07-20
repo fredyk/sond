@@ -1,0 +1,129 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/kernel/6.18/kernel/printk.snd -
+// printk console output subsystem for Linux x86_64 6.18, implemented in Sond.
+//
+// printk is the kernel's primary logging mechanism. It prefixes messages with
+// a log-level tag (e.g. "<4>" for KERN_WARNING) and emits them via the serial
+// console (COM1, 8250 UART, 0x3F8).
+//
+// Usage: include "printk.snd" from your kernel module.
+// Call printk(level, msg) where msg is a NUL-terminated buffer.
+//
+// Note: this file is self-contained and does NOT include 8250.snd, so it
+// compiles standalone with --emit-header. For full functionality on real
+// hardware, serial8250_init() must be called first (from the UART driver).
+
+// ── Log levels (match Linux 6.18 / printk levels) ──────────────────────────
+
+let KERN_EMERG   = 0   // system is unusable
+let KERN_ALERT   = 1   // action must be taken immediately
+let KERN_CRIT    = 2   // critical conditions
+let KERN_ERR     = 3   // error conditions
+let KERN_WARNING = 4   // warning conditions
+let KERN_NOTICE  = 5   // normal but significant condition
+let KERN_INFO    = 6   // informational
+let KERN_DEBUG   = 7   // debug-level messages
+
+// ── UART COM1 helper (inline, self-contained) ──────────────────────────────
+
+// LSR bit 5 = Transmitter Holding Register Empty
+// We use the literal 32 (1 << 5) to avoid naming conflicts with 8250.snd's LSR_THRE.
+
+// Wait for THR to be empty (LSR bit 5)
+fn printk_send_byte(byte: i64) {
+    for {
+        if inb(0x3FB) & 32 != 0 { break }
+    }
+    outb(0x3F8, byte)
+}
+
+// ── printk core ─────────────────────────────────────────────────────────────
+
+// printk, the core logging function.
+// level: KERN_* constant (0..7)
+// msg: NUL-terminated buffer in memory containing the message text.
+//
+// Output format: <level>message\n  (e.g. <4>warning message\n)
+//
+// The function emits each byte directly via outb to COM1 port 0x3F8,
+// waiting for the UART THR to be empty before each write.
+// This is a minimal implementation, a full printk would also:
+//   - handle format strings (%d, %s, %x, etc.)
+//   - support log-level filtering (console_loglevel)
+//   - fall back to other consoles (console_drivers)
+//   - print CPU/PID/timestamp metadata
+fn printk(level: i64, msg: i64) {
+    // Emit level tag: '<' + digit + '>'
+    printk_send_byte(60)   // '<' = 0x3C
+    printk_send_byte(level + 48)  // digit '0'..'7' = ASCII 48..55
+    printk_send_byte(62)   // '>' = 0x3E
+
+    // Emit message byte by byte from NUL-terminated buffer
+    let mut i = 0
+    for {
+        let ch = peek8(msg + i)
+        if ch == 0 { break }
+        printk_send_byte(ch)
+        i = i + 1
+    }
+
+    // Emit '\n' to terminate the line
+    printk_send_byte(10)  // LF
+}
+
+// ── Convenience macros, Linux naming convention & semantics ────────────────
+
+fn pr_emerg(msg: i64) {
+    printk(KERN_EMERG, msg)
+}
+
+fn pr_alert(msg: i64) {
+    printk(KERN_ALERT, msg)
+}
+
+fn pr_crit(msg: i64) {
+    printk(KERN_CRIT, msg)
+}
+
+fn pr_err(msg: i64) {
+    printk(KERN_ERR, msg)
+}
+
+fn pr_warn(msg: i64) {
+    printk(KERN_WARNING, msg)
+}
+
+fn pr_notice(msg: i64) {
+    printk(KERN_NOTICE, msg)
+}
+
+fn pr_info(msg: i64) {
+    printk(KERN_INFO, msg)
+}
+
+fn pr_debug(msg: i64) {
+    printk(KERN_DEBUG, msg)
+}
+
+// ── Standalone demo ────────────────────────────────────────────────────────
+// To compile standalone: sondc kernel/printk.snd --uefi -o printk-demo.efi
+// On real hardware, serial8250_init() must be called before using printk.
+
+// (No attribute here: Sond has no `#[...]` syntax. An unknown one is silently
+//  swallowed by the lexer today, and it takes the next declaration with it.)
+fn printk_demo() -> i64 {
+    outb(0x3F9, 0x00)
+    outb(0x3FB, 0x80)
+    outb(0x3F8, 3)
+    outb(0x3F9, 0x00)
+    outb(0x3FB, 0x03)
+    outb(0x3FA, 0xC7)
+    printk(KERN_INFO, "boot: printk ready\n")
+    printk(KERN_WARNING, "printk works with all levels\n")
+    pr_info("via pr_info\n")
+    pr_err("via pr_err\n")
+    pr_warn("via pr_warn\n")
+    0
+}

@@ -1,0 +1,145 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/kernel/6.18/drivers/input/i8042.snd -
+// IBM PS/2 Keyboard Controller (8042) hardware abstraction layer.
+//
+// I/O ports:
+//   0x64  Command / Status register (read-only)
+//   0x60  Data register (read/write)
+//
+// Status port (0x64) bit definitions:
+//   Bit 0  Input buffer full (1 = 8042 is waiting for a byte from CPU)
+//   Bit 1  Output buffer full (1 = 8042 has a byte ready for CPU)
+//   Bit 2  System flag
+//   Bit 3  Command/data (1 = last byte written to 0x60 was a command)
+//   Bit 4  Timeout error
+//   Bit 5  Parity error
+//   Bit 6  Received keyboard ACK
+//   Bit 7  Input queue full (1 = keyboard is waiting for 8042)
+//
+// Usage: include "drivers/input/i8042.snd" from your input subsystem.
+// This is a bare-metal library, no efi_main.
+
+// ── I/O port addresses ───────────────────────────────────────────────────────
+
+let PORT_I8042_CMD  = 0x64  // Command/status register
+let PORT_I8042_DATA = 0x60  // Data register
+
+// ── Status port bits (0x64, read-only) ──────────────────────────────────────
+
+let I8042_S_INBUF   = 0  // Input buffer (keyboard ← CPU)
+let I8042_S_OUTBUF  = 1  // Output buffer (keyboard → CPU)
+let I8042_S_SYSFLAG = 2  // System flag
+let I8042_S_CMD     = 3  // Command/data indicator
+let I8042_S_TIMEOUT = 4  // Timeout error
+let I8042_S_PARITY  = 5  // Parity error
+let I8042_S_ACK     = 6  // Keyboard ACK received
+let I8042_S_INQUEUE = 7  // Input queue full (keyboard → 8042)
+
+// ── ACK byte from keyboard ──────────────────────────────────────────────────
+
+let I8042_KBDACK = 0xFA  // ACK received from keyboard
+
+// ── Commands to the 8042 ────────────────────────────────────────────────────
+
+let I8042_COMMAND_READ        = 0x20  // Read configuration byte
+let I8042_COMMAND_WRITE       = 0x60  // Write configuration byte
+let I8042_COMMAND_SELF_TEST   = 0xAA  // Self-test
+let I8042_COMMAND_TEST_IRQ    = 0xAE  // Test keyboard interface
+let I8042_COMMAND_DISABLE_KBD = 0xA7  // Disable keyboard interface
+let I8042_COMMAND_ENABLE_KBD  = 0xAE  // Enable keyboard interface
+
+// ── Keyboard commands ───────────────────────────────────────────────────────
+
+let KBD_COMMAND_SET_LEDS    = 0xED  // Set keyboard LED status
+let KBD_COMMAND_ID        = 0xF2  // Get device scancode set
+
+// ── Registers ───────────────────────────────────────────────────────────────
+
+// Read the 8042 status register (port 0x64)
+pub fn i8042_read_status() -> i64 {
+    inb(PORT_I8042_CMD)
+}
+
+// Read a byte from the 8042 data register (port 0x60)
+pub fn i8042_read_data() -> i64 {
+    inb(PORT_I8042_DATA)
+}
+
+// Write a byte to the 8042 data register (port 0x60)
+pub fn i8042_write_data(val: i64) {
+    outb(PORT_I8042_DATA, val)
+}
+
+// Write a command byte to the 8042 command register (port 0x64)
+pub fn i8042_write_command(val: i64) {
+    outb(PORT_I8042_CMD, val)
+}
+
+// ── Polling helpers ──────────────────────────────────────────────────────────
+
+// Check if the output buffer is full (waiting for CPU to read)
+fn i8042_output_ready() -> i64 {
+    let st = i8042_read_status()
+    (st >> I8042_S_OUTBUF) & 1
+}
+
+// Check if the input buffer is empty (ready to accept a byte from CPU)
+fn i8042_input_empty() -> i64 {
+    let st = i8042_read_status()
+    (st >> I8042_S_INBUF) & 1
+}
+
+// Wait until the output buffer is full and return its data byte.
+// This is the core read path used by all keyboard input.
+pub fn i8042_read() -> i64 {
+    for {
+        if i8042_output_ready() != 0 {
+            break
+        }
+    }
+    i8042_read_data()
+}
+
+// Poll the output buffer without blocking: return current data if available,
+// or 0 if the buffer is empty.
+pub fn i8042_read_poll() -> i64 {
+    let st = i8042_read_status()
+    if ((st >> I8042_S_OUTBUF) & 1) == 0 {
+        return 0
+    }
+    i8042_read_data()
+}
+
+// Wait until the input buffer is empty, then write `val` to the data port.
+// Used to send commands to the keyboard or the 8042 controller.
+pub fn i8042_write(val: i64) {
+    for {
+        if i8042_input_empty() != 0 {
+            break
+        }
+    }
+    i8042_write_data(val)
+}
+
+// ── Initialization ──────────────────────────────────────────────────────────
+
+// Initialize the 8042 PS/2 controller and keyboard:
+//   1. Flush both input/output queues with FLUSH_COMMANDS (not in all guides).
+//   2. Disable keyboard and mouse interfaces.
+//   3. Run controller self-test (expect 0x55).
+//   4. Re-enable the keyboard interface.
+//
+// In a full kernel this would also set up the PS/2 interrupt handler.
+// For polling mode we only need enable + self-test to verify the hardware.
+pub fn i8042_init() {
+    // Self-test the controller, expect 0x55 (pass).
+    i8042_write_command(I8042_COMMAND_SELF_TEST)
+    i8042_read()  // discard ACK
+    i8042_read()  // should be 0x55
+
+    // Disable both interfaces, then enable keyboard only.
+    i8042_write_command(I8042_COMMAND_DISABLE_KBD)
+    i8042_write_data(I8042_COMMAND_ENABLE_KBD)
+}

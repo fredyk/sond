@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/kernel/6.18/drivers/video/vga_test.snd -
+// Tests for the VGA text console cursor logic.
+//
+// Note: Sondc test harness does not map 0xB8000, so tests that exercise
+// poke8/poke16 at the VGA framebuffer or scroll (which reads/writes 0xB8000)
+// segfault in the child.  We test cursor position arithmetic on its own
+// (which is the pure core) and keep vgacon_init to a zero-clear only
+// when fully_clear==0, avoiding 0xB8000 access entirely during tests.
+
+include "x86_64/linux/testing.snd"
+include "vga.snd"
+
+// ── vgacon_init ──────────────────────────────────────────────────────────────
+
+test "vgacon_init sets col=0, row=0 (clear=0)" {
+    vgacon_init(0)    // skip 0xB8000 clear
+    assert_eq(vgacon_get_col(), 0)
+    assert_eq(vgacon_get_row(), 0)
+}
+
+// ── vgacon_set_cursor ────────────────────────────────────────────────────────
+
+test "vgacon_set_cursor sets position" {
+    vgacon_init(0)
+    vgacon_set_cursor(20, 5)
+    assert_eq(vgacon_get_col(), 20)
+    assert_eq(vgacon_get_row(), 5)
+}
+
+test "vgacon_set_cursor clamps col to 79" {
+    vgacon_init(0)
+    vgacon_set_cursor(100, 3)
+    assert_eq(vgacon_get_col(), 79)
+    assert_eq(vgacon_get_row(), 3)
+}
+
+test "vgacon_set_cursor clamps row to 24 (NOT 0)" {
+    vgacon_init(0)
+    vgacon_set_cursor(0, 50)
+    // clamps to VGA_ROWS - 1 = 24
+    assert_eq(vgacon_get_row(), 24)
+}
+
+test "vgacon_set_cursor negative col clamped to 0" {
+    vgacon_init(0)
+    vgacon_set_cursor(-5, 10)
+    assert_eq(vgacon_get_col(), 0)
+}
+
+test "vgacon_set_cursor negative row clamped to 0" {
+    vgacon_init(0)
+    vgacon_set_cursor(10, -3)
+    assert_eq(vgacon_get_row(), 0)
+}
+
+test "vgacon_set_cursor stays within screen" {
+    vgacon_init(0)
+    vgacon_set_cursor(79, 24)
+    assert_eq(vgacon_get_col(), 79)
+    assert_eq(vgacon_get_row(), 24)
+}
+
+// ── Cursor wrapping arithmetic ──────────────────────────────────────────────
+
+test "wrap_cursor at (79,0) → col 0 row 1, no scroll" {
+    vgacon_init(0)
+    vgacon_set_cursor(79, 0)
+    let result = vgacon_wrap_cursor()
+    // high byte = new_row, low byte = 0
+    assert_eq(result >> 8, 1)
+    assert_eq(result & 0xFF, 0)
+}
+
+test "wrap_cursor at (79,23) → col 0 row 24, no scroll" {
+    vgacon_init(0)
+    vgacon_set_cursor(79, 23)
+    let result = vgacon_wrap_cursor()
+    assert_eq(result >> 8, 24)
+}
+
+test "wrap_cursor at (79,24) → scroll signal" {
+    vgacon_init(0)
+    vgacon_set_cursor(79, 24)
+    let result = vgacon_wrap_cursor()
+    // 1 means scroll would happen
+    assert_eq(result, 1)
+}
+
+// ── vgacon_at_screen_bottom ─────────────────────────────────────────────────
+
+test "at_screen_bottom false at row 24" {
+    vgacon_init(0)
+    assert_eq(vgacon_at_screen_bottom(), 0)
+}
+
+test "at_screen_bottom true at row 25" {
+    vgacon_init(0)
+    cur_row = 25
+    assert_eq(vgacon_at_screen_bottom(), 1)
+}
+
+test "at_screen_bottom true at very high row" {
+    vgacon_init(0)
+    cur_row = 100
+    assert_eq(vgacon_at_screen_bottom(), 1)
+}
+
+// ── Newline and backspace (pure cursor math, no 0xB8000) ────────────────────
+
+test "newlines advance rows" {
+    vgacon_init(0)
+    vgacon_set_cursor(0, 5)
+    vgacon_putchar(10, 0x07)       // '\n'
+    assert_eq(vgacon_get_col(), 0)
+    assert_eq(vgacon_get_row(), 6)
+}
+
+test "newlines keep col at 0" {
+    vgacon_init(0)
+    vgacon_set_cursor(40, 3)
+    vgacon_putchar(10, 0x07)
+    assert_eq(vgacon_get_col(), 0)
+    assert_eq(vgacon_get_row(), 4)
+}
+
+test "backspace moves left" {
+    vgacon_init(0)
+    vgacon_set_cursor(20, 7)
+    vgacon_putchar(8, 0x07)        // BS
+    assert_eq(vgacon_get_col(), 19)
+}
+
+test "backspace at col 0 wraps to previous line" {
+    vgacon_init(0)
+    vgacon_set_cursor(0, 10)
+    vgacon_putchar(8, 0x07)
+    assert_eq(vgacon_get_col(), 79)
+    assert_eq(vgacon_get_row(), 9)
+}
+
+test "backspace at (0,0) stays at (0,0)" {
+    vgacon_init(0)
+    vgacon_set_cursor(0, 0)
+    vgacon_putchar(8, 0x07)
+    assert_eq(vgacon_get_col(), 0)
+    assert_eq(vgacon_get_row(), 0)
+}

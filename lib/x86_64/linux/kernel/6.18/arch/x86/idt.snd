@@ -1,0 +1,63 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// arch/x86/idt.snd: Interrupt Descriptor Table and PIC helpers for 64-bit.
+//
+// Exports:
+//   set_gate(idt_base, vector, handler_addr, cs_sel) , write an IDT gate
+//   pic_remap()                                       , remap 8259 A→0x20, B→0x28
+//   pit_init(rate)                                    , program PIT @ `rate` Hz
+
+// Remap the 8259 PIC: IRQ0..15 → vectors 0x20..0x2F (0x00..0x1F = CPU exceptions).
+pub fn pic_remap() {
+    outb(0x20, 0x11)       // ICW1: master init, expect ICW4
+    outb(0xA0, 0x11)       // ICW1: slave init
+    outb(0x21, 0x20)       // ICW2: master base = 0x20
+    outb(0xA1, 0x28)       // ICW2: slave base = 0x28
+    outb(0x21, 0x04)       // ICW3: slave on IRQ2
+    outb(0xA1, 0x02)       // ICW3: cascade identity
+    outb(0x21, 0x01)       // ICW4: 8086 mode
+    outb(0xA1, 0x01)       // ICW4: 8086 mode
+    // Mask all IRQs initially; caller un masks what it needs.
+    outb(0x21, 0xFF)
+    outb(0xA1, 0xFF)
+}
+
+// Unmask IRQ `n` (0..15 on master PIC).
+pub fn pic_unmask(n: i64) {
+    let mut mask: i64
+    if n < 8 {
+        mask = ~((1 << n) & 0xFF)
+        outb(0x21, mask)
+    } else {
+        mask = ~((1 << (n - 8)) & 0xFF)
+        outb(0xA1, mask)
+    }
+}
+
+// Program PIT channel 0 as rate generator at `rate` Hz.
+pub fn pit_init(rate: i64) {
+    let divisor = 1193150 / rate
+    outb(0x43, 0x36)       // chan 0, lo/hi, mode 3 (square wave)
+    outb(0x40, divisor & 0xFF)
+    outb(0x40, (divisor >> 8) & 0xFF)
+}
+
+// Write an interrupt gate at `idt[vec]`. 64-bit IDT gate = 16 bytes:
+//   [0-1]  handler offset 0-15
+//   [2-3]  cs selector (kernel code selector)
+//   [4]    0 (reserved)
+//   [5]    0x8E = present, ring 0, 64-bit interrupt gate
+//   [6-7]  handler offset 16-31
+//   [8-11] handler offset 32-63
+//  [12-15] 0
+pub fn set_gate(idt: i64, vec: i64, handler: i64, sel: i64) {
+    let e = idt + vec * 16
+    poke16(e + 0, handler & 0xFFFF)
+    poke16(e + 2, sel)
+    poke8(e + 4, 0)
+    poke8(e + 5, 0x8E)       // present | ring 0 | 64-bit interrupt gate
+    poke16(e + 6, (handler >> 16) & 0xFFFF)
+    poke32(e + 8, (handler >>> 32) & 0xFFFFFFFF)
+    poke32(e + 12, 0)
+}

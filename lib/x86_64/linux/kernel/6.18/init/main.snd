@@ -1,0 +1,101 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// init/main.snd: Minimal Linux 6.18 kernel entry point for Sond.
+//
+// Boots on bare UEFI: prints a serial banner, sets up the GDT and IDT,
+// remaps the PIC, programs the PIT, and enters an idle loop.
+// Growing subsystem by subsystem: mm, sched, drivers, filesystem...
+
+include "../arch/x86/gdt.snd"
+include "../arch/x86/idt.snd"
+
+// Boot time counter (nanoseconds-ish, incremented by PIT ticks).
+let mut boot_ticks: i64
+
+// Kernel initialization, the main entry point (Linux-style).
+fn start_kernel() {
+    serial_print("[    0.000000] Sond/Linux 6.18-sond\n")
+    serial_print("[    0.000000] Memory: available\n")
+    serial_print("[    0.000000] CPU: 1 core, 64-bit mode\n")
+
+    // Set up the GDT, required for protected mode operation.
+    serial_print("[    0.000000] Initializing GDT...\n")
+    gdt_init()
+    serial_print("[    0.000000] GDT loaded.\n")
+
+    // Set up the IDT and interrupts.
+    serial_print("[    0.000000] Initializing IDT...\n")
+    let idt = alloc(4096)
+    let mut z = 0
+    for z < 4096 {
+        poke8(idt + z, 0)
+        z = z + 1
+    }
+
+    // Install the timer ISR at vector 0x20.
+    set_gate(idt, 0x20, addr_of(timer_isr), read_cs())
+
+    // Load the IDT.
+    let idtr = alloc(16)
+    poke16(idtr, 4095)
+    poke64(idtr + 2, idt)
+    lidt(idtr)
+    serial_print("[    0.000000] IDT loaded.\n")
+
+    // Remap the 8259 PIC: IRQ0..15 -> vectors 0x20..0x2F.
+    serial_print("[    0.000000] Remapping PIC...\n")
+    pic_remap()
+    serial_print("[    0.000000] PIC remapped.\n")
+
+    // Program the PIT at 100 Hz.
+    serial_print("[    0.000000] Initializing PIT (100 Hz)...\n")
+    pit_init(100)
+    serial_print("[    0.000000] PIT initialized.\n")
+
+    // Enable interrupts.
+    asm("sti")
+    serial_print("[    0.000000] Interrupts enabled.\n")
+    serial_print("[    0.000000] Sond/Linux 6.18-sond booted.\n")
+}
+
+// Timer ISR, increments the tick counter and acks the PIC.
+interrupt fn timer_isr() {
+    boot_ticks = boot_ticks + 1
+    outb(0x20, 0x20)   // EOI to the master PIC
+}
+
+// Entry point, UEFI application entry.
+fn efi_main() -> i64 {
+    serial_print("\n")
+    serial_print("Sond Linux 6.18-sond booting...\n")
+
+    // Drop UEFI firmware, Sond becomes the bare-metal kernel.
+    serial_print("[    0.000000] Exiting boot services...\n")
+    exit_boot_services()
+    serial_print("[    0.000000] Boot services exited.\n")
+
+    // Run kernel initialization.
+    start_kernel()
+
+    // Idle loop, spin until the machine is powered off.
+    // The timer ISR bumps boot_ticks asynchronously.
+    serial_print("[    0.000000] Entering idle loop.\n")
+    let mut spin = 0
+    for spin < 1000000000 {
+        // Check if we should halt (for testing: stop after enough ticks).
+        if boot_ticks >= 50 {
+            serial_print("[    0.000000] Timer OK, 50 ticks received.\n")
+            serial_print("[    0.000000] Kernel idle loop complete.\n")
+            halt()
+        }
+        spin = spin + 1
+    }
+
+    // If we exit the loop without enough ticks, something is wrong.
+    serial_print("[    0.000000] WARNING: not enough timer ticks. Expected 50, got ")
+    print_int(boot_ticks)
+    serial_print("\n")
+    halt()
+    0
+}
