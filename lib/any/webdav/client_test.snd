@@ -1,0 +1,395 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/webdav/client.snd -- status parsing, content-length extraction,
+// body splitting, and HTTP request building.
+
+include "x86_64/linux/testing.snd"
+include "x86_64/linux/bytes.snd"
+include "any/webdav/client.snd"
+
+// Compare a bytes buffer against a NUL-terminated cstr literal.
+fn buf_eq_cstr(buf: i64, c: i64) -> i64 {
+    let n = bytes_len(buf)
+    let mut i = 0
+    let mut ok = 1
+    for {
+        if i >= n { break }
+        let bc = bytes_get(buf, i)
+        let cc = peek8(c + i)
+        if cc == 0 { break }
+        if bc != cc { ok = 0 }
+        i = i + 1
+    }
+    ok
+}
+
+// Compare two bytes buffers for equality.
+fn buf_eq_buf(buf1: i64, buf2: i64) -> i64 {
+    let n1 = bytes_len(buf1)
+    let n2 = bytes_len(buf2)
+    if n1 != n2 { return 0 }
+    let mut i = 0
+    let mut ok = 1
+    for i < n1 invariant { i <= n1 } {
+        if bytes_get(buf1, i) != bytes_get(buf2, i) { ok = 0 }
+        i = i + 1
+    }
+    ok
+}
+
+// Build a mock HTTP response (headers-only) -- the body is empty after \r\n.
+// The response always ends with a second \r\n, so we get headers\r\n\r\n.
+// dav_response_body looks for \r\n\r\n and extracts the body after it.
+fn mk_resp(status_buf: i64, headers_buf: i64) -> i64 {
+    let r = bytes_new()
+    bytes_append(r, status_buf)
+    bytes_append_cstr(r, cstr("\r\n"))
+    bytes_append(r, headers_buf)
+    bytes_append_cstr(r, cstr("\r\n"))
+    r
+}
+
+// Build a mock HTTP response with body.
+fn mk_resp_body(status_buf: i64, headers_buf: i64, body_buf: i64) -> i64 {
+    let r = bytes_new()
+    bytes_append(r, status_buf)
+    bytes_append_cstr(r, cstr("\r\n"))
+    bytes_append(r, headers_buf)
+    bytes_append_cstr(r, cstr("\r\n"))
+    if bytes_len(body_buf) > 0 { bytes_append(r, body_buf) }
+    r
+}
+
+// Make a GET-style request buffer.
+fn mk_req_get(path_buf: i64) -> i64 {
+    let r = bytes_new()
+    bytes_append_cstr(r, cstr("GET "))
+    bytes_append(r, path_buf)
+    bytes_append_cstr(r, cstr(" HTTP/1.1\r\nHost: 127.0.0.1:80\r\nConnection: close\r\n\r\n"))
+    r
+}
+
+// Make a PUT-style request buffer with body.
+fn mk_req_put(path_buf: i64, body_buf: i64) -> i64 {
+    let r = bytes_new()
+    bytes_append_cstr(r, cstr("PUT "))
+    bytes_append(r, path_buf)
+    bytes_append_cstr(r, cstr(" HTTP/1.1\r\nHost: 127.0.0.1:80\r\nContent-Type: text/xml; charset=utf-8\r\nContent-Length: "))
+    bytes_append_int(r, bytes_len(body_buf))
+    bytes_append_cstr(r, cstr("\r\n\r\n"))
+    bytes_append(r, body_buf)
+    r
+}
+
+// Make a PROPFIND request buffer.
+fn mk_req_propfind() -> i64 {
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Depth: 0\r\n"))
+    let body = xml_build_propfind_body(cstr("/"))
+    bytes_append_cstr(hdr, cstr("\r\n"))
+    let r = bytes_new()
+    bytes_append_cstr(r, cstr("PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1:80\r\nContent-Type: text/xml; charset=utf-8\r\n"))
+    bytes_append(r, hdr)
+    bytes_append_cstr(r, cstr("Content-Length: "))
+    bytes_append_int(r, bytes_len(body))
+    bytes_append_cstr(r, cstr("\r\n\r\n"))
+    bytes_append(r, body)
+    r
+}
+
+// Check byte at position in a request buffer.
+fn check_req_at(buf: i64, pos: i64, want: i64) -> i64 {
+    if pos >= bytes_len(buf) { return 0 }
+    let actual = bytes_get(buf, pos)
+    if actual == want { 1 } else { 0 }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────
+
+test "dav_response_status: 200 OK" {
+    let buf = bytes_new()
+    bytes_append_cstr(buf, cstr("HTTP/1.1 200 OK\r\n"))
+    assert_eq(dav_response_status(buf), 200)
+}
+
+test "dav_response_status: 207 Multi-Status" {
+    let buf = bytes_new()
+    bytes_append_cstr(buf, cstr("HTTP/1.1 207 Multi-Status\r\n"))
+    assert_eq(dav_response_status(buf), 207)
+}
+
+test "dav_response_status: 404" {
+    let buf = bytes_new()
+    bytes_append_cstr(buf, cstr("HTTP/1.1 404 Not Found\r\n"))
+    assert_eq(dav_response_status(buf), 404)
+}
+
+test "dav_response_status: 500" {
+    let buf = bytes_new()
+    bytes_append_cstr(buf, cstr("HTTP/1.1 500 Internal Server Error\r\n"))
+    assert_eq(dav_response_status(buf), 500)
+}
+
+test "dav_response_status: empty buffer" {
+    let buf = bytes_new()
+    assert_eq(dav_response_status(buf), -1)
+}
+
+test "dav_response_status: short buffer" {
+    let buf = bytes_new()
+    bytes_append_cstr(buf, cstr("HTTP"))
+    assert_eq(dav_response_status(buf), -1)
+}
+
+test "dav_response_status: garbage" {
+    let buf = bytes_new()
+    bytes_append_cstr(buf, cstr("GARBAGE\r\n"))
+    assert_eq(dav_response_status(buf), -1)
+}
+
+test "dav_is_success: 200" {
+    assert_eq(dav_is_success(200), 1)
+}
+
+test "dav_is_success: 201" {
+    assert_eq(dav_is_success(201), 1)
+}
+
+test "dav_is_success: 204" {
+    assert_eq(dav_is_success(204), 1)
+}
+
+test "dav_is_success: 299" {
+    // 299 is still in 2xx range
+    assert_eq(dav_is_success(299), 1)
+}
+
+test "dav_is_success: 301" {
+    assert_eq(dav_is_success(301), 0)
+}
+
+test "dav_is_success: 404" {
+    assert_eq(dav_is_success(404), 0)
+}
+
+test "dav_is_success: 500" {
+    assert_eq(dav_is_success(500), 0)
+}
+
+test "dav_get_content_length: 42 found" {
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Content-Length: 42\r\nContent-Type: text/plain\r\n"))
+    let resp = mk_resp(bytes_from_cstr(cstr("HTTP/1.1 200 OK")), hdr)
+    assert_eq(dav_get_content_length(resp), 42)
+}
+
+test "dav_get_content_length: zero found" {
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Content-Length: 0\r\n"))
+    let resp = mk_resp(bytes_from_cstr(cstr("HTTP/1.1 204 No Content")), hdr)
+    assert_eq(dav_get_content_length(resp), 0)
+}
+
+test "dav_get_content_length: missing header" {
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Content-Type: text/plain\r\n"))
+    let resp = mk_resp(bytes_from_cstr(cstr("HTTP/1.1 200 OK")), hdr)
+    assert_eq(dav_get_content_length(resp), 0)
+}
+
+test "dav_get_content_length: large value" {
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Content-Length: 123456\r\n"))
+    let resp = mk_resp(bytes_from_cstr(cstr("HTTP/1.1 200 OK")), hdr)
+    assert_eq(dav_get_content_length(resp), 123456)
+}
+
+test "dav_response_body: extracts body" {
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Content-Length: 5\r\nContent-Type: text/plain\r\n"))
+    let body = bytes_from_cstr(cstr("hello"))
+    let resp = mk_resp_body(bytes_from_cstr(cstr("HTTP/1.1 200 OK")), hdr, body)
+    let out = bytes_new()
+    let status = dav_response_body(resp, out)
+    assert_eq(status, 200)
+    assert(buf_eq_cstr(out, cstr("hello")))
+}
+
+test "dav_response_body: empty body 204" {
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Content-Length: 0\r\nContent-Type: text/plain\r\n"))
+    let resp = mk_resp_body(bytes_from_cstr(cstr("HTTP/1.1 204 No Content")), hdr, bytes_new())
+    let out = bytes_new()
+    let status = dav_response_body(resp, out)
+    assert_eq(status, 204)
+    assert_eq(bytes_len(out), 0)
+}
+
+test "dav_response_body: large body 100 bytes" {
+    let body = bytes_new()
+    let i = 0
+    for i < 100 {
+        bytes_push(body, 65 + (i % 26))
+        i = i + 1
+    }
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Content-Length: 100\r\nContent-Type: application/octet-stream\r\n"))
+    let resp = mk_resp_body(bytes_from_cstr(cstr("HTTP/1.1 200 OK")), hdr, body)
+    let out = bytes_new()
+    let status = dav_response_body(resp, out)
+    assert_eq(status, 200)
+    assert_eq(bytes_len(out), 100)
+}
+
+test "dav_response_body: 207 Multi-Status XML body" {
+    let xml_body = bytes_from_cstr(cstr("<multistatus xmlns=\"DAV:\"><html/></multistatus>"))
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Content-Length: 49\r\nContent-Type: application/xml\r\n"))
+    let resp = mk_resp_body(bytes_from_cstr(cstr("HTTP/1.1 207 Multi-Status")), hdr, xml_body)
+    let out = bytes_new()
+    let status = dav_response_body(resp, out)
+    assert_eq(status, 207)
+    assert_eq(bytes_len(out), bytes_len(xml_body))
+    assert(buf_eq_buf(out, xml_body))
+}
+
+test "dav_response_body: 401 Unauthorized" {
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("WWW-Authenticate: Basic realm=\"webdav\"\r\n"))
+    let resp = mk_resp(bytes_from_cstr(cstr("HTTP/1.1 401 Unauthorized")), hdr)
+    let out = bytes_new()
+    let status = dav_response_body(resp, out)
+    assert_eq(status, 401)
+}
+
+test "dav_build_request: GET structure" {
+    let path_buf = bytes_from_cstr(cstr("/test"))
+    let req = mk_req_get(path_buf)
+    assert_eq(check_req_at(req, 0, 71), 1)  // 'G'
+    assert_eq(check_req_at(req, 1, 69), 1)  // 'E'
+    assert_eq(check_req_at(req, 2, 84), 1)  // 'T'
+    assert_eq(check_req_at(req, 3, 32), 1)  // space
+    assert_eq(check_req_at(req, 4, 47), 1)  // '/'
+}
+
+test "dav_build_request: PUT structure" {
+    let body = bytes_from_cstr(cstr("hello world"))
+    let path_buf = bytes_from_cstr(cstr("/upload"))
+    let req = mk_req_put(path_buf, body)
+    assert_eq(check_req_at(req, 0, 80), 1)  // 'P'
+}
+
+test "dav_build_request: PROPFIND has propfind tag" {
+    let req = mk_req_propfind()
+    let pos = xml_find_open_tag(req, cstr("propfind"), 0)
+    assert(pos >= 0)
+}
+
+test "dav_build_request: PROPFIND has Depth header" {
+    let req = mk_req_propfind()
+    let found = bytes_index_of_from(req, 68, 20)  // 'D' for Depth
+    assert(found >= 0)
+}
+
+test "dav_build_request: PROPFIND body has xml" {
+    let body = xml_build_propfind_body(cstr("/"))
+    assert(bytes_len(body) > 0)
+    assert(xml_find_open_tag(body, cstr("propfind"), 0) >= 0)
+}
+
+test "dav_make_resp_body: basic" {
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Content-Length: 5\r\nContent-Type: text/plain\r\n"))
+    let body = bytes_from_cstr(cstr("hello"))
+    let resp = mk_resp_body(bytes_from_cstr(cstr("HTTP/1.1 200 OK")), hdr, body)
+    assert(bytes_len(resp) > 0)
+}
+
+test "buf_eq_cstr: match" {
+    let buf = bytes_from_cstr(cstr("hello"))
+    assert_eq(buf_eq_cstr(buf, cstr("hello")), 1)
+}
+
+test "buf_eq_cstr: no match" {
+    let buf = bytes_from_cstr(cstr("hello"))
+    assert_eq(buf_eq_cstr(buf, cstr("world")), 0)
+}
+
+test "buf_eq_cstr: empty" {
+    let buf = bytes_new()
+    assert_eq(buf_eq_cstr(buf, cstr("")), 1)
+}
+
+// Coverage helpers
+test "dav_response_status: edge 199" {
+    let buf = bytes_new()
+    bytes_append_cstr(buf, cstr("HTTP/1.1 199 Minimal\r\n"))
+    assert_eq(dav_response_status(buf), 199)
+}
+
+test "dav_is_success: boundary 300" {
+    assert_eq(dav_is_success(300), 0)
+}
+
+test "dav_response_body: body with special chars" {
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Content-Length: 3\r\n"))
+    let body = bytes_new()
+    bytes_push(body, 36)
+    bytes_push(body, 64)
+    bytes_push(body, 35)
+    let resp = mk_resp_body(bytes_from_cstr(cstr("HTTP/1.1 200 OK")), hdr, body)
+    let out = bytes_new()
+    let status = dav_response_body(resp, out)
+    assert_eq(status, 200)
+    assert_eq(bytes_len(out), 3)
+}
+
+test "buf_eq_buf: match" {
+    let a = bytes_from_cstr(cstr("hello"))
+    let b = bytes_from_cstr(cstr("hello"))
+    assert_eq(buf_eq_buf(a, b), 1)
+}
+
+test "buf_eq_buf: no match" {
+    let a = bytes_from_cstr(cstr("hello"))
+    let b = bytes_from_cstr(cstr("world"))
+    assert_eq(buf_eq_buf(a, b), 0)
+}
+
+test "buf_eq_buf: different lengths" {
+    let a = bytes_from_cstr(cstr("hello"))
+    let b = bytes_from_cstr(cstr("hi"))
+    assert_eq(buf_eq_buf(a, b), 0)
+}
+
+test "buf_eq_buf: empty buffers" {
+    let a = bytes_new()
+    let b = bytes_new()
+    assert_eq(buf_eq_buf(a, b), 1)
+}
+
+test "buf_eq_cstr: bytes handle comparison via cstr" {
+    let buf = bytes_from_cstr(cstr("test"))
+    assert_eq(buf_eq_cstr(buf, cstr("test")), 1)
+}
+
+test "check_req_at: match position" {
+    let path_buf = bytes_from_cstr(cstr("GET /test"))
+    assert_eq(check_req_at(path_buf, 0, 71), 1)  // G
+    assert_eq(check_req_at(path_buf, 4, 47), 1)  // /
+}
+
+test "check_req_at: no match" {
+    let path_buf = bytes_from_cstr(cstr("GET"))
+    assert_eq(check_req_at(path_buf, 0, 65), 0)  // A != G
+}
+
+test "check_req_at: out of range" {
+    let req = bytes_from_cstr(cstr("GET / HTTP/1.1\r\n"))
+    assert_eq(check_req_at(req, 10000, 0), 0)
+}
+
+// COV
+// UPDATE

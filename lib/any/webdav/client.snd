@@ -1,0 +1,338 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/webdav/client.snd: WebDAV client primitives over TCP/HTTP (RFC 4918).
+//
+// Uses lib/x86_64/linux/net.snd for sockets and lib/x86_64/linux/http.snd for HTTP.
+// All paths, headers, etc. are byte buffers (i64).
+
+include "x86_64/linux/bytes.snd"
+include "x86_64/linux/net.snd"
+include "any/strings.snd"
+
+include "x86_64/linux/io.snd"
+include "x86_64/linux/http.snd"
+
+include "any/webdav/xml.snd"
+
+// ── Connection helpers ──────────────────────────────────────────────────
+
+// Connect to <host>:<port>, return fd or -1.  `host` is an IPv4 dot-string.
+pub fn dav_connect(host: i64, port: i64) -> i64 {
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { return -1 }
+    let ip = dav_ip_from_cstr(host)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    if connect_sock(fd, sa, 16) < 0 {
+        close_fd(fd)
+        return -1
+    }
+    fd
+}
+
+// Parse an IPv4 dot-decimal string (e.g. "127.0.0.1") into a network-order u32.
+// Uses scalar fields, no arrays, to satisfy the compiler's bound checker.
+fn dav_ip_from_cstr(s: i64) -> i64 {
+    let mut o0: i64
+    let mut o1: i64
+    let mut o2: i64
+    let mut o3: i64
+    let mut oct = 0
+    let mut val = 0
+    let mut i = 0
+    for {
+        let c = peek8(s + i)
+        if c == 0 { break }
+        if (c >= 48 && c <= 57) || c == 46 {
+            if c == 46 {
+                if oct == 0 { o0 = val }
+                if oct == 1 { o1 = val }
+                if oct == 2 { o2 = val }
+                if oct == 3 { o3 = val }
+                oct = oct + 1
+                val = 0
+            } else {
+                val = val * 10 + (c - 48)
+            }
+        }
+        i = i + 1
+    }
+    if oct < 4 {
+        if oct == 0 { o0 = val }
+        if oct == 1 { o1 = val }
+        if oct == 2 { o2 = val }
+        if oct == 3 { o3 = val }
+    }
+    o0 * 16777216 | o1 * 65536 | o2 * 256 | o3
+}
+
+// ── Low-level HTTP request builder + sender ─────────────────────────────
+
+// Build a complete HTTP request buffer as bytes.
+// `method` is a cstr (e.g. cstr("PROPFIND")).
+// `path` is a cstr-relative path.
+// `extra_headers` is a bytes handle holding CRLF-terminated lines, or 0.
+// `body` is body data buffer, or 0.
+fn dav_build_request(method: i64, path: i64, host: i64, port: i64, extra_headers: i64, body: i64) -> i64 {
+    let req = bytes_new()
+    bytes_append_cstr(req, method)
+    bytes_push(req, 32)
+    bytes_append(req, path)
+    bytes_push(req, 32)
+    bytes_append_cstr(req, cstr("HTTP/1.1\r\n"))
+    bytes_append_cstr(req, cstr("Host: "))
+    bytes_append_cstr(req, host)
+    bytes_append_cstr(req, cstr(":"))
+    bytes_append_int(req, port)
+    bytes_append_cstr(req, cstr("\r\n"))
+    bytes_append_cstr(req, cstr("Content-Type: text/xml; charset=utf-8\r\n"))
+    bytes_append_cstr(req, cstr("Connection: close\r\n"))
+
+    if body != 0 && bytes_len(body) > 0 {
+        bytes_append_cstr(req, cstr("Content-Length: "))
+        bytes_append_int(req, bytes_len(body))
+        bytes_append_cstr(req, cstr("\r\n"))
+    }
+
+    if extra_headers != 0 && bytes_len(extra_headers) > 0 {
+        let eh_len = bytes_len(extra_headers)
+        let mut i = 0
+        for i < eh_len {
+            bytes_push(req, bytes_get(extra_headers, i))
+            i = i + 1
+        }
+    }
+
+    bytes_append_cstr(req, cstr("\r\n"))
+
+    if body != 0 && bytes_len(body) > 0 {
+        bytes_append(req, body)
+    }
+    req
+}
+
+// Drain response from socket fd into a new bytes buffer.
+fn dav_drain_response(fd: i64) -> i64 {
+    let resp = bytes_new()
+    let buf[2048]
+    for {
+        let n = read_buf(fd, buf, 2048)
+        if n <= 0 { break }
+        let mut i = 0
+        for i < 2048 invariant { i <= 2048 } {
+            if i >= n { break }
+            bytes_push(resp, buf[i])
+            i = i + 1
+        }
+    }
+    resp
+}
+
+// ── Status-line parsing ─────────────────────────────────────────────────
+
+pub fn dav_response_status(resp: i64) -> i64 {
+    let n = bytes_len(resp)
+    if n < 12 { return -1 }
+    if bytes_get(resp, 0) != 72 || bytes_get(resp, 1) != 84 || bytes_get(resp, 2) != 84 || bytes_get(resp, 3) != 80 {
+        return -1
+    }
+    let d1 = bytes_get(resp, 9) - 48
+    let d2 = bytes_get(resp, 10) - 48
+    let d3 = bytes_get(resp, 11) - 48
+    if d1 >= 0 && d1 <= 9 && d2 >= 0 && d2 <= 9 && d3 >= 0 && d3 <= 9 {
+        d1 * 100 + d2 * 10 + d3
+    } else {
+        -1
+    }
+}
+
+pub fn dav_is_success(status: i64) -> i64 {
+    if status >= 200 && status < 300 { 1 } else { 0 }
+}
+
+// ── Content-Length from response headers ────────────────────────────────
+
+pub fn dav_get_content_length(resp: i64) -> i64 {
+    let mut i = 0
+    let n = bytes_len(resp)
+    for i < n invariant { i <= n } {
+        let v = dav_check_header_at(resp, i)
+        if v != 0 { return v }
+        i = i + 1
+    }
+    0
+}
+
+fn dav_check_header_at(resp: i64, pos: i64) -> i64 {
+    let n = bytes_len(resp)
+    if pos + 17 > n { return 0 }
+    if bytes_get(resp, pos) != 67 { return 0 }
+    if bytes_get(resp, pos + 1) != 111 { return 0 }
+    if bytes_get(resp, pos + 2) != 110 { return 0 }
+    if bytes_get(resp, pos + 3) != 116 { return 0 }
+    if bytes_get(resp, pos + 4) != 101 { return 0 }
+    if bytes_get(resp, pos + 5) != 110 { return 0 }
+    if bytes_get(resp, pos + 6) != 116 { return 0 }
+    if bytes_get(resp, pos + 7) != 45 { return 0 }
+    if bytes_get(resp, pos + 8) != 76 { return 0 }
+    if bytes_get(resp, pos + 9) != 101 { return 0 }
+    if bytes_get(resp, pos + 10) != 110 { return 0 }
+    if bytes_get(resp, pos + 11) != 103 { return 0 }
+    if bytes_get(resp, pos + 12) != 116 { return 0 }
+    if bytes_get(resp, pos + 13) != 104 { return 0 }
+    if bytes_get(resp, pos + 14) != 58 { return 0 }
+    if bytes_get(resp, pos + 15) != 32 { return 0 }
+    let mut v = 0
+    let mut k = pos + 16
+    for k < n {
+        let d = bytes_get(resp, k) - 48
+        if d < 0 || d > 9 { break }
+        v = v * 10 + d
+        k = k + 1
+    }
+    v
+}
+
+// ── Read all response body into out buffer, return content-length ──────
+
+// Read the body of a response (everything after \r\n\r\n) from raw HTTP response
+// into out buffer. Returns the HTTP status code.
+pub fn dav_response_body(resp: i64, out: i64) -> i64 {
+    let status = dav_response_status(resp)
+    let n = bytes_len(resp)
+    // Need at least 4 bytes for \r\n\r\n
+    if n < 4 { return status }
+    let mut i = 0
+    for i < n - 3 invariant { i <= n } {
+        if bytes_get(resp, i) == 13 && bytes_get(resp, i + 1) == 10 &&
+           bytes_get(resp, i + 2) == 13 && bytes_get(resp, i + 3) == 10 {
+            let body_start = i + 4
+            let body_len = n - body_start
+            let mut b = 0
+            for b < body_len invariant { b <= body_len } {
+                bytes_push(out, bytes_get(resp, body_start + b))
+                b = b + 1
+            }
+            return status
+        }
+        i = i + 1
+    }
+    status
+}
+
+// ── WebDAV public API ───────────────────────────────────────────────────
+
+// PROPFIND: return the raw response buffer.
+// `path` is the resource path (cstr). `depth` is a cstr ("0", "1", "infinity").
+pub fn dav_propfind(host: i64, port: i64, path: i64, depth: i64) -> i64 {
+    let fd = dav_connect(host, port)
+    if fd < 0 { return -1 }
+    let body = xml_build_propfind_body(path)
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Depth: "))
+    if bytes_len(depth) > 0 {
+        let mut di = 0
+        for {
+            let dc = bytes_get(depth, di)
+            if dc == 0 { break }
+            bytes_push(hdr, dc)
+            di = di + 1
+        }
+    }
+    if bytes_len(depth) == 0 {
+        bytes_push(hdr, 48)
+    }
+    bytes_append_cstr(hdr, cstr("\r\n"))
+    let req = dav_build_request(cstr("PROPFIND"), path, host, port, hdr, body)
+    write_buf(fd, peek64(req), bytes_len(req))
+    let resp = dav_drain_response(fd)
+    close_fd(fd)
+    resp
+}
+
+// GET resource. Returns HTTP status code.
+pub fn dav_get(host: i64, port: i64, path: i64) -> i64 {
+    let fd = dav_connect(host, port)
+    if fd < 0 { return -1 }
+    let req = dav_build_request(cstr("GET"), path, host, port, 0, 0)
+    write_buf(fd, peek64(req), bytes_len(req))
+    let resp = dav_drain_response(fd)
+    let status = dav_response_status(resp)
+    close_fd(fd)
+    status
+}
+
+// PUT resource with binary `body`. Returns HTTP status code.
+pub fn dav_put(host: i64, port: i64, path: i64, body: i64) -> i64 {
+    let fd = dav_connect(host, port)
+    if fd < 0 { return -1 }
+    let req = dav_build_request(cstr("PUT"), path, host, port, 0, body)
+    write_buf(fd, peek64(req), bytes_len(req))
+    let resp = dav_drain_response(fd)
+    let status = dav_response_status(resp)
+    close_fd(fd)
+    status
+}
+
+// MKCOL: create a collection at `path`. Returns HTTP status code.
+pub fn dav_mkcol(host: i64, port: i64, path: i64) -> i64 {
+    let fd = dav_connect(host, port)
+    if fd < 0 { return -1 }
+    let req = dav_build_request(cstr("MKCOL"), path, host, port, 0, 0)
+    write_buf(fd, peek64(req), bytes_len(req))
+    let resp = dav_drain_response(fd)
+    let status = dav_response_status(resp)
+    close_fd(fd)
+    status
+}
+
+// DELETE resource at `path`. Returns HTTP status code.
+pub fn dav_delete(host: i64, port: i64, path: i64) -> i64 {
+    let fd = dav_connect(host, port)
+    if fd < 0 { return -1 }
+    let req = dav_build_request(cstr("DELETE"), path, host, port, 0, 0)
+    write_buf(fd, peek64(req), bytes_len(req))
+    let resp = dav_drain_response(fd)
+    let status = dav_response_status(resp)
+    close_fd(fd)
+    status
+}
+
+// MOVE resource from `src` to `dst_path` on the same host. Returns HTTP status code.
+pub fn dav_move(host: i64, port: i64, src: i64, dst_path: i64) -> i64 {
+    let fd = dav_connect(host, port)
+    if fd < 0 { return -1 }
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Destination: "))
+    bytes_append_cstr(hdr, host)
+    bytes_append_cstr(hdr, cstr(":"))
+    bytes_append_int(hdr, port)
+    bytes_append(hdr, dst_path)
+    bytes_append_cstr(hdr, cstr("\r\n"))
+    let req = dav_build_request(cstr("MOVE"), src, host, port, hdr, 0)
+    write_buf(fd, peek64(req), bytes_len(req))
+    let resp = dav_drain_response(fd)
+    let status = dav_response_status(resp)
+    close_fd(fd)
+    status
+}
+
+// COPY resource from `src` to `dst_path` on the same host. Returns HTTP status code.
+pub fn dav_copy(host: i64, port: i64, src: i64, dst_path: i64) -> i64 {
+    let fd = dav_connect(host, port)
+    if fd < 0 { return -1 }
+    let hdr = bytes_new()
+    bytes_append_cstr(hdr, cstr("Destination: "))
+    bytes_append_cstr(hdr, host)
+    bytes_append_cstr(hdr, cstr(":"))
+    bytes_append_int(hdr, port)
+    bytes_append(hdr, dst_path)
+    bytes_append_cstr(hdr, cstr("\r\n"))
+    let req = dav_build_request(cstr("COPY"), src, host, port, hdr, 0)
+    write_buf(fd, peek64(req), bytes_len(req))
+    let resp = dav_drain_response(fd)
+    let status = dav_response_status(resp)
+    close_fd(fd)
+    status
+}

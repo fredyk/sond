@@ -1,0 +1,285 @@
+// FIX-compile-force
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/webdav/xml.snd: minimal XML builder and parser for WebDAV multistatus bodies.
+// Only the elements used by PROPFIND 207 are covered:
+//   multistatus, response, href, propstat, prop, resourcetype (collection),
+//   getcontentlength, getlastmodified, displayname, lockdiscovery, lockinfo.
+//
+// Design: all values are byte buffers (i64 handles).  The DAV: namespace is
+// implicit.  Multi-result parsers write into a delimited output buffer; the
+// caller splits on NUL bytes.
+
+include "x86_64/linux/bytes.snd"
+include "any/strings.snd"
+
+// ── XML tag builders ────────────────────────────────────────────────────
+
+// Append <name>value</name> to buf.  Returns buf.
+pub fn xml_element(buf: i64, name: i64, value: i64) {
+    bytes_push(buf, 60)                           // <
+    bytes_append_cstr(buf, name)
+    bytes_push(buf, 62)                           // >
+    bytes_append_cstr(buf, value)
+    bytes_push(buf, 60)                           // <
+    bytes_push(buf, 47)                           // /
+    bytes_append_cstr(buf, name)
+    bytes_push(buf, 62)                           // >
+}
+
+// <name/> self-closing tag.
+pub fn xml_elem_self(buf: i64, name: i64) {
+    bytes_push(buf, 60)                           // <
+    bytes_append_cstr(buf, name)
+    bytes_push(buf, 47)                           // /
+    bytes_push(buf, 62)                           // >
+}
+
+// ── WebDAV multistatus element builders ─────────────────────────────────
+
+// A resource entry: <response><href>path</href> ...propstat...</propstat></response>
+// `has_collection` is 1 if collection, 0 if file.
+pub fn xml_propfind_response(buf: i64, href_val: i64, displayname_val: i64, content_len_val: i64, has_collection: i64) {
+    bytes_push(buf, 60); bytes_append_cstr(buf, cstr("response")); bytes_push(buf, 62)
+    bytes_push(buf, 60); bytes_append_cstr(buf, cstr("href")); bytes_push(buf, 62)
+    bytes_append_cstr(buf, href_val)
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, cstr("href")); bytes_push(buf, 62)
+    bytes_push(buf, 60); bytes_append_cstr(buf, cstr("propstat")); bytes_push(buf, 62)
+    bytes_push(buf, 60); bytes_append_cstr(buf, cstr("prop")); bytes_push(buf, 62)
+    bytes_push(buf, 60); bytes_append_cstr(buf, cstr("displayname")); bytes_push(buf, 62)
+    bytes_append_cstr(buf, displayname_val)
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, cstr("displayname")); bytes_push(buf, 62)
+    bytes_push(buf, 60); bytes_append_cstr(buf, cstr("resourcetype")); bytes_push(buf, 62)
+    if has_collection != 0 {
+        xml_elem_self(buf, cstr("collection"))
+    } else {
+        xml_elem_self(buf, cstr("resourcetype"))
+    }
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, cstr("resourcetype")); bytes_push(buf, 62)
+    bytes_push(buf, 60); bytes_append_cstr(buf, cstr("getcontentlength")); bytes_push(buf, 62)
+    if has_collection == 0 && content_len_val != 0 {
+        bytes_append_int(buf, content_len_val)
+    } else {
+        bytes_push(buf, 48)  // "0"
+    }
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, cstr("getcontentlength")); bytes_push(buf, 62)
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, cstr("prop")); bytes_push(buf, 62)
+    bytes_push(buf, 60); bytes_append_cstr(buf, cstr("status")); bytes_push(buf, 62)
+    bytes_append_cstr(buf, cstr("HTTP/1.1 200 OK"))
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, cstr("status")); bytes_push(buf, 62)
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, cstr("propstat")); bytes_push(buf, 62)
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, cstr("response")); bytes_push(buf, 62)
+}
+
+// The outer <multistatus xmlns="DAV:">...</multistatus> wrapper.
+pub fn xml_multistatus(buf: i64, entries: i64) {
+    bytes_push(buf, 60); bytes_push(buf, 63); bytes_append_cstr(buf, cstr("xml version=\"1.0\" encoding=\"utf-8\""))
+    bytes_push(buf, 32); bytes_push(buf, 62); bytes_push(buf, 10)
+    bytes_push(buf, 60); bytes_append_cstr(buf, cstr("multistatus")); bytes_push(buf, 32)
+    bytes_append_cstr(buf, cstr("xmlns=\"DAV:\""))
+    bytes_push(buf, 62); bytes_push(buf, 10)
+    if bytes_len(entries) > 0 { bytes_append(buf, entries) }
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, cstr("multistatus")); bytes_push(buf, 62)
+}
+
+// ── XML parsers ─────────────────────────────────────────────────────────
+
+// Compare the first `n` bytes of src (at from) against a NUL-terminated cstr.
+fn bytes_prefix_eq(src: i64, from: i64, cstr_ref: i64, n: i64) -> i64 {
+    let mut i = 0
+    for i < n {
+        if bytes_get(src, from + i) != peek8(cstr_ref + i) { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+// Find an opening tag <name> in buf starting at `from`, matching tag_text chars.
+// Skips whitespace after the name to find '>'.
+fn xml_find_open_tag(buf: i64, tag_text: i64, from: i64) -> i64 {
+    let mut i = from
+    let n = bytes_len(buf)
+    for {
+        if i >= n { return -1 }
+        if bytes_get(buf, i) == 60 {  // '<'
+            let mut j = 0
+            for {
+                let tc = peek8(tag_text + j)
+                if tc == 0 { break }
+                if bytes_get(buf, i + 1 + j) != tc { break }
+                j = j + 1
+            }
+            if peek8(tag_text + j) == 0 {  // all chars matched
+                // Verify next byte is NOT a letter (prevents "<res" matching "response")
+                let next_at = i + 1 + j
+                let next_c = if next_at < n { bytes_get(buf, next_at) } else { 0 }
+                let in_name = if next_c >= 97 && next_c <= 122 { 1 } else { 0 }  // a-z
+                let in_name2 = if next_c >= 65 && next_c <= 90 { 1 } else { 0 }  // A-Z
+                let in_name3 = if next_c >= 48 && next_c <= 57 { 1 } else { 0 }  // 0-9
+                if in_name == 0 && in_name2 == 0 && in_name3 == 0 {
+                    // Skip everything until we find '>' (handles attributes like xmlns="...")
+                    let mut k = next_at
+                    for {
+                        if k >= n { break }
+                        if bytes_get(buf, k) == 62 { return i }  // '>'
+                        k = k + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Find closing tag </name> starting at `from`.
+fn xml_find_close_tag(buf: i64, tag_text: i64, from: i64) -> i64 {
+    let mut i = from
+    let n = bytes_len(buf)
+    for {
+        if i >= n { return -1 }
+        if i + 1 < n && bytes_get(buf, i) == 60 && bytes_get(buf, i + 1) == 47 {  // '</'
+            let mut j = 0
+            for {
+                let tc = peek8(tag_text + j)
+                if tc == 0 { break }
+                if bytes_get(buf, i + 2 + j) != tc { break }
+                j = j + 1
+            }
+            if peek8(tag_text + j) == 0 {
+                let gt_pos = i + 2 + j
+                if gt_pos < n && bytes_get(buf, gt_pos) == 62 { return i }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Find self-closing tag <name/> starting at `from`.
+fn xml_find_selfc_tag(buf: i64, tag_text: i64, from: i64) -> i64 {
+    let mut i = from
+    let n = bytes_len(buf)
+    for {
+        if i >= n { return -1 }
+        if bytes_get(buf, i) == 60 {  // '<'
+            let mut j = 0
+            for {
+                let tc = peek8(tag_text + j)
+                if tc == 0 { break }
+                if bytes_get(buf, i + 1 + j) != tc { break }
+                j = j + 1
+            }
+            if peek8(tag_text + j) == 0 {  // name matched
+                let slash_pos = i + 1 + j
+                let gt_pos = i + 2 + j
+                if slash_pos < n && gt_pos < n && bytes_get(buf, slash_pos) == 47 && bytes_get(buf, gt_pos) == 62 { return i }
+            }
+        }
+        i = i + 1
+    }
+}
+
+pub fn xml_get_tag_content(buf: i64, tag: i64, from: i64) -> i64 {
+    let open_pos = xml_find_open_tag(buf, tag, from)
+    if open_pos == -1 { return bytes_new() }
+    // Find '>' after the tag name (skipping whitespace/attributes)
+    let mut gt_pos = open_pos + 1
+    for {
+        if gt_pos >= bytes_len(buf) { return bytes_new() }
+        if bytes_get(buf, gt_pos) == 62 { break }  // '>'
+        gt_pos = gt_pos + 1
+    }
+    let content_start = gt_pos + 1
+    let close_pos = xml_find_close_tag(buf, tag, content_start)
+    if close_pos == -1 { return bytes_new() }
+    if close_pos > content_start { return bytes_slice(buf, content_start, close_pos) }
+    bytes_new()
+}
+
+pub fn xml_has_tag(buf: i64, tag: i64, from: i64) -> i64 {
+    let pos = xml_find_selfc_tag(buf, tag, from)
+    if pos >= 0 { 1 } else { 0 }
+}
+
+pub fn xml_extract_hrefs(out: i64, base: i64, buf: i64) -> i64 {
+    let mut count = 0
+    let mut search_from = 0
+    for {
+        let href_content = xml_get_tag_content(buf, cstr("href"), search_from)
+        if bytes_len(href_content) == 0 { break }
+        let fb = if bytes_len(href_content) > 0 { bytes_get(href_content, 0) } else { -1 }
+        // Prepend base if href doesn't start with '/'
+        let mut prepend_base = 0
+        if fb != 47 {
+            prepend_base = 1
+        }
+        if prepend_base != 0 && bytes_len(base) > 0 {
+            let combined = bytes_new()
+            bytes_append_cstr(combined, base)
+            bytes_append(combined, href_content)
+            bytes_append(out, combined)
+        } else {
+            bytes_append(out, href_content)
+        }
+        bytes_push(out, 0); bytes_push(out, 10)
+        count = count + 1
+        search_from = xml_find_open_tag(buf, cstr("response"), search_from + 1)
+        if search_from == -1 { break }
+    }
+    count
+}
+
+pub fn xml_count_responses(buf: i64) -> i64 {
+    let mut count = 0
+    let mut from = 0
+    for {
+        let pos = xml_find_open_tag(buf, cstr("response"), from)
+        if pos == -1 { break }
+        count = count + 1
+        from = pos + 1
+    }
+    count
+}
+
+pub fn xml_parse_response(xml: i64, start_pos: i64, out: i64, cf_slot: i64) -> i64 {
+    let resp_end = xml_find_close_tag(xml, cstr("response"), start_pos)
+    if resp_end == -1 { return 0 }
+    let href = xml_get_tag_content(xml, cstr("href"), start_pos)
+    bytes_append(out, href); bytes_push(out, 0)
+    let dn = xml_get_tag_content(xml, cstr("displayname"), start_pos)
+    bytes_append(out, dn); bytes_push(out, 0)
+    let has_coll = xml_has_tag(xml, cstr("collection"), start_pos)
+    poke64(cf_slot, has_coll)  // 1 for collection, 0 for file
+    let clen_str = xml_get_tag_content(xml, cstr("getcontentlength"), start_pos)
+    bytes_append(out, clen_str); bytes_push(out, 0)
+    1
+}
+
+pub fn xml_build_propfind_body(name: i64) -> i64 {
+    let body = bytes_new()
+    bytes_push(body, 60); bytes_push(body, 63); bytes_append_cstr(body, cstr("xml version=\"1.0\" encoding=\"utf-8\""))
+    bytes_push(body, 32); bytes_push(body, 62); bytes_push(body, 10)
+    bytes_push(body, 60); bytes_append_cstr(body, cstr("propfind")); bytes_push(body, 32)
+    bytes_append_cstr(body, cstr("xmlns=\"DAV:\""))
+    bytes_push(body, 62); bytes_push(body, 10)
+    bytes_push(body, 60); bytes_append_cstr(body, cstr("prop")); bytes_push(body, 62)
+    bytes_push(body, 10)
+    bytes_append_cstr(body, cstr("    <displayname/>"))
+    bytes_push(body, 10)
+    bytes_append_cstr(body, cstr("    <resourcetype/>"))
+    bytes_push(body, 10)
+    bytes_append_cstr(body, cstr("    <getcontentlength/>"))
+    bytes_push(body, 10)
+    bytes_append_cstr(body, cstr("    <getlastmodified/>"))
+    bytes_push(body, 10)
+    bytes_append_cstr(body, cstr("    <lockdiscovery/>"))
+    bytes_push(body, 10)
+    bytes_push(body, 60); bytes_push(body, 47); bytes_append_cstr(body, cstr("prop")); bytes_push(body, 62)
+    bytes_push(body, 10)
+    bytes_push(body, 60); bytes_push(body, 47); bytes_append_cstr(body, cstr("propfind")); bytes_push(body, 62)
+    body
+}
+
+
+// REBUILD
+// FIX-2

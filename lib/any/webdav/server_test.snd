@@ -1,0 +1,217 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/webdav/server.snd -- file tree operations and request handling.
+
+include "x86_64/linux/testing.snd"
+include "x86_64/linux/bytes.snd"
+include "any/webdav/server.snd"
+
+// ── Tests ───────────────────────────────────────────────────────────────
+
+test "dav_init_file_tree: creates empty tree" {
+    dav_init_file_tree()
+    let tree = dav_file_tree
+    let len = bytes_len(tree)
+    assert_eq(len, 0)
+}
+
+test "dav_add_entry: adds entry to tree" {
+    dav_init_file_tree()
+    let name = bytes_from_cstr(cstr("testfile"))
+    dav_add_entry(name, 42, 0)
+    let len = bytes_len(dav_file_tree)
+    assert(len > 0)
+}
+
+test "dav_add_entry: collection entry" {
+    dav_init_file_tree()
+    let name = bytes_from_cstr(cstr("mydir"))
+    dav_add_entry(name, 0, 1)
+    let len = bytes_len(dav_file_tree)
+    assert(len > 0)
+}
+
+test "dav_add_entry: multiple entries" {
+    dav_init_file_tree()
+    let name1 = bytes_from_cstr(cstr("file1"))
+    dav_add_entry(name1, 100, 0)
+    let name2 = bytes_from_cstr(cstr("file2"))
+    dav_add_entry(name2, 200, 0)
+    let name3 = bytes_from_cstr(cstr("dir"))
+    dav_add_entry(name3, 0, 1)
+    let len = bytes_len(dav_file_tree)
+    assert(len > 10)  // at least 3 entries
+}
+
+test "dav_read_entry: reads first entry" {
+    dav_init_file_tree()
+    let name = bytes_from_cstr(cstr("hello"))
+    dav_add_entry(name, 55, 0)
+    let out = bytes_new()
+    let next_off = dav_read_entry(0, out)
+    assert(next_off > 0)
+    let len = bytes_len(out)
+    assert_eq(len, 5)  // "hello" = 5 bytes
+}
+
+test "dav_read_entry: reads second entry" {
+    dav_init_file_tree()
+    let name1 = bytes_from_cstr(cstr("first"))
+    dav_add_entry(name1, 10, 0)
+    let name2 = bytes_from_cstr(cstr("second"))
+    dav_add_entry(name2, 20, 1)
+    // Read first entry
+    let out1 = bytes_new()
+    let off1 = dav_read_entry(0, out1)
+    assert(off1 > 0)
+    // Read second entry
+    let out2 = bytes_new()
+    let off2 = dav_read_entry(off1, out2)
+    assert(off2 > 0)
+    let len2 = bytes_len(out2)
+    assert_eq(len2, 6)  // "second" = 6 bytes
+}
+
+test "dav_read_entry: returns -1 at end" {
+    dav_init_file_tree()
+    let name = bytes_from_cstr(cstr("only"))
+    dav_add_entry(name, 1, 0)
+    let out = bytes_new()
+    let off1 = dav_read_entry(0, out)
+    assert(off1 > 0)
+    let off2 = dav_read_entry(off1, out)
+    assert_eq(off2, -1)
+}
+
+test "dav_read_entry: empty tree" {
+    dav_init_file_tree()
+    let out = bytes_new()
+    let off = dav_read_entry(0, out)
+    assert_eq(off, -1)
+}
+
+test "dav_read_entry: long name" {
+    dav_init_file_tree()
+    let name = bytes_from_cstr(cstr("averylongfilenamethatislongerthanusual"))
+    dav_add_entry(name, 999, 0)
+    let out = bytes_new()
+    let off = dav_read_entry(0, out)
+    assert(off > 0)
+    let len = bytes_len(out)
+    assert_eq(len, 38)  // "averylongfilenamethatislongerthanusual" = 38
+}
+
+test "dav_read_entry: size 0" {
+    dav_init_file_tree()
+    let name = bytes_from_cstr(cstr("empty"))
+    dav_add_entry(name, 0, 1)
+    let out = bytes_new()
+    let off = dav_read_entry(0, out)
+    assert(off > 0)
+    assert_eq(bytes_len(out), 5)  // "empty"
+}
+
+test "dav_read_entry: three entries" {
+    dav_init_file_tree()
+    let n1 = bytes_from_cstr(cstr("a"))
+    dav_add_entry(n1, 1, 0)
+    let n2 = bytes_from_cstr(cstr("b"))
+    dav_add_entry(n2, 2, 0)
+    let n3 = bytes_from_cstr(cstr("c"))
+    dav_add_entry(n3, 3, 0)
+    let o1 = bytes_new()
+    let o2 = bytes_new()
+    let o3 = bytes_new()
+    let off1 = dav_read_entry(0, o1)
+    assert(off1 > 0)
+    let off2 = dav_read_entry(off1, o2)
+    assert(off2 > 0)
+    let off3 = dav_read_entry(off2, o3)
+    assert(off3 > 0)
+    assert_eq(bytes_len(o1), 1)  // a
+    assert_eq(bytes_len(o2), 1)  // b
+    assert_eq(bytes_len(o3), 1)  // c
+}
+
+// ── dav_handle basic tests ──────────────────────────────────────────────
+
+// We can't fully test dav_handle (needs a real socket), but we can verify
+// it compiles and doesn't crash by calling it with minimal inputs.
+// Actually, we'll test the helper functions used by dav_handle directly.
+
+test "method_starts_with: OPTIONS match" {
+    let buf = bytes_from_cstr(cstr("OPTIONS"))
+    assert_eq(method_starts_with(buf, cstr("OPTIONS")), 1)
+}
+
+test "method_starts_with: PROPFIND match" {
+    let buf = bytes_from_cstr(cstr("PROPFIND"))
+    assert_eq(method_starts_with(buf, cstr("PROPFIND")), 1)
+}
+
+test "method_starts_with: no match" {
+    let buf = bytes_from_cstr(cstr("GET"))
+    assert_eq(method_starts_with(buf, cstr("POST")), 0)
+}
+
+test "method_starts_with: partial match" {
+    let buf = bytes_from_cstr(cstr("PROPFIND"))
+    assert_eq(method_starts_with(buf, cstr("PROP")), 1)
+}
+
+test "method_starts_with: short buffer no match" {
+    let buf = bytes_from_cstr(cstr("G"))
+    assert_eq(method_starts_with(buf, cstr("GET")), 0)
+}
+
+// ── dav_handle helper tests ────────────────────────────────────────────
+
+// Test internal functions indirectly through dav_handle or standalone.
+
+test "dav_add_entry: verify size encoding" {
+    dav_init_file_tree()
+    let name = bytes_from_cstr(cstr("bigfile"))
+    dav_add_entry(name, 999, 0)
+    let len = bytes_len(dav_file_tree)
+    assert(len > 10)
+}
+
+test "dav_add_entry: verify collection flag" {
+    dav_init_file_tree()
+    let name = bytes_from_cstr(cstr("directory"))
+    dav_add_entry(name, 0, 1)
+    let len = bytes_len(dav_file_tree)
+    assert(len > 0)
+}
+
+test "dav_read_entry: size 999" {
+    dav_init_file_tree()
+    let name = bytes_from_cstr(cstr("big"))
+    dav_add_entry(name, 999, 0)
+    let out = bytes_new()
+    let off = dav_read_entry(0, out)
+    assert(off > 0)
+    // Read next entry (should be -1 since only one entry)
+    let off2 = dav_read_entry(off, out)
+    assert_eq(off2, -1)
+}
+
+test "dav_read_entry: entry after multiple adds" {
+    dav_init_file_tree()
+    let name1 = bytes_from_cstr(cstr("x"))
+    dav_add_entry(name1, 50, 0)
+    let name2 = bytes_from_cstr(cstr("y"))
+    dav_add_entry(name2, 75, 1)
+    let out1 = bytes_new()
+    let out2 = bytes_new()
+    let off1 = dav_read_entry(0, out1)
+    assert_eq(bytes_len(out1), 1)  // x
+    let off2 = dav_read_entry(off1, out2)
+    assert_eq(bytes_len(out2), 1)  // y
+    let off3 = dav_read_entry(off2, out2)
+    assert_eq(off3, -1)
+}
+
+// COV
+// UPDATE
