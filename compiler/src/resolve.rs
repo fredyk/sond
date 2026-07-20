@@ -30,7 +30,27 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
     let mut depth0 = HashSet::new();
     let mut depth1 = HashSet::new();
     resolve_into(entry, &mut seen, &mut out, 0, &mut depth0, &mut depth1)?;
-    let scope = if depth0.is_empty() { depth1 } else { depth0 };
+    // Which functions is this entry on the hook for covering?
+    //
+    // A file named `*_test.snd` exists to test what it includes, so the subject is its direct
+    // includes and never its own top-level functions, which are test scaffolding.
+    //
+    // Deciding this by "does the entry define any functions of its own" instead, as this did
+    // before, is a trap: adding one helper to a test file reclassified it as a program, and the
+    // library under test dropped out of the denominator. A suite covering 1 of 5 library
+    // functions then reported 1/1 and sailed through the 80% gate. The gate is the whole point,
+    // so the rule it runs on has to be stated rather than inferred.
+    let is_test_file = entry
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with("_test.snd"));
+    let scope = if is_test_file {
+        if depth1.is_empty() { depth0 } else { depth1 }
+    } else if depth0.is_empty() {
+        depth1
+    } else {
+        depth0
+    };
     Ok((out, scope))
 }
 
@@ -151,6 +171,49 @@ mod tests {
         let combined = resolve_includes(&main).unwrap();
         assert_eq!(combined.matches("fn helper").count(), 1, "included once");
         assert!(combined.contains("fn main"), "keeps the main file");
+    }
+
+    #[test]
+    fn a_test_files_coverage_scope_is_the_library_it_includes_not_its_own_helpers() {
+        // The gate that makes a Sond program refuse to build without 80% coverage is only
+        // worth anything if it measures the code under test. A `_test.snd` file that happens
+        // to define a helper of its own must not shrink the denominator to that helper: that
+        // turns "1 of 5 library functions covered" into a green "1 of 1".
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let k = N.fetch_add(1, Ordering::Relaxed);
+        let lib = tmp(
+            &format!("sond_covlib_{k}.snd"),
+            "fn a1() -> i64 { 1 }\nfn a2() -> i64 { 2 }\nfn a3() -> i64 { 3 }",
+        );
+        let libname = lib.file_name().unwrap().to_str().unwrap();
+        let entry = tmp(
+            &format!("sond_covscope_{k}_test.snd"),
+            &format!("include \"{libname}\"\nfn helper() -> i64 {{ 7 }}\ntest \"t\" {{ }}"),
+        );
+        let (_, scope) = resolve_includes_scoped(&entry).unwrap();
+        assert!(scope.contains("a1"), "the library under test is the scope");
+        assert!(scope.contains("a3"), "all of it, not a sample");
+        assert!(
+            !scope.contains("helper"),
+            "a helper in the test file is scaffolding, not the subject"
+        );
+    }
+
+    #[test]
+    fn a_program_is_still_measured_on_its_own_functions() {
+        // The counterpart: a program that includes the standard library is not on the hook
+        // for covering the standard library.
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let k = N.fetch_add(1, Ordering::Relaxed);
+        let lib = tmp(&format!("sond_progdep_{k}.snd"), "fn dep() -> i64 { 1 }");
+        let libname = lib.file_name().unwrap().to_str().unwrap();
+        let entry = tmp(
+            &format!("sond_prog_{k}.snd"),
+            &format!("include \"{libname}\"\nfn mine() -> i64 {{ dep() }}\ntest \"t\" {{ }}"),
+        );
+        let (_, scope) = resolve_includes_scoped(&entry).unwrap();
+        assert!(scope.contains("mine"), "its own functions");
+        assert!(!scope.contains("dep"), "not its dependencies");
     }
 
     #[test]
