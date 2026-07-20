@@ -269,14 +269,14 @@ test "keyword where" {
     assert_eq(tok_kind(tokenize(b), 0), 63)  // TK_WHERE_KW
 }
 
-test "keyword test" {
+test "bare test is an identifier, the keyword needs a string after it" {
     let b = bytes_new()
     bytes_push(b, 116)
     bytes_push(b, 101)
     bytes_push(b, 115)
     bytes_push(b, 116)
     assert_eq(tok_count(tokenize(b)), 1)
-    assert_eq(tok_kind(tokenize(b), 0), 44)  // TK_TEST
+    assert_eq(tok_kind(tokenize(b), 0), 4)  // a bare `test` is a name, not a keyword
 }
 
 test "keyword struct" {
@@ -447,4 +447,444 @@ test "keyword while" {
     bytes_push(b, 101)
     assert_eq(tok_count(tokenize(b)), 1)
     assert_eq(tok_kind(tokenize(b), 0), 71)  // TK_WHILE_KW
+}
+
+// --- Helpers for building source buffers from arrays of char literals ---
+// (top-level fn in a *_test.snd file: does not count against the coverage
+// denominator, only the included lexer.snd does, so use freely)
+
+fn push_arr(b: i64, arr: i64, n: i64) {
+    let mut i = 0
+    for i < n {
+        bytes_push(b, arr[i])
+        i = i + 1
+    }
+}
+
+fn tokenize_arr(arr: i64, n: i64) -> i64 {
+    let b = bytes_new()
+    push_arr(b, arr, n)
+    tokenize(b)
+}
+
+// --- Ported from compiler/src/lexer_tests.rs: hex literals ---
+
+test "hex 0xff followed by identifier (lexer_tests::tokenizes_a_hex_literal)" {
+    let a[5] = ['0', 'x', 'f', 'f', 'z']
+    let t = tokenize_arr(a, 5)
+    assert_eq(tok_count(t), 2)
+    assert_eq(tok_kind(t, 0), 0)    // TK_INT
+    assert_eq(tok_val(t, 0), 255)
+    assert_eq(tok_kind(t, 1), 4)    // TK_IDENT ('z' is not part of the hex run)
+}
+
+test "hex full 64-bit mask wraps to -1 (lexer_tests::tokenizes_a_hex_literal)" {
+    let a[18] = ['0', 'x', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F']
+    let t = tokenize_arr(a, 18)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 0)
+    assert_eq(tok_val(t, 0), -1)
+}
+
+test "hex mixed-zero mask (lexer_tests::tokenizes_a_hex_literal)" {
+    let a[18] = ['0', 'x', '0', '0', '0', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', 'F', '0', '0', '0']
+    let t = tokenize_arr(a, 18)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_val(t, 0), 0x000FFFFFFFFFF000)
+}
+
+// DISCREPANCY vs compiler/src/lexer.rs: Rust accepts BOTH `0x` and `0X` as the hex
+// prefix (`matches!(ahead.peek(), Some('x') | Some('X'))`). lexer.snd's tokenize only
+// checks for lowercase 'x' (byte 120): "0X10" is NOT recognized as hex at all, and is
+// instead lexed as TK_INT(0) followed by TK_IDENT("X10"). This test encodes the
+// CORRECT (Rust) behavior and is expected to FAIL against the current lexer.snd.
+test "hex 0X10 uppercase prefix (DISCREPANCY: lexer.snd ignores uppercase X)" {
+    let a[4] = ['0', 'X', '1', '0']
+    let t = tokenize_arr(a, 4)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 0)    // TK_INT
+    assert_eq(tok_val(t, 0), 16)
+}
+
+test "int followed by dot and non-digit is not a decimal (lexer_tests-inspired)" {
+    let a[6] = ['4', '2', '.', 'f', 'o', 'o']
+    let t = tokenize_arr(a, 6)
+    assert_eq(tok_count(t), 3)
+    assert_eq(tok_kind(t, 0), 0)    // TK_INT 42
+    assert_eq(tok_val(t, 0), 42)
+    assert_eq(tok_kind(t, 1), 34)   // TK_DOT
+    assert_eq(tok_kind(t, 2), 4)    // TK_IDENT "foo"
+}
+
+// --- Ported from compiler/src/lexer_tests.rs: skips_whitespace ---
+
+test "skips whitespace without newline (lexer_tests::skips_whitespace)" {
+    let a[7] = [' ', ' ', '4', '2', '\t', ' ', '7']
+    let t = tokenize_arr(a, 7)
+    assert_eq(tok_count(t), 2)
+    assert_eq(tok_kind(t, 0), 0)
+    assert_eq(tok_val(t, 0), 42)
+    assert_eq(tok_kind(t, 1), 0)
+    assert_eq(tok_val(t, 1), 7)
+}
+
+test "bare carriage return is plain whitespace, no semicolon" {
+    let a[3] = ['5', '\r', '6']
+    let t = tokenize_arr(a, 3)
+    assert_eq(tok_count(t), 2)
+    assert_eq(tok_val(t, 0), 5)
+    assert_eq(tok_val(t, 1), 6)
+}
+
+// --- Ported from compiler/src/lexer_tests.rs: tokenizes_string_escapes ---
+
+test "string escape tab" {
+    let a[6] = ['"', 'x', '\\', 't', 'y', '"']
+    let t = tokenize_arr(a, 6)
+    assert_eq(tok_count(t), 1)
+    let s = tok_val(t, 0)
+    assert_eq(bytes_len(s), 3)
+    assert_eq(bytes_get(s, 0), 120)  // x
+    assert_eq(bytes_get(s, 1), 9)    // \t
+    assert_eq(bytes_get(s, 2), 121)  // y
+}
+
+test "string escape carriage return" {
+    let a[6] = ['"', 'x', '\\', 'r', 'y', '"']
+    let t = tokenize_arr(a, 6)
+    let s = tok_val(t, 0)
+    assert_eq(bytes_get(s, 1), 13)   // \r
+}
+
+test "string escape nul" {
+    let a[6] = ['"', 'x', '\\', '0', 'y', '"']
+    let t = tokenize_arr(a, 6)
+    let s = tok_val(t, 0)
+    assert_eq(bytes_len(s), 3)
+    assert_eq(bytes_get(s, 1), 0)    // \0
+}
+
+test "string escape backslash" {
+    let a[6] = ['"', 'x', '\\', '\\', 'y', '"']
+    let t = tokenize_arr(a, 6)
+    let s = tok_val(t, 0)
+    assert_eq(bytes_get(s, 1), 92)   // \\
+}
+
+test "string escape double quote" {
+    let a[6] = ['"', 'x', '\\', '"', 'y', '"']
+    let t = tokenize_arr(a, 6)
+    let s = tok_val(t, 0)
+    assert_eq(bytes_get(s, 1), 34)   // \"
+}
+
+test "string escape single quote" {
+    let a[6] = ['"', 'x', '\\', '\'', 'y', '"']
+    let t = tokenize_arr(a, 6)
+    let s = tok_val(t, 0)
+    assert_eq(bytes_get(s, 1), 39)   // \'
+}
+
+test "string unknown escape falls back to the raw character" {
+    let a[6] = ['"', 'x', '\\', 'q', 'y', '"']
+    let t = tokenize_arr(a, 6)
+    let s = tok_val(t, 0)
+    assert_eq(bytes_len(s), 3)
+    assert_eq(bytes_get(s, 1), 113)  // 'q', backslash just dropped
+}
+
+// --- Ported from compiler/src/lexer_tests.rs: tokenizes_a_char_literal ---
+
+test "char literal digit zero (lexer_tests::tokenizes_a_char_literal)" {
+    let a[3] = ['\'', '0', '\'']
+    let t = tokenize_arr(a, 3)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_val(t, 0), 48)
+}
+
+test "char literal escape tab" {
+    let a[4] = ['\'', '\\', 't', '\'']
+    let t = tokenize_arr(a, 4)
+    assert_eq(tok_val(t, 0), 9)
+}
+
+test "char literal escape carriage return" {
+    let a[4] = ['\'', '\\', 'r', '\'']
+    let t = tokenize_arr(a, 4)
+    assert_eq(tok_val(t, 0), 13)
+}
+
+test "char literal escape nul" {
+    let a[4] = ['\'', '\\', '0', '\'']
+    let t = tokenize_arr(a, 4)
+    assert_eq(tok_val(t, 0), 0)
+}
+
+test "char literal escape backslash" {
+    let a[4] = ['\'', '\\', '\\', '\'']
+    let t = tokenize_arr(a, 4)
+    assert_eq(tok_val(t, 0), 92)
+}
+
+test "char literal escape single quote" {
+    let a[4] = ['\'', '\\', '\'', '\'']
+    let t = tokenize_arr(a, 4)
+    assert_eq(tok_val(t, 0), 39)
+}
+
+test "char literal escape double quote" {
+    let a[4] = ['\'', '\\', '"', '\'']
+    let t = tokenize_arr(a, 4)
+    assert_eq(tok_val(t, 0), 34)
+}
+
+test "char literal unknown escape returns the raw code" {
+    let a[4] = ['\'', '\\', 'q', '\'']
+    let t = tokenize_arr(a, 4)
+    assert_eq(tok_val(t, 0), 113)  // 'q'
+}
+
+// --- Ported from compiler/src/lexer_tests.rs: tokenizes_an_identifier,
+//     distinguishes_keywords_from_identifiers ---
+
+test "identifier tax_base with underscore (lexer_tests::tokenizes_an_identifier)" {
+    let a[8] = ['t', 'a', 'x', '_', 'b', 'a', 's', 'e']
+    let t = tokenize_arr(a, 8)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 4)   // TK_IDENT
+}
+
+test "identifier containing a trailing digit" {
+    let a[2] = ['z', '9']
+    let t = tokenize_arr(a, 2)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 4)
+}
+
+test "let fn letra: letra is not the keyword let (lexer_tests::distinguishes_keywords_from_identifiers)" {
+    let a[12] = ['l', 'e', 't', ' ', 'f', 'n', ' ', 'l', 'e', 't', 'r', 'a']
+    let t = tokenize_arr(a, 12)
+    assert_eq(tok_count(t), 3)
+    assert_eq(tok_kind(t, 0), 50)  // TK_LET_KW
+    assert_eq(tok_kind(t, 1), 51)  // TK_FN_KW
+    assert_eq(tok_kind(t, 2), 4)   // TK_IDENT "letra"
+}
+
+// One non-keyword identifier per length 2..9 so every `_kw_*` helper's
+// no-match branch (not just its match branch) gets exercised, matching the
+// intent of lexer_tests::distinguishes_keywords_from_identifiers.
+test "non-keyword identifiers of every keyword length are plain idents" {
+    let a[51] = [
+        'a', 'b', ' ',
+        'x', 'y', 'z', ' ',
+        'w', 'x', 'y', 'z', ' ',
+        'v', 'w', 'x', 'y', 'z', ' ',
+        'u', 'v', 'w', 'x', 'y', 'z', ' ',
+        't', 'u', 'v', 'w', 'x', 'y', 'z', ' ',
+        's', 't', 'u', 'v', 'w', 'x', 'y', 'z', ' ',
+        'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'
+    ]
+    let t = tokenize_arr(a, 51)
+    assert_eq(tok_count(t), 8)
+    let mut i = 0
+    for i < 8 {
+        assert_eq(tok_kind(t, i), 4)  // TK_IDENT
+        i = i + 1
+    }
+}
+
+// --- Ported from compiler/src/lexer_tests.rs: tokenizes_operators_and_delimiters,
+//     tokenizes_comparison_operators, tokenizes_brackets_dot_and_arithmetic ---
+
+test "operators and delimiters (lexer_tests::tokenizes_operators_and_delimiters)" {
+    let a[18] = ['=', ' ', '+', ' ', '(', ' ', ')', ' ', '{', ' ', '}', ' ', ',', ' ', ':', ' ', '-', '>']
+    let t = tokenize_arr(a, 18)
+    assert_eq(tok_count(t), 9)
+    assert_eq(tok_kind(t, 0), 21)  // TK_EQ
+    assert_eq(tok_kind(t, 1), 11)  // TK_PLUS
+    assert_eq(tok_kind(t, 2), 36)  // TK_LPAREN
+    assert_eq(tok_kind(t, 3), 37)  // TK_RPAREN
+    assert_eq(tok_kind(t, 4), 38)  // TK_LBRACE
+    assert_eq(tok_kind(t, 5), 39)  // TK_RBRACE
+    assert_eq(tok_kind(t, 6), 42)  // TK_COMMA
+    assert_eq(tok_kind(t, 7), 43)  // TK_COLON
+    assert_eq(tok_kind(t, 8), 28)  // TK_ARROW
+}
+
+test "comparison operators (lexer_tests::tokenizes_comparison_operators)" {
+    let a[15] = ['=', '=', ' ', '!', '=', ' ', '<', ' ', '>', ' ', '<', '=', ' ', '>', '=']
+    let t = tokenize_arr(a, 15)
+    assert_eq(tok_count(t), 6)
+    assert_eq(tok_kind(t, 0), 22)  // TK_EQEQ
+    assert_eq(tok_kind(t, 1), 23)  // TK_NE
+    assert_eq(tok_kind(t, 2), 24)  // TK_LT
+    assert_eq(tok_kind(t, 3), 26)  // TK_GT
+    assert_eq(tok_kind(t, 4), 25)  // TK_LE
+    assert_eq(tok_kind(t, 5), 27)  // TK_GE
+}
+
+test "brackets dot and arithmetic (lexer_tests::tokenizes_brackets_dot_and_arithmetic)" {
+    let a[11] = ['[', ' ', ']', ' ', '.', ' ', '-', ' ', '*', ' ', '/']
+    let t = tokenize_arr(a, 11)
+    assert_eq(tok_count(t), 6)
+    assert_eq(tok_kind(t, 0), 40)  // TK_LBRACKET
+    assert_eq(tok_kind(t, 1), 41)  // TK_RBRACKET
+    assert_eq(tok_kind(t, 2), 34)  // TK_DOT
+    assert_eq(tok_kind(t, 3), 12)  // TK_MINUS
+    assert_eq(tok_kind(t, 4), 13)  // TK_STAR
+    assert_eq(tok_kind(t, 5), 14)  // TK_SLASH
+}
+
+test "remaining operators: percent caret tilde amp pipe double-ops shr lshr" {
+    let a[28] = ['%', ' ', '^', ' ', '~', ' ', '&', ' ', '|', ' ', '&', '&', ' ', '|', '|', ' ', '=', '>', ' ', '.', '.', ' ', '>', '>', ' ', '>', '>', '>']
+    let t = tokenize_arr(a, 28)
+    assert_eq(tok_count(t), 11)
+    assert_eq(tok_kind(t, 0), 15)   // TK_PERCENT
+    assert_eq(tok_kind(t, 1), 16)   // TK_CARET
+    assert_eq(tok_kind(t, 2), 17)   // TK_TILDE
+    assert_eq(tok_kind(t, 3), 30)   // TK_AMP
+    assert_eq(tok_kind(t, 4), 32)   // TK_PIPE
+    assert_eq(tok_kind(t, 5), 31)   // TK_AMP_AMP
+    assert_eq(tok_kind(t, 6), 33)   // TK_PIPE_PIPE
+    assert_eq(tok_kind(t, 7), 29)   // TK_FAT_ARROW
+    assert_eq(tok_kind(t, 8), 35)   // TK_DOT_DOT
+    assert_eq(tok_kind(t, 9), 19)   // TK_SHR
+    assert_eq(tok_kind(t, 10), 20)  // TK_LSHR
+}
+
+// DISCREPANCY vs compiler/src/lexer.rs: Rust's '<' handler recognizes `<<` as a single
+// Token::Shl. lexer.snd's tokenize has NO two-character check for '<' at all (only the
+// `<=` case is handled before falling through to a bare TK_LT), so "<<" comes out as
+// two separate TK_LT tokens instead of one TK_SHL. This test encodes the CORRECT (Rust,
+// and Sond.md-documented `<<` operator) behavior and is expected to FAIL.
+test "shl operator (DISCREPANCY: lexer.snd has no << handling at all)" {
+    let a[2] = ['<', '<']
+    let t = tokenize_arr(a, 2)
+    assert_eq(tok_count(t), 1)
+    assert_eq(tok_kind(t, 0), 18)  // TK_SHL
+}
+
+// --- Ported from compiler/src/lexer_tests.rs: inserts_implicit_semicolon_at_end_of_line,
+//     no_semicolon_after_a_trailing_operator, no_semicolon_after_open_brace_or_blank_lines ---
+
+test "implicit semicolon at end of line (lexer_tests::inserts_implicit_semicolon_at_end_of_line)" {
+    let a[21] = ['l', 'e', 't', ' ', 'x', ' ', '=', ' ', '4', '2', '\n', 'l', 'e', 't', ' ', 'y', ' ', '=', ' ', '7', '\n']
+    let t = tokenize_arr(a, 21)
+    assert_eq(tok_count(t), 10)
+    assert_eq(tok_kind(t, 0), 50)  // let
+    assert_eq(tok_kind(t, 4), 10)  // TK_SEMICOLON after 42
+    assert_eq(tok_val(t, 3), 42)
+    assert_eq(tok_kind(t, 9), 10)  // TK_SEMICOLON after 7
+    assert_eq(tok_val(t, 8), 7)
+}
+
+test "no semicolon after a trailing operator (lexer_tests::no_semicolon_after_a_trailing_operator)" {
+    let a[13] = ['l', 'e', 't', ' ', 'x', ' ', '=', ' ', '1', ' ', '+', '\n', '2']
+    let t = tokenize_arr(a, 13)
+    assert_eq(tok_count(t), 6)
+    assert_eq(tok_kind(t, 4), 11)  // TK_PLUS is the last token before the newline
+    assert_eq(tok_kind(t, 5), 0)   // straight into TK_INT(2), no semicolon
+    assert_eq(tok_val(t, 5), 2)
+}
+
+test "no semicolon after open brace or blank lines (lexer_tests::no_semicolon_after_open_brace_or_blank_lines)" {
+    let a[14] = ['f', 'n', ' ', 'f', '(', ')', ' ', '{', '\n', '\n', '4', '2', '\n', '}']
+    let t = tokenize_arr(a, 14)
+    assert_eq(tok_count(t), 8)
+    assert_eq(tok_kind(t, 4), 38)  // TK_LBRACE
+    assert_eq(tok_kind(t, 5), 0)   // TK_INT 42 directly, no semicolon after '{' or blank line
+    assert_eq(tok_kind(t, 6), 10)  // TK_SEMICOLON after 42
+    assert_eq(tok_kind(t, 7), 39)  // TK_RBRACE
+}
+
+// Exercises every remaining `ends_stmt` true-branch: TK_RETURN_KW, TK_BREAK_KW,
+// TK_CONTINUE_KW, TK_RPAREN, TK_RBRACKET and TK_RBRACE each immediately before a newline.
+test "ends_stmt true branches: return break continue paren bracket brace" {
+    let a[33] = ['r', 'e', 't', 'u', 'r', 'n', '\n', 'b', 'r', 'e', 'a', 'k', '\n', 'c', 'o', 'n', 't', 'i', 'n', 'u', 'e', '\n', '(', '1', ')', '\n', '[', '2', ']', '\n', '{', '}', '\n']
+    let t = tokenize_arr(a, 33)
+    assert_eq(tok_count(t), 17)
+    assert_eq(tok_kind(t, 0), 67)   // TK_RETURN_KW
+    assert_eq(tok_kind(t, 1), 10)   // semicolon
+    assert_eq(tok_kind(t, 2), 72)   // TK_BREAK_KW
+    assert_eq(tok_kind(t, 3), 10)
+    assert_eq(tok_kind(t, 4), 73)   // TK_CONTINUE_KW
+    assert_eq(tok_kind(t, 5), 10)
+    assert_eq(tok_kind(t, 8), 37)   // TK_RPAREN
+    assert_eq(tok_kind(t, 9), 10)   // semicolon after RPAREN
+    assert_eq(tok_kind(t, 12), 41)  // TK_RBRACKET
+    assert_eq(tok_kind(t, 13), 10)  // semicolon after RBRACKET
+    assert_eq(tok_kind(t, 15), 39)  // TK_RBRACE
+    assert_eq(tok_kind(t, 16), 10)  // semicolon after RBRACE
+}
+
+// --- Ported from compiler/src/lexer_tests.rs: tokenizes_contract_keywords /
+//     tokenizes_a_sond_fragment style end-to-end fragments ---
+
+test "contract line: tax_base >= 0 (end-to-end fragment)" {
+    let a[13] = ['t', 'a', 'x', '_', 'b', 'a', 's', 'e', ' ', '>', '=', ' ', '0']
+    let t = tokenize_arr(a, 13)
+    assert_eq(tok_count(t), 3)
+    assert_eq(tok_kind(t, 0), 4)   // TK_IDENT
+    assert_eq(tok_kind(t, 1), 27)  // TK_GE
+    assert_eq(tok_kind(t, 2), 0)   // TK_INT
+}
+
+// --- Direct unit tests for lx_hex_parse (dead code: not called by tokenize(), so it
+//     needs its own direct coverage). ---
+
+test "lx_hex_parse stops at a non-hex byte and reports the stop index" {
+    let a[3] = ['1', 'a', 'g']
+    let b = bytes_new()
+    push_arr(b, a, 3)
+    let out = heap_alloc(8)
+    let v = lx_hex_parse(b, 0, 3, out)
+    assert_eq(v, 26)          // 0x1a
+    assert_eq(peek64(out), 2) // stopped at index 2 ('g')
+}
+
+test "lx_hex_parse consumes the whole buffer" {
+    let a[2] = ['f', 'f']
+    let b = bytes_new()
+    push_arr(b, a, 2)
+    let out = heap_alloc(8)
+    let v = lx_hex_parse(b, 0, 2, out)
+    assert_eq(v, 255)
+    assert_eq(peek64(out), 2)
+}
+
+// DISCREPANCY (in dead code): lx_hex_parse always does `v + (d - 87)` for non-digit hex
+// bytes, which is only correct for lowercase a-f. tokenize()'s OWN inline hex parser
+// correctly branches on `d <= 70` to subtract 55 for uppercase A-F; lx_hex_parse does
+// not, so it silently miscomputes uppercase hex digits. This test encodes the correct
+// value of 0x1A (26) and is expected to FAIL (lx_hex_parse actually returns -6 here).
+test "lx_hex_parse uppercase hex digit (DISCREPANCY: wrong result, only lowercase a-f works)" {
+    let a[2] = ['1', 'A']
+    let b = bytes_new()
+    push_arr(b, a, 2)
+    let out = heap_alloc(8)
+    let v = lx_hex_parse(b, 0, 2, out)
+    assert_eq(v, 26)  // 0x1A; lx_hex_parse currently returns -6
+}
+
+// --- Contextual `test` keyword: compiler/src/lexer.rs reclassifies a bare TK_TEST to
+//     TK_IDENT unless it is immediately followed by a string literal. ---
+
+test "test followed by a string literal stays TK_TEST" {
+    let a[7] = ['t', 'e', 's', 't', '"', 'x', '"']
+    let t = tokenize_arr(a, 7)
+    assert_eq(tok_kind(t, 0), 44)  // TK_TEST
+}
+
+// DISCREPANCY vs compiler/src/lexer.rs: Rust's tokenize() runs a post-pass that turns a
+// bare Token::Test into Token::Ident whenever it is NOT immediately followed by a string
+// literal (so `fn test()` parses `test` as an ordinary identifier). lexer.snd's
+// `_kw_ident` unconditionally returns TK_TEST for the word "test" with no such
+// reclassification pass anywhere in tokenize(). This test encodes the CORRECT (Rust)
+// behavior and is expected to FAIL against the current lexer.snd (note this directly
+// contradicts the pre-existing "keyword test" test above, which pins the current,
+// context-blind behavior).
+test "bare test not followed by a string is a plain identifier (DISCREPANCY: no reclassification pass in lexer.snd)" {
+    let a[4] = ['t', 'e', 's', 't']
+    let t = tokenize_arr(a, 4)
+    assert_eq(tok_kind(t, 0), 4)  // TK_IDENT, not TK_TEST
 }
