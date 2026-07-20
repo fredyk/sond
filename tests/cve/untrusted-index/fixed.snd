@@ -1,0 +1,91 @@
+// CVE-2014-8612 -- FIXED. Real fix, FreeBSD-SA-15:01.sctp (2015-01-27),
+// sctp_setopt() in sys/netinet/sctp_userreq.c, case SCTP_SS_VALUE:
+//
+//   case SCTP_SS_VALUE:
+//   {
+//       struct sctp_stream_value *av;
+//       SCTP_CHECK_AND_CAST(av, optval, struct sctp_stream_value, optsize);
+//       if (stcb) {
+//           if ((av->stream_id >= stcb->asoc.streamoutcnt) ||
+//               (stcb->asoc.ss_functions.sctp_ss_set_value(stcb, &stcb->asoc,
+//                &stcb->asoc.strmout[av->stream_id], av->stream_value))) {
+//               error = EINVAL;
+//           }
+//           SCTP_TCB_UNLOCK(stcb);
+//       }
+//       break;
+//   }
+//
+// The fix adds exactly one thing: `av->stream_id >= stcb->asoc.streamoutcnt`
+// is checked BEFORE av->stream_id is ever used to index strmout[]. Anything
+// out of range now takes the EINVAL branch instead of touching the array.
+
+include "x86_64/linux/testing.snd"
+
+let STREAM_COUNT = 8   // stand-in for stcb->asoc.streamoutcnt (# of outbound streams)
+
+// Sond cannot prove a Slice index is in bounds unless the indexing parameter
+// itself carries that bound, so the fix is expressed as a `where` refinement
+// on `stream_id` -- this is the minimal annotation the compiler needs, and it
+// is the exact same fact the real FreeBSD patch checks at runtime with
+// `av->stream_id >= stcb->asoc.streamoutcnt`.
+fn handle_sctp_ss_value(strmout: Slice, stream_id: i64 where 0 <= stream_id && stream_id < strmout.len, stream_value: i64) {
+    strmout[stream_id] = stream_value
+}
+
+// Port of the added guard: `if (av->stream_id >= stcb->asoc.streamoutcnt) { error = EINVAL; }`
+// This is the boundary between "trusted, in-range index" and "reject the
+// setsockopt() call" -- exactly where the real fix draws the line. Only past
+// this check does the untrusted stream_id become a value the prover accepts
+// as an argument to handle_sctp_ss_value's refined parameter.
+fn sctp_setopt_ss_value(strmout: Slice, stream_id: i64, stream_value: i64) -> (error: i64) {
+    if stream_id < 0 || stream_id >= strmout.len {
+        return 22   // EINVAL
+    }
+    handle_sctp_ss_value(strmout, stream_id, stream_value)
+    0
+}
+
+fn main() -> i64 {
+    let table[8]   // 8 == STREAM_COUNT (array size must be a literal in Sond)
+    let s = Slice { ptr: table, len: table.len }
+    sctp_setopt_ss_value(s, 3, 42)
+    s[3]
+}
+
+test "in-range stream_id is applied and returns success" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    let err = sctp_setopt_ss_value(s, 0, 7)
+    assert_eq(err, 0)
+    assert_eq(s[0], 7)
+}
+
+test "last valid slot (STREAM_COUNT - 1) is applied and returns success" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    let err = sctp_setopt_ss_value(s, STREAM_COUNT - 1, 99)
+    assert_eq(err, 0)
+    assert_eq(s[STREAM_COUNT - 1], 99)
+}
+
+test "stream_id == streamoutcnt (first out-of-range value) is rejected with EINVAL" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    let err = sctp_setopt_ss_value(s, STREAM_COUNT, 1234)
+    assert_eq(err, 22)
+}
+
+test "large out-of-range stream_id (attacker-controlled uint16) is rejected with EINVAL" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    let err = sctp_setopt_ss_value(s, 65535, 1234)
+    assert_eq(err, 22)
+}
+
+test "negative stream_id is rejected with EINVAL" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    let err = sctp_setopt_ss_value(s, -1, 1234)
+    assert_eq(err, 22)
+}

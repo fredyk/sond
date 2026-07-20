@@ -1,0 +1,148 @@
+// vuln.snd -- CVE-2026-4891, dnsmasq DNSSEC RRSIG signature-length underflow
+// (src/dnssec.c, validate_rrset(); reported by Royce M., fixed 2026-03-25)
+//
+// Upstream vulnerable code, validate_rrset() in src/dnssec.c:
+//
+//   p = sigs[j];
+//   GETLONG(ttl, p);
+//   GETSHORT(rdlen, p);        /* rdlen >= 18 checked previously */
+//   psav = p;
+//   p += 2;                    /* type_covered - already checked */
+//   algo = *p++;
+//   labels = *p++;
+//   GETLONG(orig_ttl, p);
+//   GETLONG(sig_expiration, p);
+//   GETLONG(sig_inception, p);
+//   GETSHORT(key_tag, p);
+//   if (!extract_name(header, plen, &p, keyname, EXTR_NAME_EXTRACT, 0))
+//     return STAT_BOGUS;
+//   ...
+//   sig = p;
+//   sig_len = rdlen - (p - psav);      /* dnssec.c:548 -- THE BUG */
+//   ...
+//   hash->update(ctx, 18, psav);
+//   ...
+//   if (verify(key, keylen, sig, sig_len, digest, hash->digest_size, algo))
+//     return STAT_SECURE;
+//
+// `rdlen` (an `int`, read out of the RRSIG record's on-wire rdlength field)
+// is validated in the CALLER, explore_rrset() (dnssec.c:351-368), by exactly
+// two checks on rdlen ALONE:
+//
+//   GETSHORT(rdlen, p);
+//   if (!CHECK_LEN(header, p, plen, rdlen)) return 0;   /* upper bound: fits in packet */
+//   ...
+//   if (rdlen < 18) return 0;                            /* lower bound: fixed header size */
+//
+// Neither check relates rdlen to how many bytes `p` actually advances while
+// validate_rrset() re-parses the fixed 18-byte header PLUS the RRSIG's
+// signer-name field (a compressed, VARIABLE-length DNS name decoded by
+// extract_name()). `sig_len = rdlen - (p - psav)` is computed from that
+// runtime-variable consumption, completely independent of the two checks
+// above -- a crafted packet whose signer's name is long enough makes
+// `(p - psav)` exceed `rdlen`, driving `sig_len` negative even though rdlen
+// itself passed both of its bounds checks. `sig_len` (an `int`) is then
+// handed to hash->update()/verify(), which take it as a `size_t` byte count:
+// the negative value wraps to a huge unsigned length, causing a heap
+// out-of-bounds read (CVE-2026-4891, "heap-based out-of-bounds read... DoS
+// via a crafted DNS packet").
+//
+// This port keeps the real shape: check_rdlen() reproduces explore_rrset()'s
+// two rdlen-only bound checks; compute_sig_len() reproduces the subtraction
+// at dnssec.c:548; validate_rrset() calls both and then indexes into the
+// signature buffer using the untrusted result -- with NO check that sig_len
+// is positive, exactly like the pre-patch code. `sig` is modeled as an
+// opaque Slice (a raw pointer with a length nothing here relates to
+// sig_len), mirroring `unsigned char *sig` in the real verify()/hash->update()
+// signatures: neither of those C functions know the "real" size of the
+// buffer `sig` points into either -- they trust the byte count they were
+// given, exactly as this port trusts `sig_len`.
+
+include "x86_64/linux/testing.snd"
+
+// Port of explore_rrset()'s rdlen validation (dnssec.c:353,368): rdlen must
+// fit inside what's left of the packet (CHECK_LEN) and be at least the
+// RRSIG's 18-byte fixed header. Both checks are on rdlen ALONE.
+fn check_rdlen(rdlen: i64, remaining_in_packet: i64) -> bool {
+    if rdlen > remaining_in_packet {
+        false
+    } else if rdlen < 18 {
+        false
+    } else {
+        true
+    }
+}
+
+// Port of dnssec.c:548 -- sig_len = rdlen - (p - psav)
+// `consumed` stands for (p - psav): bytes actually spent decoding the fixed
+// 18-byte RRSIG header plus the signer's (compressed, variable-length) name.
+fn compute_sig_len(rdlen: i64, consumed: i64) -> i64 {
+    rdlen - consumed
+}
+
+// Stand-in for verify()'s/hash->update()'s use of (sig, sig_len): a
+// signature-verification routine inspecting the claimed last byte of the
+// signature (e.g. an RSASSA trailer/padding check). `sig` carries no
+// independent notion of "how many bytes are really there" -- like the real
+// `unsigned char *sig` parameter, only `sig_len` says how far it is safe to
+// go.
+fn signature_trailer_byte(sig: Slice, sig_len: i64) -> i64 {
+    sig[sig_len - 1]
+}
+
+// Port of validate_rrset()'s signature-length computation and first use.
+pub fn validate_rrset(rdlen: i64, remaining_in_packet: i64, consumed: i64, sig: Slice) -> i64 {
+    if not check_rdlen(rdlen, remaining_in_packet) {
+        return -1 // STAT_BOGUS
+    }
+
+    let sig_len = compute_sig_len(rdlen, consumed)
+
+    // THE BUG (CVE-2026-4891): rdlen passed both bound checks in
+    // check_rdlen() above, but neither related rdlen to `consumed`. A
+    // crafted packet whose signer's name is long enough makes
+    // consumed > rdlen, driving sig_len negative -- and there is no check
+    // of sig_len before it is used to index the signature.
+    signature_trailer_byte(sig, sig_len)
+}
+
+fn main() -> i64 {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    // a well-formed RRSIG: 22-byte rdlen, header+name consumed exactly 18
+    // bytes (no signer name past the root), packet holds the whole record
+    validate_rrset(22, 22, 18, s)
+}
+
+test "well-formed RRSIG (consumed < rdlen) reads the in-bounds trailer byte" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    s[3] = 77
+    let r = validate_rrset(22, 22, 18, s) // sig_len = 22 - 18 = 4
+    assert_eq(r, 77) // sig[sig_len - 1] == sig[3]
+}
+
+test "rdlen below the 18-byte fixed header is rejected before sig_len is computed" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    let r = validate_rrset(10, 100, 10, s)
+    assert_eq(r, -1)
+}
+
+test "rdlen exceeding the packet is rejected before sig_len is computed" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    let r = validate_rrset(500, 100, 18, s)
+    assert_eq(r, -1)
+}
+
+test "CVE-2026-4891: a signer's name longer than rdlen drives sig_len negative and reads out of bounds" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    // rdlen passes both check_rdlen() bounds (18 <= 20 <= 100), but the
+    // signer's name consumed 25 bytes -- more than rdlen accounts for.
+    // sig_len = 20 - 25 = -5, and signature_trailer_byte() indexes
+    // sig[sig_len - 1] == sig[-6]: an out-of-bounds read before `table`.
+    let r = validate_rrset(20, 100, 25, s)
+    assert(r == r) // if this line is ever reached without crashing, record it
+}

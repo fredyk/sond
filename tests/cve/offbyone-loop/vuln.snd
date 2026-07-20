@@ -1,0 +1,107 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Port of CVE-2021-3156 "Baron Samedit": the sudo heap-based buffer
+// overflow (Qualys, disclosed January 2021). CWE-193 (off-by-one).
+//
+// Real bug, plugins/sudoers/sudoers.c, set_cmnd():
+//
+//   for (to = user_args, av = NewArgv + 1; (from = *av); av++) {
+//       while (*from) {
+//           if (from[0] == '\\' && !isspace((unsigned char)from[1]))
+//               from++;
+//           *to++ = *from++;
+//       }
+//       *to++ = ' ';
+//   }
+//
+// `user_args` (`to`) is allocated with exactly enough room for a straight
+// 1:1 copy of the concatenated argv strings -- no slack for the unescape
+// step. `from` walks a NUL-terminated argv string. When the LAST character
+// of an argument is a lone backslash, from[1] is that string's own NUL
+// terminator. isspace('\0') is false, so `!isspace(from[1])` is true and
+// the escape branch fires: `from++` steps past the terminator. The next
+// statement then reads/copies *from (now one byte past the end of THIS
+// argument's allocation) and advances `from` again -- the loop keeps
+// walking off the end of the source buffer, copying whatever heap bytes it
+// finds into `to`, overrunning `to` right along with it. Full account and
+// the real fix are in NOTES.md.
+//
+// This is kept in the idiom lib/any/strings.snd already uses for C string
+// ports in this codebase: peek8/poke8 raw-pointer arithmetic on i64
+// addresses, not the higher-level bounds-carrying Slice/array API. That is
+// a deliberate fidelity choice, not a way to dodge checks: set_cmnd() is
+// itself raw C pointer arithmetic over a NUL-terminated buffer, and
+// peek8/poke8 is the direct Sond equivalent, with no bounds machinery
+// grafted on that the original C did not have either.
+
+let BACKSLASH = 92   // '\'
+let SPACE = 32       // ' '
+let TAB = 9
+let NEWLINE = 10
+let VTAB = 11
+let FORMFEED = 12
+let CARRIAGE_RETURN = 13
+let NUL = 0
+
+// Mirrors C's isspace() for the whitespace classes glibc classifies as
+// space in the "C" locale (the one sudo runs under).
+fn is_space_byte(c: i64) -> bool {
+    c == SPACE || c == TAB || c == NEWLINE || c == VTAB || c == FORMFEED || c == CARRIAGE_RETURN
+}
+
+// Port of set_cmnd()'s inner copy/unescape loop.
+// `from_buf` is a NUL-terminated argv-style buffer; `to_buf` is sized like
+// the real `user_args`: just enough for a straight copy of `from_buf`'s
+// real characters, with NO slack for the bug.
+fn unescape_arg(from_buf: i64, to_buf: i64) -> i64 {
+    let mut from_i = 0
+    let mut to_i = 0
+    for peek8(from_buf + from_i) != NUL {
+        let c = peek8(from_buf + from_i)
+        let c1 = peek8(from_buf + from_i + 1)
+        if c == BACKSLASH && not is_space_byte(c1) {
+            // BUG: fires even when c1 IS the NUL terminator (0 is not a
+            // whitespace byte), stepping from_i past the end of the
+            // string -- exactly the real `from++` when from[1] == '\0'.
+            from_i = from_i + 1
+        }
+        poke8(to_buf + to_i, peek8(from_buf + from_i))
+        to_i = to_i + 1
+        from_i = from_i + 1
+    }
+    to_i
+}
+
+fn main() -> i64 {
+    // Real-world trigger: an argv entry ending in a lone backslash, e.g.
+    // the last argument of a sudoedit invocation being "...\". Here the
+    // argument is "ABCDEFG\" -- 8 real characters, the 8th being the
+    // trailing backslash. strlen == 8, so the real allocation for this
+    // argument is 9 bytes (8 chars + NUL) and the CORRECT unescaped output
+    // is exactly 8 bytes (a lone trailing backslash has nothing to escape,
+    // so it must be copied through literally).
+    let mut from_buf[2]           // 16 real bytes of backing storage
+    poke8(from_buf + 0, 65)       // 'A'
+    poke8(from_buf + 1, 66)       // 'B'
+    poke8(from_buf + 2, 67)       // 'C'
+    poke8(from_buf + 3, 68)       // 'D'
+    poke8(from_buf + 4, 69)       // 'E'
+    poke8(from_buf + 5, 70)       // 'F'
+    poke8(from_buf + 6, 71)       // 'G'
+    poke8(from_buf + 7, BACKSLASH) // '\' -- last real char, triggers the bug
+    poke8(from_buf + 8, NUL)      // true end of the argument (size 9)
+    // Bytes 9.. stand in for whatever the allocator happened to place
+    // right after this argument's chunk on the heap (the next argv
+    // string, chunk metadata, ...) in the real exploit -- non-zero, so the
+    // runaway loop keeps going instead of stopping on the first over-read.
+    poke8(from_buf + 9, 88)       // 'X'
+    poke8(from_buf + 10, 89)      // 'Y'
+    poke8(from_buf + 11, NUL)     // stop the demo inside our own buffer
+
+    // to_buf sized 1:1 with the argument's REAL, correct output length (8
+    // bytes = 1 word): the real set_cmnd() allocation reserves no room for
+    // the bug's extra reads/writes.
+    let mut to_buf[1]
+
+    unescape_arg(from_buf, to_buf)
+}

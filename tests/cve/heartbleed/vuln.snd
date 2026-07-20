@@ -1,0 +1,56 @@
+// vuln.snd: CVE-2014-0160 "Heartbleed" (OpenSSL), faithful port to Sond
+//
+// Upstream vulnerable code (ssl/t1_lib.c, tls1_process_heartbeat(), OpenSSL
+// 1.0.1 before 1.0.1g):
+//
+//   /* Read type and payload length first */
+//   hbtype = *p++;
+//   n2s(p, payload);        // 2-byte, attacker-controlled length field taken
+//                            // straight out of the received record
+//   pl = p;
+//   ...
+//   buffer = OPENSSL_malloc(1 + 2 + payload + padding);
+//   bp = buffer;
+//   ...
+//   memcpy(bp, pl, payload);   // <-- THE BUG
+//
+// A heartbeat request record is [1 byte type][2 bytes payload_length][payload]
+// [padding]. OpenSSL trusted the attacker-supplied payload_length field and
+// echoed that many bytes back, reading straight out of whatever memory sits
+// after the (much shorter) record it actually received: up to 64KB of
+// adjacent heap memory (private keys, session data, other connections' plaintext)
+// leaked back to the attacker in the heartbeat reply. There was NO check that
+// `payload_length` fits inside the record that was actually received.
+//
+// This port keeps that exact shape: process_heartbeat() reads a 2-byte length
+// prefix out of the attacker-supplied `record` Slice and echoes that many bytes
+// into `out`, with no check that `payload_len` fits inside `record`.
+
+// process_heartbeat: read the heartbeat header from `record`, echo
+// `payload_len` bytes of "payload" back into `out`. Mirrors
+// tls1_process_heartbeat(): trusts the length field embedded in the record
+// itself, never checks it against the record's actual size.
+pub fn process_heartbeat(record: Slice, out: Slice) -> i64 {
+    // byte 0: hbtype (heartbeat message type), read like OpenSSL does, unused
+    let hbtype = record[0]
+
+    // bytes 1-2: payload_length, attacker-controlled, big-endian (n2s macro)
+    let payload_len = (record[1] << 8) | record[2]
+
+    // payload starts right after the 3-byte header (1 type + 2 length)
+    let header = 3
+
+    // THE BUG: copy `payload_len` bytes starting at `header` from `record`
+    // into `out`, without ever checking that record actually holds that many
+    // bytes past the header. If the attacker claims a payload_length far
+    // larger than the record it actually sent, this reads past the end of
+    // `record`, an out-of-bounds read of adjacent memory, echoed straight
+    // back to the attacker.
+    let mut i = 0
+    for i < payload_len {
+        out[i] = record[header + i]
+        i = i + 1
+    }
+
+    payload_len
+}

@@ -1,0 +1,69 @@
+// CVE-2014-8612 -- FreeBSD SCTP "SCTP_SS_VALUE" kernel memory corruption
+// (multiple array-index errors in the SCTP stream-scheduling code, fixed by
+// FreeBSD-SA-15:01.sctp, 2015-01-27; discovered by Clement Lecigne, Google
+// Security Team, and Francisco Falcon, Core Security Technologies)
+//
+// Real vulnerable code, sctp_setopt() in sys/netinet/sctp_userreq.c:
+//
+//   case SCTP_SS_VALUE:
+//   {
+//       struct sctp_stream_value *av;
+//       SCTP_CHECK_AND_CAST(av, optval, struct sctp_stream_value, optsize);
+//       if (stcb) {
+//           if (stcb->asoc.ss_functions.sctp_ss_set_value(stcb, &stcb->asoc,
+//               &stcb->asoc.strmout[av->stream_id], av->stream_value)) {
+//               error = EINVAL;
+//           }
+//           SCTP_TCB_UNLOCK(stcb);
+//       }
+//       break;
+//   }
+//
+// `av` is the raw struct sctp_stream_value copied out of the setsockopt()
+// buffer the calling process supplied -- av->stream_id is a uint16_t fully
+// controlled by that caller. It indexes stcb->asoc.strmout[], a fixed-size
+// array with stcb->asoc.streamoutcnt entries (the number of outbound SCTP
+// streams negotiated for this association -- typically small, e.g. 10).
+// There is NO check of av->stream_id against streamoutcnt before it is used
+// to compute &stcb->asoc.strmout[av->stream_id]. sctp_ss_prio_set_value()
+// then does a plain field write through that pointer:
+//
+//   strq->ss_params.prio.priority = value;
+//
+// giving an unprivileged local caller of setsockopt(SCTP_SS_VALUE) an
+// out-of-bounds 16-bit kernel-memory write at an attacker-chosen offset
+// (the companion getsockopt(SCTP_SS_VALUE) path has the same missing check
+// on the read side, leaking kernel memory instead of corrupting it).
+
+include "x86_64/linux/testing.snd"
+
+let STREAM_COUNT = 8   // stand-in for stcb->asoc.streamoutcnt (# of outbound streams)
+
+// Port of sctp_ss_prio_set_value(): strq->ss_params.prio.priority = value
+// `strmout` stands for stcb->asoc.strmout[]; `stream_id` stands for the
+// untrusted av->stream_id taken straight from the setsockopt() payload.
+fn handle_sctp_ss_value(strmout: Slice, stream_id: i64, stream_value: i64) {
+    strmout[stream_id] = stream_value
+}
+
+fn main() -> i64 {
+    let table[8]   // 8 == STREAM_COUNT (array size must be a literal in Sond)
+    let s = Slice { ptr: table, len: table.len }
+    // a well-behaved caller only ever uses stream ids it negotiated
+    handle_sctp_ss_value(s, 3, 42)
+    s[3]
+}
+
+test "in-range stream_id behaves like a normal SCTP_SS_VALUE call" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    handle_sctp_ss_value(s, 0, 7)
+    assert_eq(s[0], 7)
+}
+
+test "another in-range stream_id, exercising the last valid slot" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    handle_sctp_ss_value(s, STREAM_COUNT - 1, 99)
+    assert_eq(s[STREAM_COUNT - 1], 99)
+}

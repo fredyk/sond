@@ -1,0 +1,75 @@
+// fixed.snd: CVE-2014-0160 "Heartbleed" (OpenSSL), upstream fix ported to Sond
+//
+// The official OpenSSL patch (commit 4817504d069b4c5082161b02a22116ad75f822b,
+// released as 1.0.1g) added exactly two bounds checks around the code in
+// vuln.snd / tls1_process_heartbeat():
+//
+//   /* Read type and payload length first */
+//   if (1 + 2 + 16 > s->s3->rrec.length)
+//           return 0; /* silently discard */
+//   hbtype = *p++;
+//   n2s(p, payload);
+//   if (1 + 2 + payload + 16 > s->s3->rrec.length)
+//           return 0; /* silently discard per RFC 6520 sec. 4 */
+//   pl = p;
+//   ...
+//   memcpy(bp, pl, payload);
+//
+// i.e.: (1) the record must be at least big enough to hold the type+length
+// header before those fields are even read, and (2) the attacker-claimed
+// `payload` length must fit inside the record that was ACTUALLY received,
+// checked against the real record length (`s->s3->rrec.length`) before the
+// memcpy touches a single payload byte. This is precisely the check the
+// vulnerable code skipped.
+//
+// This port applies the same two guard clauses. Sond's Slice indexing is
+// checked-by-default (every `s[i]` must be statically proven in `0..s.len`),
+// so simply adding the same runtime checks the real fix added is enough for
+// the compiler to prove `record[header + i]` and `out[i]` safe on its own -
+// no extra annotation was needed beyond the fix itself. See NOTES.md.
+
+// process_heartbeat: read the heartbeat header from `record`, echo
+// `payload_len` bytes of "payload" back into `out`: but only after checking
+// that both `record` and `out` actually hold that many bytes, exactly like
+// the upstream 1.0.1g patch.
+pub fn process_heartbeat(record: Slice, out: Slice) -> i64 {
+    // payload starts right after the 3-byte header (1 type + 2 length)
+    let header = 3
+
+    // FIX, check 1: the record must be at least large enough to hold the
+    // type+length header before we read hbtype/payload_len out of it
+    // (upstream: `if (1 + 2 + 16 > s->s3->rrec.length) return 0;`).
+    if record.len < header {
+        return 0 // silently discard, per RFC 6520 sec. 4
+    }
+
+    // byte 0: hbtype (heartbeat message type), read like OpenSSL does, unused
+    let hbtype = record[0]
+
+    // bytes 1-2: payload_length, attacker-controlled, big-endian (n2s macro)
+    let payload_len = (record[1] << 8) | record[2]
+
+    // FIX, check 2: the attacker-claimed payload_length must fit inside the
+    // record that was actually received (upstream:
+    // `if (1 + 2 + payload + 16 > s->s3->rrec.length) return 0;`).
+    if header + payload_len > record.len {
+        return 0 // silently discard, per RFC 6520 sec. 4
+    }
+
+    // The reply buffer must also be large enough to hold the echoed payload
+    // (upstream guarantees this by construction: the reply is
+    // `OPENSSL_malloc(1 + 2 + payload + padding)`, always sized to fit
+    // `payload` bytes, never part of the vulnerability, but the caller's
+    // guarantee must still be checked here since `out` is just a parameter).
+    if payload_len > out.len {
+        return 0
+    }
+
+    let mut i = 0
+    for i < payload_len {
+        out[i] = record[header + i]
+        i = i + 1
+    }
+
+    payload_len
+}

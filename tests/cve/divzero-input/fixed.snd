@@ -1,0 +1,35 @@
+// Fixed port of CVE-2019-1010315 (WavPack <= 5.1, CWE-369: Divide By Zero).
+// See vuln.snd for the bug and vulnerable line (cli/dsdiff.c:282).
+//
+// Upstream fix (commit 4c0faba32fddbd0745cbfaf1e1aeb3da5d35b9fc) adds exactly
+// this guard right before the division, rejecting the file instead of
+// dividing by an unset channel count:
+//
+//     if (!config->num_channels) {
+//         error_line ("%s is not a valid .DFF file!", infilename);
+//         return WAVPACK_SOFT_ERROR;
+//     }
+//
+// Ported 1:1 below as an early return on `cfg.num_channels == 0` (the -1
+// stands in for WAVPACK_SOFT_ERROR). No `requires`/`ensures` annotation is
+// needed: sondc raises a built-in proof obligation on every integer `/` that
+// its divisor be nonzero, and this guard is exactly the flow-sensitive
+// evidence its prover needs to discharge that obligation: the same runtime
+// check that fixed the real CVE also satisfies the compiler here.
+
+struct DsdiffConfig { num_channels: i64 }
+
+fn compute_total_samples(data_size: i64, cfg: DsdiffConfig) -> i64 {
+    if cfg.num_channels == 0 {
+        return -1
+    }
+    data_size / cfg.num_channels
+}
+
+fn main() -> i64 {
+    // Same crafted-file scenario as vuln.snd: `cfg` never populated, so
+    // `num_channels` is still 0. This time the guard rejects it cleanly
+    // instead of trapping.
+    let cfg: DsdiffConfig
+    compute_total_samples(65536, cfg)
+}

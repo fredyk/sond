@@ -1,0 +1,53 @@
+// Fixed version of vuln.snd (see NOTES.md for the CVE-2017-7529 background).
+//
+// The overflow-prone guard `offset + length > src_len` is rewritten in the
+// standard non-overflowing form: instead of adding two attacker-controlled
+// values and comparing the (possibly wrapped) sum against the size, subtract
+// on the KNOWN-good side (the constant/trusted `src_len`) and compare
+// against the untrusted `offset` directly:
+//
+//     if (offset + length > buffer_size)   // BUGGY: offset+length can overflow
+//     if (offset > buffer_size - length)   // FIXED: buffer_size - length does not
+//                                          //   (buffer_size and length are both
+//                                          //   bounded by the allocation, so their
+//                                          //   difference cannot wrap)
+//
+// This mirrors nginx's actual 2017-07-11 fix, which inserts an explicit
+// pre-addition overflow guard before accumulating the range size:
+//
+//     if (size > NGX_MAX_OFF_T_VALUE - (end - start)) {
+//         return NGX_HTTP_RANGE_NOT_SATISFIABLE;
+//     }
+//     size += end - start;
+//
+// i.e. nginx also moved the overflow-prone `+` to the safe side of the
+// comparison (subtracting from the fixed maximum) rather than adding two
+// untrusted quantities and testing the sum. Same idea, applied to our
+// distilled offset/length form.
+//
+// A residual assumption both the real fix and this one still make: `length`
+// itself must be non-negative and no larger than `src_len`, or
+// `src_len - length` can itself go negative/overflow. Real code additionally
+// rejects negative lengths up front; that check is orthogonal to the
+// overflow fix demonstrated here and is left out to keep the two files a
+// minimal, one-line diff (see NOTES.md for the honest limits of this port).
+
+// range_copy(src_ptr, src_len, offset, length, dst_ptr) -> bytes copied, or -1
+pub fn range_copy(src_ptr: i64, src_len: i64, offset: i64, length: i64, dst_ptr: i64) -> i64 {
+    // --- the fixed guard ---
+    // `src_len - length` cannot overflow i64 the way `offset + length` could:
+    // both operands are bounded (a real allocation size and a requested
+    // length that -- once this function is used correctly -- is itself
+    // bounded by that same allocation), so the subtraction cannot wrap
+    // around to hide an out-of-range `offset` from the comparison.
+    if offset > src_len - length {
+        return -1
+    }
+
+    let mut i = 0
+    for i < length {
+        poke8(dst_ptr + i, peek8(src_ptr + offset + i))
+        i = i + 1
+    }
+    length
+}

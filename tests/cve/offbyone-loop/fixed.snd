@@ -1,0 +1,81 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Fixed port of CVE-2021-3156 "Baron Samedit" (see vuln.snd / NOTES.md).
+//
+// Real upstream fix (sudo, plugins/sudoers/sudoers.c, set_cmnd()):
+//
+//   -   if (from[0] == '\\' && !isspace((unsigned char) from[1]))
+//   +   if (from[0] == '\\' && from[1] != '\0' && !isspace((unsigned char) from[1]))
+//
+// The only change is the added `from[1] != '\0'` guard: a backslash is
+// only ever an escape character if there IS a next character to escape.
+// A trailing lone backslash is now copied through literally instead of
+// being treated as "escape whatever comes after the terminator".
+
+let BACKSLASH = 92   // '\'
+let SPACE = 32       // ' '
+let TAB = 9
+let NEWLINE = 10
+let VTAB = 11
+let FORMFEED = 12
+let CARRIAGE_RETURN = 13
+let NUL = 0
+
+fn is_space_byte(c: i64) -> bool {
+    c == SPACE || c == TAB || c == NEWLINE || c == VTAB || c == FORMFEED || c == CARRIAGE_RETURN
+}
+
+// Same loop as vuln.snd's unescape_arg, with the upstream fix applied:
+// the escape branch now additionally requires c1 != NUL.
+//
+// No `requires`/`ensures` contract was added here. The current sondc
+// prover only verifies straight-line integer bodies (no loops, per
+// Sond.md); it cannot yet express or check "this loop never writes past
+// to_buf's capacity". peek8/poke8 are unchecked builtins with no bounds
+// contract to attach a refinement to either. So the "minimal annotation
+// Sond needs" for this file to compile is, honestly, NONE beyond valid
+// syntax -- the fix here is a pure logic correction, not something that
+// becomes compiler-checkable in the current implementation. See NOTES.md.
+fn unescape_arg_fixed(from_buf: i64, to_buf: i64) -> i64 {
+    let mut from_i = 0
+    let mut to_i = 0
+    for peek8(from_buf + from_i) != NUL {
+        let c = peek8(from_buf + from_i)
+        let c1 = peek8(from_buf + from_i + 1)
+        if c == BACKSLASH && c1 != NUL && not is_space_byte(c1) {
+            from_i = from_i + 1
+        }
+        poke8(to_buf + to_i, peek8(from_buf + from_i))
+        to_i = to_i + 1
+        from_i = from_i + 1
+    }
+    to_i
+}
+
+fn main() -> i64 {
+    // Same buffers as vuln.snd: argument "ABCDEFG\" (8 real chars, trailing
+    // backslash), correct unescaped output is exactly 8 bytes.
+    let mut from_buf[2]
+    poke8(from_buf + 0, 65)        // 'A'
+    poke8(from_buf + 1, 66)        // 'B'
+    poke8(from_buf + 2, 67)        // 'C'
+    poke8(from_buf + 3, 68)        // 'D'
+    poke8(from_buf + 4, 69)        // 'E'
+    poke8(from_buf + 5, 70)        // 'F'
+    poke8(from_buf + 6, 71)        // 'G'
+    poke8(from_buf + 7, BACKSLASH) // '\'
+    poke8(from_buf + 8, NUL)       // true end of the argument (size 9)
+    poke8(from_buf + 9, 88)        // 'X' -- adjacent-memory stand-in, must
+    poke8(from_buf + 10, 89)       // 'Y'    never be read by the fixed loop
+    poke8(from_buf + 11, NUL)
+
+    // to_buf sized 1:1 with the correct output length (8 bytes = 1 word).
+    // With the fix, exactly 8 bytes get written -- no overflow.
+    let mut to_buf[1]
+
+    let written = unescape_arg_fixed(from_buf, to_buf)
+    // written should be 8 (fills to_buf exactly, reads none of the
+    // adjacent-memory stand-in bytes). Returned as the exit code so a
+    // caller (or a future automated check) can assert it directly.
+    written
+}

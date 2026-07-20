@@ -1,0 +1,66 @@
+// CVE-2017-7529-class bug: integer overflow defeats a range/bounds check
+// (CWE-190 -> CWE-787), ported from nginx's range filter module.
+//
+// Real bug (nginx src/http/modules/ngx_http_range_filter_module.c,
+// ngx_http_range_parse(), before the 2017-07-11 security patch):
+//
+//     range->start = start;
+//     range->end = end;
+//     size += end - start;                 // <-- can overflow off_t (i64)
+//     if (ranges-- == 0) { ... }
+//
+// nginx accumulates the total response size across every requested byte
+// range with `size += end - start`. A client can send a `Range:` header
+// with enough sub-ranges (or extreme values) that this running total wraps
+// the signed 64-bit accumulator, producing a small/negative `size` that
+// later size/length checks accept. nginx then serves a multipart response
+// built from the wrapped-around size, walking past the cached response
+// body into adjacent cache-file memory (the CVE's "memory disclosure").
+// See NOTES.md for the exact patch diff.
+//
+// This file distills that pattern to its essence, matching the classic
+// CWE-190 "does this fit in the buffer?" guard:
+//
+//     if (offset + length > buffer_size) { reject }   // BUGGY: can overflow
+//     memcpy(dst, src + offset, length)                // then reads OOB
+//
+// It is a faithful, UNMODIFIED port of the vulnerable idiom: no `where`/
+// `requires` constrains offset/length (the real code has none either --
+// they come straight off the wire), and the copy is raw pointer arithmetic
+// (peek8/poke8), exactly like C's `memcpy(dst, src + offset, length)`. See
+// lib/any/strings.snd's memcpy() in this repo for the same idiom used
+// elsewhere in the Sond stdlib.
+
+// range_copy(src_ptr, src_len, offset, length, dst_ptr) -> bytes copied, or -1
+//
+//   Copies `length` bytes starting at `offset` from the buffer at `src_ptr`
+//   (of size `src_len`) into `dst_ptr`. Plays the role of nginx serving one
+//   requested byte range out of a cached response body.
+pub fn range_copy(src_ptr: i64, src_len: i64, offset: i64, length: i64, dst_ptr: i64) -> i64 {
+    // --- the vulnerable guard (CWE-190) ---
+    // Looks correct under ordinary (unbounded) arithmetic: reject any
+    // request whose end (offset + length) falls past the buffer. But
+    // `offset + length` is computed in i64 and can OVERFLOW -- exactly the
+    // shape of nginx's `size += end - start` overflowing NGX_MAX_OFF_T_VALUE
+    // -- wrapping to a small or negative value that slips under `src_len`.
+    // A request with a huge `offset` (e.g. offset = i64::MAX - 3, length =
+    // 16) passes this check even though `offset` alone is far past the end
+    // of the buffer.
+    if offset + length > src_len {
+        return -1
+    }
+
+    // --- the vulnerable copy ---
+    // Raw pointer arithmetic + unchecked byte load, exactly like the C
+    // `memcpy(dst, src->pos + offset, length)`: `peek8`/`poke8` operate on
+    // ANY address, with no bounds check of their own (see Sond.md: "a is
+    // any address"). If the guard above was fooled by overflow, this walks
+    // `src_ptr + offset` far outside the `src_len`-byte buffer -- the CVE's
+    // out-of-bounds read, disclosing whatever memory sits there.
+    let mut i = 0
+    for i < length {
+        poke8(dst_ptr + i, peek8(src_ptr + offset + i))
+        i = i + 1
+    }
+    length
+}

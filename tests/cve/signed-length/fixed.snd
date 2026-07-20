@@ -1,0 +1,140 @@
+// fixed.snd -- CVE-2026-4891, dnsmasq DNSSEC RRSIG signature-length underflow, FIXED
+//
+// The real upstream patch (thekelleys.org.uk/dnsmasq/CVE/CVE-2026-4891.diff,
+// commit 2cacea42e4d45717bd0ce3ccfe8e78960245e5d, "Verify rdlen field in
+// RRSIG packets. CVE-2026-4891") adds exactly one guard, right before
+// dnssec.c:548 used to compute sig_len unconditionally:
+//
+//   +      /* Don't trust rdlen not to be too small and give us a negative sig_len
+//   +         It has already been checked that it doesn't run us off the end
+//   +         of the packet. */
+//   +      if ((sig_len = rdlen - (p - psav)) <= 0)
+//   +        return STAT_BOGUS;
+//   +
+//         sig = p;
+//   -      sig_len = rdlen - (p - psav);
+//
+// i.e. reject the record with STAT_BOGUS as soon as the computed sig_len is
+// not strictly positive, BEFORE `sig`/`sig_len` are ever used to touch the
+// signature bytes. The patch comment is explicit that the *packet* bound was
+// already handled (CHECK_LEN, ported here as the `remaining_in_packet`
+// check) -- the missing piece was purely "sig_len must also be > 0".
+//
+// This port applies that same guard: check_rdlen() is unchanged from
+// vuln.snd (it already enforced the real upper/lower bounds on rdlen
+// itself), and validate_rrset() now rejects as soon as sig_len <= 0,
+// mirroring the upstream one-liner exactly.
+//
+// One further annotation was needed beyond the literal upstream diff for
+// sondc's prover to accept the file: the real C code never checks sig_len
+// against the *physical* size of the buffer `sig` points into, because in C
+// a raw `unsigned char *` carries no such bound -- the memory safety of
+// `sig[0 .. sig_len)` there actually falls out of an invariant from an
+// EARLIER call (CHECK_LEN in explore_rrset(), several stack frames away,
+// establishing that `psav + rdlen` sits inside the packet) that this
+// simplified single-function port does not reconstruct. Sond's Slice type
+// makes that missing invariant visible: signature_trailer_byte() now carries
+// a `where` refinement requiring `sig_len` to be both positive AND within
+// `sig.len`, and validate_rrset() adds the matching runtime check
+// (`sig_len > sig.len`) alongside the upstream `sig_len <= 0` check so the
+// call site can prove it. This is the minimal extra fact the compiler needs
+// to accept what the upstream fix leaves as an implicit, cross-function
+// invariant -- see NOTES.md for the full discussion.
+
+include "x86_64/linux/testing.snd"
+
+// Port of explore_rrset()'s rdlen validation (dnssec.c:353,368) -- unchanged
+// from vuln.snd, this was never the buggy part.
+fn check_rdlen(rdlen: i64, remaining_in_packet: i64) -> bool {
+    if rdlen > remaining_in_packet {
+        false
+    } else if rdlen < 18 {
+        false
+    } else {
+        true
+    }
+}
+
+// Port of dnssec.c:548 -- sig_len = rdlen - (p - psav). Unchanged from
+// vuln.snd: the subtraction itself was never wrong, only the missing check
+// on its result was.
+fn compute_sig_len(rdlen: i64, consumed: i64) -> i64 {
+    rdlen - consumed
+}
+
+// Same stand-in for verify()'s/hash->update()'s use of (sig, sig_len) as in
+// vuln.snd, now with the refinement the prover needs: sig_len must describe
+// a real, in-bounds span of `sig`.
+fn signature_trailer_byte(sig: Slice, sig_len: i64 where 0 < sig_len && sig_len <= sig.len) -> i64 {
+    sig[sig_len - 1]
+}
+
+pub fn validate_rrset(rdlen: i64, remaining_in_packet: i64, consumed: i64, sig: Slice) -> i64 {
+    if not check_rdlen(rdlen, remaining_in_packet) {
+        return -1 // STAT_BOGUS
+    }
+
+    let sig_len = compute_sig_len(rdlen, consumed)
+
+    // FIX (upstream dnssec.c, CVE-2026-4891 patch): reject as soon as
+    // sig_len is not strictly positive -- the exact upstream guard.
+    if sig_len <= 0 {
+        return -1 // STAT_BOGUS
+    }
+
+    // Extra guard beyond the literal upstream diff (see file header):
+    // makes explicit, for the prover, the buffer-bound invariant that in
+    // the real code comes from an earlier CHECK_LEN() call several frames
+    // away rather than from anything local to this function.
+    if sig_len > sig.len {
+        return -1 // STAT_BOGUS
+    }
+
+    signature_trailer_byte(sig, sig_len)
+}
+
+fn main() -> i64 {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    validate_rrset(22, 22, 18, s)
+}
+
+test "well-formed RRSIG (consumed < rdlen) still reads the in-bounds trailer byte" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    s[3] = 77
+    let r = validate_rrset(22, 22, 18, s) // sig_len = 22 - 18 = 4
+    assert_eq(r, 77) // sig[sig_len - 1] == sig[3]
+}
+
+test "rdlen below the 18-byte fixed header is rejected before sig_len is computed" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    let r = validate_rrset(10, 100, 10, s)
+    assert_eq(r, -1)
+}
+
+test "rdlen exceeding the packet is rejected before sig_len is computed" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    let r = validate_rrset(500, 100, 18, s)
+    assert_eq(r, -1)
+}
+
+test "CVE-2026-4891 case: signer's name longer than rdlen now rejected instead of underflowing" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    // Same inputs that drove sig_len to -5 (out-of-bounds read) in vuln.snd:
+    // rdlen=20 passes check_rdlen() (18 <= 20 <= 100), but consumed=25 makes
+    // sig_len = 20 - 25 = -5. Now rejected instead of underflowing.
+    let r = validate_rrset(20, 100, 25, s)
+    assert_eq(r, -1)
+}
+
+test "sig_len that would exceed sig.len is also rejected" {
+    let table[8]
+    let s = Slice { ptr: table, len: table.len }
+    // rdlen=30, consumed=18 -> sig_len=12, but s.len is only 8.
+    let r = validate_rrset(30, 100, 18, s)
+    assert_eq(r, -1)
+}

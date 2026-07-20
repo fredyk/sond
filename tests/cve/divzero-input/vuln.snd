@@ -1,0 +1,33 @@
+// Port of CVE-2019-1010315 (WavPack <= 5.1, CWE-369: Divide By Zero)
+// Vulnerable function: ParseDsdiffHeaderConfig(), cli/dsdiff.c:282 (GitHub dbry/WavPack)
+//
+// The DSDIFF ("DSD Interchange File Format") parser fills `config->num_channels`
+// only when it walks a "PROP"/"SND " chunk that itself contains a "CHNL"
+// sub-chunk. A crafted .dff file can present a "DSD " data chunk WITHOUT ever
+// having supplied a "SND "/"CHNL" chunk, so `config->num_channels` is left at
+// its zero-initialized default. The line that computes the total sample count
+// then divides the data-chunk size by that unchecked, attacker-controlled
+// (indirectly: attacker-omitted) field:
+//
+//     total_samples = dff_chunk_header.ckDataSize / config->num_channels;
+//
+// -> SIGFPE, process crash, denial of service. Fixed upstream in commit
+//    4c0faba32fddbd0745cbfaf1e1aeb3da5d35b9fc by adding a
+//    `if (!config->num_channels) { error...; return WAVPACK_SOFT_ERROR; }`
+//    guard right before this line (see fixed.snd).
+
+struct DsdiffConfig { num_channels: i64 }
+
+// Direct port of dsdiff.c:282: no validation, exactly as upstream had it.
+fn compute_total_samples(data_size: i64, cfg: DsdiffConfig) -> i64 {
+    data_size / cfg.num_channels
+}
+
+fn main() -> i64 {
+    // Simulates a crafted .dff file: the parser reached the "DSD " data chunk
+    // without ever seeing a "SND "/"CHNL" property chunk, so `cfg` was never
+    // populated and keeps its zero-initialized `num_channels` field, the
+    // real-world trigger for CVE-2019-1010315.
+    let cfg: DsdiffConfig
+    compute_total_samples(65536, cfg)
+}
