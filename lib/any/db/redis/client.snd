@@ -198,8 +198,9 @@ pub fn redis_send_resp(fd: i64, buf: i64, cmd_buf: i64, cmd_len: i64) -> i64 {
 // Send a command built from args (each [addr, len] pair) and read response.
 // args is a pointer to [n*2] i64 slots alternating [addr, len].
 pub fn redis_command(buf: i64, fd: i64, n_args: i64, args: i64) -> i64 {
-    let encoded = bytes_new()
-    enc_array_of_strings(n_args, args)
+    // The encoder builds and returns its own buffer. Allocating an empty one here and
+    // throwing the encoder's result away sent a zero-length write for every command.
+    let encoded = enc_array_of_strings(n_args, args)
     let elen = bytes_len(encoded)
     sendto_sock(fd, encoded, elen, 0, 0, 0)
     read_response(fd, buf, 0, peek64(buf + 24))
