@@ -298,9 +298,28 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 }
             }
 
-            // Any other character: not handled yet; will be added via TDD.
-            _ => {
+            // An explicit `;`. Statements are newline-terminated, so this is not
+            // how you end one, but contracts use it to separate propositions
+            // (`requires { i >= 0; i < n }`). It was being dropped on the floor
+            // and the parser happened to cope; make it the token it always was.
+            ';' => {
+                tokens.push(Token::Semicolon);
                 chars.next();
+            }
+
+            // A character with no meaning in Sond stops the build.
+            //
+            // Dropping it instead is far worse than it looks: the characters
+            // around it stay, and the parser reads them as something else
+            // entirely. A `#[no_main]` copied from Rust into a Sond file lost
+            // its `#`, left `[no_main]` to parse as an index expression, and
+            // that expression swallowed the declaration after it. Every file
+            // including it lost its test blocks, and the compiler said nothing.
+            //
+            // A compiler whose whole claim is that it rejects what it cannot
+            // prove cannot also accept what it cannot read.
+            _ => {
+                panic!("unexpected character {c:?}");
             }
         }
     }

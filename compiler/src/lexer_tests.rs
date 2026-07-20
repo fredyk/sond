@@ -259,3 +259,19 @@ fn no_semicolon_after_open_brace_or_blank_lines() {
         ]
     );
 }
+
+#[test]
+#[should_panic(expected = "unexpected character")]
+fn rejects_a_character_it_does_not_know() {
+    // A character with no meaning in Sond must stop the build, not vanish.
+    // Silently dropping it is how `#[no_main]` in an included file became an
+    // index expression that swallowed the declaration after it, with the
+    // compiler reporting nothing at all.
+    tokenize("#");
+}
+
+#[test]
+#[should_panic(expected = "unexpected character")]
+fn rejects_an_unknown_attribute_before_a_declaration() {
+    tokenize("#[no_main]\nfn f() -> i64 { 0 }");
+}
