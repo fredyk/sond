@@ -385,16 +385,65 @@ test "dav_handle: PROPFIND on a non-empty tree returns 207 with a response eleme
 
     let status_line = bytes_slice(resp, 0, 25)
     assert_eq(bytes_eq(status_line, bytes_from_cstr(cstr("HTTP/1.1 207 Multi-Status"))), 1)
-    // KNOWN BUG in server_build_multistatus (server.snd): the per-entry parser advances
-    // `off` by `off + dn_i` after reading a name, which points AT the entry's NUL
-    // terminator instead of past it, desyncing the walk over dav_file_tree after the
-    // first entry. Left as-is here (this file only owns the tests): a non-empty tree
-    // reliably yields at least one <response>, but neither the exact count nor the
-    // href/displayname text can be asserted against without pinning the bug's incidental
-    // output. Exercising this path still drives server_build_multistatus's loop, digit
-    // parsing and collection-flag branches for coverage.
     assert(xml_find_open_tag(resp, cstr("multistatus"), 0) >= 0)
     assert(xml_count_responses(resp) >= 1)
+}
+
+// server_build_multistatus used to advance its per-entry cursor by `off + dn_i` right
+// after reading a name, which lands ON the entry's NUL terminator instead of past it.
+// That desyncs the walk over dav_file_tree for every entry after the first: the size and
+// collection-flag digits of entry N get re-read as the START of a garbage "name" for a
+// phantom entry, so a 2-entry tree produced 3 <response> elements with corrupted
+// href/displayname text. This test pins the CORRECT byte-for-byte shape: exactly one
+// <response> per real entry, with the exact href, displayname, size and collection flag
+// that were written via dav_add_entry.
+test "dav_handle: PROPFIND on a two-entry tree returns exactly one response per entry with correct fields" {
+    dav_init_file_tree()
+    let fname = bytes_from_cstr(cstr("report.txt"))
+    dav_add_entry(fname, 123, 0)
+    let dname = bytes_from_cstr(cstr("archive"))
+    dav_add_entry(dname, 0, 1)
+
+    let fds[1]
+    syscall(SYS_pipe, fds)
+    let rfd = peek32(fds + 0)
+    let wfd = peek32(fds + 4)
+    let req = bytes_from_cstr(cstr("PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1\r\nDepth: 1\r\n\r\n"))
+    dav_handle(wfd, req)
+    close_fd(wfd)
+    let buf[512]
+    let n = read_buf(rfd, buf, 4096)
+    close_fd(rfd)
+    let resp = bytes_from_raw(buf, n)
+
+    // Exactly one <response> per real entry: no phantom third entry from the desync.
+    assert_eq(xml_count_responses(resp), 2)
+
+    let pos1 = xml_find_open_tag(resp, cstr("response"), 0)
+    assert(pos1 >= 0)
+    let href1 = xml_get_tag_content(resp, cstr("href"), pos1)
+    assert_eq(bytes_eq(href1, bytes_from_cstr(cstr("/report.txt"))), 1)
+    let dn1 = xml_get_tag_content(resp, cstr("displayname"), pos1)
+    assert_eq(bytes_eq(dn1, bytes_from_cstr(cstr("report.txt"))), 1)
+    let cl1 = xml_get_tag_content(resp, cstr("getcontentlength"), pos1)
+    assert_eq(bytes_eq(cl1, bytes_from_cstr(cstr("123"))), 1)
+
+    let pos2 = xml_find_open_tag(resp, cstr("response"), pos1 + 1)
+    assert(pos2 >= 0)
+    // report.txt is not a collection: no <collection/> tag before the second response.
+    let coll_pos1 = xml_find_open_tag(resp, cstr("collection"), pos1)
+    let has_coll1 = if coll_pos1 >= 0 && coll_pos1 < pos2 { 1 } else { 0 }
+    assert_eq(has_coll1, 0)
+    let href2 = xml_get_tag_content(resp, cstr("href"), pos2)
+    assert_eq(bytes_eq(href2, bytes_from_cstr(cstr("/archive"))), 1)
+    let dn2 = xml_get_tag_content(resp, cstr("displayname"), pos2)
+    assert_eq(bytes_eq(dn2, bytes_from_cstr(cstr("archive"))), 1)
+    // archive IS a collection: it must carry the <collection/> tag.
+    assert_eq(xml_has_tag(resp, cstr("collection"), pos2), 1)
+
+    // No third response left over after the second real entry.
+    let pos3 = xml_find_open_tag(resp, cstr("response"), pos2 + 1)
+    assert_eq(pos3, -1)
 }
 
 // ── MKCOL / DELETE ──────────────────────────────────────────────────────────

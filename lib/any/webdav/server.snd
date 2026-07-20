@@ -139,8 +139,8 @@ fn server_build_multistatus(entries_buf: i64) {
         }
         if dn_i == 0 { break }
 
-        // Skip NUL
-        let skip = off + dn_i
+        // Skip past the NUL that terminates the name (off + dn_i points AT the NUL).
+        let skip = off + dn_i + 1
         // Read size (3 chars)
         let sz_i = skip
         let mut sz_len = 0
@@ -161,7 +161,15 @@ fn server_build_multistatus(entries_buf: i64) {
         if next_off > n { break }
         off = next_off
 
-        // Build response XML
+        // Build response XML. xml_propfind_response takes RAW NUL-terminated cstr
+        // pointers for href/displayname (see its every call site in xml_test.snd, all
+        // passing cstr() literals) -- not bytes-handle i64s. A bytes handle is a pointer
+        // to a [data, len, cap] header, not to character data, so passing the handle
+        // itself here used to make xml_propfind_response's internal bytes_append_cstr
+        // walk that header's raw words as if they were characters: garbage href and
+        // displayname text in every PROPFIND response. Build each as a bytes buffer
+        // (to reuse bytes_push/growth), NUL-terminate it, then pass peek64() of the
+        // handle -- the buffer's actual data pointer, a valid cstr.
         let href_buf = bytes_new()
         bytes_append_cstr(href_buf, cstr("/"))
         let mut hi = 0
@@ -172,9 +180,8 @@ fn server_build_multistatus(entries_buf: i64) {
             bytes_push(href_buf, dc)
             hi = hi + 1
         }
-        // Use the displayname directly from the file tree
-        // Actually, xml_propfind_response takes a bytes handle, not raw stack bytes
-        // So we need to copy name into a buffer
+        bytes_push(href_buf, 0)  // NUL-terminate so peek64(href_buf) is a valid cstr
+
         let dn_bytes = bytes_new()
         let mut ci = 0
         for ci < 255 invariant { ci <= 255 } {
@@ -184,6 +191,7 @@ fn server_build_multistatus(entries_buf: i64) {
             bytes_push(dn_bytes, dc)
             ci = ci + 1
         }
+        bytes_push(dn_bytes, 0)  // NUL-terminate so peek64(dn_bytes) is a valid cstr
 
         // Parse size from file tree
         let mut size_val = 0
@@ -195,7 +203,7 @@ fn server_build_multistatus(entries_buf: i64) {
             si = si + 1
         }
 
-        xml_propfind_response(entries_buf, href_buf, dn_bytes, size_val, is_coll)
+        xml_propfind_response(entries_buf, peek64(href_buf), peek64(dn_bytes), size_val, is_coll)
     }
 }
 
