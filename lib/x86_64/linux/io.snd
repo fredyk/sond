@@ -5,6 +5,7 @@
 // API: open_file(path,flags,mode)->fd|-errno ; read_buf(fd,buf,n) ; write_buf(fd,buf,n) ; close_fd(fd)
 
 include "syscall-nums.snd"
+include "x86_64/linux/poll.snd"
 
 fn open_file(path: i64, flags: i64, mode: i64) -> i64 {
     syscall(SYS_open, path, flags, mode)
@@ -36,6 +37,11 @@ fn splice_fd(fd_in: i64, fd_out: i64, n: i64) -> i64 {
 // Moves up to `n` bytes from fd_in→fd_out via a pipe (pipefd = [2] i32 array
 // provided by the caller, created with SYS_pipe). Returns bytes moved (>0),
 // 0 on EOF, -1 on error. fd_in/fd_out can be sockets or files.
+// How long the drain half below waits for a stalled output to become writable
+// before giving up, in milliseconds. A blocking splice into a full output has no
+// bound, so if the peer stops reading the process hangs forever. Overridable.
+let mut io_splice_idle_ms = 120000
+
 fn splice_pump(fd_in: i64, fd_out: i64, pipefd: i64, n: i64) -> i64 {
     let rd = peek32(pipefd)
     let wr = peek32(pipefd + 4)
@@ -45,9 +51,22 @@ fn splice_pump(fd_in: i64, fd_out: i64, pipefd: i64, n: i64) -> i64 {
     }
     let mut out = 0
     for out < moved {
-        let w = splice_fd(rd, fd_out, moved - out)
+        // Drain non-blocking (MOVE|MORE|NONBLOCK = 7). A plain blocking splice here
+        // would hang if fd_out's buffer is full and the peer is not draining, and a
+        // POLLOUT poll before the call is not enough: splice can still try to write
+        // more than the free space and block. So on EAGAIN, wait, bounded, for the
+        // output to become writable and retry.
+        let w = syscall(SYS_splice, rd, 0, fd_out, 0, moved - out, 7)
+        if w == 0 - 11 {
+            let pfd[1]
+            pollfd_set(pfd, 0, fd_out, POLLOUT)
+            if poll_fds(pfd, 1, io_splice_idle_ms) == 0 {
+                return 0 - 1
+            }
+            continue
+        }
         if w <= 0 {
-            return -1
+            return 0 - 1
         }
         out = out + w
     }

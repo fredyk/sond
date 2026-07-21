@@ -38,6 +38,29 @@ fn main() -> i64 {
         if peek8(buf + i) != peek8(msg + i) { puts("FAIL dst data\n") return 1 }
         i = i + 1
     }
+    // Stalled output must not hang. Fill a pipe so a splice into it gets EAGAIN,
+    // set a short deadline, and confirm splice_pump gives up (-1) instead of
+    // blocking forever. Without the SPLICE_F_NONBLOCK + bounded-poll fix this
+    // call never returns.
+    let s1[1]
+    let s2[1]
+    let s3[1]
+    if syscall(SYS_pipe, s1) < 0 { puts("FAIL pipe s1\n") return 1 }
+    if syscall(SYS_pipe, s2) < 0 { puts("FAIL pipe s2\n") return 1 }
+    if syscall(SYS_pipe, s3) < 0 { puts("FAIL pipe s3\n") return 1 }
+    let s1r = peek32(s1)
+    let s1w = peek32(s1 + 4)
+    let s3w = peek32(s3 + 4)
+    // Fill s3 to its 64 KiB capacity so it cannot accept more; nobody reads it.
+    let big[8192]
+    write_buf(s3w, big, 65536)
+    // Put some bytes at the source so the first splice half succeeds.
+    write_buf(s1w, msg, mlen)
+    io_splice_idle_ms = 100
+    let stalled = splice_pump(s1r, s3w, s2, mlen)
+    if stalled != 0 - 1 { puts("FAIL stalled output should time out\n") return 1 }
+    puts("OK splice_pump stalled-output bounded\n")
+
     puts("OK splice_pump\n")
     0
 }
