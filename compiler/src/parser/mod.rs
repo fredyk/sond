@@ -464,6 +464,15 @@ impl Parser {
                     stmts.push(Stmt::Continue);
                     self.skip_semicolons();
                 }
+                Some(Token::Spawn) => {
+                    // `spawn f(args)`: run the call on a new thread. The inner expression is
+                    // parsed as an ordinary expression, but it must be a call, nothing else
+                    // is meaningful to run on a thread.
+                    self.advance();
+                    let call = self.parse_expr();
+                    stmts.push(Stmt::Spawn(call));
+                    self.skip_semicolons();
+                }
                 _ => {
                     let e = self.parse_expr();
                     if self.eat(Token::Eq) {

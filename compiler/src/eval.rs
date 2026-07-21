@@ -90,7 +90,7 @@ pub fn eval_block(block: &Block, env: &mut Env) -> Value {
                 env.insert(name.clone(), v);
             }
             Stmt::Assign { .. } => todo!("assignment to non-variable target"),
-            Stmt::Expr(e) => {
+            Stmt::Expr(e) | Stmt::Spawn(e) => {
                 eval_expr(e, env);
             }
             Stmt::Return(e) => {

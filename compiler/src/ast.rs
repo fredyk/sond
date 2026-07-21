@@ -183,6 +183,10 @@ pub enum Stmt {
     Continue,
     /// An expression used as a statement (its value is discarded).
     Expr(Expr),
+    /// `spawn f(args)`: run the call on a new OS thread (RFC-0010 Layer B). The
+    /// enclosing scope joins every thread it spawned before it returns, so the
+    /// inner expression is always a call, never an arbitrary expression.
+    Spawn(Expr),
 }
 
 /// An expression (used in bodies and in `requires`/`ensures` propositions).

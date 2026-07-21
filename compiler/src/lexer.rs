@@ -391,6 +391,7 @@ fn keyword_or_ident(word: String) -> Token {
         "while" => Token::While,
         "break" => Token::Break,
         "continue" => Token::Continue,
+        "spawn" => Token::Spawn,
         "and" => Token::And,
         "or" => Token::Or,
         "not" => Token::Not,

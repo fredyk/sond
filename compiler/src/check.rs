@@ -307,7 +307,7 @@ fn check_stmt(s: &Stmt, immutable: &HashMap<&str, &str>, fname: &str) -> Result<
             check_expr(value, immutable, fname)
         }
         Stmt::Let { value, .. } => check_expr(value, immutable, fname),
-        Stmt::Expr(e) | Stmt::Return(Some(e)) => check_expr(e, immutable, fname),
+        Stmt::Expr(e) | Stmt::Spawn(e) | Stmt::Return(Some(e)) => check_expr(e, immutable, fname),
         Stmt::For { body, cond, .. } => {
             if let Some(c) = cond {
                 check_expr(c, immutable, fname)?;

@@ -84,7 +84,7 @@ fn check_block(block: &Block, env: &mut Env) -> Result<Ty, TypeError> {
                     return err(format!("cannot assign {vt:?} to a target of type {tt:?}"));
                 }
             }
-            Stmt::Expr(e) => {
+            Stmt::Expr(e) | Stmt::Spawn(e) => {
                 infer(e, env)?;
             }
             Stmt::Return(Some(e)) => {

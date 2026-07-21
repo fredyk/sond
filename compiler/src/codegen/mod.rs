@@ -398,7 +398,7 @@ fn collect_locals(block: &Block, out: &mut Vec<String>) {
                 out.push(name.clone());
             }
             Stmt::Assign { value, .. } => collect_locals_in_expr(value, out),
-            Stmt::Expr(e) => collect_locals_in_expr(e, out),
+            Stmt::Expr(e) | Stmt::Spawn(e) => collect_locals_in_expr(e, out),
             Stmt::Return(Some(e)) => collect_locals_in_expr(e, out),
             Stmt::Return(None) => {}
             Stmt::For { cond, body, .. } => {
@@ -437,7 +437,7 @@ fn collect_arrays(block: &Block, out: &mut Vec<(String, i64)>) {
             }
             Stmt::Let { value, .. } => collect_arrays_in_expr(value, out),
             Stmt::Assign { value, .. } => collect_arrays_in_expr(value, out),
-            Stmt::Expr(e) => collect_arrays_in_expr(e, out),
+            Stmt::Expr(e) | Stmt::Spawn(e) => collect_arrays_in_expr(e, out),
             Stmt::Return(Some(e)) => collect_arrays_in_expr(e, out),
             Stmt::Return(None) => {}
             Stmt::For { cond, body, .. } => {
@@ -1034,6 +1034,16 @@ impl Codegen {
                 }
                 Stmt::Assign { .. } => todo!("x64 codegen: assignment to non-variable target"),
                 Stmt::Expr(e) => self.expr(e),
+                Stmt::Spawn(_) => {
+                    // The surface parses and type-checks, but the thread runtime (clone + a
+                    // fresh stack + a structured join, plus a thread-local arena so allocation
+                    // does not race) is the next increment. Refuse loudly rather than emit
+                    // something that looks like it ran a thread and did not.
+                    panic!(
+                        "codegen: `spawn` is not implemented yet. The parser accepts it so the \
+                         surface can settle, but Layer B (the OS-thread runtime) is still being built."
+                    );
+                }
                 Stmt::Return(e) => {
                     match e {
                         Some(e) => self.expr(e),

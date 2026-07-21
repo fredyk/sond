@@ -482,6 +482,9 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
             // reference-to-local, so a call cannot reassign a caller's local), and no contract to
             // enforce, so it is soundly discarded.
             Stmt::Expr(_) => live,
+            // A spawned call runs concurrently; for effect analysis today it is treated like any
+            // expression statement (its effect happens). Disjointness is a separate pass.
+            Stmt::Spawn(_) => live,
             // A loop is verified via its invariant (init + preservation), then continues
             // with (invariant ∧ ¬condition). Without an invariant it is unverifiable.
             Stmt::For {

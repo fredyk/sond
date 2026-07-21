@@ -275,3 +275,10 @@ fn rejects_a_character_it_does_not_know() {
 fn rejects_an_unknown_attribute_before_a_declaration() {
     tokenize("#[no_main]\nfn f() -> i64 { 0 }");
 }
+
+#[test]
+fn spawn_is_a_keyword() {
+    // `spawn f()` starts a thread (RFC-0010 Layer B), so `spawn` is a keyword and
+    // must not lex as an ordinary identifier.
+    assert_eq!(tokenize("spawn"), vec![Token::Spawn]);
+}

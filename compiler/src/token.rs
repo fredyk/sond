@@ -34,6 +34,10 @@ pub enum Token {
     /// `struct`
     Struct,
     Test,
+    /// `spawn`: run a function call on a new OS thread (RFC-0010 Layer B). The enclosing
+    /// scope joins every thread it spawned before it exits (structured concurrency), so a
+    /// spawned thread can never outlive the frame that started it.
+    Spawn,
     /// `enum`: a sum type (closed set of variants).
     Enum,
     /// `as`: an explicit numeric conversion (`x as u8`, `n as f64`).

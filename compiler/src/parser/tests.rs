@@ -1,5 +1,5 @@
 use super::*;
-use crate::ast::{Function, Param, StructDef, Type, Visibility};
+use crate::ast::{Expr, Function, Param, Stmt, StructDef, Type, Visibility};
 use crate::lexer::tokenize;
 
 fn parse_fn(src: &str) -> Function {
@@ -483,4 +483,13 @@ fn parses_a_call_with_positional_and_keyword_args() {
             ]
         )
     );
+}
+
+#[test]
+fn parses_a_spawn_statement() {
+    // `spawn f(a)` is a statement whose inner expression is the call to run on a
+    // new thread.
+    let f = parse_fn("fn run(a: i64) -> i64 { spawn work(a) 0 }");
+    let is_spawn_call = f.body.stmts.iter().any(|s| matches!(s, Stmt::Spawn(Expr::Call(_, _))));
+    assert!(is_spawn_call, "the body should hold a Spawn of a call, got {:?}", f.body);
 }
