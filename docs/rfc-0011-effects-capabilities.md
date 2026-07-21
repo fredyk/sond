@@ -26,6 +26,51 @@ So effects+capabilities is not one feature among many; it is the mechanism RFC-0
 *"the thing that turns Class A into unrepresentable."* Until it lands, every guarantee above is
 design, not fact. This RFC specifies it.
 
+## 1b. The evidence: one relay, seven bugs in two days
+
+This RFC stopped being theoretical on 2026-07-21. Porting a real network relay (a downstream
+product) from fork-per-connection to Sond threads produced seven distinct bugs, all of the same
+family, all of which this design turns into compile errors. They are not hypotheticals; each cost
+real debugging time, several were found only in production or on real hardware, and one hung 117
+processes for up to four hours. Listed because a design forced by seven shipped bugs is worth more
+than one argued from first principles.
+
+**Unbounded blocking waits (four instances).** A `read`, an `accept`, a `write` and a `splice`,
+each blocking with no deadline. When the peer stalls, the process hangs forever. None was visible
+to the compiler; each was found by a process hanging in production. The fix each time was the same
+poll-with-deadline, applied by hand after the hang. Under this design a blocking wait is an
+effect that must carry a **deadline** (or an explicit, auditable `no_deadline`), so all four would
+have been compile errors the day the code was written. This is the strongest single argument in the
+RFC: *the same bug, four times, in one component, none catchable today.*
+
+**Allocation inside a thread (one instance).** Two threads sharing an address space both bump the
+same arena pointer, an invisible race through raw `poke` on a mutable global (debt #4 + #7). It was
+closed for the concurrency work by giving each thread its own arena, but the general statement is
+this design's: allocation is a `Mem` effect on a capability, and two threads holding disjoint
+capabilities cannot race, by the disjointness check of RFC-0010.
+
+**Use-after-move into a thread (one instance).** `spawn pump(fd); close_fd(fd)` in one function
+closes the descriptor out from under a live thread, because the continuation runs concurrently with
+the child. The symptom is corruption, not an error. When `fd` is **moved** into the thread as a
+capability, the parent no longer holds it, and `close_fd(fd)` in the parent is a compile error.
+
+**`exit` inside a thread (one instance).** A connection worker's error paths call
+`syscall(SYS_exit, N)` to kill *themselves*; ported into a thread, `exit` kills the *whole process*,
+so one failed handshake would take down the relay and every other connection with it, silently.
+`exit`/`exit_group` is a **process-termination effect**; inside a spawned body it is forbidden (or
+replaced by a `task_return` that ends only the thread), so the catastrophe is a compile error.
+
+The through-line: **code written with process semantics does something catastrophic and silent when
+moved into a thread.** Every one of the seven is ambient authority or an unbounded/irreversible
+effect that the type system does not currently see. That is exactly what effects and capabilities
+make visible.
+
+The whole argument, measured side by side on the day: the same relay **without** the deadline fix
+ran to 207 processes, 31 zombies, 108 blocked in `read()`, the oldest hung for nearly fifteen hours;
+**with** it, five processes, zero zombies, hundreds of health probes without a single anomaly. The
+distance between those two lines is one missing effect the compiler could not see. This RFC is how
+it learns to.
+
 ## 2. The two halves and the one link
 
 - **Effect**: an *observable interaction*, reading/writing a resource, IO, nondeterminism.
@@ -111,6 +156,16 @@ fn transfer(from: Account, to: Account, amt: u64, db: Cap[Db])
 - **#7 (mutable globals)** → a module-level `let mut` is ambient mutable authority; it becomes
   a capability that must be threaded explicitly, or is forbidden. Non-local reasoning
   (action-at-a-distance) disappears because the mutation now appears in the effect signature.
+
+- **Concurrency footguns (surfaced 2026-07-21, §1b)** → three more, each a real relay bug:
+  - **Unbounded blocking wait** → a blocking `read`/`write`/`accept`/`splice` carries a wait
+    effect that MUST declare a `deadline`, or an explicit audited `no_deadline`. Four production
+    hangs become four compile errors.
+  - **Use-after-move into a thread** → a descriptor moved into a spawned body as a capability
+    leaves the parent's scope; using it there (`close_fd(fd)`) no longer type-checks.
+  - **Process termination inside a thread** → `exit`/`exit_group` is a process-termination effect
+    forbidden inside a spawned body (a thread ends with `task_return`, which ends only itself), so
+    a per-connection error path can no longer take down the whole relay.
 
 ## 7. Interaction with contracts
 
