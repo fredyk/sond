@@ -160,6 +160,48 @@ Writing this surfaced three things the earlier RFCs implied but never stated:
    three instances, all the same argument: capabilities + effects turn silent corruption into a
    rejected program.
 
+## 7b. Thread-local arena: the mechanism (design, before implementation)
+
+Section 7.4 named the direction; this is how. The allocator (`heap_alloc`) bumps a shared global,
+so the moment two threads allocate they race. Each thread needs its own bump region. Three ways to
+reach a per-thread arena pointer, and only one survives the hosted target.
+
+**TLS via `%fs` (rejected for hosted).** The natural answer is a thread-local variable read through
+the `%fs` segment base, set per thread with `CLONE_SETTLS` or `arch_prctl(ARCH_SET_FS)`. It is
+clean on freestanding, where Sond owns `%fs` entirely. It is a trap on hosted: a program linked
+with `cc` shares its address space with glibc, which owns the `%fs` TLS block (errno, the stack
+canary, its own bookkeeping) and lays it out at offsets Sond does not control. Writing our own
+`%fs:offset` corrupts glibc's TLS. Since the real consumer, a network relay, is a hosted process,
+this path is out for the profile that matters.
+
+**A dedicated register (chosen).** A callee-saved register is thread-local for free: every thread
+has its own register file. Reserve one, say `%r15`, as "the current arena pointer", so
+`heap_alloc` bumps through it instead of through a global. `main` seeds it with the default arena at
+startup; `emit_spawn` seeds the child's copy with a fresh `mmap`'d arena right after the clone,
+before the thread body runs. No TLS, no `%fs`, no glibc collision, and it works identically on
+hosted and freestanding.
+
+The costs, all real and all bounded:
+- `%r15` leaves the general pool. `emit_spawn` currently stages spawn arguments in `%rbx`/`%r12..%r15`;
+  it drops to `%rbx`/`%r12..%r14` (four argument slots, still enough for the relay's two-fd calls).
+- Every function must preserve the arena register. It is callee-saved, so ordinary calls already do;
+  the discipline is that no codegen path may clobber `%r15` for scratch. This is the one invariant to
+  test hard, because a single violating path is silent heap corruption.
+- The allocator, written in Sond today (`lib/x86_64/linux/heap.snd`), reads a global. It needs a
+  compiler intrinsic to read/write the arena register, or a small `asm` shim, since Sond source
+  cannot name `%r15`.
+
+**Handing an allocation across threads.** Once arenas are per-thread, a `Bytes` allocated in one
+thread lives in that thread's arena, which is freed when the thread ends. Moving it to another
+thread (through a channel, later) must copy the bytes, or the receiver holds a pointer into a dead
+arena. That is a channel-semantics question, deferred with channels; the register-arena change does
+not need it, because this slice only makes *intra-thread* allocation safe, which is what lifts the
+`check_no_alloc_in_spawn` guard.
+
+Test plan for the slice: a spawned body that allocates (a `Bytes`) and a concurrent allocation in
+the parent, run under a race detector or with enough iterations to expose a shared-bump race, must
+produce disjoint, uncorrupted allocations. Only then is the guard removed.
+
 ## 8. Honest limits
 
 - This model **presupposes the effect + capability system** (RFC-0000 §5–6), which is *not yet
