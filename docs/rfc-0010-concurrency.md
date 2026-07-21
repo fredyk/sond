@@ -208,12 +208,34 @@ Test plan for the slice: a spawned body that allocates (a `Bytes`) and a concurr
 the parent, run under a race detector or with enough iterations to expose a shared-bump race, must
 produce disjoint, uncorrupted allocations. Only then is the guard removed.
 
+## 7c. `exit` inside a spawned body: ENFORCED (process-termination effect)
+
+**Status: enforced as of 2026-07-21** (`check::check_no_process_exit_in_spawn`, commit `0c6471a`).
+This is the fourth footgun from the same relay, and the first one closed by an actual effect rather
+than a structural guard. Under process-per-connection semantics a connection worker's error paths
+call `syscall(SYS_exit, N)` to end *themselves*; ported into a thread, `exit` ends the *whole
+process*, so one failed handshake would tear down the relay and every other live connection with it,
+silently.
+
+The checker models a `ProcExit` effect that propagates up the call graph: every function reachable
+transitively from a `spawn` target (including through nested spawns) is inspected, and if any of them
+calls the exit syscall (by the `SYS_exit`/`SYS_exit_group` alias or the raw numbers 60/231) the
+program does not compile. The error names the offending function and points at ending the spawned
+body by returning (a `task_return`, which ends only that thread) instead of exiting the process. The
+same call in never-spawned code stays legal: a normal program exits its own process on purpose, and
+a helper reached only off the spawn path is untouched. This is the general effect mechanism (RFC-0011)
+applied to its first concrete case: an effect inferred through the call graph and forbidden under a
+context.
+
 ## 8. Honest limits
 
-- This model **presupposes the effect + capability system** (RFC-0000 §5–6), which is *not yet
-  implemented* (it is on the bootstrap debt registry as the mechanism that turns Class A into
-  "unrepresentable"). Until it lands, concurrency in Sond is only as safe as manual discipline,
-  the guarantees here are the target, not today's reality.
+- This model **presupposes the effect + capability system** (RFC-0000 §5–6), which is *mostly not
+  yet implemented* (it is on the bootstrap debt registry as the mechanism that turns Class A into
+  "unrepresentable"). Its **first case has landed**: `exit` inside a spawned body is now a compile
+  error (§7c), a single `ProcExit` effect propagated up the call graph. The rest, the mandatory
+  deadline on blocking waits and the capability move that closes use-after-move, is still design.
+  Until they land, most of the concurrency safety here is manual discipline, the guarantees are the
+  target, not yet today's full reality.
 - A tiny **trusted core** remains: the `Atomic` primitive and the scheduler's lock-free queue
   are the irreducible place where the hardware memory model is real; they are audited once, and
   everything above them inherits the safety. (You cannot bootstrap synchronization out of

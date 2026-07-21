@@ -2658,6 +2658,34 @@ mod exit_in_spawn_tests {
     }
 
     #[test]
+    fn rejects_exit_reached_through_a_nested_spawn() {
+        // A spawned body may itself spawn: `outer` runs on a thread and spawns `inner`, which
+        // exits. `inner` also runs on a thread, so the process-exit effect must be followed
+        // across the nested spawn, not only across plain calls.
+        let e = check(
+            "let SYS_exit = 60\n\
+             fn inner() -> i64 { syscall(SYS_exit, 9) 0 }\n\
+             fn outer() -> i64 { spawn inner() 0 }\n\
+             fn f() -> i64 { spawn outer() 0 }",
+        );
+        assert!(e.is_err(), "exit inside a nested spawned body must be rejected");
+        assert!(e.unwrap_err().contains("inner"), "the error should name the nested body");
+    }
+
+    #[test]
+    fn accepts_exit_in_a_helper_reached_only_off_the_spawn_path() {
+        // `helper` exits, but it is reached only from the non-spawned continuation, never from
+        // the spawned body. The effect is scoped to what runs on a thread, so this stays legal.
+        let ok = check(
+            "let SYS_exit = 60\n\
+             fn helper() -> i64 { syscall(SYS_exit, 0) 0 }\n\
+             fn worker() -> i64 { 0 }\n\
+             fn f() -> i64 { spawn worker() helper() 0 }",
+        );
+        assert!(ok.is_ok(), "exit off the spawn path is legitimate, got {ok:?}");
+    }
+
+    #[test]
     fn accepts_a_spawned_body_that_does_not_exit() {
         let ok = check(
             "let SYS_exit = 60\n\
