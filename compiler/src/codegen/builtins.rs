@@ -187,6 +187,14 @@ impl Codegen {
                 assert!(args.is_empty(), "argc takes no arguments");
                 self.line("    movq sond_argc(%rip), %rax");
             }
+            // arena_tcb() -> i64: the current thread's arena control block address, held in the
+            // reserved arena register %r15. It is per-thread for free (each thread has its own
+            // register file), so the allocator bumps through it with no shared global to race on.
+            // Three words: [next_free_byte, block_end, total]. main and each spawned thread seed it.
+            "arena_tcb" => {
+                assert!(args.is_empty(), "arena_tcb takes no arguments");
+                self.line("    movq %r15, %rax");
+            }
             // argv(i) -> i64: address of the i-th argument (a NUL-terminated string).
             "argv" => {
                 assert_eq!(args.len(), 1, "argv expects (index)");

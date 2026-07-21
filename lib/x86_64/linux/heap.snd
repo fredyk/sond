@@ -5,41 +5,41 @@
 // the standard library (growable buffers, strings, collections) build on, since the hosted
 // target has no `alloc` builtin (that one is UEFI-only).
 //
-// An arena is exactly the right shape for short-lived, allocation-heavy programs such as a
-// compiler: allocate freely for the whole run, then let the OS reclaim everything at exit
-// (or call `heap_reset` to reclaim in bulk between phases). There is no per-object free.
+// The arena state is PER THREAD. It lives in a three-word control block, [next_free_byte,
+// block_end, total], reached through the arena register (`arena_tcb()`, the reserved %r15), not
+// a shared global. Two threads that both allocate therefore never race on the bump pointer:
+// each has its own block. main and every spawned thread seed the register with their own control
+// block at entry. There is no per-object free; the OS reclaims each block at exit.
 
 include "x86_64/linux/syscall-nums.snd"
 
-let mut __arena_ptr = 0    // next free byte (0 until the first allocation)
-let mut __arena_end = 0    // one past the end of the current mmap block
-let mut __arena_total = 0  // total bytes handed out, across all blocks
-
-// Map a fresh block big enough for `need` bytes (at least 16 MiB) and bump into it. Called on
-// first use and whenever the current block is exhausted.
-fn __arena_grow(need: i64) {
+// Map a fresh block big enough for `need` bytes (at least 16 MiB) and point the control block at
+// it. Called on the first allocation and whenever the current block is exhausted. The old block
+// is abandoned; the arena only grows.
+fn __arena_grow(tcb: i64, need: i64) {
     let block = 16777216                       // 16 MiB
     let size = if need > block { need } else { block }
     // PROT_READ|PROT_WRITE = 3; MAP_PRIVATE|MAP_ANONYMOUS = 2|32 = 34; fd = -1; offset = 0.
     let base = syscall(SYS_mmap, 0, size, 3, 34, 0 - 1, 0)
-    __arena_ptr = base
-    __arena_end = base + size
+    poke64(tcb, base)
+    poke64(tcb + 8, base + size)
 }
 
 // Allocate `n` bytes from the arena, 8-byte aligned, zero-filled (mmap gives zeroed pages).
 // Grows the arena on demand, so it never returns null for a reasonable request.
 pub fn heap_alloc(n: i64) -> i64 {
+    let tcb = arena_tcb()
     let aligned = (n + 7) & (0 - 8)
-    if __arena_ptr + aligned > __arena_end {
-        __arena_grow(aligned)
+    if peek64(tcb) + aligned > peek64(tcb + 8) {
+        __arena_grow(tcb, aligned)
     }
-    let p = __arena_ptr
-    __arena_ptr = __arena_ptr + aligned
-    __arena_total = __arena_total + aligned
+    let p = peek64(tcb)
+    poke64(tcb, p + aligned)
+    poke64(tcb + 16, peek64(tcb + 16) + aligned)
     p
 }
 
-// Total bytes handed out so far, across every block (for diagnostics/tests).
+// Total bytes handed out so far by the calling thread's arena (for diagnostics/tests).
 pub fn heap_used() -> i64 {
-    __arena_total
+    peek64(arena_tcb() + 16)
 }

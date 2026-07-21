@@ -170,7 +170,13 @@ pub fn emit_program_g(globals: &[Global], structs: &[StructDef], funcs: &[Functi
     cg.line("    movq %rdi, sond_argc(%rip)");
     cg.line("    movq %rsi, sond_argv(%rip)");
     cg.line("    movq %rdx, sond_envp(%rip)");
+    // Reserve %r15 as the thread-local arena pointer. It is callee-saved, so glibc (which called
+    // main) expects it preserved: save it, point it at the default arena control block, and
+    // restore it before returning.
+    cg.line("    pushq %r15");
+    cg.line("    leaq sond_arena_tcb(%rip), %r15");
     cg.line("    call sond_start");
+    cg.line("    popq %r15");
     cg.line("    ret");
     cg.emit_print_int_helper();
     cg.emit_print_int_signed_helper();
@@ -213,7 +219,10 @@ pub fn emit_program_coverage_g(
     cg.line("    movq %rdi, sond_argc(%rip)");
     cg.line("    movq %rsi, sond_argv(%rip)");
     cg.line("    movq %rdx, sond_envp(%rip)");
+    cg.line("    pushq %r15");
+    cg.line("    leaq sond_arena_tcb(%rip), %r15");
     cg.line("    call sond_start");
+    cg.line("    popq %r15");
     cg.line("    ret");
     cg.emit_print_int_helper();
     cg.emit_print_int_signed_helper();
@@ -309,6 +318,7 @@ pub fn emit_freestanding_g(globals: &[Global], structs: &[StructDef], funcs: &[F
     // envp begins after argv's NULL terminator: rsp + 8 (skip argc) + (argc+1)*8 = rsp + 16 + argc*8.
     cg.line("    leaq 16(%rsp,%rax,8), %rcx");
     cg.line("    movq %rcx, sond_envp(%rip)");
+    cg.line("    leaq sond_arena_tcb(%rip), %r15"); // seed the thread-local arena pointer
     cg.line("    call sond_start");
     cg.line("    movq %rax, %rdi"); // exit code = the entry's value
     cg.line("    movq $60, %rax"); // sys_exit
@@ -356,6 +366,7 @@ pub fn emit_uefi_g(globals: &[Global], structs: &[StructDef], funcs: &[Function]
     cg.line("    movq %rcx, sond_imghandle(%rip)"); // stash ImageHandle for EBS
     cg.line("    movq %rdx, sond_systab(%rip)"); // stash SystemTable for print
     cg.line("    subq $8, %rsp"); // 16-align the stack before the call
+    cg.line("    leaq sond_arena_tcb(%rip), %r15"); // seed the thread-local arena pointer
     cg.line("    call sond_start");
     cg.line("    addq $8, %rsp");
     cg.line("    ret"); // the entry's value becomes the EFI status
@@ -1047,14 +1058,14 @@ impl Codegen {
 
     /// Emits the module-level globals into `.data`.
     fn emit_globals(&mut self) {
-        if self.global_data.is_empty() && self.global_array_data.is_empty() && self.all_ctids.is_empty()
-        {
-            return;
-        }
         let data = std::mem::take(&mut self.global_data);
         let arrays = std::mem::take(&mut self.global_array_data);
         let ctids = std::mem::take(&mut self.all_ctids);
         self.line(".data");
+        // The default thread's arena control block: [next_free_byte, block_end, total]. Every
+        // program reads the arena through %r15, seeded at entry to point here; a spawned thread
+        // gets its own block instead. Emitted unconditionally, since any allocation needs it.
+        self.line("sond_arena_tcb: .quad 0, 0, 0");
         if self.uses_spawn {
             // The per-thread stack size, used as both an mmap length and the offset from the
             // mapping's base to its top.
