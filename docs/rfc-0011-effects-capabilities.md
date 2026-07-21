@@ -60,6 +60,14 @@ so one failed handshake would take down the relay and every other connection wit
 `exit`/`exit_group` is a **process-termination effect**; inside a spawned body it is forbidden (or
 replaced by a `task_return` that ends only the thread), so the catastrophe is a compile error.
 
+> **Status: this case is ENFORCED as of 2026-07-21** (`check::check_no_process_exit_in_spawn`,
+> commit `0c6471a`). The checker models a `ProcExit` effect that propagates up the call graph:
+> every function reachable transitively from a `spawn` target is inspected, and if any of them calls
+> the exit syscall (by the `SYS_exit`/`SYS_exit_group` alias or the raw numbers 60/231) compilation
+> fails with a message pointing at `task_return`. The same call in never-spawned code stays legal. It
+> is the first of the seven turned from design into an enforced compile error; the general mechanism
+> (declared effects + capabilities) is the rest of this RFC.
+
 The through-line: **code written with process semantics does something catastrophic and silent when
 moved into a thread.** Every one of the seven is ambient authority or an unbounded/irreversible
 effect that the type system does not currently see. That is exactly what effects and capabilities
