@@ -153,6 +153,35 @@ pub fn check_struct_mutability(funcs: &[Function], structs: &[StructDef]) -> Res
 /// kind. `fn m(self)` is a value method, `fn m(self: *T)` is a pointer method;
 /// mixing them in a type is rejected (Go allows this and only lints, Sond does
 /// not). A method is any function whose first parameter is named `self`.
+/// Rejects a `spawn` inside a loop (RFC-0010 Layer B). Each spawn site owns one static join
+/// cell that holds the child TID until the structured join at function exit clears it. Spawning
+/// in a loop would overwrite that cell on the next iteration, so the earlier thread would never
+/// be joined: a silent thread leak. Per-iteration join state (a growable set of live threads)
+/// is a later increment; until then this is a compile error, not a footgun.
+pub fn check_spawn_not_in_loop(funcs: &[Function]) -> Result<(), String> {
+    fn walk(stmts: &[Stmt], in_loop: bool, fname: &str) -> Result<(), String> {
+        for s in stmts {
+            match s {
+                Stmt::Spawn(_) if in_loop => {
+                    return Err(format!(
+                        "function `{fname}`: `spawn` inside a loop is not supported yet. Each \
+                         spawn is joined at the function's return through a single per-site cell, \
+                         so a loop would leave every thread but the last one unjoined. Spawn a \
+                         fixed set of threads outside the loop for now."
+                    ));
+                }
+                Stmt::For { body, .. } => walk(&body.stmts, true, fname)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    for f in funcs {
+        walk(&f.body.stmts, false, &f.name)?;
+    }
+    Ok(())
+}
+
 pub fn check_receiver_kinds(funcs: &[Function]) -> Result<(), String> {
     // struct name -> (is_pointer, first method name seen) of its receiver kind.
     let mut kind: HashMap<&str, (bool, &str)> = HashMap::new();
@@ -2383,5 +2412,33 @@ mod tests {
         // Visibility composes with the modifier.
         let funcs = Parser::new(tokenize("pub wrapping fn f() -> i64 { 1 }")).parse_program();
         assert!(funcs[0].is_wrapping && matches!(funcs[0].vis, crate::ast::Visibility::Pub));
+    }
+}
+
+#[cfg(test)]
+mod spawn_loop_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn check(src: &str) -> Result<(), String> {
+        let funcs = Parser::new(tokenize(src)).parse_program();
+        check_spawn_not_in_loop(&funcs)
+    }
+
+    #[test]
+    fn rejects_spawn_inside_a_loop() {
+        // Each spawn site has one static join cell, so spawning in a loop would overwrite the
+        // previous thread's tid and leave it unjoined. Until per-iteration join state exists,
+        // a spawn in a loop is a compile error rather than a silent thread leak.
+        let e = check("fn w() -> i64 { 0 }\nfn f() -> i64 { for i in 0..3 { spawn w() } 0 }");
+        assert!(e.is_err(), "spawn inside a loop must be rejected");
+        assert!(e.unwrap_err().contains("loop"), "the error should mention the loop");
+    }
+
+    #[test]
+    fn accepts_spawn_outside_a_loop() {
+        let ok = check("fn w() -> i64 { 0 }\nfn f() -> i64 { spawn w() spawn w() 0 }");
+        assert!(ok.is_ok(), "two straight-line spawns are fine, got {ok:?}");
     }
 }

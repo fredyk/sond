@@ -604,6 +604,15 @@ struct Codegen {
     cur_ret_struct: Option<i64>,
     /// Interned `f64` literals: `(label, bits)`, emitted as `.quad` doubles in `.rodata`.
     float_consts: Vec<(String, u64)>,
+    /// RFC-0010 Layer B. The `clear_child_tid` cells of the threads spawned in the function
+    /// currently being emitted. A `spawn` allocates one and stores the child TID into it; the
+    /// kernel clears it and futex-wakes on the thread's exit, and the function's epilogue waits
+    /// on each, which is the structured join. Reset per function.
+    spawn_ctids: Vec<String>,
+    /// Every ctid cell across the whole program, emitted as `.quad 0` in `.bss`.
+    all_ctids: Vec<String>,
+    /// Set once any `spawn` is emitted, so the thread stack size constant is emitted.
+    uses_spawn: bool,
 }
 
 /// Functions excluded from coverage instrumentation: the synthesized `sond test` harness
@@ -674,6 +683,7 @@ impl Codegen {
         };
         let frame = (slot * 8 + 15) & !15; // 16-byte aligned
         self.ret_label = self.fresh_label("ret");
+        self.spawn_ctids.clear();
 
         self.line(".text");
         self.line(&format!(".globl {label}"));
@@ -748,6 +758,34 @@ impl Codegen {
         }
 
         self.line(&format!("{}:", self.ret_label.clone()));
+        // Structured join (RFC-0010): before the function returns, wait for every thread it
+        // spawned. This is where a spawned thread's lifetime ends, so none can outlive the
+        // frame that started it. Emitted here at the single return label, so it covers early
+        // `return`s too. The return value is in %rax and the futex syscall clobbers it, so it
+        // is saved across the joins.
+        if !self.spawn_ctids.is_empty() {
+            let ctids = std::mem::take(&mut self.spawn_ctids);
+            self.line("    pushq %rax"); // preserve the return value across the joins
+            for cell in &ctids {
+                // futex-wait until the kernel clears the cell to 0 at the child's exit.
+                //   tid = [cell]; while tid != 0 { futex(cell, FUTEX_WAIT, tid, NULL); tid = [cell] }
+                let wait = self.fresh_label("join_wait");
+                let done = self.fresh_label("join_done");
+                self.line(&format!("{wait}:"));
+                self.line(&format!("    movq {cell}(%rip), %rdx")); // rdx = expected tid
+                self.line("    testq %rdx, %rdx");
+                self.line(&format!("    jz {done}"));
+                self.line(&format!("    leaq {cell}(%rip), %rdi")); // uaddr
+                self.line("    xorq %rsi, %rsi"); // FUTEX_WAIT = 0
+                // rdx already holds the expected value
+                self.line("    xorq %r10, %r10"); // timeout = NULL
+                self.line("    movq $202, %rax"); // SYS_futex
+                self.line("    syscall");
+                self.line(&format!("    jmp {wait}"));
+                self.line(&format!("{done}:"));
+            }
+            self.line("    popq %rax");
+        }
         // Postconditions: checked at every exit, with the return value bound to
         // the named return so `ensures` can talk about the result.
         if let Some(off) = ret_slot {
@@ -905,14 +943,116 @@ impl Codegen {
         }
     }
 
+    /// Emits `spawn f(args)` (RFC-0010 Layer B): run the call on a real OS thread.
+    ///
+    /// The thread shares the address space (`CLONE_VM`) and file descriptors (`CLONE_FILES`),
+    /// runs on its own freshly mmap'd stack, and is joined at the enclosing function's return
+    /// (structured concurrency). The child TID goes into a per-spawn cell that the kernel
+    /// clears and futex-wakes on exit, which is what the join waits on.
+    ///
+    /// Arguments are evaluated in the parent into callee-saved registers, which the clone
+    /// syscall preserves and the child inherits, so the child loads them into the argument
+    /// registers and calls the function with no shared-memory hand-off.
+    ///
+    /// Raw syscalls throughout: no libc, so a spawning program still links and runs freestanding.
+    fn emit_spawn(&mut self, call: &Expr) {
+        let Expr::Call(callee, args) = call else {
+            panic!("`spawn` must be followed by a function call");
+        };
+        let Expr::Var(fname) = callee.as_ref() else {
+            todo!("spawn of an indirect call {callee:?}");
+        };
+        // Callee-saved registers survive the clone syscall (it clobbers only rax, rcx, r11 and
+        // the argument registers). Up to five, matching what a thread body needs in practice.
+        const SAVED: [&str; 5] = ["%r12", "%r13", "%r14", "%r15", "%rbx"];
+        if args.len() > SAVED.len() {
+            panic!(
+                "spawn currently supports up to {} arguments to the thread function (got {})",
+                SAVED.len(),
+                args.len()
+            );
+        }
+        self.uses_spawn = true;
+        let cell = format!("sond_ctid_{}", self.all_ctids.len());
+        self.all_ctids.push(cell.clone());
+        self.spawn_ctids.push(cell.clone());
+
+        // Save the parent's callee-saved registers we are about to use (48 = 6 slots keeps the
+        // stack 16-aligned), evaluate the arguments into them.
+        self.line("    subq $48, %rsp");
+        for (i, reg) in SAVED.iter().take(args.len()).enumerate() {
+            self.line(&format!("    movq {reg}, {}(%rsp)", i * 8));
+        }
+        for (i, arg) in args.iter().enumerate() {
+            self.expr(&arg.value); // -> %rax
+            self.line(&format!("    movq %rax, {}", SAVED[i]));
+        }
+
+        // mmap a 256 KiB stack for the child: mmap(0, size, RW, PRIVATE|ANON|STACK, -1, 0).
+        self.line("    xorq %rdi, %rdi");
+        self.line("    movq $sond_thread_stack, %rsi");
+        self.line("    movq $3, %rdx"); // PROT_READ|PROT_WRITE
+        self.line("    movq $0x20022, %r10"); // MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK
+        self.line("    movq $-1, %r8");
+        self.line("    xorq %r9, %r9");
+        self.line("    movq $9, %rax"); // SYS_mmap
+        self.line("    syscall");
+        // Child stack top, 16-aligned: base + size.
+        self.line("    leaq sond_thread_stack(%rax), %rsi");
+        self.line("    andq $-16, %rsi");
+
+        // clone(flags, child_stack, ptid=0, ctid=&cell, tls=0).
+        // CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|CHILD_CLEARTID.
+        self.line("    movq $0x250f00, %rdi");
+        // rsi = child stack (set above)
+        self.line("    xorq %rdx, %rdx"); // parent_tid = NULL
+        self.line(&format!("    leaq {cell}(%rip), %r10")); // child_tid cell
+        self.line("    xorq %r8, %r8"); // tls = NULL
+        self.line("    movq $56, %rax"); // SYS_clone
+        self.line("    syscall");
+
+        let child = self.fresh_label("thread_child");
+        self.line("    testq %rax, %rax");
+        self.line(&format!("    jz {child}"));
+        // Parent: rax = child tid. Record it in the cell so the join has a value to wait on.
+        self.line(&format!("    movq %rax, {cell}(%rip)"));
+        // Restore the parent's callee-saved registers and continue.
+        for (i, reg) in SAVED.iter().take(args.len()).enumerate() {
+            self.line(&format!("    movq {}(%rsp), {reg}", i * 8));
+        }
+        self.line("    addq $48, %rsp");
+        let after = self.fresh_label("thread_parent");
+        self.line(&format!("    jmp {after}"));
+
+        // Child: rax = 0, rsp = its own stack. Move the args into the argument registers and
+        // call the function, then exit THIS thread (SYS_exit, not exit_group), which triggers
+        // the kernel's clear + futex-wake on the ctid cell.
+        self.line(&format!("{child}:"));
+        for (saved, argreg) in SAVED.iter().zip(ARG_REGS.iter()).take(args.len()) {
+            self.line(&format!("    movq {saved}, {argreg}"));
+        }
+        self.line(&format!("    call {fname}"));
+        self.line("    xorq %rdi, %rdi"); // thread exit status 0
+        self.line("    movq $60, %rax"); // SYS_exit (this thread only)
+        self.line("    syscall");
+        self.line(&format!("{after}:"));
+    }
+
     /// Emits the module-level globals into `.data`.
     fn emit_globals(&mut self) {
-        if self.global_data.is_empty() && self.global_array_data.is_empty() {
+        if self.global_data.is_empty() && self.global_array_data.is_empty() && self.all_ctids.is_empty()
+        {
             return;
         }
         let data = std::mem::take(&mut self.global_data);
         let arrays = std::mem::take(&mut self.global_array_data);
+        let ctids = std::mem::take(&mut self.all_ctids);
         self.line(".data");
+        if self.uses_spawn {
+            // The per-thread stack size, used as both an mmap length and the offset from the
+            // mapping's base to its top.
+            self.line(".set sond_thread_stack, 262144");
+        }
         for (name, value) in data {
             self.line(&format!("{name}: .quad {value}"));
         }
@@ -923,6 +1063,10 @@ impl Codegen {
                 .collect::<Vec<_>>()
                 .join(", ");
             self.line(&format!("{name}: .quad {quads}"));
+        }
+        // One clear_child_tid cell per spawn site, zeroed (no live thread yet).
+        for cell in ctids {
+            self.line(&format!("{cell}: .quad 0"));
         }
     }
 
@@ -1034,16 +1178,7 @@ impl Codegen {
                 }
                 Stmt::Assign { .. } => todo!("x64 codegen: assignment to non-variable target"),
                 Stmt::Expr(e) => self.expr(e),
-                Stmt::Spawn(_) => {
-                    // The surface parses and type-checks, but the thread runtime (clone + a
-                    // fresh stack + a structured join, plus a thread-local arena so allocation
-                    // does not race) is the next increment. Refuse loudly rather than emit
-                    // something that looks like it ran a thread and did not.
-                    panic!(
-                        "codegen: `spawn` is not implemented yet. The parser accepts it so the \
-                         surface can settle, but Layer B (the OS-thread runtime) is still being built."
-                    );
-                }
+                Stmt::Spawn(call) => self.emit_spawn(call),
                 Stmt::Return(e) => {
                     match e {
                         Some(e) => self.expr(e),
