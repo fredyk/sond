@@ -182,6 +182,155 @@ pub fn check_spawn_not_in_loop(funcs: &[Function]) -> Result<(), String> {
     Ok(())
 }
 
+/// Rejects the process-termination effect inside a spawned call graph (RFC-0011, footgun #3).
+/// `syscall(SYS_exit, N)` ends the calling *thread* under process-per-connection semantics but
+/// the whole *process* when it runs on a spawned OS thread, so one connection's error path would
+/// take the entire program (and every other connection) down with it, silently. This is the first
+/// concrete effect the checker learns: a `ProcExit` effect that propagates up the call graph and
+/// is forbidden under `spawn`. The general mechanism (declared effects + capabilities) is RFC-0011;
+/// this is its first enforced case.
+pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> {
+    // Every `Call` node reachable in a block, decomposed into (callee, args). Used both to walk
+    // the call graph (by callee name) and to spot the exit syscall (by the first argument).
+    fn collect_calls<'a>(b: &'a Block, out: &mut Vec<(&'a Expr, &'a Vec<Arg>)>) {
+        for s in &b.stmts {
+            match s {
+                Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Spawn(value) => {
+                    collect_calls_expr(value, out)
+                }
+                Stmt::Assign { target, value } => {
+                    collect_calls_expr(target, out);
+                    collect_calls_expr(value, out);
+                }
+                Stmt::Return(Some(e)) => collect_calls_expr(e, out),
+                Stmt::For { cond, body, .. } => {
+                    if let Some(c) = cond {
+                        collect_calls_expr(c, out);
+                    }
+                    collect_calls(body, out);
+                }
+                Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+            }
+        }
+        if let Some(t) = &b.tail {
+            collect_calls_expr(t, out);
+        }
+    }
+    fn collect_calls_expr<'a>(e: &'a Expr, out: &mut Vec<(&'a Expr, &'a Vec<Arg>)>) {
+        match e {
+            Expr::Call(callee, args) => {
+                out.push((callee, args));
+                collect_calls_expr(callee, out);
+                for a in args {
+                    collect_calls_expr(&a.value, out);
+                }
+            }
+            Expr::Field(b, _) => collect_calls_expr(b, out),
+            Expr::Index(b, i) => {
+                collect_calls_expr(b, out);
+                collect_calls_expr(i, out);
+            }
+            Expr::SliceRange(b, lo, hi) => {
+                collect_calls_expr(b, out);
+                if let Some(x) = lo {
+                    collect_calls_expr(x, out);
+                }
+                if let Some(x) = hi {
+                    collect_calls_expr(x, out);
+                }
+            }
+            Expr::Unary(_, b) => collect_calls_expr(b, out),
+            Expr::Binary(_, l, r) => {
+                collect_calls_expr(l, out);
+                collect_calls_expr(r, out);
+            }
+            Expr::List(xs) => {
+                for x in xs {
+                    collect_calls_expr(x, out);
+                }
+            }
+            Expr::StructLit(_, fields) => {
+                for (_, v) in fields {
+                    collect_calls_expr(v, out);
+                }
+            }
+            Expr::If { cond, then_branch, else_branch } => {
+                collect_calls_expr(cond, out);
+                collect_calls(then_branch, out);
+                if let Some(eb) = else_branch {
+                    collect_calls(eb, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    // `syscall(SYS_exit, N)` or `syscall(60, N)` (231 = exit_group): the process-termination call.
+    fn is_process_exit(callee: &Expr, args: &[Arg]) -> bool {
+        let Expr::Var(name) = callee else { return false };
+        if name != "syscall" {
+            return false;
+        }
+        let Some(first) = args.first() else { return false };
+        match &first.value {
+            Expr::Var(n) => n == "SYS_exit" || n == "SYS_exit_group",
+            Expr::Int(n) => *n == 60 || *n == 231,
+            _ => false,
+        }
+    }
+
+    let map: HashMap<&str, &Function> = funcs.iter().map(|f| (f.name.as_str(), f)).collect();
+
+    // Seed the "runs on a spawned thread" set with every direct spawn target, then close it over
+    // the call graph: the process-exit effect propagates up the calls a spawned body makes.
+    // A spawn is a statement, so scan statements directly for spawn targets.
+    fn spawn_targets<'a>(b: &'a Block, out: &mut Vec<&'a str>) {
+        for s in &b.stmts {
+            match s {
+                Stmt::Spawn(Expr::Call(callee, _)) => {
+                    if let Expr::Var(n) = callee.as_ref() {
+                        out.push(n);
+                    }
+                }
+                Stmt::For { body, .. } => spawn_targets(body, out),
+                _ => {}
+            }
+        }
+    }
+    let mut reachable: Vec<&str> = Vec::new();
+    for f in funcs {
+        spawn_targets(&f.body, &mut reachable);
+    }
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut work = reachable;
+    while let Some(name) = work.pop() {
+        if !seen.insert(name) {
+            continue;
+        }
+        let Some(f) = map.get(name) else { continue };
+        let mut calls = Vec::new();
+        collect_calls(&f.body, &mut calls);
+        // This function runs (transitively) under a spawn: it must not terminate the process.
+        for (callee, args) in &calls {
+            if is_process_exit(callee, args) {
+                return Err(format!(
+                    "function `{name}` runs on a spawned thread but calls the process-exit \
+                     syscall (`syscall(SYS_exit, ..)`). On a thread that ends the whole process, \
+                     not just the thread, so one task's error path would tear down every other \
+                     task with it. Return from the spawned body (which ends only that thread) \
+                     instead of exiting; a `task_return` value is the intended way to end a task."
+                ));
+            }
+            if let Expr::Var(n) = callee {
+                if map.contains_key(n.as_str()) {
+                    work.push(n);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn check_receiver_kinds(funcs: &[Function]) -> Result<(), String> {
     // struct name -> (is_pointer, first method name seen) of its receiver kind.
     let mut kind: HashMap<&str, (bool, &str)> = HashMap::new();
@@ -2440,5 +2589,81 @@ mod spawn_loop_tests {
     fn accepts_spawn_outside_a_loop() {
         let ok = check("fn w() -> i64 { 0 }\nfn f() -> i64 { spawn w() spawn w() 0 }");
         assert!(ok.is_ok(), "two straight-line spawns are fine, got {ok:?}");
+    }
+}
+
+#[cfg(test)]
+mod exit_in_spawn_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn check(src: &str) -> Result<(), String> {
+        let funcs = Parser::new(tokenize(src)).parse_program();
+        check_no_process_exit_in_spawn(&funcs)
+    }
+
+    // RFC-0011 footgun #3: `syscall(SYS_exit, N)` ends the calling THREAD under process
+    // semantics but the whole PROCESS inside a spawned body, so one connection's error path
+    // would take down the relay and every other connection with it, silently.
+
+    #[test]
+    fn rejects_exit_directly_in_a_spawned_body() {
+        let e = check(
+            "let SYS_exit = 60\n\
+             fn worker() -> i64 { syscall(SYS_exit, 2) 0 }\n\
+             fn f() -> i64 { spawn worker() 0 }",
+        );
+        assert!(e.is_err(), "exit inside a spawned body must be rejected");
+        let msg = e.unwrap_err();
+        assert!(msg.contains("worker"), "error should name the offending function: {msg}");
+        assert!(
+            msg.contains("task_return") || msg.contains("whole process"),
+            "error should explain the process-termination effect: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_exit_through_a_call_chain_from_a_spawned_body() {
+        // The effect propagates up the call graph: `worker` is clean itself but calls `bail`,
+        // which exits. A spawned body must be free of the process-exit effect transitively.
+        let e = check(
+            "let SYS_exit = 60\n\
+             fn bail() -> i64 { syscall(SYS_exit, 3) 0 }\n\
+             fn worker() -> i64 { bail() 0 }\n\
+             fn f() -> i64 { spawn worker() 0 }",
+        );
+        assert!(e.is_err(), "exit reached through a call chain must be rejected");
+    }
+
+    #[test]
+    fn rejects_exit_via_integer_literal_syscall_number() {
+        // The syscall number may be written as the raw literal 60 instead of the SYS_exit alias.
+        let e = check(
+            "fn worker() -> i64 { syscall(60, 1) 0 }\n\
+             fn f() -> i64 { spawn worker() 0 }",
+        );
+        assert!(e.is_err(), "exit written as syscall(60, ..) must be rejected too");
+    }
+
+    #[test]
+    fn accepts_exit_outside_any_spawned_body() {
+        // The same call is perfectly fine in code that is never spawned: a normal program
+        // exits its own process on purpose. The effect is only forbidden under `spawn`.
+        let ok = check(
+            "let SYS_exit = 60\n\
+             fn main() -> i64 { syscall(SYS_exit, 0) 0 }",
+        );
+        assert!(ok.is_ok(), "exit in non-spawned code is legitimate, got {ok:?}");
+    }
+
+    #[test]
+    fn accepts_a_spawned_body_that_does_not_exit() {
+        let ok = check(
+            "let SYS_exit = 60\n\
+             fn worker() -> i64 { 0 }\n\
+             fn f() -> i64 { spawn worker() 0 }",
+        );
+        assert!(ok.is_ok(), "a clean spawned body must be accepted, got {ok:?}");
     }
 }
