@@ -3,30 +3,30 @@ include "x86_64/linux/http.snd"
 include "x86_64/linux/testing.snd"
 
 test "parse the method" {
-    let req = bytes_from_cstr(cstr("GET /index.html HTTP/1.1"))
-    assert_eq(bytes_eq(http_method(req), bytes_from_cstr(cstr("GET"))), 1)
+    let req = bytes_from_cstr("GET /index.html HTTP/1.1")
+    assert_eq(bytes_eq(http_method(req), bytes_from_cstr("GET")), 1)
 }
 
 test "parse the path" {
-    let req = bytes_from_cstr(cstr("GET /index.html HTTP/1.1"))
-    assert_eq(bytes_eq(http_path(req), bytes_from_cstr(cstr("/index.html"))), 1)
+    let req = bytes_from_cstr("GET /index.html HTTP/1.1")
+    assert_eq(bytes_eq(http_path(req), bytes_from_cstr("/index.html")), 1)
 }
 
 test "parse a POST with a root path" {
-    let req = bytes_from_cstr(cstr("POST / HTTP/1.1"))
-    assert_eq(bytes_eq(http_method(req), bytes_from_cstr(cstr("POST"))), 1)
-    assert_eq(bytes_eq(http_path(req), bytes_from_cstr(cstr("/"))), 1)
+    let req = bytes_from_cstr("POST / HTTP/1.1")
+    assert_eq(bytes_eq(http_method(req), bytes_from_cstr("POST")), 1)
+    assert_eq(bytes_eq(http_path(req), bytes_from_cstr("/")), 1)
 }
 
 test "build a 200 response" {
-    let resp = http_response(cstr("200 OK"), bytes_from_cstr(cstr("Hi")))
-    let want = bytes_from_cstr(cstr("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nHi"))
+    let resp = http_response("200 OK", bytes_from_cstr("Hi"))
+    let want = bytes_from_cstr("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nHi")
     assert_eq(bytes_eq(resp, want), 1)
 }
 
 test "parse headers into a map" {
-    let req = bytes_from_cstr(cstr("GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n"))
+    let req = bytes_from_cstr("GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n")
     let h = http_headers(req)
-    assert_eq(bytes_eq(map_get(h, bytes_from_cstr(cstr("Host")), 0), bytes_from_cstr(cstr("example.com"))), 1)
-    assert_eq(bytes_eq(map_get(h, bytes_from_cstr(cstr("Content-Length")), 0), bytes_from_cstr(cstr("5"))), 1)
+    assert_eq(bytes_eq(map_get(h, bytes_from_cstr("Host"), 0), bytes_from_cstr("example.com")), 1)
+    assert_eq(bytes_eq(map_get(h, bytes_from_cstr("Content-Length"), 0), bytes_from_cstr("5")), 1)
 }

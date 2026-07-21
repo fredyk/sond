@@ -47,16 +47,16 @@ fn main() -> i64 {
     // msg1: client -> server
     let m1[128]
     let l1 = noise_ik_client_msg1(cst, m1)
-    if l1 != 96 { puts(cstr("FAIL msg1 len\n")) return 1 }
+    if l1 != 96 { puts("FAIL msg1 len\n") return 1 }
     let got_cs[32]
-    if noise_ik_server_msg1(sst, m1, l1, got_cs) != 0 { puts(cstr("FAIL server reads msg1\n")) return 1 }
-    if eq32(got_cs, cs_pub) == 0 { puts(cstr("FAIL server recovers client static\n")) return 1 }
+    if noise_ik_server_msg1(sst, m1, l1, got_cs) != 0 { puts("FAIL server reads msg1\n") return 1 }
+    if eq32(got_cs, cs_pub) == 0 { puts("FAIL server recovers client static\n") return 1 }
 
     // msg2: server -> client
     let m2[128]
     let l2 = noise_ik_server_msg2(sst, m2)
-    if l2 != 48 { puts(cstr("FAIL msg2 len\n")) return 1 }
-    if noise_ik_client_msg2(cst, m2, l2) != 0 { puts(cstr("FAIL client reads msg2\n")) return 1 }
+    if l2 != 48 { puts("FAIL msg2 len\n") return 1 }
+    if noise_ik_client_msg2(cst, m2, l2) != 0 { puts("FAIL client reads msg2\n") return 1 }
 
     // session keys: must match on both sides
     let ck1[32]
@@ -65,11 +65,11 @@ fn main() -> i64 {
     let sk2[32]
     noise_ik_session_keys(cst, ck1, ck2)
     noise_ik_session_keys(sst, sk1, sk2)
-    if eq32(ck1, sk1) == 0 { puts(cstr("FAIL k_c2s mismatch\n")) return 1 }
-    if eq32(ck2, sk2) == 0 { puts(cstr("FAIL k_s2c mismatch\n")) return 1 }
+    if eq32(ck1, sk1) == 0 { puts("FAIL k_c2s mismatch\n") return 1 }
+    if eq32(ck2, sk2) == 0 { puts("FAIL k_s2c mismatch\n") return 1 }
     // the two directions must be distinct keys
-    if eq32(ck1, ck2) == 1 { puts(cstr("FAIL keys not distinct\n")) return 1 }
+    if eq32(ck1, ck2) == 1 { puts("FAIL keys not distinct\n") return 1 }
 
-    puts(cstr("OK noise-ik (handshake + session keys)\n"))
+    puts("OK noise-ik (handshake + session keys)\n")
     0
 }

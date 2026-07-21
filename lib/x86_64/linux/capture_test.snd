@@ -11,8 +11,8 @@ include "capture.snd"
 fn main() -> i64 {
     let buf[256]
     let argv[3]
-    argv[0] = cstr("/bin/echo")
-    argv[1] = cstr("hi")
+    argv[0] = "/bin/echo"
+    argv[1] = "hi"
     argv[2] = 0
 
     let nbytes = run_capture(argv[0], argv, buf, 256)

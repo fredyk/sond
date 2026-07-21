@@ -80,7 +80,7 @@ test "serial: utoa renders small integers" {
 // line (the kernel must accept our struct termios), and round-trip bytes. This
 // exercises serial_open/config/flush/read/write/close without any hardware.
 test "serial: open+config+write+read round-trip over a pty" {
-    let master = serial_open(cstr("/dev/ptmx"))
+    let master = serial_open("/dev/ptmx")
     assert(master >= 0)
 
     let lock[1]
@@ -94,7 +94,7 @@ test "serial: open+config+write+read round-trip over a pty" {
 
     // Build "/dev/pts/<n>"
     let mut i = 0
-    let dev = cstr("/dev/pts/")
+    let dev = "/dev/pts/"
     for i < 9 { poke8(ptspath + i, peek8(dev + i)); i = i + 1 }
     utoa(ptspath + 9, n)
 

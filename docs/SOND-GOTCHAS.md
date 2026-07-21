@@ -11,9 +11,9 @@ mistakes a model makes every time. ALWAYS verify by compiling: `./compiler/targe
   address), and read it back with `peek32(st)` / `peek64(st)`.
 - **Returning the address of a LOCAL array**: `let a[3] ... return a` leaves a DANGLING pointer (the
   stack frame is freed on return). Build buffers/argv in the CALLER and pass them by address.
-- **Strings as values**: `"..."` literals are ONLY valid as an argument to `print`/`write`/`serial_print`.
-  For a path/arg (open/execve), build it byte by byte with `poke8(buf+i, code)` and a trailing `\0`. (Once
-  the `cstr("...")` builtin exists, use it for this.)
+  - **Strings as values**: a `"..."` literal IS a pointer (`i64`) to its NUL-terminated bytes in static
+    memory. Pass it straight to anything wanting an address (`open`, `execve`, `peek8`). No `cstr`;
+    the literal already is one. Build one at runtime with `poke8(buf+i, code)` and a trailing NUL.
 - **Nested functions**: `fn` is TOP-LEVEL only. Lift helpers out to the top level.
 - **Mutable parameters**: parameters are immutable. To mutate: `let mut v = x`.
 - **`let mut a[N]`** for arrays: arrays take no `mut` (the name is already an address). Use `let a[N]`.

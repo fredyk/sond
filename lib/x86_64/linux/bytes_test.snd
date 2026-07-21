@@ -30,39 +30,39 @@ test "growing past the initial capacity preserves the data" {
 }
 
 test "bytes_from_cstr copies a string literal" {
-    let b = bytes_from_cstr(cstr("Hi!"))
+    let b = bytes_from_cstr("Hi!")
     assert_eq(bytes_len(b), 3)
     assert_eq(bytes_get(b, 0), 72)
     assert_eq(bytes_get(b, 2), 33)
 }
 
 test "bytes_eq: equal buffers" {
-    assert_eq(bytes_eq(bytes_from_cstr(cstr("GET")), bytes_from_cstr(cstr("GET"))), 1)
+    assert_eq(bytes_eq(bytes_from_cstr("GET"), bytes_from_cstr("GET")), 1)
 }
 
 test "bytes_eq: different length" {
-    assert_eq(bytes_eq(bytes_from_cstr(cstr("GET")), bytes_from_cstr(cstr("POST"))), 0)
+    assert_eq(bytes_eq(bytes_from_cstr("GET"), bytes_from_cstr("POST")), 0)
 }
 
 test "bytes_eq: same length, different bytes" {
-    assert_eq(bytes_eq(bytes_from_cstr(cstr("GET")), bytes_from_cstr(cstr("PUT"))), 0)
+    assert_eq(bytes_eq(bytes_from_cstr("GET"), bytes_from_cstr("PUT")), 0)
 }
 
 test "bytes_index_of: found" {
-    assert_eq(bytes_index_of(bytes_from_cstr(cstr("a/b")), 47), 1)
+    assert_eq(bytes_index_of(bytes_from_cstr("a/b"), 47), 1)
 }
 
 test "bytes_index_of: not found" {
-    assert_eq(bytes_index_of(bytes_from_cstr(cstr("abc")), 47), 0 - 1)
+    assert_eq(bytes_index_of(bytes_from_cstr("abc"), 47), 0 - 1)
 }
 
 test "bytes_index_of_from starts at the offset" {
-    let b = bytes_from_cstr(cstr("a b c"))
+    let b = bytes_from_cstr("a b c")
     assert_eq(bytes_index_of_from(b, 32, 2), 3)
 }
 
 test "bytes_slice extracts a subrange" {
-    let b = bytes_from_cstr(cstr("GET /x"))
+    let b = bytes_from_cstr("GET /x")
     let path = bytes_slice(b, 4, 6)
     assert_eq(bytes_len(path), 2)
     assert_eq(bytes_get(path, 0), 47)
@@ -70,28 +70,28 @@ test "bytes_slice extracts a subrange" {
 }
 
 test "bytes_append_cstr appends a literal" {
-    let b = bytes_from_cstr(cstr("AB"))
-    bytes_append_cstr(b, cstr("CD"))
+    let b = bytes_from_cstr("AB")
+    bytes_append_cstr(b, "CD")
     assert_eq(bytes_len(b), 4)
     assert_eq(bytes_get(b, 3), 68)
 }
 
 test "bytes_append concatenates buffers" {
-    let a = bytes_from_cstr(cstr("foo"))
-    bytes_append(a, bytes_from_cstr(cstr("bar")))
-    assert_eq(bytes_eq(a, bytes_from_cstr(cstr("foobar"))), 1)
+    let a = bytes_from_cstr("foo")
+    bytes_append(a, bytes_from_cstr("bar"))
+    assert_eq(bytes_eq(a, bytes_from_cstr("foobar")), 1)
 }
 
 test "bytes_append_int: zero" {
     let b = bytes_new()
     bytes_append_int(b, 0)
-    assert_eq(bytes_eq(b, bytes_from_cstr(cstr("0"))), 1)
+    assert_eq(bytes_eq(b, bytes_from_cstr("0")), 1)
 }
 
 test "bytes_append_int: multi-digit" {
     let b = bytes_new()
     bytes_append_int(b, 1234)
-    assert_eq(bytes_eq(b, bytes_from_cstr(cstr("1234"))), 1)
+    assert_eq(bytes_eq(b, bytes_from_cstr("1234")), 1)
 }
 
 test "bytes_from_raw copies a raw region" {
@@ -100,5 +100,5 @@ test "bytes_from_raw copies a raw region" {
     poke8(mem + 1, 66)
     poke8(mem + 2, 67)
     let b = bytes_from_raw(mem, 3)
-    assert_eq(bytes_eq(b, bytes_from_cstr(cstr("ABC"))), 1)
+    assert_eq(bytes_eq(b, bytes_from_cstr("ABC")), 1)
 }

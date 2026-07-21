@@ -1,10 +1,10 @@
 include "x86_64/linux/calc.snd"
 include "x86_64/linux/testing.snd"
-test "single number" { assert_eq(calc_eval(bytes_from_cstr(cstr("42"))), 42) }
-test "addition" { assert_eq(calc_eval(bytes_from_cstr(cstr("2+3"))), 5) }
-test "precedence: mul before add" { assert_eq(calc_eval(bytes_from_cstr(cstr("2+3*4"))), 14) }
-test "parens override precedence" { assert_eq(calc_eval(bytes_from_cstr(cstr("(2+3)*4"))), 20) }
-test "subtraction and division" { assert_eq(calc_eval(bytes_from_cstr(cstr("20-8/4"))), 18) }
-test "spaces are ignored" { assert_eq(calc_eval(bytes_from_cstr(cstr(" 7 * ( 1 + 1 ) "))), 14) }
-test "division by zero is guarded to 0" { assert_eq(calc_eval(bytes_from_cstr(cstr("5/0"))), 0) }
-test "a number stops at a non-digit above nine" { assert_eq(calc_eval(bytes_from_cstr(cstr("5x"))), 5) }
+test "single number" { assert_eq(calc_eval(bytes_from_cstr("42")), 42) }
+test "addition" { assert_eq(calc_eval(bytes_from_cstr("2+3")), 5) }
+test "precedence: mul before add" { assert_eq(calc_eval(bytes_from_cstr("2+3*4")), 14) }
+test "parens override precedence" { assert_eq(calc_eval(bytes_from_cstr("(2+3)*4")), 20) }
+test "subtraction and division" { assert_eq(calc_eval(bytes_from_cstr("20-8/4")), 18) }
+test "spaces are ignored" { assert_eq(calc_eval(bytes_from_cstr(" 7 * ( 1 + 1 ) ")), 14) }
+test "division by zero is guarded to 0" { assert_eq(calc_eval(bytes_from_cstr("5/0")), 0) }
+test "a number stops at a non-digit above nine" { assert_eq(calc_eval(bytes_from_cstr("5x")), 5) }

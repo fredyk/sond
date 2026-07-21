@@ -32,12 +32,12 @@ fn main() -> i64 {
         let ca[2]
         sockaddr_in_build(ca, ip, port)
         if connect_sock(cfd, ca, 16) < 0 { syscall(SYS_exit, 2) }
-        write_buf(cfd, cstr("GET /hello HTTP/1.1\r\n\r\n"), 22)
+        write_buf(cfd, "GET /hello HTTP/1.1\r\n\r\n", 22)
         let rbuf[256]
         let rn = read_buf(cfd, rbuf, 256)
         close_fd(cfd)
         let resp = bytes_from_raw(rbuf, rn)
-        let want = bytes_from_cstr(cstr("HTTP/1.1 200 OK"))
+        let want = bytes_from_cstr("HTTP/1.1 200 OK")
         let mut ok = 1
         let mut i = 0
         for i < 15 {
@@ -54,9 +54,9 @@ fn main() -> i64 {
     let reqn = read_buf(afd, reqbuf, 256)
     let req = bytes_from_raw(reqbuf, reqn)
     let body = bytes_new()
-    bytes_append_cstr(body, cstr("you asked for "))
+    bytes_append_cstr(body, "you asked for ")
     bytes_append(body, http_path(req))
-    let resp = http_response(cstr("200 OK"), body)
+    let resp = http_response("200 OK", body)
     write_buf(afd, peek64(resp), bytes_len(resp))
     close_fd(afd)
 

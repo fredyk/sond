@@ -100,13 +100,13 @@ fn main() -> i64 {
         let ks2c[4]
         noise_ik_session_keys(cst, kc2s, ks2c)
         // encrypted request
-        send_sealed(cfd, kc2s, cstr("GET /hi HTTP/1.1\r\n\r\n"), 20)
+        send_sealed(cfd, kc2s, "GET /hi HTTP/1.1\r\n\r\n", 20)
         // encrypted response
         let resp[64]
         let rn = recv_sealed(cfd, ks2c, resp)
         close_fd(cfd)
         if rn < 15 { syscall(SYS_exit, 4) }
-        let ok = bytes_eq(bytes_from_raw(resp, 15), bytes_from_cstr(cstr("HTTP/1.1 200 OK")))
+        let ok = bytes_eq(bytes_from_raw(resp, 15), bytes_from_cstr("HTTP/1.1 200 OK"))
         if ok == 1 { syscall(SYS_exit, 0) } else { syscall(SYS_exit, 5) }
     }
 
@@ -129,9 +129,9 @@ fn main() -> i64 {
     let req[64]
     let qn = recv_sealed(afd, kc2s, req)
     let body = bytes_new()
-    bytes_append_cstr(body, cstr("secure "))
+    bytes_append_cstr(body, "secure ")
     bytes_append(body, http_path(bytes_from_raw(req, qn)))
-    let resp = http_response(cstr("200 OK"), body)
+    let resp = http_response("200 OK", body)
     send_sealed(afd, ks2c, peek64(resp), bytes_len(resp))
     close_fd(afd)
 

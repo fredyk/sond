@@ -25,7 +25,7 @@ test "enc_int encodes :0" {
 
 test "resp_encode_command builds correct RESP for PING" {
     let cmd[10]
-    poke64(cmd + 0, cstr("PING"))
+    poke64(cmd + 0, "PING")
     poke64(cmd + 8, 4)
     let b = resp_encode_command(1, cmd)
     assert_eq(bytes_len(b), 14)  // *1\r\n$4\r\nPING\r\n  = 2+2+2+4+2=12 → 2+2+2+4+2=12
@@ -40,9 +40,9 @@ test "resp_encode_command builds correct RESP for PING" {
 
 test "resp_encode_command builds 2-arg command" {
     let items[4]
-    poke64(items + 0, cstr("MGET"))
+    poke64(items + 0, "MGET")
     poke64(items + 8, 4)
-    poke64(items + 16, cstr("key1"))
+    poke64(items + 16, "key1")
     poke64(items + 24, 4)
     let b = resp_encode_command(2, items)
     // *2\r\n$4\r\nMGET\r\n$4\r\nkey1\r\n  = 4+4+4+4+4+4 = 24
@@ -412,14 +412,14 @@ test "ip_from_cstr's overflow guard on an over-long host string" {
     // No '.' or NUL occurs in the first 16 characters, so the loop only ever
     // exits through the `if i > 15 { break }` safety guard, and `result` (never
     // touched by the '.'/NUL branch) stays at its initial 0.
-    let ip = ip_from_cstr(cstr("11111111111111111111"))
+    let ip = ip_from_cstr("11111111111111111111")
     assert_eq(ip, 0)
 }
 
 test "redis_connect returns negative when the peer refuses the connection" {
     // Nothing binds this port anywhere in the suite: loopback refusal is
     // immediate (a local RST), so this cannot hang.
-    let fd = redis_connect(cstr("127.0.0.1"), 18899)
+    let fd = redis_connect("127.0.0.1", 18899)
     assert(fd < 0)
 }
 
@@ -450,11 +450,11 @@ test "redis_connect/redis_send_resp/redis_send/redis_read round trip over a real
         let cfd = accept_sock(srv, csa, alen)
         let rbuf1[64]
         recvfrom_sock(cfd, rbuf1, 512, 0, 0, 0)
-        let reply1 = cstr("+PONG\r\n")
+        let reply1 = "+PONG\r\n"
         sendto_sock(cfd, reply1, 7, 0, 0, 0)
         let rbuf2[64]
         recvfrom_sock(cfd, rbuf2, 512, 0, 0, 0)
-        let reply2 = cstr(":42\r\n")
+        let reply2 = ":42\r\n"
         sendto_sock(cfd, reply2, 5, 0, 0, 0)
         close_fd(cfd)
         close_fd(srv)
@@ -462,11 +462,11 @@ test "redis_connect/redis_send_resp/redis_send/redis_read round trip over a real
     }
     assert(pid > 0)
 
-    let fd = redis_connect(cstr("127.0.0.1"), port)
+    let fd = redis_connect("127.0.0.1", port)
     assert(fd >= 0)
 
     let cmd[2]
-    poke64(cmd + 0, cstr("PING"))
+    poke64(cmd + 0, "PING")
     poke64(cmd + 8, 4)
     let encoded = resp_encode_command(1, cmd)
     let raw = peek64(encoded)
@@ -530,7 +530,7 @@ test "redis_connect_new/redis_fill/redis_parse/redis_connect_close round trip" {
         let alen[1]
         poke32(alen, 16)
         let cfd = accept_sock(srv, csa, alen)
-        let reply = cstr(":42\r\n")
+        let reply = ":42\r\n"
         sendto_sock(cfd, reply, 5, 0, 0, 0)
         close_fd(cfd)
         close_fd(srv)
@@ -596,7 +596,7 @@ test "read_response's accumulation loop stops as soon as the buffer is full" {
         let cfd = accept_sock(srv, csa, alen)
         let rbuf[64]
         recvfrom_sock(cfd, rbuf, 512, 0, 0, 0)
-        let reply = cstr("+OK\r\n")
+        let reply = "+OK\r\n"
         sendto_sock(cfd, reply, 5, 0, 0, 0)
         close_fd(cfd)
         close_fd(srv)
@@ -604,10 +604,10 @@ test "read_response's accumulation loop stops as soon as the buffer is full" {
     }
     assert(pid > 0)
 
-    let fd = redis_connect(cstr("127.0.0.1"), port)
+    let fd = redis_connect("127.0.0.1", port)
     assert(fd >= 0)
     let cmd[2]
-    poke64(cmd + 0, cstr("PING"))
+    poke64(cmd + 0, "PING")
     poke64(cmd + 8, 4)
     let encoded = resp_encode_command(1, cmd)
     let raw = peek64(encoded)
@@ -657,7 +657,7 @@ test "redis_fill's accumulation loop stops as soon as the buffer is full" {
         let alen[1]
         poke32(alen, 16)
         let cfd = accept_sock(srv, csa, alen)
-        let reply = cstr("+OK\r\n")
+        let reply = "+OK\r\n"
         sendto_sock(cfd, reply, 5, 0, 0, 0)
         close_fd(cfd)
         close_fd(srv)
@@ -665,7 +665,7 @@ test "redis_fill's accumulation loop stops as soon as the buffer is full" {
     }
     assert(pid > 0)
 
-    let fd = redis_connect(cstr("127.0.0.1"), port)
+    let fd = redis_connect("127.0.0.1", port)
     assert(fd >= 0)
     let recvdata[1]
     let handle = heap_alloc(32)
@@ -701,7 +701,7 @@ test "string commands: PING/GET/SET/SETEX/GETSET/APPEND/STRLEN/INCR*/DECR*" {
 
     let items0 = heap_alloc(320)
     redis_ping(fd, buf, items0)
-    assert_eq(bytes_eq(resp_encode_command(1, items0), bytes_from_cstr(cstr("*1\r\n$4\r\nPING\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items0), bytes_from_cstr("*1\r\n$4\r\nPING\r\n")), 1)
 
     // redis_get/redis_set/redis_setex used to compute the length byte for
     // their own command-name argument as strlen(key) instead of the command
@@ -709,12 +709,12 @@ test "string commands: PING/GET/SET/SETEX/GETSET/APPEND/STRLEN/INCR*/DECR*" {
     // (see the dedicated regression test below, which uses a key of a
     // different length to pin the fix down).
     let items1 = heap_alloc(320)
-    redis_get(fd, buf, items1, cstr("key"))
-    assert_eq(bytes_eq(resp_encode_command(2, items1), bytes_from_cstr(cstr("*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n"))), 1)
+    redis_get(fd, buf, items1, "key")
+    assert_eq(bytes_eq(resp_encode_command(2, items1), bytes_from_cstr("*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n")), 1)
 
     let items2 = heap_alloc(320)
-    redis_set(fd, buf, items2, cstr("key"), cstr("v1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items2), bytes_from_cstr(cstr("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$2\r\nv1\r\n"))), 1)
+    redis_set(fd, buf, items2, "key", "v1")
+    assert_eq(bytes_eq(resp_encode_command(3, items2), bytes_from_cstr("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$2\r\nv1\r\n")), 1)
 
     // redis_setex builds its EX-seconds digits in a LOCAL stack array (`tmp`)
     // and stores that address into `items`. That is safe in the function's own
@@ -726,7 +726,7 @@ test "string commands: PING/GET/SET/SETEX/GETSET/APPEND/STRLEN/INCR*/DECR*" {
     // stable local buffer immediately, using only inline peek/poke (no calls)
     // between the wrapper returning and the rescue completing.
     let items3 = heap_alloc(320)
-    redis_setex(fd, buf, items3, cstr("key"), cstr("v1"), 60)
+    redis_setex(fd, buf, items3, "key", "v1", 60)
     let r34[4]
     let j34 = 0
     let l34 = peek64(items3 + 4 * 16 + 8)
@@ -735,11 +735,11 @@ test "string commands: PING/GET/SET/SETEX/GETSET/APPEND/STRLEN/INCR*/DECR*" {
         j34 = j34 + 1
     }
     poke64(items3 + 4 * 16, r34)
-    assert_eq(bytes_eq(resp_encode_command(5, items3), bytes_from_cstr(cstr("*5\r\n$3\r\nSET\r\n$3\r\nkey\r\n$2\r\nv1\r\n$2\r\nEX\r\n$2\r\n60\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(5, items3), bytes_from_cstr("*5\r\n$3\r\nSET\r\n$3\r\nkey\r\n$2\r\nv1\r\n$2\r\nEX\r\n$2\r\n60\r\n")), 1)
 
     // Same stack-tmp hazard as redis_setex, for the "seconds" argument (slot 2).
     let items4 = heap_alloc(320)
-    redis_setex2(fd, buf, items4, cstr("k1"), 30, cstr("v1"))
+    redis_setex2(fd, buf, items4, "k1", 30, "v1")
     let r42[4]
     let j42 = 0
     let l42 = peek64(items4 + 2 * 16 + 8)
@@ -748,29 +748,29 @@ test "string commands: PING/GET/SET/SETEX/GETSET/APPEND/STRLEN/INCR*/DECR*" {
         j42 = j42 + 1
     }
     poke64(items4 + 2 * 16, r42)
-    assert_eq(bytes_eq(resp_encode_command(4, items4), bytes_from_cstr(cstr("*4\r\n$5\r\nSETEX\r\n$2\r\nk1\r\n$2\r\n30\r\n$2\r\nv1\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items4), bytes_from_cstr("*4\r\n$5\r\nSETEX\r\n$2\r\nk1\r\n$2\r\n30\r\n$2\r\nv1\r\n")), 1)
 
     // redis_getset used to pass a hardcoded length of 8 for its own command
     // name, but "GETSET" is 6 characters, so it read 2 bytes past the
     // literal's NUL terminator. Fixed to use the real length.
     let items5 = heap_alloc(320)
-    redis_getset(fd, buf, items5, cstr("k1"), cstr("v1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items5), bytes_from_cstr(cstr("*3\r\n$6\r\nGETSET\r\n$2\r\nk1\r\n$2\r\nv1\r\n"))), 1)
+    redis_getset(fd, buf, items5, "k1", "v1")
+    assert_eq(bytes_eq(resp_encode_command(3, items5), bytes_from_cstr("*3\r\n$6\r\nGETSET\r\n$2\r\nk1\r\n$2\r\nv1\r\n")), 1)
 
     let items6 = heap_alloc(320)
-    redis_append(fd, buf, items6, cstr("k1"), cstr("v1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items6), bytes_from_cstr(cstr("*3\r\n$6\r\nAPPEND\r\n$2\r\nk1\r\n$2\r\nv1\r\n"))), 1)
+    redis_append(fd, buf, items6, "k1", "v1")
+    assert_eq(bytes_eq(resp_encode_command(3, items6), bytes_from_cstr("*3\r\n$6\r\nAPPEND\r\n$2\r\nk1\r\n$2\r\nv1\r\n")), 1)
 
     let items7 = heap_alloc(320)
-    redis_strlen(fd, buf, items7, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items7), bytes_from_cstr(cstr("*2\r\n$6\r\nSTRLEN\r\n$2\r\nk1\r\n"))), 1)
+    redis_strlen(fd, buf, items7, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items7), bytes_from_cstr("*2\r\n$6\r\nSTRLEN\r\n$2\r\nk1\r\n")), 1)
 
     let items8 = heap_alloc(320)
-    redis_incr(fd, buf, items8, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items8), bytes_from_cstr(cstr("*2\r\n$4\r\nINCR\r\n$2\r\nk1\r\n"))), 1)
+    redis_incr(fd, buf, items8, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items8), bytes_from_cstr("*2\r\n$4\r\nINCR\r\n$2\r\nk1\r\n")), 1)
 
     let items9 = heap_alloc(320)
-    redis_incrby(fd, buf, items9, cstr("k1"), 5)
+    redis_incrby(fd, buf, items9, "k1", 5)
     let r92[4]
     let j92 = 0
     let l92 = peek64(items9 + 2 * 16 + 8)
@@ -779,14 +779,14 @@ test "string commands: PING/GET/SET/SETEX/GETSET/APPEND/STRLEN/INCR*/DECR*" {
         j92 = j92 + 1
     }
     poke64(items9 + 2 * 16, r92)
-    assert_eq(bytes_eq(resp_encode_command(3, items9), bytes_from_cstr(cstr("*3\r\n$6\r\nINCRBY\r\n$2\r\nk1\r\n$1\r\n5\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items9), bytes_from_cstr("*3\r\n$6\r\nINCRBY\r\n$2\r\nk1\r\n$1\r\n5\r\n")), 1)
 
     let items10 = heap_alloc(320)
-    redis_decr(fd, buf, items10, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items10), bytes_from_cstr(cstr("*2\r\n$4\r\nDECR\r\n$2\r\nk1\r\n"))), 1)
+    redis_decr(fd, buf, items10, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items10), bytes_from_cstr("*2\r\n$4\r\nDECR\r\n$2\r\nk1\r\n")), 1)
 
     let items11 = heap_alloc(320)
-    redis_decrby(fd, buf, items11, cstr("k1"), 3)
+    redis_decrby(fd, buf, items11, "k1", 3)
     let r112[4]
     let j112 = 0
     let l112 = peek64(items11 + 2 * 16 + 8)
@@ -795,13 +795,13 @@ test "string commands: PING/GET/SET/SETEX/GETSET/APPEND/STRLEN/INCR*/DECR*" {
         j112 = j112 + 1
     }
     poke64(items11 + 2 * 16, r112)
-    assert_eq(bytes_eq(resp_encode_command(3, items11), bytes_from_cstr(cstr("*3\r\n$6\r\nDECRBY\r\n$2\r\nk1\r\n$1\r\n3\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items11), bytes_from_cstr("*3\r\n$6\r\nDECRBY\r\n$2\r\nk1\r\n$1\r\n3\r\n")), 1)
 }
 
 test "redis_get/redis_set/redis_setex use their own command name's length, not the key's" {
     // redis_get/redis_set/redis_setex used to compute the length of their own
     // command-name argument as strlen(key) instead of the command name's own
-    // constant length (e.g. add_cmd_arg(items, 0, cstr("GET"), strlen(key))
+    // constant length (e.g. add_cmd_arg(items, 0, "GET", strlen(key))
     // instead of the constant 3). A key whose length differs from the command
     // name's exposes this: pre-fix, a 1-character key made GET's own bulk
     // string read only "G" instead of the full "GET". Fixed by hardcoding
@@ -813,17 +813,17 @@ test "redis_get/redis_set/redis_setex use their own command name's length, not t
     poke64(buf + 24, 512)
 
     let items0 = heap_alloc(320)
-    redis_get(fd, buf, items0, cstr("k"))
-    assert_eq(bytes_eq(resp_encode_command(2, items0), bytes_from_cstr(cstr("*2\r\n$3\r\nGET\r\n$1\r\nk\r\n"))), 1)
+    redis_get(fd, buf, items0, "k")
+    assert_eq(bytes_eq(resp_encode_command(2, items0), bytes_from_cstr("*2\r\n$3\r\nGET\r\n$1\r\nk\r\n")), 1)
 
     let items1 = heap_alloc(320)
-    redis_set(fd, buf, items1, cstr("k"), cstr("v"))
-    assert_eq(bytes_eq(resp_encode_command(3, items1), bytes_from_cstr(cstr("*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n"))), 1)
+    redis_set(fd, buf, items1, "k", "v")
+    assert_eq(bytes_eq(resp_encode_command(3, items1), bytes_from_cstr("*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n")), 1)
 
     // Same stack-tmp hazard as redis_setex in the test above: copy the EX
     // digits into a stable local buffer before calling resp_encode_command.
     let items2 = heap_alloc(320)
-    redis_setex(fd, buf, items2, cstr("k"), cstr("v"), 60)
+    redis_setex(fd, buf, items2, "k", "v", 60)
     let r2[4]
     let j2 = 0
     let l2 = peek64(items2 + 4 * 16 + 8)
@@ -832,7 +832,7 @@ test "redis_get/redis_set/redis_setex use their own command name's length, not t
         j2 = j2 + 1
     }
     poke64(items2 + 4 * 16, r2)
-    assert_eq(bytes_eq(resp_encode_command(5, items2), bytes_from_cstr(cstr("*5\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n$2\r\nEX\r\n$2\r\n60\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(5, items2), bytes_from_cstr("*5\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n$2\r\nEX\r\n$2\r\n60\r\n")), 1)
 }
 
 test "keyspace commands: DEL/EXISTS/TTL/EXPIRE/TYPE/RENAME/KEYS/FLUSHDB/DBSIZE/SELECT/ECHO/PING" {
@@ -844,23 +844,23 @@ test "keyspace commands: DEL/EXISTS/TTL/EXPIRE/TYPE/RENAME/KEYS/FLUSHDB/DBSIZE/S
 
     let items0 = heap_alloc(320)
     let delkeys[2]
-    poke64(delkeys + 0, cstr("a"))
-    poke64(delkeys + 8, cstr("b"))
+    poke64(delkeys + 0, "a")
+    poke64(delkeys + 8, "b")
     redis_del(fd, buf, items0, 2, delkeys)
-    assert_eq(bytes_eq(resp_encode_command(3, items0), bytes_from_cstr(cstr("*3\r\n$3\r\nDEL\r\n$1\r\na\r\n$1\r\nb\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items0), bytes_from_cstr("*3\r\n$3\r\nDEL\r\n$1\r\na\r\n$1\r\nb\r\n")), 1)
 
     let items1 = heap_alloc(320)
-    redis_exists(fd, buf, items1, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items1), bytes_from_cstr(cstr("*2\r\n$6\r\nEXISTS\r\n$2\r\nk1\r\n"))), 1)
+    redis_exists(fd, buf, items1, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items1), bytes_from_cstr("*2\r\n$6\r\nEXISTS\r\n$2\r\nk1\r\n")), 1)
 
     let items2 = heap_alloc(320)
-    redis_ttl(fd, buf, items2, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items2), bytes_from_cstr(cstr("*2\r\n$3\r\nTTL\r\n$2\r\nk1\r\n"))), 1)
+    redis_ttl(fd, buf, items2, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items2), bytes_from_cstr("*2\r\n$3\r\nTTL\r\n$2\r\nk1\r\n")), 1)
 
     // redis_expire's "seconds" digits live in a local stack `tmp`; see the
     // rescue note on redis_setex above for why this copy is necessary.
     let items3 = heap_alloc(320)
-    redis_expire(fd, buf, items3, cstr("k1"), 120)
+    redis_expire(fd, buf, items3, "k1", 120)
     let r32[4]
     let j32 = 0
     let l32 = peek64(items3 + 2 * 16 + 8)
@@ -869,27 +869,27 @@ test "keyspace commands: DEL/EXISTS/TTL/EXPIRE/TYPE/RENAME/KEYS/FLUSHDB/DBSIZE/S
         j32 = j32 + 1
     }
     poke64(items3 + 2 * 16, r32)
-    assert_eq(bytes_eq(resp_encode_command(3, items3), bytes_from_cstr(cstr("*3\r\n$6\r\nEXPIRE\r\n$2\r\nk1\r\n$3\r\n120\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items3), bytes_from_cstr("*3\r\n$6\r\nEXPIRE\r\n$2\r\nk1\r\n$3\r\n120\r\n")), 1)
 
     let items4 = heap_alloc(320)
-    redis_type(fd, buf, items4, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items4), bytes_from_cstr(cstr("*2\r\n$4\r\nTYPE\r\n$2\r\nk1\r\n"))), 1)
+    redis_type(fd, buf, items4, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items4), bytes_from_cstr("*2\r\n$4\r\nTYPE\r\n$2\r\nk1\r\n")), 1)
 
     let items5 = heap_alloc(320)
-    redis_rename(fd, buf, items5, cstr("k1"), cstr("nk"))
-    assert_eq(bytes_eq(resp_encode_command(3, items5), bytes_from_cstr(cstr("*3\r\n$6\r\nRENAME\r\n$2\r\nk1\r\n$2\r\nnk\r\n"))), 1)
+    redis_rename(fd, buf, items5, "k1", "nk")
+    assert_eq(bytes_eq(resp_encode_command(3, items5), bytes_from_cstr("*3\r\n$6\r\nRENAME\r\n$2\r\nk1\r\n$2\r\nnk\r\n")), 1)
 
     let items6 = heap_alloc(320)
-    redis_keys(fd, buf, items6, cstr("p*"))
-    assert_eq(bytes_eq(resp_encode_command(2, items6), bytes_from_cstr(cstr("*2\r\n$4\r\nKEYS\r\n$2\r\np*\r\n"))), 1)
+    redis_keys(fd, buf, items6, "p*")
+    assert_eq(bytes_eq(resp_encode_command(2, items6), bytes_from_cstr("*2\r\n$4\r\nKEYS\r\n$2\r\np*\r\n")), 1)
 
     let items7 = heap_alloc(320)
     redis_flushdb(fd, buf, items7)
-    assert_eq(bytes_eq(resp_encode_command(1, items7), bytes_from_cstr(cstr("*1\r\n$7\r\nFLUSHDB\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items7), bytes_from_cstr("*1\r\n$7\r\nFLUSHDB\r\n")), 1)
 
     let items8 = heap_alloc(320)
     redis_dbsize(fd, buf, items8)
-    assert_eq(bytes_eq(resp_encode_command(1, items8), bytes_from_cstr(cstr("*1\r\n$6\r\nDBSIZE\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items8), bytes_from_cstr("*1\r\n$6\r\nDBSIZE\r\n")), 1)
 
     let items9 = heap_alloc(320)
     redis_select(fd, buf, items9, 2)
@@ -901,15 +901,15 @@ test "keyspace commands: DEL/EXISTS/TTL/EXPIRE/TYPE/RENAME/KEYS/FLUSHDB/DBSIZE/S
         j91 = j91 + 1
     }
     poke64(items9 + 1 * 16, r91)
-    assert_eq(bytes_eq(resp_encode_command(2, items9), bytes_from_cstr(cstr("*2\r\n$6\r\nSELECT\r\n$1\r\n2\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(2, items9), bytes_from_cstr("*2\r\n$6\r\nSELECT\r\n$1\r\n2\r\n")), 1)
 
     let items10 = heap_alloc(320)
-    redis_echo(fd, buf, items10, cstr("ms"))
-    assert_eq(bytes_eq(resp_encode_command(2, items10), bytes_from_cstr(cstr("*2\r\n$4\r\nECHO\r\n$2\r\nms\r\n"))), 1)
+    redis_echo(fd, buf, items10, "ms")
+    assert_eq(bytes_eq(resp_encode_command(2, items10), bytes_from_cstr("*2\r\n$4\r\nECHO\r\n$2\r\nms\r\n")), 1)
 
     let items11 = heap_alloc(320)
-    redis_ping_msg(fd, buf, items11, cstr("ms"))
-    assert_eq(bytes_eq(resp_encode_command(2, items11), bytes_from_cstr(cstr("*2\r\n$4\r\nPING\r\n$2\r\nms\r\n"))), 1)
+    redis_ping_msg(fd, buf, items11, "ms")
+    assert_eq(bytes_eq(resp_encode_command(2, items11), bytes_from_cstr("*2\r\n$4\r\nPING\r\n$2\r\nms\r\n")), 1)
 }
 
 test "list commands: LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE/LINDEX/LSET/LTRIM/LREM" {
@@ -920,30 +920,30 @@ test "list commands: LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE/LINDEX/LSET/LTRIM/LREM" {
     poke64(buf + 24, 512)
 
     let items0 = heap_alloc(320)
-    redis_lpush(fd, buf, items0, cstr("k1"), cstr("v1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items0), bytes_from_cstr(cstr("*3\r\n$5\r\nLPUSH\r\n$2\r\nk1\r\n$2\r\nv1\r\n"))), 1)
+    redis_lpush(fd, buf, items0, "k1", "v1")
+    assert_eq(bytes_eq(resp_encode_command(3, items0), bytes_from_cstr("*3\r\n$5\r\nLPUSH\r\n$2\r\nk1\r\n$2\r\nv1\r\n")), 1)
 
     let items1 = heap_alloc(320)
-    redis_rpush(fd, buf, items1, cstr("k1"), cstr("v1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items1), bytes_from_cstr(cstr("*3\r\n$5\r\nRPUSH\r\n$2\r\nk1\r\n$2\r\nv1\r\n"))), 1)
+    redis_rpush(fd, buf, items1, "k1", "v1")
+    assert_eq(bytes_eq(resp_encode_command(3, items1), bytes_from_cstr("*3\r\n$5\r\nRPUSH\r\n$2\r\nk1\r\n$2\r\nv1\r\n")), 1)
 
     let items2 = heap_alloc(320)
-    redis_lpop(fd, buf, items2, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items2), bytes_from_cstr(cstr("*2\r\n$4\r\nLPOP\r\n$2\r\nk1\r\n"))), 1)
+    redis_lpop(fd, buf, items2, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items2), bytes_from_cstr("*2\r\n$4\r\nLPOP\r\n$2\r\nk1\r\n")), 1)
 
     let items3 = heap_alloc(320)
-    redis_rpop(fd, buf, items3, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items3), bytes_from_cstr(cstr("*2\r\n$4\r\nRPOP\r\n$2\r\nk1\r\n"))), 1)
+    redis_rpop(fd, buf, items3, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items3), bytes_from_cstr("*2\r\n$4\r\nRPOP\r\n$2\r\nk1\r\n")), 1)
 
     let items4 = heap_alloc(320)
-    redis_llen(fd, buf, items4, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items4), bytes_from_cstr(cstr("*2\r\n$4\r\nLLEN\r\n$2\r\nk1\r\n"))), 1)
+    redis_llen(fd, buf, items4, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items4), bytes_from_cstr("*2\r\n$4\r\nLLEN\r\n$2\r\nk1\r\n")), 1)
 
     // LRANGE/LINDEX/LSET/LTRIM/LREM's numeric arguments (start/stop/index/
     // count) all live in local stack `tmp` buffers in client.snd; see the
     // rescue note on redis_setex above for why the copy below is necessary.
     let items5 = heap_alloc(320)
-    redis_lrange(fd, buf, items5, cstr("k1"), 0, -1)
+    redis_lrange(fd, buf, items5, "k1", 0, -1)
     let r52[4]
     let j52 = 0
     let l52 = peek64(items5 + 2 * 16 + 8)
@@ -960,10 +960,10 @@ test "list commands: LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE/LINDEX/LSET/LTRIM/LREM" {
         j53 = j53 + 1
     }
     poke64(items5 + 3 * 16, r53)
-    assert_eq(bytes_eq(resp_encode_command(4, items5), bytes_from_cstr(cstr("*4\r\n$6\r\nLRANGE\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n-1\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items5), bytes_from_cstr("*4\r\n$6\r\nLRANGE\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n-1\r\n")), 1)
 
     let items6 = heap_alloc(320)
-    redis_lindex(fd, buf, items6, cstr("k1"), 2)
+    redis_lindex(fd, buf, items6, "k1", 2)
     let r62[4]
     let j62 = 0
     let l62 = peek64(items6 + 2 * 16 + 8)
@@ -972,10 +972,10 @@ test "list commands: LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE/LINDEX/LSET/LTRIM/LREM" {
         j62 = j62 + 1
     }
     poke64(items6 + 2 * 16, r62)
-    assert_eq(bytes_eq(resp_encode_command(3, items6), bytes_from_cstr(cstr("*3\r\n$6\r\nLINDEX\r\n$2\r\nk1\r\n$1\r\n2\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items6), bytes_from_cstr("*3\r\n$6\r\nLINDEX\r\n$2\r\nk1\r\n$1\r\n2\r\n")), 1)
 
     let items7 = heap_alloc(320)
-    redis_lset(fd, buf, items7, cstr("k1"), 0, cstr("v1"))
+    redis_lset(fd, buf, items7, "k1", 0, "v1")
     let r72[4]
     let j72 = 0
     let l72 = peek64(items7 + 2 * 16 + 8)
@@ -984,10 +984,10 @@ test "list commands: LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE/LINDEX/LSET/LTRIM/LREM" {
         j72 = j72 + 1
     }
     poke64(items7 + 2 * 16, r72)
-    assert_eq(bytes_eq(resp_encode_command(4, items7), bytes_from_cstr(cstr("*4\r\n$4\r\nLSET\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\nv1\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items7), bytes_from_cstr("*4\r\n$4\r\nLSET\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\nv1\r\n")), 1)
 
     let items8 = heap_alloc(320)
-    redis_ltrim(fd, buf, items8, cstr("k1"), 0, -1)
+    redis_ltrim(fd, buf, items8, "k1", 0, -1)
     let r82[4]
     let j82 = 0
     let l82 = peek64(items8 + 2 * 16 + 8)
@@ -1004,10 +1004,10 @@ test "list commands: LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE/LINDEX/LSET/LTRIM/LREM" {
         j83 = j83 + 1
     }
     poke64(items8 + 3 * 16, r83)
-    assert_eq(bytes_eq(resp_encode_command(4, items8), bytes_from_cstr(cstr("*4\r\n$5\r\nLTRIM\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n-1\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items8), bytes_from_cstr("*4\r\n$5\r\nLTRIM\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n-1\r\n")), 1)
 
     let items9 = heap_alloc(320)
-    redis_lrem(fd, buf, items9, cstr("k1"), 1, cstr("v1"))
+    redis_lrem(fd, buf, items9, "k1", 1, "v1")
     let r92[4]
     let j92 = 0
     let l92 = peek64(items9 + 2 * 16 + 8)
@@ -1016,7 +1016,7 @@ test "list commands: LPUSH/RPUSH/LPOP/RPOP/LLEN/LRANGE/LINDEX/LSET/LTRIM/LREM" {
         j92 = j92 + 1
     }
     poke64(items9 + 2 * 16, r92)
-    assert_eq(bytes_eq(resp_encode_command(4, items9), bytes_from_cstr(cstr("*4\r\n$4\r\nLREM\r\n$2\r\nk1\r\n$1\r\n1\r\n$2\r\nv1\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items9), bytes_from_cstr("*4\r\n$4\r\nLREM\r\n$2\r\nk1\r\n$1\r\n1\r\n$2\r\nv1\r\n")), 1)
 }
 
 test "hash commands: HSET/HGET/HDEL/HGETALL/HLEN/HKEYS/HVALS/HEXISTS/HINCRBY" {
@@ -1027,44 +1027,44 @@ test "hash commands: HSET/HGET/HDEL/HGETALL/HLEN/HKEYS/HVALS/HEXISTS/HINCRBY" {
     poke64(buf + 24, 512)
 
     let items0 = heap_alloc(320)
-    redis_hset(fd, buf, items0, cstr("k1"), cstr("f1"), cstr("v1"))
-    assert_eq(bytes_eq(resp_encode_command(4, items0), bytes_from_cstr(cstr("*4\r\n$4\r\nHSET\r\n$2\r\nk1\r\n$2\r\nf1\r\n$2\r\nv1\r\n"))), 1)
+    redis_hset(fd, buf, items0, "k1", "f1", "v1")
+    assert_eq(bytes_eq(resp_encode_command(4, items0), bytes_from_cstr("*4\r\n$4\r\nHSET\r\n$2\r\nk1\r\n$2\r\nf1\r\n$2\r\nv1\r\n")), 1)
 
     let items1 = heap_alloc(320)
-    redis_hget(fd, buf, items1, cstr("k1"), cstr("f1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items1), bytes_from_cstr(cstr("*3\r\n$4\r\nHGET\r\n$2\r\nk1\r\n$2\r\nf1\r\n"))), 1)
+    redis_hget(fd, buf, items1, "k1", "f1")
+    assert_eq(bytes_eq(resp_encode_command(3, items1), bytes_from_cstr("*3\r\n$4\r\nHGET\r\n$2\r\nk1\r\n$2\r\nf1\r\n")), 1)
 
     let items2 = heap_alloc(320)
     let hdelfields[2]
-    poke64(hdelfields + 0, cstr("fa"))
-    poke64(hdelfields + 8, cstr("fb"))
-    redis_hdel(fd, buf, items2, cstr("k1"), 2, hdelfields)
-    assert_eq(bytes_eq(resp_encode_command(4, items2), bytes_from_cstr(cstr("*4\r\n$4\r\nHDEL\r\n$2\r\nk1\r\n$2\r\nfa\r\n$2\r\nfb\r\n"))), 1)
+    poke64(hdelfields + 0, "fa")
+    poke64(hdelfields + 8, "fb")
+    redis_hdel(fd, buf, items2, "k1", 2, hdelfields)
+    assert_eq(bytes_eq(resp_encode_command(4, items2), bytes_from_cstr("*4\r\n$4\r\nHDEL\r\n$2\r\nk1\r\n$2\r\nfa\r\n$2\r\nfb\r\n")), 1)
 
     let items3 = heap_alloc(320)
-    redis_hgetall(fd, buf, items3, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items3), bytes_from_cstr(cstr("*2\r\n$7\r\nHGETALL\r\n$2\r\nk1\r\n"))), 1)
+    redis_hgetall(fd, buf, items3, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items3), bytes_from_cstr("*2\r\n$7\r\nHGETALL\r\n$2\r\nk1\r\n")), 1)
 
     let items4 = heap_alloc(320)
-    redis_hlen(fd, buf, items4, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items4), bytes_from_cstr(cstr("*2\r\n$4\r\nHLEN\r\n$2\r\nk1\r\n"))), 1)
+    redis_hlen(fd, buf, items4, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items4), bytes_from_cstr("*2\r\n$4\r\nHLEN\r\n$2\r\nk1\r\n")), 1)
 
     let items5 = heap_alloc(320)
-    redis_hkeys(fd, buf, items5, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items5), bytes_from_cstr(cstr("*2\r\n$5\r\nHKEYS\r\n$2\r\nk1\r\n"))), 1)
+    redis_hkeys(fd, buf, items5, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items5), bytes_from_cstr("*2\r\n$5\r\nHKEYS\r\n$2\r\nk1\r\n")), 1)
 
     let items6 = heap_alloc(320)
-    redis_hvals(fd, buf, items6, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items6), bytes_from_cstr(cstr("*2\r\n$5\r\nHVALS\r\n$2\r\nk1\r\n"))), 1)
+    redis_hvals(fd, buf, items6, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items6), bytes_from_cstr("*2\r\n$5\r\nHVALS\r\n$2\r\nk1\r\n")), 1)
 
     let items7 = heap_alloc(320)
-    redis_hexists(fd, buf, items7, cstr("k1"), cstr("f1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items7), bytes_from_cstr(cstr("*3\r\n$7\r\nHEXISTS\r\n$2\r\nk1\r\n$2\r\nf1\r\n"))), 1)
+    redis_hexists(fd, buf, items7, "k1", "f1")
+    assert_eq(bytes_eq(resp_encode_command(3, items7), bytes_from_cstr("*3\r\n$7\r\nHEXISTS\r\n$2\r\nk1\r\n$2\r\nf1\r\n")), 1)
 
     // redis_hincrby's "increment" digits live in a local stack `tmp`; see the
     // rescue note on redis_setex above for why the copy below is necessary.
     let items8 = heap_alloc(320)
-    redis_hincrby(fd, buf, items8, cstr("k1"), cstr("f1"), 5)
+    redis_hincrby(fd, buf, items8, "k1", "f1", 5)
     let r83[4]
     let j83 = 0
     let l83 = peek64(items8 + 3 * 16 + 8)
@@ -1073,7 +1073,7 @@ test "hash commands: HSET/HGET/HDEL/HGETALL/HLEN/HKEYS/HVALS/HEXISTS/HINCRBY" {
         j83 = j83 + 1
     }
     poke64(items8 + 3 * 16, r83)
-    assert_eq(bytes_eq(resp_encode_command(4, items8), bytes_from_cstr(cstr("*4\r\n$7\r\nHINCRBY\r\n$2\r\nk1\r\n$2\r\nf1\r\n$1\r\n5\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items8), bytes_from_cstr("*4\r\n$7\r\nHINCRBY\r\n$2\r\nk1\r\n$2\r\nf1\r\n$1\r\n5\r\n")), 1)
 }
 
 test "set commands: SADD/SREM/SMEMBERS/SISMEMBER/SCARD/SPOP/SRANDMEMBER/SDIFF/SINTER/SUNION" {
@@ -1084,33 +1084,33 @@ test "set commands: SADD/SREM/SMEMBERS/SISMEMBER/SCARD/SPOP/SRANDMEMBER/SDIFF/SI
     poke64(buf + 24, 512)
 
     let items0 = heap_alloc(320)
-    redis_sadd(fd, buf, items0, cstr("k1"), cstr("m1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items0), bytes_from_cstr(cstr("*3\r\n$4\r\nSADD\r\n$2\r\nk1\r\n$2\r\nm1\r\n"))), 1)
+    redis_sadd(fd, buf, items0, "k1", "m1")
+    assert_eq(bytes_eq(resp_encode_command(3, items0), bytes_from_cstr("*3\r\n$4\r\nSADD\r\n$2\r\nk1\r\n$2\r\nm1\r\n")), 1)
 
     let items1 = heap_alloc(320)
-    redis_srem(fd, buf, items1, cstr("k1"), cstr("m1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items1), bytes_from_cstr(cstr("*3\r\n$4\r\nSREM\r\n$2\r\nk1\r\n$2\r\nm1\r\n"))), 1)
+    redis_srem(fd, buf, items1, "k1", "m1")
+    assert_eq(bytes_eq(resp_encode_command(3, items1), bytes_from_cstr("*3\r\n$4\r\nSREM\r\n$2\r\nk1\r\n$2\r\nm1\r\n")), 1)
 
     let items2 = heap_alloc(320)
-    redis_smembers(fd, buf, items2, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items2), bytes_from_cstr(cstr("*2\r\n$8\r\nSMEMBERS\r\n$2\r\nk1\r\n"))), 1)
+    redis_smembers(fd, buf, items2, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items2), bytes_from_cstr("*2\r\n$8\r\nSMEMBERS\r\n$2\r\nk1\r\n")), 1)
 
     let items3 = heap_alloc(320)
-    redis_sismember(fd, buf, items3, cstr("k1"), cstr("m1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items3), bytes_from_cstr(cstr("*3\r\n$9\r\nSISMEMBER\r\n$2\r\nk1\r\n$2\r\nm1\r\n"))), 1)
+    redis_sismember(fd, buf, items3, "k1", "m1")
+    assert_eq(bytes_eq(resp_encode_command(3, items3), bytes_from_cstr("*3\r\n$9\r\nSISMEMBER\r\n$2\r\nk1\r\n$2\r\nm1\r\n")), 1)
 
     let items4 = heap_alloc(320)
-    redis_scard(fd, buf, items4, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items4), bytes_from_cstr(cstr("*2\r\n$5\r\nSCARD\r\n$2\r\nk1\r\n"))), 1)
+    redis_scard(fd, buf, items4, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items4), bytes_from_cstr("*2\r\n$5\r\nSCARD\r\n$2\r\nk1\r\n")), 1)
 
     let items5 = heap_alloc(320)
-    redis_spop(fd, buf, items5, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items5), bytes_from_cstr(cstr("*2\r\n$4\r\nSPOP\r\n$2\r\nk1\r\n"))), 1)
+    redis_spop(fd, buf, items5, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items5), bytes_from_cstr("*2\r\n$4\r\nSPOP\r\n$2\r\nk1\r\n")), 1)
 
     // redis_srandmember's "count" digits live in a local stack `tmp`; see the
     // rescue note on redis_setex above for why the copy below is necessary.
     let items6 = heap_alloc(320)
-    redis_srandmember(fd, buf, items6, cstr("k1"), 2)
+    redis_srandmember(fd, buf, items6, "k1", 2)
     let r62[4]
     let j62 = 0
     let l62 = peek64(items6 + 2 * 16 + 8)
@@ -1119,22 +1119,22 @@ test "set commands: SADD/SREM/SMEMBERS/SISMEMBER/SCARD/SPOP/SRANDMEMBER/SDIFF/SI
         j62 = j62 + 1
     }
     poke64(items6 + 2 * 16, r62)
-    assert_eq(bytes_eq(resp_encode_command(3, items6), bytes_from_cstr(cstr("*3\r\n$11\r\nSRANDMEMBER\r\n$2\r\nk1\r\n$1\r\n2\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items6), bytes_from_cstr("*3\r\n$11\r\nSRANDMEMBER\r\n$2\r\nk1\r\n$1\r\n2\r\n")), 1)
 
     let items7 = heap_alloc(320)
     let setkeys[2]
-    poke64(setkeys + 0, cstr("a"))
-    poke64(setkeys + 8, cstr("b"))
+    poke64(setkeys + 0, "a")
+    poke64(setkeys + 8, "b")
     redis_sdiff(fd, buf, items7, 2, setkeys)
-    assert_eq(bytes_eq(resp_encode_command(3, items7), bytes_from_cstr(cstr("*3\r\n$5\r\nSDIFF\r\n$1\r\na\r\n$1\r\nb\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items7), bytes_from_cstr("*3\r\n$5\r\nSDIFF\r\n$1\r\na\r\n$1\r\nb\r\n")), 1)
 
     let items8 = heap_alloc(320)
     redis_sinter(fd, buf, items8, 2, setkeys)
-    assert_eq(bytes_eq(resp_encode_command(3, items8), bytes_from_cstr(cstr("*3\r\n$6\r\nSINTER\r\n$1\r\na\r\n$1\r\nb\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items8), bytes_from_cstr("*3\r\n$6\r\nSINTER\r\n$1\r\na\r\n$1\r\nb\r\n")), 1)
 
     let items9 = heap_alloc(320)
     redis_sunion(fd, buf, items9, 2, setkeys)
-    assert_eq(bytes_eq(resp_encode_command(3, items9), bytes_from_cstr(cstr("*3\r\n$6\r\nSUNION\r\n$1\r\na\r\n$1\r\nb\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items9), bytes_from_cstr("*3\r\n$6\r\nSUNION\r\n$1\r\na\r\n$1\r\nb\r\n")), 1)
 }
 
 test "sorted set range/score commands" {
@@ -1149,7 +1149,7 @@ test "sorted set range/score commands" {
     // note on redis_setex in the string-commands test above for why the
     // copies below are necessary before re-encoding.
     let items0 = heap_alloc(320)
-    redis_zadd(fd, buf, items0, cstr("k1"), 5, cstr("m1"))
+    redis_zadd(fd, buf, items0, "k1", 5, "m1")
     let r02[4]
     let j02 = 0
     let l02 = peek64(items0 + 2 * 16 + 8)
@@ -1158,10 +1158,10 @@ test "sorted set range/score commands" {
         j02 = j02 + 1
     }
     poke64(items0 + 2 * 16, r02)
-    assert_eq(bytes_eq(resp_encode_command(4, items0), bytes_from_cstr(cstr("*4\r\n$4\r\nZADD\r\n$2\r\nk1\r\n$1\r\n5\r\n$2\r\nm1\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items0), bytes_from_cstr("*4\r\n$4\r\nZADD\r\n$2\r\nk1\r\n$1\r\n5\r\n$2\r\nm1\r\n")), 1)
 
     let items1 = heap_alloc(320)
-    redis_zrange(fd, buf, items1, cstr("k1"), 0, -1)
+    redis_zrange(fd, buf, items1, "k1", 0, -1)
     let r12[4]
     let j12 = 0
     let l12 = peek64(items1 + 2 * 16 + 8)
@@ -1178,30 +1178,30 @@ test "sorted set range/score commands" {
         j13 = j13 + 1
     }
     poke64(items1 + 3 * 16, r13)
-    assert_eq(bytes_eq(resp_encode_command(4, items1), bytes_from_cstr(cstr("*4\r\n$6\r\nZRANGE\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n-1\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items1), bytes_from_cstr("*4\r\n$6\r\nZRANGE\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n-1\r\n")), 1)
 
     let items2 = heap_alloc(320)
-    redis_zscore(fd, buf, items2, cstr("k1"), cstr("m1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items2), bytes_from_cstr(cstr("*3\r\n$6\r\nZSCORE\r\n$2\r\nk1\r\n$2\r\nm1\r\n"))), 1)
+    redis_zscore(fd, buf, items2, "k1", "m1")
+    assert_eq(bytes_eq(resp_encode_command(3, items2), bytes_from_cstr("*3\r\n$6\r\nZSCORE\r\n$2\r\nk1\r\n$2\r\nm1\r\n")), 1)
 
     let items3 = heap_alloc(320)
-    redis_zcard(fd, buf, items3, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(2, items3), bytes_from_cstr(cstr("*2\r\n$5\r\nZCARD\r\n$2\r\nk1\r\n"))), 1)
+    redis_zcard(fd, buf, items3, "k1")
+    assert_eq(bytes_eq(resp_encode_command(2, items3), bytes_from_cstr("*2\r\n$5\r\nZCARD\r\n$2\r\nk1\r\n")), 1)
 
     let items4 = heap_alloc(320)
-    redis_zrem(fd, buf, items4, cstr("k1"), cstr("m1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items4), bytes_from_cstr(cstr("*3\r\n$4\r\nZREM\r\n$2\r\nk1\r\n$2\r\nm1\r\n"))), 1)
+    redis_zrem(fd, buf, items4, "k1", "m1")
+    assert_eq(bytes_eq(resp_encode_command(3, items4), bytes_from_cstr("*3\r\n$4\r\nZREM\r\n$2\r\nk1\r\n$2\r\nm1\r\n")), 1)
 
     let items5 = heap_alloc(320)
-    redis_zrank(fd, buf, items5, cstr("k1"), cstr("m1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items5), bytes_from_cstr(cstr("*3\r\n$5\r\nZRANK\r\n$2\r\nk1\r\n$2\r\nm1\r\n"))), 1)
+    redis_zrank(fd, buf, items5, "k1", "m1")
+    assert_eq(bytes_eq(resp_encode_command(3, items5), bytes_from_cstr("*3\r\n$5\r\nZRANK\r\n$2\r\nk1\r\n$2\r\nm1\r\n")), 1)
 
     let items6 = heap_alloc(320)
-    redis_zrevrank(fd, buf, items6, cstr("k1"), cstr("m1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items6), bytes_from_cstr(cstr("*3\r\n$8\r\nZREVRANK\r\n$2\r\nk1\r\n$2\r\nm1\r\n"))), 1)
+    redis_zrevrank(fd, buf, items6, "k1", "m1")
+    assert_eq(bytes_eq(resp_encode_command(3, items6), bytes_from_cstr("*3\r\n$8\r\nZREVRANK\r\n$2\r\nk1\r\n$2\r\nm1\r\n")), 1)
 
     let items7 = heap_alloc(320)
-    redis_zincrby(fd, buf, items7, cstr("k1"), 5, cstr("m1"))
+    redis_zincrby(fd, buf, items7, "k1", 5, "m1")
     let r72[4]
     let j72 = 0
     let l72 = peek64(items7 + 2 * 16 + 8)
@@ -1210,10 +1210,10 @@ test "sorted set range/score commands" {
         j72 = j72 + 1
     }
     poke64(items7 + 2 * 16, r72)
-    assert_eq(bytes_eq(resp_encode_command(4, items7), bytes_from_cstr(cstr("*4\r\n$7\r\nZINCRBY\r\n$2\r\nk1\r\n$1\r\n5\r\n$2\r\nm1\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items7), bytes_from_cstr("*4\r\n$7\r\nZINCRBY\r\n$2\r\nk1\r\n$1\r\n5\r\n$2\r\nm1\r\n")), 1)
 
     let items8 = heap_alloc(320)
-    redis_zcount(fd, buf, items8, cstr("k1"), 0, 10)
+    redis_zcount(fd, buf, items8, "k1", 0, 10)
     let r82[4]
     let j82 = 0
     let l82 = peek64(items8 + 2 * 16 + 8)
@@ -1230,14 +1230,14 @@ test "sorted set range/score commands" {
         j83 = j83 + 1
     }
     poke64(items8 + 3 * 16, r83)
-    assert_eq(bytes_eq(resp_encode_command(4, items8), bytes_from_cstr(cstr("*4\r\n$6\r\nZCOUNT\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n10\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items8), bytes_from_cstr("*4\r\n$6\r\nZCOUNT\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n10\r\n")), 1)
 
     let items9 = heap_alloc(320)
-    redis_zlexcount(fd, buf, items9, cstr("k1"), cstr("[a"), cstr("[z"))
-    assert_eq(bytes_eq(resp_encode_command(4, items9), bytes_from_cstr(cstr("*4\r\n$9\r\nZLEXCOUNT\r\n$2\r\nk1\r\n$2\r\n[a\r\n$2\r\n[z\r\n"))), 1)
+    redis_zlexcount(fd, buf, items9, "k1", "[a", "[z")
+    assert_eq(bytes_eq(resp_encode_command(4, items9), bytes_from_cstr("*4\r\n$9\r\nZLEXCOUNT\r\n$2\r\nk1\r\n$2\r\n[a\r\n$2\r\n[z\r\n")), 1)
 
     let items10 = heap_alloc(320)
-    redis_zremrangebyrank(fd, buf, items10, cstr("k1"), 0, -1)
+    redis_zremrangebyrank(fd, buf, items10, "k1", 0, -1)
     let r102[4]
     let j102 = 0
     let l102 = peek64(items10 + 2 * 16 + 8)
@@ -1254,10 +1254,10 @@ test "sorted set range/score commands" {
         j103 = j103 + 1
     }
     poke64(items10 + 3 * 16, r103)
-    assert_eq(bytes_eq(resp_encode_command(4, items10), bytes_from_cstr(cstr("*4\r\n$15\r\nZREMRANGEBYRANK\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n-1\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items10), bytes_from_cstr("*4\r\n$15\r\nZREMRANGEBYRANK\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n-1\r\n")), 1)
 
     let items11 = heap_alloc(320)
-    redis_zremrangebyscore(fd, buf, items11, cstr("k1"), 0, 10)
+    redis_zremrangebyscore(fd, buf, items11, "k1", 0, 10)
     let r112[4]
     let j112 = 0
     let l112 = peek64(items11 + 2 * 16 + 8)
@@ -1274,14 +1274,14 @@ test "sorted set range/score commands" {
         j113 = j113 + 1
     }
     poke64(items11 + 3 * 16, r113)
-    assert_eq(bytes_eq(resp_encode_command(4, items11), bytes_from_cstr(cstr("*4\r\n$16\r\nZREMRANGEBYSCORE\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n10\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items11), bytes_from_cstr("*4\r\n$16\r\nZREMRANGEBYSCORE\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n10\r\n")), 1)
 
     let items12 = heap_alloc(320)
-    redis_zremrangebylex(fd, buf, items12, cstr("k1"), cstr("[a"), cstr("[z"))
-    assert_eq(bytes_eq(resp_encode_command(4, items12), bytes_from_cstr(cstr("*4\r\n$14\r\nZREMRANGEBYLEX\r\n$2\r\nk1\r\n$2\r\n[a\r\n$2\r\n[z\r\n"))), 1)
+    redis_zremrangebylex(fd, buf, items12, "k1", "[a", "[z")
+    assert_eq(bytes_eq(resp_encode_command(4, items12), bytes_from_cstr("*4\r\n$14\r\nZREMRANGEBYLEX\r\n$2\r\nk1\r\n$2\r\n[a\r\n$2\r\n[z\r\n")), 1)
 
     let items13 = heap_alloc(320)
-    redis_zrangebyscore(fd, buf, items13, cstr("k1"), 0, 10)
+    redis_zrangebyscore(fd, buf, items13, "k1", 0, 10)
     let r132[4]
     let j132 = 0
     let l132 = peek64(items13 + 2 * 16 + 8)
@@ -1298,23 +1298,23 @@ test "sorted set range/score commands" {
         j133 = j133 + 1
     }
     poke64(items13 + 3 * 16, r133)
-    assert_eq(bytes_eq(resp_encode_command(4, items13), bytes_from_cstr(cstr("*4\r\n$13\r\nZRANGEBYSCORE\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n10\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items13), bytes_from_cstr("*4\r\n$13\r\nZRANGEBYSCORE\r\n$2\r\nk1\r\n$1\r\n0\r\n$2\r\n10\r\n")), 1)
 
     let items14 = heap_alloc(320)
-    redis_zrangebylex(fd, buf, items14, cstr("k1"), cstr("[a"), cstr("[z"))
-    assert_eq(bytes_eq(resp_encode_command(4, items14), bytes_from_cstr(cstr("*4\r\n$11\r\nZRANGEBYLEX\r\n$2\r\nk1\r\n$2\r\n[a\r\n$2\r\n[z\r\n"))), 1)
+    redis_zrangebylex(fd, buf, items14, "k1", "[a", "[z")
+    assert_eq(bytes_eq(resp_encode_command(4, items14), bytes_from_cstr("*4\r\n$11\r\nZRANGEBYLEX\r\n$2\r\nk1\r\n$2\r\n[a\r\n$2\r\n[z\r\n")), 1)
 
     let items15 = heap_alloc(320)
     let zmmembers[2]
-    poke64(zmmembers + 0, cstr("ma"))
-    poke64(zmmembers + 8, cstr("mb"))
-    redis_zmscore(fd, buf, items15, cstr("k1"), 2, zmmembers)
-    assert_eq(bytes_eq(resp_encode_command(4, items15), bytes_from_cstr(cstr("*4\r\n$7\r\nZMSCORE\r\n$2\r\nk1\r\n$2\r\nma\r\n$2\r\nmb\r\n"))), 1)
+    poke64(zmmembers + 0, "ma")
+    poke64(zmmembers + 8, "mb")
+    redis_zmscore(fd, buf, items15, "k1", 2, zmmembers)
+    assert_eq(bytes_eq(resp_encode_command(4, items15), bytes_from_cstr("*4\r\n$7\r\nZMSCORE\r\n$2\r\nk1\r\n$2\r\nma\r\n$2\r\nmb\r\n")), 1)
 }
 
 test "sorted set store commands: ZINTERSTORE/ZUNIONSTORE" {
     // Both functions used to overwrite items slot 0 (which
-    // add_cmd_arg(items, 0, cstr("ZINTERSTORE"/"ZUNIONSTORE"), 11) had just
+    // add_cmd_arg(items, 0, "ZINTERSTORE" or "ZUNIONSTORE", 11) had just
     // set) with the destination key via a raw poke64(items, dst_ptr), and
     // never wrote slot 1 at all (the loop jumped straight from slot 1 to slot
     // 2). The command NAME was therefore lost from the wire entirely, and a
@@ -1330,19 +1330,19 @@ test "sorted set store commands: ZINTERSTORE/ZUNIONSTORE" {
 
     let items0 = heap_alloc(320)
     let zkeys0[3]
-    poke64(zkeys0 + 0, cstr("dst"))
-    poke64(zkeys0 + 8, cstr("a"))
-    poke64(zkeys0 + 16, cstr("b"))
+    poke64(zkeys0 + 0, "dst")
+    poke64(zkeys0 + 8, "a")
+    poke64(zkeys0 + 16, "b")
     redis_zinterstore(fd, buf, items0, 3, zkeys0)
-    assert_eq(bytes_eq(resp_encode_command(4, items0), bytes_from_cstr(cstr("*4\r\n$11\r\nZINTERSTORE\r\n$3\r\ndst\r\n$1\r\na\r\n$1\r\nb\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items0), bytes_from_cstr("*4\r\n$11\r\nZINTERSTORE\r\n$3\r\ndst\r\n$1\r\na\r\n$1\r\nb\r\n")), 1)
 
     let items1 = heap_alloc(320)
     let zkeys1[3]
-    poke64(zkeys1 + 0, cstr("dst"))
-    poke64(zkeys1 + 8, cstr("a"))
-    poke64(zkeys1 + 16, cstr("b"))
+    poke64(zkeys1 + 0, "dst")
+    poke64(zkeys1 + 8, "a")
+    poke64(zkeys1 + 16, "b")
     redis_zunionstore(fd, buf, items1, 3, zkeys1)
-    assert_eq(bytes_eq(resp_encode_command(4, items1), bytes_from_cstr(cstr("*4\r\n$11\r\nZUNIONSTORE\r\n$3\r\ndst\r\n$1\r\na\r\n$1\r\nb\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(4, items1), bytes_from_cstr("*4\r\n$11\r\nZUNIONSTORE\r\n$3\r\ndst\r\n$1\r\na\r\n$1\r\nb\r\n")), 1)
 }
 
 test "server commands: INFO/CONFIG GET/SAVE/BGSAVE/LASTSAVE/SHUTDOWN/DEBUG OBJECT/CLIENT/AUTH/QUIT/TIME/UPTIME/SLAVEOF/WAIT" {
@@ -1354,31 +1354,31 @@ test "server commands: INFO/CONFIG GET/SAVE/BGSAVE/LASTSAVE/SHUTDOWN/DEBUG OBJEC
 
     let items0 = heap_alloc(320)
     redis_info(fd, buf, items0)
-    assert_eq(bytes_eq(resp_encode_command(1, items0), bytes_from_cstr(cstr("*1\r\n$4\r\nINFO\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items0), bytes_from_cstr("*1\r\n$4\r\nINFO\r\n")), 1)
 
     let items1 = heap_alloc(320)
-    redis_config_get(fd, buf, items1, cstr("mm"))
-    assert_eq(bytes_eq(resp_encode_command(3, items1), bytes_from_cstr(cstr("*3\r\n$6\r\nCONFIG\r\n$3\r\nGET\r\n$2\r\nmm\r\n"))), 1)
+    redis_config_get(fd, buf, items1, "mm")
+    assert_eq(bytes_eq(resp_encode_command(3, items1), bytes_from_cstr("*3\r\n$6\r\nCONFIG\r\n$3\r\nGET\r\n$2\r\nmm\r\n")), 1)
 
     let items2 = heap_alloc(320)
     redis_save(fd, buf, items2)
-    assert_eq(bytes_eq(resp_encode_command(1, items2), bytes_from_cstr(cstr("*1\r\n$4\r\nSAVE\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items2), bytes_from_cstr("*1\r\n$4\r\nSAVE\r\n")), 1)
 
     let items3 = heap_alloc(320)
     redis_bgsave(fd, buf, items3)
-    assert_eq(bytes_eq(resp_encode_command(1, items3), bytes_from_cstr(cstr("*1\r\n$6\r\nBGSAVE\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items3), bytes_from_cstr("*1\r\n$6\r\nBGSAVE\r\n")), 1)
 
     let items4 = heap_alloc(320)
     redis_lastsave(fd, buf, items4)
-    assert_eq(bytes_eq(resp_encode_command(1, items4), bytes_from_cstr(cstr("*1\r\n$8\r\nLASTSAVE\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items4), bytes_from_cstr("*1\r\n$8\r\nLASTSAVE\r\n")), 1)
 
     let items5 = heap_alloc(320)
     redis_shutdown(fd, buf, items5)
-    assert_eq(bytes_eq(resp_encode_command(1, items5), bytes_from_cstr(cstr("*1\r\n$8\r\nSHUTDOWN\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items5), bytes_from_cstr("*1\r\n$8\r\nSHUTDOWN\r\n")), 1)
 
     let items6 = heap_alloc(320)
-    redis_debug_object(fd, buf, items6, cstr("k1"))
-    assert_eq(bytes_eq(resp_encode_command(3, items6), bytes_from_cstr(cstr("*3\r\n$5\r\nDEBUG\r\n$6\r\nOBJECT\r\n$2\r\nk1\r\n"))), 1)
+    redis_debug_object(fd, buf, items6, "k1")
+    assert_eq(bytes_eq(resp_encode_command(3, items6), bytes_from_cstr("*3\r\n$5\r\nDEBUG\r\n$6\r\nOBJECT\r\n$2\r\nk1\r\n")), 1)
 
     // redis_monitor used to bypass RESP encoding entirely and send
     // `strlen("MONITOR") + 5` (12) raw bytes starting at the "MONITOR"
@@ -1391,33 +1391,33 @@ test "server commands: INFO/CONFIG GET/SAVE/BGSAVE/LASTSAVE/SHUTDOWN/DEBUG OBJEC
 
     let items8 = heap_alloc(320)
     redis_client_list(fd, buf, items8)
-    assert_eq(bytes_eq(resp_encode_command(2, items8), bytes_from_cstr(cstr("*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(2, items8), bytes_from_cstr("*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n")), 1)
 
     let items9 = heap_alloc(320)
-    redis_client_kill(fd, buf, items9, cstr("9"))
-    assert_eq(bytes_eq(resp_encode_command(4, items9), bytes_from_cstr(cstr("*4\r\n$6\r\nCLIENT\r\n$4\r\nKILL\r\n$2\r\nID\r\n$1\r\n9\r\n"))), 1)
+    redis_client_kill(fd, buf, items9, "9")
+    assert_eq(bytes_eq(resp_encode_command(4, items9), bytes_from_cstr("*4\r\n$6\r\nCLIENT\r\n$4\r\nKILL\r\n$2\r\nID\r\n$1\r\n9\r\n")), 1)
 
     let items10 = heap_alloc(320)
-    redis_auth(fd, buf, items10, cstr("pw"))
-    assert_eq(bytes_eq(resp_encode_command(2, items10), bytes_from_cstr(cstr("*2\r\n$4\r\nAUTH\r\n$2\r\npw\r\n"))), 1)
+    redis_auth(fd, buf, items10, "pw")
+    assert_eq(bytes_eq(resp_encode_command(2, items10), bytes_from_cstr("*2\r\n$4\r\nAUTH\r\n$2\r\npw\r\n")), 1)
 
     let items11 = heap_alloc(320)
     redis_quit(fd, buf, items11)
-    assert_eq(bytes_eq(resp_encode_command(1, items11), bytes_from_cstr(cstr("*1\r\n$4\r\nQUIT\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items11), bytes_from_cstr("*1\r\n$4\r\nQUIT\r\n")), 1)
 
     let items12 = heap_alloc(320)
     redis_time(fd, buf, items12)
-    assert_eq(bytes_eq(resp_encode_command(1, items12), bytes_from_cstr(cstr("*1\r\n$4\r\nTIME\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items12), bytes_from_cstr("*1\r\n$4\r\nTIME\r\n")), 1)
 
     let items13 = heap_alloc(320)
     redis_uptime(fd, buf, items13)
-    assert_eq(bytes_eq(resp_encode_command(1, items13), bytes_from_cstr(cstr("*1\r\n$6\r\nUPTIME\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items13), bytes_from_cstr("*1\r\n$6\r\nUPTIME\r\n")), 1)
 
     // redis_slaveof/redis_wait's numeric arguments (port/num_slaves/timeout)
     // live in local stack `tmp` buffers; see the rescue note on redis_setex
     // in the string-commands test above for why the copies below are needed.
     let items14 = heap_alloc(320)
-    redis_slaveof(fd, buf, items14, cstr("h1"), 6380)
+    redis_slaveof(fd, buf, items14, "h1", 6380)
     let r142[4]
     let j142 = 0
     let l142 = peek64(items14 + 2 * 16 + 8)
@@ -1426,7 +1426,7 @@ test "server commands: INFO/CONFIG GET/SAVE/BGSAVE/LASTSAVE/SHUTDOWN/DEBUG OBJEC
         j142 = j142 + 1
     }
     poke64(items14 + 2 * 16, r142)
-    assert_eq(bytes_eq(resp_encode_command(3, items14), bytes_from_cstr(cstr("*3\r\n$7\r\nSLAVEOF\r\n$2\r\nh1\r\n$4\r\n6380\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items14), bytes_from_cstr("*3\r\n$7\r\nSLAVEOF\r\n$2\r\nh1\r\n$4\r\n6380\r\n")), 1)
 
     let items15 = heap_alloc(320)
     redis_wait(fd, buf, items15, 1, 100)
@@ -1446,7 +1446,7 @@ test "server commands: INFO/CONFIG GET/SAVE/BGSAVE/LASTSAVE/SHUTDOWN/DEBUG OBJEC
         j152 = j152 + 1
     }
     poke64(items15 + 2 * 16, r152)
-    assert_eq(bytes_eq(resp_encode_command(3, items15), bytes_from_cstr(cstr("*3\r\n$4\r\nWAIT\r\n$1\r\n1\r\n$3\r\n100\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items15), bytes_from_cstr("*3\r\n$4\r\nWAIT\r\n$1\r\n1\r\n$3\r\n100\r\n")), 1)
 }
 
 test "redis_monitor sends a RESP-encoded command, not a raw over-read" {
@@ -1474,7 +1474,7 @@ test "redis_monitor sends a RESP-encoded command, not a raw over-read" {
 
     let rbuf[32]
     let n = recvfrom_sock(fd_b, rbuf, 32, 0, 0, 0)
-    let want = bytes_from_cstr(cstr("*1\r\n$7\r\nMONITOR\r\n"))
+    let want = bytes_from_cstr("*1\r\n$7\r\nMONITOR\r\n")
     assert_eq(n, bytes_len(want))
     let mut i = 0
     for i < n {
@@ -1494,26 +1494,26 @@ test "transaction commands: MULTI/EXEC/DISCARD/WATCH/UNWATCH" {
 
     let items0 = heap_alloc(320)
     redis_multi(fd, buf, items0)
-    assert_eq(bytes_eq(resp_encode_command(1, items0), bytes_from_cstr(cstr("*1\r\n$5\r\nMULTI\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items0), bytes_from_cstr("*1\r\n$5\r\nMULTI\r\n")), 1)
 
     let items1 = heap_alloc(320)
     redis_exec(fd, buf, items1)
-    assert_eq(bytes_eq(resp_encode_command(1, items1), bytes_from_cstr(cstr("*1\r\n$4\r\nEXEC\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items1), bytes_from_cstr("*1\r\n$4\r\nEXEC\r\n")), 1)
 
     let items2 = heap_alloc(320)
     redis_discard(fd, buf, items2)
-    assert_eq(bytes_eq(resp_encode_command(1, items2), bytes_from_cstr(cstr("*1\r\n$7\r\nDISCARD\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items2), bytes_from_cstr("*1\r\n$7\r\nDISCARD\r\n")), 1)
 
     let items3 = heap_alloc(320)
     let watchkeys[2]
-    poke64(watchkeys + 0, cstr("a"))
-    poke64(watchkeys + 8, cstr("b"))
+    poke64(watchkeys + 0, "a")
+    poke64(watchkeys + 8, "b")
     redis_watch(fd, buf, items3, 2, watchkeys)
-    assert_eq(bytes_eq(resp_encode_command(3, items3), bytes_from_cstr(cstr("*3\r\n$5\r\nWATCH\r\n$1\r\na\r\n$1\r\nb\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items3), bytes_from_cstr("*3\r\n$5\r\nWATCH\r\n$1\r\na\r\n$1\r\nb\r\n")), 1)
 
     let items4 = heap_alloc(320)
     redis_unwatch(fd, buf, items4)
-    assert_eq(bytes_eq(resp_encode_command(1, items4), bytes_from_cstr(cstr("*1\r\n$7\r\nUNWATCH\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(1, items4), bytes_from_cstr("*1\r\n$7\r\nUNWATCH\r\n")), 1)
 }
 
 test "pub/sub commands: SUBSCRIBE/UNSUBSCRIBE/PSUBSCRIBE/PUNSUBSCRIBE/PUBLISH" {
@@ -1525,27 +1525,27 @@ test "pub/sub commands: SUBSCRIBE/UNSUBSCRIBE/PSUBSCRIBE/PUNSUBSCRIBE/PUBLISH" {
 
     let items0 = heap_alloc(320)
     let chans[2]
-    poke64(chans + 0, cstr("c1"))
-    poke64(chans + 8, cstr("c2"))
+    poke64(chans + 0, "c1")
+    poke64(chans + 8, "c2")
     redis_subscribe(fd, buf, items0, 2, chans)
-    assert_eq(bytes_eq(resp_encode_command(3, items0), bytes_from_cstr(cstr("*3\r\n$9\r\nSUBSCRIBE\r\n$2\r\nc1\r\n$2\r\nc2\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items0), bytes_from_cstr("*3\r\n$9\r\nSUBSCRIBE\r\n$2\r\nc1\r\n$2\r\nc2\r\n")), 1)
 
     let items1 = heap_alloc(320)
     redis_unsubscribe(fd, buf, items1, 2, chans)
-    assert_eq(bytes_eq(resp_encode_command(3, items1), bytes_from_cstr(cstr("*3\r\n$11\r\nUNSUBSCRIBE\r\n$2\r\nc1\r\n$2\r\nc2\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items1), bytes_from_cstr("*3\r\n$11\r\nUNSUBSCRIBE\r\n$2\r\nc1\r\n$2\r\nc2\r\n")), 1)
 
     let items2 = heap_alloc(320)
     let patterns[2]
-    poke64(patterns + 0, cstr("p1"))
-    poke64(patterns + 8, cstr("p2"))
+    poke64(patterns + 0, "p1")
+    poke64(patterns + 8, "p2")
     redis_psubscribe(fd, buf, items2, 2, patterns)
-    assert_eq(bytes_eq(resp_encode_command(3, items2), bytes_from_cstr(cstr("*3\r\n$10\r\nPSUBSCRIBE\r\n$2\r\np1\r\n$2\r\np2\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items2), bytes_from_cstr("*3\r\n$10\r\nPSUBSCRIBE\r\n$2\r\np1\r\n$2\r\np2\r\n")), 1)
 
     let items3 = heap_alloc(320)
     redis_punsubscribe(fd, buf, items3, 2, patterns)
-    assert_eq(bytes_eq(resp_encode_command(3, items3), bytes_from_cstr(cstr("*3\r\n$12\r\nPUNSUBSCRIBE\r\n$2\r\np1\r\n$2\r\np2\r\n"))), 1)
+    assert_eq(bytes_eq(resp_encode_command(3, items3), bytes_from_cstr("*3\r\n$12\r\nPUNSUBSCRIBE\r\n$2\r\np1\r\n$2\r\np2\r\n")), 1)
 
     let items4 = heap_alloc(320)
-    redis_publish(fd, buf, items4, cstr("c1"), cstr("ms"))
-    assert_eq(bytes_eq(resp_encode_command(3, items4), bytes_from_cstr(cstr("*3\r\n$7\r\nPUBLISH\r\n$2\r\nc1\r\n$2\r\nms\r\n"))), 1)
+    redis_publish(fd, buf, items4, "c1", "ms")
+    assert_eq(bytes_eq(resp_encode_command(3, items4), bytes_from_cstr("*3\r\n$7\r\nPUBLISH\r\n$2\r\nc1\r\n$2\r\nms\r\n")), 1)
 }

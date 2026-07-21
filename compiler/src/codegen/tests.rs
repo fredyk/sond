@@ -694,10 +694,10 @@ fn uefi_readkey_polls_conin_and_print_char_uses_conout() {
 }
 
 #[test]
-fn cstr_lowers_to_lea_and_returns_address_of_null_terminated_string() {
-    // cstr("A") should emit leaq and the string data; peek8 reads 'A' (65).
+fn a_string_literal_lowers_to_the_address_of_null_terminated_bytes() {
+    // "A" should emit leaq and the string data; peek8 reads 'A' (65).
     let asm = emit_program(
-        &Parser::new(tokenize("fn f() -> i64 { peek8(cstr(\"A\")) }")).parse_program(),
+        &Parser::new(tokenize("fn f() -> i64 { peek8(\"A\") }")).parse_program(),
     );
     assert!(
         asm.contains("leaq .Lstr0(%rip), %rax"),
@@ -710,30 +710,39 @@ fn cstr_lowers_to_lea_and_returns_address_of_null_terminated_string() {
 }
 
 #[test]
-fn cstr_peek8_returns_first_byte_as_integer() {
-    // peek8(cstr("A")) reads the byte 'A' = 65 at the returned address.
-    assert_eq!(compile_and_run("fn f() -> i64 { peek8(cstr(\"A\")) }"), 65);
+fn a_string_literal_read_by_peek8_gives_its_first_byte() {
+    // peek8("A") reads the byte 'A' = 65 at the literal's address.
+    assert_eq!(compile_and_run("fn f() -> i64 { peek8(\"A\") }"), 65);
 }
 
 #[test]
-fn cstr_with_syscall_exit_passes_address_to_syscall() {
-    // syscall(60, peek8(cstr("A"))) -> exit(65)
+fn a_string_literal_address_flows_into_a_syscall() {
+    // syscall(60, peek8("A")) -> exit(65)
     assert_eq!(
-        compile_and_run("fn f() -> i64 { syscall(60, peek8(cstr(\"A\"))) }"),
+        compile_and_run("fn f() -> i64 { syscall(60, peek8(\"A\")) }"),
         65
     );
 }
 
 #[test]
-fn cstr_multiple_bytes_are_readable_via_peek8() {
-    // cstr("Hi!") emits "Hi!\0"; peek8 at offset gives each byte.
+fn a_string_literals_bytes_are_readable_by_offset() {
+    // "Hi!" emits "Hi!\0"; peek8 at offset gives each byte.
     assert_eq!(
         compile_and_run(
             "fn f() -> i64 { \
-             let p = cstr(\"Hi!\")\n\
+             let p = \"Hi!\"\n\
              syscall(60, peek8(p + 2)) \
              }"
         ),
         33
     );
+}
+
+#[test]
+#[should_panic(expected = "a string literal is already a pointer")]
+fn cstr_is_gone_with_a_helpful_message() {
+    // `cstr("x")` used to turn a literal into a pointer. A bare literal now IS one,
+    // so the builtin is removed, and calling it points at the replacement rather
+    // than failing as an unknown function.
+    emit_program(&[parse_function("fn main() -> i64 { cstr(\"x\") }")]);
 }

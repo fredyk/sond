@@ -24,7 +24,7 @@ fn run_capture(path: i64, argv: i64, buf: i64, buflen: i64) -> i64 {
         syscall(SYS_dup2, write_fd, 1)
         // Discard child stderr: run_capture captures stdout; the command's stderr
         // (status messages, "no such file"...) must not leak to the caller's terminal.
-        let devnull = syscall(SYS_open, cstr("/dev/null"), 1, 0)
+        let devnull = syscall(SYS_open, "/dev/null", 1, 0)
         if devnull >= 0 {
             syscall(SYS_dup2, devnull, 2)
         }

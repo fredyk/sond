@@ -115,7 +115,9 @@ fn infer(expr: &Expr, env: &mut Env) -> Result<Ty, TypeError> {
         Expr::Int(_) => Ok(Ty::Int),
         Expr::Decimal(_) => Ok(Ty::Decimal),
         Expr::Bool(_) => Ok(Ty::Bool),
-        Expr::Str(_) => Ok(Ty::Str),
+        // A string literal is the address of static NUL-terminated bytes, so its type is
+        // the integer/address type, the same as what indexing or `peek8` expects.
+        Expr::Str(_) => Ok(Ty::Int),
         Expr::Var(name) => env.get(name).cloned().ok_or_else(|| TypeError {
             message: format!("unbound variable `{name}`"),
         }),
@@ -261,5 +263,22 @@ mod tests {
     fn accepts_the_money_contract_shape() {
         // Decimal params and body.
         assert!(check("fn id(base: Money) -> Money { base }").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod str_literal_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    #[test]
+    fn a_string_literal_is_an_address() {
+        // `"x"` is a pointer to NUL-terminated bytes, so it types as the address
+        // type and composes with pointer arithmetic (`"x" + 1`), unlike a distinct
+        // Str type that would reject it.
+        let e = Parser::new(tokenize("\"hello\"")).parse_expr();
+        let mut env = Env::new();
+        assert_eq!(infer(&e, &mut env).unwrap(), Ty::Int);
     }
 }

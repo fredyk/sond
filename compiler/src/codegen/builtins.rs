@@ -173,12 +173,14 @@ impl Codegen {
             // cstr("literal") -> i64: emit the string + NUL terminator in .rodata
             // and return its address. Enables paths and argv for open/execve.
             "cstr" => {
-                assert_eq!(args.len(), 1, "cstr expects (str)");
-                let Expr::Str(s) = &args[0].value else {
-                    todo!("cstr expects a string literal");
-                };
-                let label = self.intern_string(s);
-                self.line(&format!("    leaq {label}(%rip), %rax"));
+                // `cstr` is gone. A string literal is already a pointer to NUL-terminated
+                // bytes, so `cstr("x")` and `"x"` compile to the same thing. Point at the
+                // replacement rather than emit code, so the habit does not survive.
+                panic!(
+                    "`cstr` has been removed: a string literal is already a pointer to \
+                     NUL-terminated data, so write the literal directly (`\"x\"` instead of \
+                     `cstr(\"x\")`)."
+                );
             }
             // argc() -> i64: number of process arguments (hosted; captured in main).
             "argc" => {

@@ -9,7 +9,7 @@
 //   include "x86_64/linux/http-server.snd"
 //   ... in the request handler:
 //     let name = ...route the path...
-//     if name == 0 { http_send_status(afd, cstr("404 Not Found")) }
+//     if name == 0 { http_send_status(afd, "404 Not Found") }
 //     else { http_serve_file(afd, name, my_content_type(name)) }
 
 include "x86_64/linux/io.snd"
@@ -69,18 +69,18 @@ fn http_finish(afd: i64) -> i64 {
     0
 }
 
-// Send a 301 Moved Permanently to `location` (a cstr, e.g. cstr("https://example.org/")). Used
+// Send a 301 Moved Permanently to `location` (a cstr, e.g. "https://example.org/"). Used
 // to point one host at another, a technical host redirecting its human-facing root to the
 // marketing site. Bodyless and keep-alive, so a pooled connection stays reusable.
 fn http_send_redirect(afd: i64, location: i64) {
     let h = bytes_new()
-    bytes_append_cstr(h, cstr("HTTP/1.1 301 Moved Permanently\r\nLocation: "))
+    bytes_append_cstr(h, "HTTP/1.1 301 Moved Permanently\r\nLocation: ")
     bytes_append_cstr(h, location)
-    bytes_append_cstr(h, cstr("\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"))
+    bytes_append_cstr(h, "\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n")
     write_buf(afd, peek64(h), bytes_len(h))
 }
 
-// Send a bodyless HTTP response with the given status line (e.g. cstr("404 Not Found")).
+// Send a bodyless HTTP response with the given status line (e.g. "404 Not Found").
 fn http_send_status(afd: i64, status: i64) {
     let body = bytes_new()
     let resp = http_response(status, body)
@@ -90,7 +90,7 @@ fn http_send_status(afd: i64, status: i64) {
 // Open the file at `path` (a `bytes` handle holding a filesystem path) and stream it to `afd`
 // as a 200 with `Content-Type: <ctype>` (a cstr); send 404 if it cannot be opened. Returns 0.
 // As http_serve_file, but also emit `Cache-Control: <cc>` (a cstr) when `cc` is non-zero. Pass a
-// value like cstr("no-store") for artifacts a CDN must never cache, a reproducible release
+// value like "no-store" for artifacts a CDN must never cache, a reproducible release
 // tarball served against a freshly-generated checksum desyncs (and every install fails) the
 // moment a stale copy lingers at the edge, so releases opt out of caching entirely.
 fn http_serve_file_cc(afd: i64, path: i64, ctype: i64, cc: i64) -> i64 {
@@ -99,20 +99,20 @@ fn http_serve_file_cc(afd: i64, path: i64, ctype: i64, cc: i64) -> i64 {
     bytes_push(p, 0)                                   // NUL-terminate for open
     let fd = open_file(peek64(p), 0, 0)                // O_RDONLY
     if fd < 0 {
-        http_send_status(afd, cstr("404 Not Found"))
+        http_send_status(afd, "404 Not Found")
         return 0
     }
     let sz = http_file_size(fd)
     let h = bytes_new()
-    bytes_append_cstr(h, cstr("HTTP/1.1 200 OK\r\nContent-Type: "))
+    bytes_append_cstr(h, "HTTP/1.1 200 OK\r\nContent-Type: ")
     bytes_append_cstr(h, ctype)
-    bytes_append_cstr(h, cstr("\r\nContent-Length: "))
+    bytes_append_cstr(h, "\r\nContent-Length: ")
     bytes_append_int(h, sz)
     if cc != 0 {
-        bytes_append_cstr(h, cstr("\r\nCache-Control: "))
+        bytes_append_cstr(h, "\r\nCache-Control: ")
         bytes_append_cstr(h, cc)
     }
-    bytes_append_cstr(h, cstr("\r\nConnection: keep-alive\r\n\r\n"))
+    bytes_append_cstr(h, "\r\nConnection: keep-alive\r\n\r\n")
     write_buf(afd, peek64(h), bytes_len(h))
     let buf[2048]
     for {

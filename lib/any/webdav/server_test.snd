@@ -29,7 +29,7 @@ test "dav_init_file_tree: creates empty tree" {
 
 test "dav_add_entry: adds entry to tree" {
     dav_init_file_tree()
-    let name = bytes_from_cstr(cstr("testfile"))
+    let name = bytes_from_cstr("testfile")
     dav_add_entry(name, 42, 0)
     let len = bytes_len(dav_file_tree)
     assert(len > 0)
@@ -37,7 +37,7 @@ test "dav_add_entry: adds entry to tree" {
 
 test "dav_add_entry: collection entry" {
     dav_init_file_tree()
-    let name = bytes_from_cstr(cstr("mydir"))
+    let name = bytes_from_cstr("mydir")
     dav_add_entry(name, 0, 1)
     let len = bytes_len(dav_file_tree)
     assert(len > 0)
@@ -45,11 +45,11 @@ test "dav_add_entry: collection entry" {
 
 test "dav_add_entry: multiple entries" {
     dav_init_file_tree()
-    let name1 = bytes_from_cstr(cstr("file1"))
+    let name1 = bytes_from_cstr("file1")
     dav_add_entry(name1, 100, 0)
-    let name2 = bytes_from_cstr(cstr("file2"))
+    let name2 = bytes_from_cstr("file2")
     dav_add_entry(name2, 200, 0)
-    let name3 = bytes_from_cstr(cstr("dir"))
+    let name3 = bytes_from_cstr("dir")
     dav_add_entry(name3, 0, 1)
     let len = bytes_len(dav_file_tree)
     assert(len > 10)  // at least 3 entries
@@ -57,7 +57,7 @@ test "dav_add_entry: multiple entries" {
 
 test "dav_read_entry: reads first entry" {
     dav_init_file_tree()
-    let name = bytes_from_cstr(cstr("hello"))
+    let name = bytes_from_cstr("hello")
     dav_add_entry(name, 55, 0)
     let out = bytes_new()
     let next_off = dav_read_entry(0, out)
@@ -68,9 +68,9 @@ test "dav_read_entry: reads first entry" {
 
 test "dav_read_entry: reads second entry" {
     dav_init_file_tree()
-    let name1 = bytes_from_cstr(cstr("first"))
+    let name1 = bytes_from_cstr("first")
     dav_add_entry(name1, 10, 0)
-    let name2 = bytes_from_cstr(cstr("second"))
+    let name2 = bytes_from_cstr("second")
     dav_add_entry(name2, 20, 1)
     // Read first entry
     let out1 = bytes_new()
@@ -86,7 +86,7 @@ test "dav_read_entry: reads second entry" {
 
 test "dav_read_entry: returns -1 at end" {
     dav_init_file_tree()
-    let name = bytes_from_cstr(cstr("only"))
+    let name = bytes_from_cstr("only")
     dav_add_entry(name, 1, 0)
     let out = bytes_new()
     let off1 = dav_read_entry(0, out)
@@ -104,7 +104,7 @@ test "dav_read_entry: empty tree" {
 
 test "dav_read_entry: long name" {
     dav_init_file_tree()
-    let name = bytes_from_cstr(cstr("averylongfilenamethatislongerthanusual"))
+    let name = bytes_from_cstr("averylongfilenamethatislongerthanusual")
     dav_add_entry(name, 999, 0)
     let out = bytes_new()
     let off = dav_read_entry(0, out)
@@ -115,7 +115,7 @@ test "dav_read_entry: long name" {
 
 test "dav_read_entry: size 0" {
     dav_init_file_tree()
-    let name = bytes_from_cstr(cstr("empty"))
+    let name = bytes_from_cstr("empty")
     dav_add_entry(name, 0, 1)
     let out = bytes_new()
     let off = dav_read_entry(0, out)
@@ -125,11 +125,11 @@ test "dav_read_entry: size 0" {
 
 test "dav_read_entry: three entries" {
     dav_init_file_tree()
-    let n1 = bytes_from_cstr(cstr("a"))
+    let n1 = bytes_from_cstr("a")
     dav_add_entry(n1, 1, 0)
-    let n2 = bytes_from_cstr(cstr("b"))
+    let n2 = bytes_from_cstr("b")
     dav_add_entry(n2, 2, 0)
-    let n3 = bytes_from_cstr(cstr("c"))
+    let n3 = bytes_from_cstr("c")
     dav_add_entry(n3, 3, 0)
     let o1 = bytes_new()
     let o2 = bytes_new()
@@ -198,35 +198,35 @@ test "dav_read_entry: missing is_col digit still advances past the entry" {
 // ── method_starts_with ─────────────────────────────────────────────────────
 
 test "method_starts_with: OPTIONS match" {
-    let buf = bytes_from_cstr(cstr("OPTIONS"))
-    assert_eq(method_starts_with(buf, cstr("OPTIONS")), 1)
+    let buf = bytes_from_cstr("OPTIONS")
+    assert_eq(method_starts_with(buf, "OPTIONS"), 1)
 }
 
 test "method_starts_with: PROPFIND match" {
-    let buf = bytes_from_cstr(cstr("PROPFIND"))
-    assert_eq(method_starts_with(buf, cstr("PROPFIND")), 1)
+    let buf = bytes_from_cstr("PROPFIND")
+    assert_eq(method_starts_with(buf, "PROPFIND"), 1)
 }
 
 test "method_starts_with: no match" {
-    let buf = bytes_from_cstr(cstr("GET"))
-    assert_eq(method_starts_with(buf, cstr("POST")), 0)
+    let buf = bytes_from_cstr("GET")
+    assert_eq(method_starts_with(buf, "POST"), 0)
 }
 
 test "method_starts_with: partial match" {
-    let buf = bytes_from_cstr(cstr("PROPFIND"))
-    assert_eq(method_starts_with(buf, cstr("PROP")), 1)
+    let buf = bytes_from_cstr("PROPFIND")
+    assert_eq(method_starts_with(buf, "PROP"), 1)
 }
 
 test "method_starts_with: short buffer no match" {
-    let buf = bytes_from_cstr(cstr("G"))
-    assert_eq(method_starts_with(buf, cstr("GET")), 0)
+    let buf = bytes_from_cstr("G")
+    assert_eq(method_starts_with(buf, "GET"), 0)
 }
 
 // ── dav_add_entry: encoding details ────────────────────────────────────────
 
 test "dav_add_entry: verify size encoding" {
     dav_init_file_tree()
-    let name = bytes_from_cstr(cstr("bigfile"))
+    let name = bytes_from_cstr("bigfile")
     dav_add_entry(name, 999, 0)
     let len = bytes_len(dav_file_tree)
     assert(len > 10)
@@ -234,7 +234,7 @@ test "dav_add_entry: verify size encoding" {
 
 test "dav_add_entry: verify collection flag" {
     dav_init_file_tree()
-    let name = bytes_from_cstr(cstr("directory"))
+    let name = bytes_from_cstr("directory")
     dav_add_entry(name, 0, 1)
     let len = bytes_len(dav_file_tree)
     assert(len > 0)
@@ -242,7 +242,7 @@ test "dav_add_entry: verify collection flag" {
 
 test "dav_read_entry: size 999" {
     dav_init_file_tree()
-    let name = bytes_from_cstr(cstr("big"))
+    let name = bytes_from_cstr("big")
     dav_add_entry(name, 999, 0)
     let out = bytes_new()
     let off = dav_read_entry(0, out)
@@ -254,9 +254,9 @@ test "dav_read_entry: size 999" {
 
 test "dav_read_entry: entry after multiple adds" {
     dav_init_file_tree()
-    let name1 = bytes_from_cstr(cstr("x"))
+    let name1 = bytes_from_cstr("x")
     dav_add_entry(name1, 50, 0)
-    let name2 = bytes_from_cstr(cstr("y"))
+    let name2 = bytes_from_cstr("y")
     dav_add_entry(name2, 75, 1)
     let out1 = bytes_new()
     let out2 = bytes_new()
@@ -271,40 +271,40 @@ test "dav_read_entry: entry after multiple adds" {
 // ── bytes.snd primitives, used directly as the assertion tools below ──────
 
 test "bytes_eq: equal buffers" {
-    let a = bytes_from_cstr(cstr("webdav"))
-    let b = bytes_from_cstr(cstr("webdav"))
+    let a = bytes_from_cstr("webdav")
+    let b = bytes_from_cstr("webdav")
     assert_eq(bytes_eq(a, b), 1)
 }
 
 test "bytes_eq: different length" {
-    let a = bytes_from_cstr(cstr("webdav"))
-    let b = bytes_from_cstr(cstr("web"))
+    let a = bytes_from_cstr("webdav")
+    let b = bytes_from_cstr("web")
     assert_eq(bytes_eq(a, b), 0)
 }
 
 test "bytes_eq: same length different content" {
-    let a = bytes_from_cstr(cstr("PROPFIND"))
-    let b = bytes_from_cstr(cstr("PROPFINE"))
+    let a = bytes_from_cstr("PROPFIND")
+    let b = bytes_from_cstr("PROPFINE")
     assert_eq(bytes_eq(a, b), 0)
 }
 
 test "bytes_index_of: found and not found" {
-    let a = bytes_from_cstr(cstr("HTTP/1.1 200 OK"))
+    let a = bytes_from_cstr("HTTP/1.1 200 OK")
     assert_eq(bytes_index_of(a, 32), 8)   // first space
     assert_eq(bytes_index_of(a, 63), -1)  // '?' not present
 }
 
 test "bytes_index_of_from: skips earlier occurrences" {
-    let a = bytes_from_cstr(cstr("a,b,c"))
+    let a = bytes_from_cstr("a,b,c")
     assert_eq(bytes_index_of_from(a, 44, 0), 1)
     assert_eq(bytes_index_of_from(a, 44, 2), 3)
     assert_eq(bytes_index_of_from(a, 44, 4), -1)
 }
 
 test "bytes_slice: middle range and empty range" {
-    let a = bytes_from_cstr(cstr("multistatus"))
+    let a = bytes_from_cstr("multistatus")
     let mid = bytes_slice(a, 5, 11)
-    assert_eq(bytes_eq(mid, bytes_from_cstr(cstr("status"))), 1)
+    assert_eq(bytes_eq(mid, bytes_from_cstr("status")), 1)
     let empty = bytes_slice(a, 3, 3)
     assert_eq(bytes_len(empty), 0)
 }
@@ -312,17 +312,17 @@ test "bytes_slice: middle range and empty range" {
 test "bytes_append_int: zero and multi-digit" {
     let b0 = bytes_new()
     bytes_append_int(b0, 0)
-    assert_eq(bytes_eq(b0, bytes_from_cstr(cstr("0"))), 1)
+    assert_eq(bytes_eq(b0, bytes_from_cstr("0")), 1)
     let b1 = bytes_new()
     bytes_append_int(b1, 1234)
-    assert_eq(bytes_eq(b1, bytes_from_cstr(cstr("1234"))), 1)
+    assert_eq(bytes_eq(b1, bytes_from_cstr("1234")), 1)
 }
 
 test "bytes_from_raw: copies exactly n bytes from a raw pointer" {
-    let src = cstr("raw-bytes")
+    let src = "raw-bytes"
     let b = bytes_from_raw(src, 3)
     assert_eq(bytes_len(b), 3)
-    assert_eq(bytes_eq(b, bytes_from_cstr(cstr("raw"))), 1)
+    assert_eq(bytes_eq(b, bytes_from_cstr("raw")), 1)
 }
 
 // ── OPTIONS: RFC 4918 §9.1 class 1/2 compliance header ─────────────────────
@@ -332,14 +332,14 @@ test "dav_handle: OPTIONS announces DAV 1,2 with an empty 200 body" {
     syscall(SYS_pipe, fds)
     let rfd = peek32(fds + 0)
     let wfd = peek32(fds + 4)
-    let req = bytes_from_cstr(cstr("OPTIONS / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
+    let req = bytes_from_cstr("OPTIONS / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
     dav_handle(wfd, req)
     close_fd(wfd)
     let buf[512]
     let n = read_buf(rfd, buf, 4096)
     close_fd(rfd)
     let resp = bytes_from_raw(buf, n)
-    let want = bytes_from_cstr(cstr("HTTP/1.1 200 OK\r\nDAV: 1,2\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"))
+    let want = bytes_from_cstr("HTTP/1.1 200 OK\r\nDAV: 1,2\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n")
     assert_eq(bytes_eq(resp, want), 1)
 }
 
@@ -351,7 +351,7 @@ test "dav_handle: PROPFIND on an empty tree returns an empty 207 multistatus" {
     syscall(SYS_pipe, fds)
     let rfd = peek32(fds + 0)
     let wfd = peek32(fds + 4)
-    let req = bytes_from_cstr(cstr("PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1\r\nDepth: 1\r\n\r\n"))
+    let req = bytes_from_cstr("PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1\r\nDepth: 1\r\n\r\n")
     dav_handle(wfd, req)
     close_fd(wfd)
     let buf[512]
@@ -359,23 +359,23 @@ test "dav_handle: PROPFIND on an empty tree returns an empty 207 multistatus" {
     close_fd(rfd)
     let resp = bytes_from_raw(buf, n)
     let status_line = bytes_slice(resp, 0, 25)
-    assert_eq(bytes_eq(status_line, bytes_from_cstr(cstr("HTTP/1.1 207 Multi-Status"))), 1)
-    assert(xml_find_open_tag(resp, cstr("multistatus"), 0) >= 0)
+    assert_eq(bytes_eq(status_line, bytes_from_cstr("HTTP/1.1 207 Multi-Status")), 1)
+    assert(xml_find_open_tag(resp, "multistatus", 0) >= 0)
     assert_eq(xml_count_responses(resp), 0)
 }
 
 test "dav_handle: PROPFIND on a non-empty tree returns 207 with a response element" {
     dav_init_file_tree()
-    let fname = bytes_from_cstr(cstr("report.txt"))
+    let fname = bytes_from_cstr("report.txt")
     dav_add_entry(fname, 123, 0)
-    let dname = bytes_from_cstr(cstr("archive"))
+    let dname = bytes_from_cstr("archive")
     dav_add_entry(dname, 0, 1)
 
     let fds[1]
     syscall(SYS_pipe, fds)
     let rfd = peek32(fds + 0)
     let wfd = peek32(fds + 4)
-    let req = bytes_from_cstr(cstr("PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1\r\nDepth: 1\r\n\r\n"))
+    let req = bytes_from_cstr("PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1\r\nDepth: 1\r\n\r\n")
     dav_handle(wfd, req)
     close_fd(wfd)
     let buf[512]
@@ -384,8 +384,8 @@ test "dav_handle: PROPFIND on a non-empty tree returns 207 with a response eleme
     let resp = bytes_from_raw(buf, n)
 
     let status_line = bytes_slice(resp, 0, 25)
-    assert_eq(bytes_eq(status_line, bytes_from_cstr(cstr("HTTP/1.1 207 Multi-Status"))), 1)
-    assert(xml_find_open_tag(resp, cstr("multistatus"), 0) >= 0)
+    assert_eq(bytes_eq(status_line, bytes_from_cstr("HTTP/1.1 207 Multi-Status")), 1)
+    assert(xml_find_open_tag(resp, "multistatus", 0) >= 0)
     assert(xml_count_responses(resp) >= 1)
 }
 
@@ -399,16 +399,16 @@ test "dav_handle: PROPFIND on a non-empty tree returns 207 with a response eleme
 // that were written via dav_add_entry.
 test "dav_handle: PROPFIND on a two-entry tree returns exactly one response per entry with correct fields" {
     dav_init_file_tree()
-    let fname = bytes_from_cstr(cstr("report.txt"))
+    let fname = bytes_from_cstr("report.txt")
     dav_add_entry(fname, 123, 0)
-    let dname = bytes_from_cstr(cstr("archive"))
+    let dname = bytes_from_cstr("archive")
     dav_add_entry(dname, 0, 1)
 
     let fds[1]
     syscall(SYS_pipe, fds)
     let rfd = peek32(fds + 0)
     let wfd = peek32(fds + 4)
-    let req = bytes_from_cstr(cstr("PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1\r\nDepth: 1\r\n\r\n"))
+    let req = bytes_from_cstr("PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1\r\nDepth: 1\r\n\r\n")
     dav_handle(wfd, req)
     close_fd(wfd)
     let buf[512]
@@ -419,30 +419,30 @@ test "dav_handle: PROPFIND on a two-entry tree returns exactly one response per 
     // Exactly one <response> per real entry: no phantom third entry from the desync.
     assert_eq(xml_count_responses(resp), 2)
 
-    let pos1 = xml_find_open_tag(resp, cstr("response"), 0)
+    let pos1 = xml_find_open_tag(resp, "response", 0)
     assert(pos1 >= 0)
-    let href1 = xml_get_tag_content(resp, cstr("href"), pos1)
-    assert_eq(bytes_eq(href1, bytes_from_cstr(cstr("/report.txt"))), 1)
-    let dn1 = xml_get_tag_content(resp, cstr("displayname"), pos1)
-    assert_eq(bytes_eq(dn1, bytes_from_cstr(cstr("report.txt"))), 1)
-    let cl1 = xml_get_tag_content(resp, cstr("getcontentlength"), pos1)
-    assert_eq(bytes_eq(cl1, bytes_from_cstr(cstr("123"))), 1)
+    let href1 = xml_get_tag_content(resp, "href", pos1)
+    assert_eq(bytes_eq(href1, bytes_from_cstr("/report.txt")), 1)
+    let dn1 = xml_get_tag_content(resp, "displayname", pos1)
+    assert_eq(bytes_eq(dn1, bytes_from_cstr("report.txt")), 1)
+    let cl1 = xml_get_tag_content(resp, "getcontentlength", pos1)
+    assert_eq(bytes_eq(cl1, bytes_from_cstr("123")), 1)
 
-    let pos2 = xml_find_open_tag(resp, cstr("response"), pos1 + 1)
+    let pos2 = xml_find_open_tag(resp, "response", pos1 + 1)
     assert(pos2 >= 0)
     // report.txt is not a collection: no <collection/> tag before the second response.
-    let coll_pos1 = xml_find_open_tag(resp, cstr("collection"), pos1)
+    let coll_pos1 = xml_find_open_tag(resp, "collection", pos1)
     let has_coll1 = if coll_pos1 >= 0 && coll_pos1 < pos2 { 1 } else { 0 }
     assert_eq(has_coll1, 0)
-    let href2 = xml_get_tag_content(resp, cstr("href"), pos2)
-    assert_eq(bytes_eq(href2, bytes_from_cstr(cstr("/archive"))), 1)
-    let dn2 = xml_get_tag_content(resp, cstr("displayname"), pos2)
-    assert_eq(bytes_eq(dn2, bytes_from_cstr(cstr("archive"))), 1)
+    let href2 = xml_get_tag_content(resp, "href", pos2)
+    assert_eq(bytes_eq(href2, bytes_from_cstr("/archive")), 1)
+    let dn2 = xml_get_tag_content(resp, "displayname", pos2)
+    assert_eq(bytes_eq(dn2, bytes_from_cstr("archive")), 1)
     // archive IS a collection: it must carry the <collection/> tag.
-    assert_eq(xml_has_tag(resp, cstr("collection"), pos2), 1)
+    assert_eq(xml_has_tag(resp, "collection", pos2), 1)
 
     // No third response left over after the second real entry.
-    let pos3 = xml_find_open_tag(resp, cstr("response"), pos2 + 1)
+    let pos3 = xml_find_open_tag(resp, "response", pos2 + 1)
     assert_eq(pos3, -1)
 }
 
@@ -453,14 +453,14 @@ test "dav_handle: MKCOL creates a collection, 201" {
     syscall(SYS_pipe, fds)
     let rfd = peek32(fds + 0)
     let wfd = peek32(fds + 4)
-    let req = bytes_from_cstr(cstr("MKCOL /newdir HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
+    let req = bytes_from_cstr("MKCOL /newdir HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
     dav_handle(wfd, req)
     close_fd(wfd)
     let buf[512]
     let n = read_buf(rfd, buf, 4096)
     close_fd(rfd)
     let resp = bytes_from_raw(buf, n)
-    assert_eq(bytes_eq(resp, bytes_from_cstr(cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"))), 1)
+    assert_eq(bytes_eq(resp, bytes_from_cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")), 1)
 }
 
 test "dav_handle: DELETE removes a resource, 204" {
@@ -468,14 +468,14 @@ test "dav_handle: DELETE removes a resource, 204" {
     syscall(SYS_pipe, fds)
     let rfd = peek32(fds + 0)
     let wfd = peek32(fds + 4)
-    let req = bytes_from_cstr(cstr("DELETE /report.txt HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
+    let req = bytes_from_cstr("DELETE /report.txt HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
     dav_handle(wfd, req)
     close_fd(wfd)
     let buf[512]
     let n = read_buf(rfd, buf, 4096)
     close_fd(rfd)
     let resp = bytes_from_raw(buf, n)
-    assert_eq(bytes_eq(resp, bytes_from_cstr(cstr("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"))), 1)
+    assert_eq(bytes_eq(resp, bytes_from_cstr("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")), 1)
 }
 
 // ── PUT ──────────────────────────────────────────────────────────────────
@@ -485,14 +485,14 @@ test "dav_handle: PUT with a body and Content-Length returns 201" {
     syscall(SYS_pipe, fds)
     let rfd = peek32(fds + 0)
     let wfd = peek32(fds + 4)
-    let req = bytes_from_cstr(cstr("PUT /newfile.txt HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 11\r\n\r\nhello world"))
+    let req = bytes_from_cstr("PUT /newfile.txt HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 11\r\n\r\nhello world")
     dav_handle(wfd, req)
     close_fd(wfd)
     let buf[512]
     let n = read_buf(rfd, buf, 4096)
     close_fd(rfd)
     let resp = bytes_from_raw(buf, n)
-    assert_eq(bytes_eq(resp, bytes_from_cstr(cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"))), 1)
+    assert_eq(bytes_eq(resp, bytes_from_cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")), 1)
 }
 
 test "dav_handle: PUT with no Content-Length header still returns 201" {
@@ -500,14 +500,14 @@ test "dav_handle: PUT with no Content-Length header still returns 201" {
     syscall(SYS_pipe, fds)
     let rfd = peek32(fds + 0)
     let wfd = peek32(fds + 4)
-    let req = bytes_from_cstr(cstr("PUT /empty.txt HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
+    let req = bytes_from_cstr("PUT /empty.txt HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
     dav_handle(wfd, req)
     close_fd(wfd)
     let buf[512]
     let n = read_buf(rfd, buf, 4096)
     close_fd(rfd)
     let resp = bytes_from_raw(buf, n)
-    assert_eq(bytes_eq(resp, bytes_from_cstr(cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"))), 1)
+    assert_eq(bytes_eq(resp, bytes_from_cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")), 1)
 }
 
 test "dav_handle: PUT with a Content-Length over 2048 still drains and returns 201" {
@@ -515,14 +515,14 @@ test "dav_handle: PUT with a Content-Length over 2048 still drains and returns 2
     syscall(SYS_pipe, fds)
     let rfd = peek32(fds + 0)
     let wfd = peek32(fds + 4)
-    let req = bytes_from_cstr(cstr("PUT /big.bin HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5000\r\n\r\n"))
+    let req = bytes_from_cstr("PUT /big.bin HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 5000\r\n\r\n")
     dav_handle(wfd, req)
     close_fd(wfd)
     let buf[512]
     let n = read_buf(rfd, buf, 4096)
     close_fd(rfd)
     let resp = bytes_from_raw(buf, n)
-    assert_eq(bytes_eq(resp, bytes_from_cstr(cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"))), 1)
+    assert_eq(bytes_eq(resp, bytes_from_cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")), 1)
 }
 
 // ── GET (no real file serving in this stub) and unrecognized methods ──────
@@ -532,14 +532,14 @@ test "dav_handle: GET returns 404 Not Found" {
     syscall(SYS_pipe, fds)
     let rfd = peek32(fds + 0)
     let wfd = peek32(fds + 4)
-    let req = bytes_from_cstr(cstr("GET /report.txt HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
+    let req = bytes_from_cstr("GET /report.txt HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
     dav_handle(wfd, req)
     close_fd(wfd)
     let buf[512]
     let n = read_buf(rfd, buf, 4096)
     close_fd(rfd)
     let resp = bytes_from_raw(buf, n)
-    assert_eq(bytes_eq(resp, bytes_from_cstr(cstr("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"))), 1)
+    assert_eq(bytes_eq(resp, bytes_from_cstr("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")), 1)
 }
 
 test "dav_handle: an unimplemented method returns 501 Not Implemented" {
@@ -547,14 +547,14 @@ test "dav_handle: an unimplemented method returns 501 Not Implemented" {
     syscall(SYS_pipe, fds)
     let rfd = peek32(fds + 0)
     let wfd = peek32(fds + 4)
-    let req = bytes_from_cstr(cstr("PATCH /report.txt HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"))
+    let req = bytes_from_cstr("PATCH /report.txt HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
     dav_handle(wfd, req)
     close_fd(wfd)
     let buf[512]
     let n = read_buf(rfd, buf, 4096)
     close_fd(rfd)
     let resp = bytes_from_raw(buf, n)
-    assert_eq(bytes_eq(resp, bytes_from_cstr(cstr("HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n"))), 1)
+    assert_eq(bytes_eq(resp, bytes_from_cstr("HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n")), 1)
 }
 
 // ── server_get_put: only reachable directly, dav_handle never calls it ────
@@ -572,7 +572,7 @@ test "server_get_put: PUT branch responds 201 Created" {
     let n = read_buf(rfd, buf, 4096)
     close_fd(rfd)
     let resp = bytes_from_raw(buf, n)
-    assert_eq(bytes_eq(resp, bytes_from_cstr(cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"))), 1)
+    assert_eq(bytes_eq(resp, bytes_from_cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")), 1)
 }
 
 test "server_get_put: GET branch responds 404 Not Found" {
@@ -586,7 +586,7 @@ test "server_get_put: GET branch responds 404 Not Found" {
     let n = read_buf(rfd, buf, 4096)
     close_fd(rfd)
     let resp = bytes_from_raw(buf, n)
-    assert_eq(bytes_eq(resp, bytes_from_cstr(cstr("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"))), 1)
+    assert_eq(bytes_eq(resp, bytes_from_cstr("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")), 1)
 }
 
 // ── server_send_status, called directly with an arbitrary status ──────────
@@ -596,11 +596,11 @@ test "server_send_status: writes an exact bodyless status response" {
     syscall(SYS_pipe, fds)
     let rfd = peek32(fds + 0)
     let wfd = peek32(fds + 4)
-    server_send_status(wfd, cstr("403 Forbidden"))
+    server_send_status(wfd, "403 Forbidden")
     close_fd(wfd)
     let buf[512]
     let n = read_buf(rfd, buf, 4096)
     close_fd(rfd)
     let resp = bytes_from_raw(buf, n)
-    assert_eq(bytes_eq(resp, bytes_from_cstr(cstr("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"))), 1)
+    assert_eq(bytes_eq(resp, bytes_from_cstr("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")), 1)
 }

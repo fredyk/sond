@@ -52,7 +52,8 @@ fn efi_main() -> i64 {
 
 - `i64`: 64-bit signed integer. This is also used for pointers and characters.
 - `bool`: `true` / `false`.
-- String literals `"..."` exist only as arguments to `print`/`write`/`serial_print`.
+- A string literal `"..."` is a pointer (`i64`) to its NUL-terminated bytes; use it where an
+  address is wanted (`peek8("hi")`, `f("hi")`). No `cstr`: the literal already is one.
 
 Decimals (`10.25`) compile as `f64`, NOT as exact `Money` yet: do not use them for money.
 

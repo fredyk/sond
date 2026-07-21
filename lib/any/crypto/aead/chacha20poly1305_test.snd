@@ -40,29 +40,29 @@ fn main() -> i64 {
     i = 0
     for i < 8 { poke8(aad + 4 + i, 0xc0 + i) i = i + 1 }
 
-    let pt = cstr("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.")
+    let pt = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
     let n = strlen(pt)
 
     let ct[114]
     let tag[16]
     aead_seal(key, nonce, aad, 12, pt, n, ct, tag)
 
-    let ectx = cstr("d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116")
-    if eq_hex(ct, 114, ectx) == 0 { puts(cstr("FAIL ciphertext\n")) return 1 }
-    if eq_hex(tag, 16, cstr("1ae10b594f09e26a7e902ecbd0600691")) == 0 { puts(cstr("FAIL tag\n")) return 1 }
+    let ectx = "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116"
+    if eq_hex(ct, 114, ectx) == 0 { puts("FAIL ciphertext\n") return 1 }
+    if eq_hex(tag, 16, "1ae10b594f09e26a7e902ecbd0600691") == 0 { puts("FAIL tag\n") return 1 }
 
     // open with valid tag → 0 and recovers pt
     let back[114]
-    if aead_open(key, nonce, aad, 12, ct, n, tag, back) != 0 { puts(cstr("FAIL open valid\n")) return 1 }
+    if aead_open(key, nonce, aad, 12, ct, n, tag, back) != 0 { puts("FAIL open valid\n") return 1 }
     i = 0
     for i < n {
-        if peek8(back + i) != peek8(pt + i) { puts(cstr("FAIL open plaintext\n")) return 1 }
+        if peek8(back + i) != peek8(pt + i) { puts("FAIL open plaintext\n") return 1 }
         i = i + 1
     }
     // open with corrupted tag → !=0
     poke8(tag + 0, peek8(tag + 0) ^ 1)
-    if aead_open(key, nonce, aad, 12, ct, n, tag, back) == 0 { puts(cstr("FAIL open forged accepted\n")) return 1 }
+    if aead_open(key, nonce, aad, 12, ct, n, tag, back) == 0 { puts("FAIL open forged accepted\n") return 1 }
 
-    puts(cstr("OK chacha20poly1305 (RFC 8439 2.8.2)\n"))
+    puts("OK chacha20poly1305 (RFC 8439 2.8.2)\n")
     0
 }

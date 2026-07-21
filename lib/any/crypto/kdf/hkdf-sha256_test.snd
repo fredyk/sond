@@ -44,27 +44,27 @@ fn main() -> i64 {
 
     let prk[32]
     hkdf_extract(salt, 13, ikm, 22, prk)
-    if eq_hex(prk, 32, cstr("077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5")) == 0 {
-        puts(cstr("FAIL TC1 PRK\n")) return 1
+    if eq_hex(prk, 32, "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5") == 0 {
+        puts("FAIL TC1 PRK\n") return 1
     }
     let okm[42]
     hkdf_expand(prk, info, 10, okm, 42)
-    if eq_hex(okm, 42, cstr("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")) == 0 {
-        puts(cstr("FAIL TC1 OKM\n")) return 1
+    if eq_hex(okm, 42, "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865") == 0 {
+        puts("FAIL TC1 OKM\n") return 1
     }
 
     // --- RFC 5869 Test Case 3 (empty salt and info, L=42) ---
     let prk3[32]
     hkdf_extract(0, 0, ikm, 22, prk3)
-    if eq_hex(prk3, 32, cstr("19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04")) == 0 {
-        puts(cstr("FAIL TC3 PRK\n")) return 1
+    if eq_hex(prk3, 32, "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04") == 0 {
+        puts("FAIL TC3 PRK\n") return 1
     }
     let okm3[42]
     hkdf_expand(prk3, 0, 0, okm3, 42)
-    if eq_hex(okm3, 42, cstr("8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8")) == 0 {
-        puts(cstr("FAIL TC3 OKM\n")) return 1
+    if eq_hex(okm3, 42, "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8") == 0 {
+        puts("FAIL TC3 OKM\n") return 1
     }
 
-    puts(cstr("OK hkdf-sha256 (RFC 5869 TC1+TC3)\n"))
+    puts("OK hkdf-sha256 (RFC 5869 TC1+TC3)\n")
     0
 }

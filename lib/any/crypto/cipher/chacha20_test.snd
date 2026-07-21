@@ -34,25 +34,25 @@ fn main() -> i64 {
     for i < 12 { poke8(nonce + i, 0) i = i + 1 }
     poke8(nonce + 7, 0x4a)
 
-    let pt = cstr("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.")
+    let pt = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
     let n = strlen(pt)
-    if n != 114 { puts(cstr("FAIL plaintext len\n")) return 2 }
+    if n != 114 { puts("FAIL plaintext len\n") return 2 }
 
     let ct[114]
     chacha20_xor(key, nonce, 1, pt, ct, n)
 
-    let exp = cstr("6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d")
-    if eq_hex(ct, 114, exp) == 0 { puts(cstr("FAIL ciphertext RFC8439 2.4.2\n")) return 1 }
+    let exp = "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d"
+    if eq_hex(ct, 114, exp) == 0 { puts("FAIL ciphertext RFC8439 2.4.2\n") return 1 }
 
     // inverse decryption: XOR again must recover the plaintext
     let back[114]
     chacha20_xor(key, nonce, 1, ct, back, n)
     i = 0
     for i < n {
-        if peek8(back + i) != peek8(pt + i) { puts(cstr("FAIL roundtrip\n")) return 1 }
+        if peek8(back + i) != peek8(pt + i) { puts("FAIL roundtrip\n") return 1 }
         i = i + 1
     }
 
-    puts(cstr("OK chacha20 (RFC 8439 2.4.2)\n"))
+    puts("OK chacha20 (RFC 8439 2.4.2)\n")
     0
 }

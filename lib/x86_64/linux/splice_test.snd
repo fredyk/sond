@@ -11,33 +11,33 @@ fn main() -> i64 {
     let p1[1]
     let p2[1]
     let p3[1]
-    if syscall(SYS_pipe, p1) < 0 { puts(cstr("FAIL pipe1\n")) return 1 }
-    if syscall(SYS_pipe, p2) < 0 { puts(cstr("FAIL pipe2\n")) return 1 }
-    if syscall(SYS_pipe, p3) < 0 { puts(cstr("FAIL pipe3\n")) return 1 }
+    if syscall(SYS_pipe, p1) < 0 { puts("FAIL pipe1\n") return 1 }
+    if syscall(SYS_pipe, p2) < 0 { puts("FAIL pipe2\n") return 1 }
+    if syscall(SYS_pipe, p3) < 0 { puts("FAIL pipe3\n") return 1 }
 
     let p1r = peek32(p1)
     let p1w = peek32(p1 + 4)
     let p3r = peek32(p3)
     let p3w = peek32(p3 + 4)
 
-    let msg = cstr("splice-moves-these-bytes-0123456789")
+    let msg = "splice-moves-these-bytes-0123456789"
     let mlen = strlen(msg)
     write_buf(p1w, msg, mlen)
     close_fd(p1w)   // EOF at source
 
     // splice_pump(p1.read -> p3.write) using p2 as intermediate pipe
     let moved = splice_pump(p1r, p3w, p2, mlen)
-    if moved != mlen { puts(cstr("FAIL moved count\n")) return 1 }
+    if moved != mlen { puts("FAIL moved count\n") return 1 }
     close_fd(p3w)
 
     let buf[64]
     let n = read_buf(p3r, buf, 64)
-    if n != mlen { puts(cstr("FAIL dst len\n")) return 1 }
+    if n != mlen { puts("FAIL dst len\n") return 1 }
     let mut i = 0
     for i < mlen {
-        if peek8(buf + i) != peek8(msg + i) { puts(cstr("FAIL dst data\n")) return 1 }
+        if peek8(buf + i) != peek8(msg + i) { puts("FAIL dst data\n") return 1 }
         i = i + 1
     }
-    puts(cstr("OK splice_pump\n"))
+    puts("OK splice_pump\n")
     0
 }

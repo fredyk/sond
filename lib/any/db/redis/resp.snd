@@ -37,34 +37,34 @@ fn append_itoa(b: i64, n: i64) {
 // Encode a byte-string at `addr` with length `len` as a RESP bulk string
 // into buffer `b`:  $<len>\r\n<bytes>\r\n
 pub fn enc_bulk_string(addr: i64, len: i64, b: i64) {
-    bytes_append_cstr(b, cstr("$"))
+    bytes_append_cstr(b, "$")
     append_itoa(b, len)
-    bytes_append_cstr(b, cstr("\r\n"))
+    bytes_append_cstr(b, "\r\n")
     let mut i = 0
     for i < len {
         bytes_push(b, peek8(addr + i))
         i = i + 1
     }
-    bytes_append_cstr(b, cstr("\r\n"))
+    bytes_append_cstr(b, "\r\n")
 }
 
 // Encode an integer as RESP:  :N\r\n
 pub fn enc_int(n: i64) -> i64 {
     let b = bytes_new()
-    bytes_append_cstr(b, cstr(":"))
+    bytes_append_cstr(b, ":")
     append_itoa(b, n)
-    bytes_append_cstr(b, cstr("\r\n"))
+    bytes_append_cstr(b, "\r\n")
     b
 }
 
 // Encode a nil bulk string:  $-1\r\n
 pub fn enc_nil() -> i64 {
-    bytes_from_cstr(cstr("$-1\r\n"))
+    bytes_from_cstr("$-1\r\n")
 }
 
 // Encode a nil array:  *-1\r\n
 pub fn enc_array_nil() -> i64 {
-    bytes_from_cstr(cstr("*-1\r\n"))
+    bytes_from_cstr("*-1\r\n")
 }
 
 // Encode a RESP array of N byte-strings.  `items`: pointer to [N*2] i64
@@ -72,9 +72,9 @@ pub fn enc_array_nil() -> i64 {
 // Builds:  *N\r\n<bulk0>\r\n<bulk1>\r\n ...
 pub fn enc_array_of_strings(n: i64, items: i64) -> i64 {
     let b = bytes_new()
-    bytes_append_cstr(b, cstr("*"))
+    bytes_append_cstr(b, "*")
     append_itoa(b, n)
-    bytes_append_cstr(b, cstr("\r\n"))
+    bytes_append_cstr(b, "\r\n")
     let mut i = 0
     for i < n {
         let addr = peek64(items + i * 16)

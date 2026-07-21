@@ -18,4 +18,4 @@ pub fn str_len(s: i64) -> i64 {
 }
 
 // Return a C string (char*): a NUL-terminated byte sequence in .rodata.
-pub fn greeting() -> i64 { cstr("HELLO from Sond") }
+pub fn greeting() -> i64 { "HELLO from Sond" }

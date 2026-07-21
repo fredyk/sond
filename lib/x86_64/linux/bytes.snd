@@ -51,7 +51,7 @@ pub fn bytes_push(b: i64, byte: i64) {
     poke64(b + 8, len + 1)
 }
 
-// Build a buffer from a NUL-terminated C string (e.g. a `cstr("...")` literal).
+// Build a buffer from a NUL-terminated C string (e.g. a `"..."` literal).
 pub fn bytes_from_cstr(s: i64) -> i64 {
     let b = bytes_new()
     let mut i = 0
