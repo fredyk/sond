@@ -980,55 +980,68 @@ impl Codegen {
         let Expr::Var(fname) = callee.as_ref() else {
             todo!("spawn of an indirect call {callee:?}");
         };
-        // Callee-saved registers survive the clone syscall (it clobbers only rax, rcx, r11 and
-        // the argument registers). Up to five, matching what a thread body needs in practice.
-        // %r15 is reserved as the arena pointer, so it is NOT available to stage arguments;
-        // four callee-saved registers remain, enough for the calls a thread body needs.
-        const SAVED: [&str; 4] = ["%r12", "%r13", "%r14", "%rbx"];
-        if args.len() > SAVED.len() {
-            panic!(
-                "spawn currently supports up to {} arguments to the thread function (got {})",
-                SAVED.len(),
-                args.len()
-            );
+        // Arguments cross into the thread through the CHILD's stack, not through registers. A
+        // register carried across the clone would have to be callee-saved (to survive evaluating
+        // the other arguments), and with %r15 reserved for the arena only four of those remain;
+        // writing the arguments into the child's own stack removes the register limit and matches
+        // the six a normal call takes.
+        let n = args.len();
+        if n > ARG_REGS.len() {
+            panic!("spawn passes at most {} arguments (got {n})", ARG_REGS.len());
         }
+        // 256 KiB per thread stack. The top 32 bytes hold the arena control block; the arguments
+        // sit just below it, in a 16-aligned block, and the child's stack grows down from there.
+        const THREAD_STACK: i64 = 262144;
+        let argspace = (n as i64 * 8 + 15) & !15;
         self.uses_spawn = true;
         let cell = format!("sond_ctid_{}", self.all_ctids.len());
         self.all_ctids.push(cell.clone());
         self.spawn_ctids.push(cell.clone());
 
-        // Save the parent's callee-saved registers we are about to use (48 = 6 slots keeps the
-        // stack 16-aligned), evaluate the arguments into them.
-        self.line("    subq $48, %rsp");
-        for (i, reg) in SAVED.iter().take(args.len()).enumerate() {
-            self.line(&format!("    movq {reg}, {}(%rsp)", i * 8));
-        }
-        for (i, arg) in args.iter().enumerate() {
+        // Evaluate the arguments and push them, so arg0 ends on top (at 0(%rsp), arg i at 8i).
+        for arg in args.iter().rev() {
             self.expr(&arg.value); // -> %rax
-            self.line(&format!("    movq %rax, {}", SAVED[i]));
+            self.line("    pushq %rax");
         }
 
-        // mmap a 256 KiB stack for the child: mmap(0, size, RW, PRIVATE|ANON|STACK, -1, 0).
+        // mmap the child stack. The pushed arguments are untouched (a syscall does not use the
+        // stack), so they are still there to copy across.
         self.line("    xorq %rdi, %rdi");
-        self.line("    movq $sond_thread_stack, %rsi");
+        self.line(&format!("    movq ${THREAD_STACK}, %rsi"));
         self.line("    movq $3, %rdx"); // PROT_READ|PROT_WRITE
         self.line("    movq $0x20022, %r10"); // MAP_PRIVATE|MAP_ANONYMOUS|MAP_STACK
         self.line("    movq $-1, %r8");
         self.line("    xorq %r9, %r9");
-        self.line("    movq $9, %rax"); // SYS_mmap
+        self.line("    movq $9, %rax"); // SYS_mmap -> base in %rax
         self.line("    syscall");
-        // Child stack top, 16-aligned: base + size.
-        self.line("    leaq sond_thread_stack(%rax), %rsi");
-        self.line("    andq $-16, %rsi");
-        // Reserve 32 bytes at the top of the child's stack for its own arena control block
-        // (three words, zero-filled by the anonymous mmap). The child points %r15 at it, so it
-        // allocates from its own arena and never races the parent on a shared bump pointer.
-        self.line("    subq $32, %rsi");
+        // Copy each argument from the parent stack to the child's argument block. arg i lands at
+        // TCB - 8*(i+1), where TCB = base + THREAD_STACK - 32; i.e. base + (THREAD_STACK - 40 - 8i).
+        for i in 0..n {
+            self.line(&format!("    movq {}(%rsp), %rcx", i * 8));
+            self.line(&format!(
+                "    movq %rcx, {}(%rax)",
+                THREAD_STACK - 40 - 8 * i as i64
+            ));
+        }
+        // The child's stack pointer: below the arguments, still 16-aligned.
+        self.line(&format!(
+            "    leaq {}(%rax), %rsi",
+            THREAD_STACK - 32 - argspace
+        ));
+
+        // The join waits on a sentinel the parent stores BEFORE the clone, which the kernel
+        // clears to 0 and futex-wakes at the child's exit (CLONE_CHILD_CLEARTID). Doing it this way
+        // avoids two races at once: storing the tid AFTER clone would let a fast child clear the
+        // cell first and then have it overwritten, so the join waits on a dead thread forever; and
+        // CLONE_CHILD_SETTID does not help, since the man page notes its store "may not have
+        // completed before the clone call returns in the parent" under CLONE_VM, so the parent could
+        // read 0 and skip the wait entirely. A sentinel written before the clone is reliably 1 (set
+        // by the parent) or 0 (cleared by the kernel), and depends on neither ordering.
+        self.line(&format!("    movq $1, {cell}(%rip)"));
 
         // clone(flags, child_stack, ptid=0, ctid=&cell, tls=0).
         // CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|CHILD_CLEARTID.
         self.line("    movq $0x250f00, %rdi");
-        // rsi = child stack (set above)
         self.line("    xorq %rdx, %rdx"); // parent_tid = NULL
         self.line(&format!("    leaq {cell}(%rip), %r10")); // child_tid cell
         self.line("    xorq %r8, %r8"); // tls = NULL
@@ -1038,25 +1051,26 @@ impl Codegen {
         let child = self.fresh_label("thread_child");
         self.line("    testq %rax, %rax");
         self.line(&format!("    jz {child}"));
-        // Parent: rax = child tid. Record it in the cell so the join has a value to wait on.
-        self.line(&format!("    movq %rax, {cell}(%rip)"));
-        // Restore the parent's callee-saved registers and continue.
-        for (i, reg) in SAVED.iter().take(args.len()).enumerate() {
-            self.line(&format!("    movq {}(%rsp), {reg}", i * 8));
+        // Parent: the sentinel is already in the cell and the kernel owns clearing it, so there is
+        // nothing to record. Drop the pushed arguments and continue.
+        if n > 0 {
+            self.line(&format!("    addq ${}, %rsp", n * 8));
         }
-        self.line("    addq $48, %rsp");
         let after = self.fresh_label("thread_parent");
         self.line(&format!("    jmp {after}"));
 
-        // Child: rax = 0, rsp = its own stack. Move the args into the argument registers and
-        // call the function, then exit THIS thread (SYS_exit, not exit_group), which triggers
-        // the kernel's clear + futex-wake on the ctid cell.
+        // Child: rax = 0, rsp = its own stack. The arena control block is `argspace` above rsp
+        // (the reserved top 32 bytes), zeroed by mmap so the first allocation grows a fresh block.
+        // The arguments sit between rsp and the block; load them into the argument registers, then
+        // call, then exit THIS thread (SYS_exit, not exit_group), which clears + futex-wakes the
+        // ctid cell.
         self.line(&format!("{child}:"));
-        // The child's stack pointer is the top of its arena control block; make it the thread's
-        // arena. Zeroed by mmap, so the first allocation grows a fresh block for this thread.
-        self.line("    movq %rsp, %r15");
-        for (saved, argreg) in SAVED.iter().zip(ARG_REGS.iter()).take(args.len()) {
-            self.line(&format!("    movq {saved}, {argreg}"));
+        self.line(&format!("    leaq {argspace}(%rsp), %r15")); // %r15 = arena control block
+        for (i, argreg) in ARG_REGS.iter().take(n).enumerate() {
+            self.line(&format!(
+                "    movq {}(%rsp), {argreg}",
+                argspace - 8 * (i as i64 + 1)
+            ));
         }
         self.line(&format!("    call {fname}"));
         self.line("    xorq %rdi, %rdi"); // thread exit status 0

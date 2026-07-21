@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// The structured join must actually wait for a thread, even one that exits in a
+// few instructions. A worker sets a shared flag; the spawn and its join live in
+// a helper, so by the time the helper returns the thread has been joined and the
+// flag is set. main reads it and must see the written value, not the initial 0.
+// A join that did not wait would race here and usually read 0. Run it in a loop
+// to expose any timing race (the bug this guards was invisible in a single slow
+// traced run but reproduced on two real cores).
+
+fn setter(flag: i64) -> i64 {
+    poke64(flag, 12345)
+    0
+}
+
+fn spawn_and_join(flag: i64) -> i64 {
+    spawn setter(flag)
+    0
+}
+
+fn main() -> i64 {
+    let f[1]
+    poke64(f, 0)
+    spawn_and_join(f)
+    if peek64(f) == 12345 {
+        write(1, "OK join waited\n")
+        0
+    } else {
+        write(1, "FAIL join did not wait\n")
+        1
+    }
+}
