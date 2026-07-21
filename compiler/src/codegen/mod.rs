@@ -982,7 +982,9 @@ impl Codegen {
         };
         // Callee-saved registers survive the clone syscall (it clobbers only rax, rcx, r11 and
         // the argument registers). Up to five, matching what a thread body needs in practice.
-        const SAVED: [&str; 5] = ["%r12", "%r13", "%r14", "%r15", "%rbx"];
+        // %r15 is reserved as the arena pointer, so it is NOT available to stage arguments;
+        // four callee-saved registers remain, enough for the calls a thread body needs.
+        const SAVED: [&str; 4] = ["%r12", "%r13", "%r14", "%rbx"];
         if args.len() > SAVED.len() {
             panic!(
                 "spawn currently supports up to {} arguments to the thread function (got {})",
@@ -1018,6 +1020,10 @@ impl Codegen {
         // Child stack top, 16-aligned: base + size.
         self.line("    leaq sond_thread_stack(%rax), %rsi");
         self.line("    andq $-16, %rsi");
+        // Reserve 32 bytes at the top of the child's stack for its own arena control block
+        // (three words, zero-filled by the anonymous mmap). The child points %r15 at it, so it
+        // allocates from its own arena and never races the parent on a shared bump pointer.
+        self.line("    subq $32, %rsi");
 
         // clone(flags, child_stack, ptid=0, ctid=&cell, tls=0).
         // CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|CHILD_CLEARTID.
@@ -1046,6 +1052,9 @@ impl Codegen {
         // call the function, then exit THIS thread (SYS_exit, not exit_group), which triggers
         // the kernel's clear + futex-wake on the ctid cell.
         self.line(&format!("{child}:"));
+        // The child's stack pointer is the top of its arena control block; make it the thread's
+        // arena. Zeroed by mmap, so the first allocation grows a fresh block for this thread.
+        self.line("    movq %rsp, %r15");
         for (saved, argreg) in SAVED.iter().zip(ARG_REGS.iter()).take(args.len()) {
             self.line(&format!("    movq {saved}, {argreg}"));
         }

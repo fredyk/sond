@@ -160,7 +160,13 @@ Writing this surfaced three things the earlier RFCs implied but never stated:
    three instances, all the same argument: capabilities + effects turn silent corruption into a
    rejected program.
 
-## 7b. Thread-local arena: the mechanism (design, before implementation)
+## 7b. Thread-local arena: IMPLEMENTED (register-based)
+
+**Status: implemented and merged on the concurrency branch.** The allocator now bumps a per-thread
+control block through the reserved `%r15`, seeded at every entry point and at each `spawn`; the whole
+standard library plus a concurrent-allocation race test (`examples/host/concurrency/thread-arena`)
+pass, so allocation inside a spawned thread is safe and the guard is gone. The analysis below is why
+this mechanism, and not the others.
 
 Section 7.4 named the direction; this is how. The allocator (`heap_alloc`) bumps a shared global,
 so the moment two threads allocate they race. Each thread needs its own bump region. Three ways to
@@ -195,8 +201,8 @@ The costs, all real and all bounded:
 thread lives in that thread's arena, which is freed when the thread ends. Moving it to another
 thread (through a channel, later) must copy the bytes, or the receiver holds a pointer into a dead
 arena. That is a channel-semantics question, deferred with channels; the register-arena change does
-not need it, because this slice only makes *intra-thread* allocation safe, which is what lifts the
-`check_no_alloc_in_spawn` guard.
+not need it, because this slice only makes *intra-thread* allocation safe, which is what lifted the
+former no-allocation-in-spawn guard (now removed).
 
 Test plan for the slice: a spawned body that allocates (a `Bytes`) and a concurrent allocation in
 the parent, run under a race detector or with enough iterations to expose a shared-bump race, must
