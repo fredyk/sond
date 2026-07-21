@@ -955,6 +955,13 @@ impl Codegen {
     /// registers and calls the function with no shared-memory hand-off.
     ///
     /// Raw syscalls throughout: no libc, so a spawning program still links and runs freestanding.
+    ///
+    /// SEMANTICS, and a real footgun: the join is at the spawning function's return, so every
+    /// statement AFTER a spawn in that function runs CONCURRENTLY with the thread, not after it.
+    /// Releasing a resource the thread uses in the same function (`spawn pump(fd); close_fd(fd)`)
+    /// tears it out from under a live thread; the symptom is corruption, not a clean error. Put the
+    /// spawns in their own function and release in the caller, which only resumes once the join is
+    /// done. The capability system will make the wrong version a compile error (RFC-0010 section 7).
     fn emit_spawn(&mut self, call: &Expr) {
         let Expr::Call(callee, args) = call else {
             panic!("`spawn` must be followed by a function call");

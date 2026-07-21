@@ -147,6 +147,19 @@ Writing this surfaced three things the earlier RFCs implied but never stated:
    **precondition** for turning on hosted threads, not an afterthought: the allocator must pick its
    story before Layer B ships, or the headline guarantee is false at the foundation.
 
+5. **The continuation runs concurrently with the children (surfaced porting a relay, 2026-07-21).**
+   `spawn` starts a thread and the join happens at the END of the spawning function, so every
+   statement AFTER a `spawn` in that function runs **in parallel** with the thread, not after it.
+   This is the whole point of a structured-concurrency scope, but it reads sequentially and bites:
+   `spawn pump(fd); close_fd(fd)` in one function closes the descriptor UNDER a live thread, and the
+   symptom is random corruption, not a clean error. The discipline is to put the spawns in their own
+   small function and let the CALLER release the resources, since the caller only resumes once the
+   join is done. This is a third footgun the capability system closes at compile time: if `fd` is
+   MOVED into the thread as a capability, the parent no longer holds it and `close_fd(fd)` in the
+   parent is a compile error, exactly like the shared-arena race and the unbounded waits. One relay,
+   three instances, all the same argument: capabilities + effects turn silent corruption into a
+   rejected program.
+
 ## 8. Honest limits
 
 - This model **presupposes the effect + capability system** (RFC-0000 §5–6), which is *not yet
