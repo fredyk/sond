@@ -125,8 +125,9 @@ fn check_complete(port: &PortDef, prov: &ProviderDef, target: &str) -> Result<()
                 sig.params.len()
             ));
         }
-        // Parameter names must match the port's: the port's contract is written against
-        // those names, so a provider that renames a parameter would silence the contract.
+        // Each parameter must match the port's in both name and type. The name, because the
+        // port's contract is written against it; the type, because a mismatched type means the
+        // provider does not implement the interface a caller was verified against.
         for (mp, sp) in m.params.iter().zip(&sig.params) {
             if mp.name != sp.name {
                 return Err(format!(
@@ -136,9 +137,47 @@ fn check_complete(port: &PortDef, prov: &ProviderDef, target: &str) -> Result<()
                     port.name, target, sig.name, mp.name, sp.name
                 ));
             }
+            if mp.ty != sp.ty {
+                return Err(format!(
+                    "provider `{} for {}`: method `{}` gives parameter `{}` type `{}` but the \
+                     port declares type `{}`.",
+                    port.name,
+                    target,
+                    sig.name,
+                    mp.name,
+                    type_name(&mp.ty),
+                    type_name(&sp.ty)
+                ));
+            }
+        }
+        if m.ret != sig.ret {
+            return Err(format!(
+                "provider `{} for {}`: method `{}` has return type `{}` but the port declares `{}`.",
+                port.name,
+                target,
+                sig.name,
+                opt_type_name(&m.ret),
+                opt_type_name(&sig.ret)
+            ));
         }
     }
     Ok(())
+}
+
+/// Renders a type name (`Type`), reusing the existing renderer.
+fn type_name(t: &crate::ast::Type) -> String {
+    match t {
+        crate::ast::Type::Named(s) => s.clone(),
+        crate::ast::Type::Ptr(inner) => format!("*{}", type_name(inner)),
+    }
+}
+
+/// Renders an optional return type: the type, or `()` for unit.
+fn opt_type_name(t: &Option<crate::ast::Type>) -> String {
+    match t {
+        Some(t) => type_name(t),
+        None => "()".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -280,6 +319,34 @@ mod tests {
         .unwrap_err();
         assert!(e.contains("parameter"), "explains the parameter-name mismatch: {e}");
         assert!(e.contains('b'), "names the port's parameter: {e}");
+    }
+
+    #[test]
+    fn a_provider_with_a_mismatched_parameter_type_is_rejected() {
+        // Arity and names match, but the type does not: the provider does not implement the
+        // port's interface, and a caller verified against the port would be lied to.
+        let e = resolve(
+            "port Serial { fn putc(b: i64) }\n\
+             provides Serial for pic16 { fn putc(b: *i64) { } }\n\
+             use Serial",
+            "pic16",
+        )
+        .unwrap_err();
+        assert!(e.contains("putc"), "names the method: {e}");
+        assert!(e.contains("type"), "explains the type mismatch: {e}");
+    }
+
+    #[test]
+    fn a_provider_with_a_mismatched_return_type_is_rejected() {
+        let e = resolve(
+            "port Reader { fn get() -> i64 }\n\
+             provides Reader for host { fn get() -> *i64 { 0 } }\n\
+             use Reader",
+            "host",
+        )
+        .unwrap_err();
+        assert!(e.contains("get"), "names the method: {e}");
+        assert!(e.contains("return"), "explains the return-type mismatch: {e}");
     }
 
     #[test]
