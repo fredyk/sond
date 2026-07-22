@@ -389,7 +389,15 @@ fn emit_call(e: &Expr, out: &mut String, locals: &HashMap<String, u8>) {
                 l!("        movlw   0x{v:02X}");
                 l!("        movwf   0x{r:02X}");
             }
-            _ => l!("        ; poke8 needs constant reg,val in Phase 1b"),
+            // Constant register, RUNTIME value: evaluate the value into W (banksel
+            // is bit-ops on STATUS, so W survives), then store it. The register
+            // address must still be a constant so we can bank-select it.
+            (Some(r), None) => {
+                eval_to_w(&args[1].value, out, locals);
+                l!("        banksel 0x{r:02X}");
+                l!("        movwf   0x{r:02X}");
+            }
+            _ => l!("        ; poke8 needs a constant register in Phase 1b"),
         },
         ("delay", 0) => l!("        call    delay"),
         ("serial_init", 0) => l!("        call    serial_init"),
@@ -468,6 +476,21 @@ mod tests {
         assert!(
             !asm.contains("unsupported expression"),
             "peek8 must be a supported expression"
+        );
+    }
+
+    // poke8 must accept a runtime VALUE (not just a constant) into a fixed
+    // register — e.g. CCPR1L = a received PWM duty, or a computed pin pattern.
+    #[test]
+    fn poke8_writes_a_variable_value() {
+        let asm = asm_for("fn main() { serial_init() let speed = serial_getc() poke8(0x15, speed) }");
+        assert!(
+            asm.contains("movwf   0x15"),
+            "poke8(reg, var) must write the evaluated value to the register:\n{asm}"
+        );
+        assert!(
+            !asm.contains("poke8 needs"),
+            "a variable value must be supported, not rejected"
         );
     }
 
