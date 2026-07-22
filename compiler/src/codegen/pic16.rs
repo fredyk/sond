@@ -76,7 +76,7 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
 
     l!("main:");
     if let Some(m) = funcs.iter().find(|f| f.name == "main") {
-        emit_block(&m.body, &mut out, &mut lbl, &fn_locals[&m.name], &fnp);
+        emit_block(&m.body, &mut out, &mut lbl, &fn_locals[&m.name], &fnp, None);
     }
     l!("        goto    $               ; halt");
 
@@ -87,7 +87,7 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
             continue;
         }
         l!("{}:", f.name);
-        emit_block(&f.body, &mut out, &mut lbl, &fn_locals[&f.name], &fnp);
+        emit_block(&f.body, &mut out, &mut lbl, &fn_locals[&f.name], &fnp, None);
         l!("        return");
     }
     // A simple ~two-nested-loop busy delay (uses two GPRs at 0x70/0x71 in the common bank).
@@ -327,9 +327,10 @@ fn emit_block(
     lbl: &mut usize,
     locals: &HashMap<String, u8>,
     fnp: &HashMap<String, Vec<u8>>,
+    le: Option<usize>,
 ) {
     for s in &b.stmts {
-        emit_stmt(s, out, lbl, locals, fnp);
+        emit_stmt(s, out, lbl, locals, fnp, le);
     }
     if let Some(tail) = &b.tail {
         match tail.as_ref() {
@@ -337,7 +338,7 @@ fn emit_block(
                 cond,
                 then_branch,
                 else_branch,
-            } => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals, fnp),
+            } => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals, fnp, le),
             e if as_call(e).is_some() => emit_call(e, out, locals, fnp),
             // A value tail is the block's result — for a function body it is the
             // return value, left in W.
@@ -352,6 +353,7 @@ fn emit_stmt(
     lbl: &mut usize,
     locals: &HashMap<String, u8>,
     fnp: &HashMap<String, Vec<u8>>,
+    le: Option<usize>,
 ) {
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
@@ -379,8 +381,9 @@ fn emit_stmt(
             let n = *lbl;
             *lbl += 1;
             l!("_loop{n}:");
-            emit_block(body, out, lbl, locals, fnp);
+            emit_block(body, out, lbl, locals, fnp, Some(n));
             l!("        goto    _loop{n}");
+            l!("_end{n}:                          ; break target");
         }
         // `for lhs < rhs { .. }`: an 8-bit counted loop (unsigned), the basis of compute kernels
         // and reading a length-prefixed payload. `lhs = lhs + 1` in the body advances it.
@@ -398,16 +401,21 @@ fn emit_stmt(
             l!("        subwf   0x7E, w         ; lhs - rhs, C set iff lhs >= rhs");
             l!("        btfsc   STATUS, 0       ; C is bit 0");
             l!("        goto    _end{n}         ; lhs >= rhs -> exit");
-            emit_block(body, out, lbl, locals, fnp);
+            emit_block(body, out, lbl, locals, fnp, Some(n));
             l!("        goto    _loop{n}");
             l!("_end{n}:");
         }
+        // `break`: jump to the enclosing loop's end label.
+        Stmt::Break => match le {
+            Some(n) => l!("        goto    _end{n}         ; break"),
+            None => l!("        ; break outside a loop"),
+        },
         // A statement-position `if x == C { .. } else { .. }`: the command dispatch.
         Stmt::Expr(Expr::If {
             cond,
             then_branch,
             else_branch,
-        }) => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals, fnp),
+        }) => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals, fnp, le),
         Stmt::Expr(e) => emit_call(e, out, locals, fnp),
         _ => l!("        ; (unsupported statement omitted in Phase 1b)"),
     }
@@ -415,6 +423,9 @@ fn emit_stmt(
 
 /// Emits `if <lhs> == C { then } else { else }` (or `!=`), the byte-compare dispatch a
 /// compute node needs. Other conditions are omitted (Phase 1b).
+// The emit chain threads several read-only bits of context (locals, function
+// table, enclosing loop); bundling them into a Ctx struct is a future cleanup.
+#[allow(clippy::too_many_arguments)]
 fn emit_if(
     cond: &Expr,
     then_b: &crate::ast::Block,
@@ -423,6 +434,7 @@ fn emit_if(
     lbl: &mut usize,
     locals: &HashMap<String, u8>,
     fnp: &HashMap<String, Vec<u8>>,
+    le: Option<usize>,
 ) {
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
@@ -449,11 +461,11 @@ fn emit_if(
             l!("        btfsc   STATUS, 2");
         }
         l!("        goto    _else{n}");
-        emit_block(then_b, out, lbl, locals, fnp);
+        emit_block(then_b, out, lbl, locals, fnp, le);
         l!("        goto    _endif{n}");
         l!("_else{n}:");
         if let Some(eb) = else_b {
-            emit_block(eb, out, lbl, locals, fnp);
+            emit_block(eb, out, lbl, locals, fnp, le);
         }
         l!("_endif{n}:");
     } else {
@@ -582,6 +594,19 @@ mod tests {
             !asm.contains("unsupported expression"),
             "peek8 must be a supported expression"
         );
+    }
+
+    // `break` exits the enclosing loop — the construct the serial start-bit wait
+    // needs (poll RA1, break when the start edge arrives). It must jump to the
+    // loop's end label, and an infinite `for { }` must grow one.
+    #[test]
+    fn break_exits_the_enclosing_loop() {
+        let asm = asm_for("fn main() { serial_init() for { let b = serial_getc() if b == 0 { break } } }");
+        assert!(
+            !asm.contains("(unsupported statement"),
+            "break must be compiled, not dropped:\n{asm}"
+        );
+        assert!(asm.contains("goto    _end"), "break must jump to the loop end label:\n{asm}");
     }
 
     // When the source defines a function whose name is a backend intrinsic
