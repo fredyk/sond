@@ -3,7 +3,7 @@
 | Field       | Value                                                                 |
 |-------------|-----------------------------------------------------------------------|
 | RFC         | 0014                                                                  |
-| Status      | Draft                                                                 |
+| Status      | Implemented (all six slices landed 2026-07-22)                        |
 | Date        | 2026-07-22                                                            |
 | Authors     | Jhon Magdalena Vila                                                    |
 | Motivation  | A caller that needs "a serial line" cannot say so: the include model resolves to one concrete file per target, so on a target with no stdlib implementation you must hand-stub every primitive |
@@ -218,3 +218,28 @@ implementation, and the contract is the proof that ties them.
 
 Each slice is a compile-time-only change (no runtime), so the whole feature can land behind failing
 tests without touching a single generated instruction until step 6 proves it on real hardware.
+
+## 11. Status: implemented (2026-07-22)
+
+The mechanism landed in six commits, strict TDD throughout, and matches this design with one honest
+adjustment: the concrete target identifiers are the compiler's own tags (`host`, `pic16`, `uefi`,
+`freestanding`, `shared`), not the `x86_64_linux` of the examples above. What is built:
+
+- **Grammar** (`port`, `provides ... for`, `use`): parsed into `PortDef` (bodyless `Signature`s),
+  `ProviderDef` (per-target functions), and `UseDecl`, collected off the function list like structs
+  and enums. The function-head parser is shared (`parse_sig_tail`) so a port method and a function
+  signature are one grammar.
+- **Resolution** (`ports::resolve_ports`, run in the driver after parse, before lowering): each `use`
+  binds to exactly one provider for the active target. Zero (message names the target and lists those
+  that do have a provider), ambiguous, missing-method, wrong-arity, and renamed-parameter are all
+  compile errors; using an undeclared port is too.
+- **Splicing**: the selected provider's methods are added to the translation unit (one target's
+  implementation, providers for other targets dropped, a repeated `use` spliced once), so codegen is
+  unchanged and a call to a port method resolves to the active target's code.
+- **Verification**: each spliced method carries the port signature's contract, so the existing prover
+  proves the body meets the port's `ensures`. A provider returning `x + 1` against `ensures { r == x +
+  x }` is rejected with a counterexample; `x + x` compiles and runs.
+
+What remains open (not blocking): the `default provider` question (section 9, leaning against), the
+generated-header emission of ports (section 9), and slice-plan step 6, migrating the real `Serial`
+to a port and deleting the firmware stubs, which is downstream product work, not language work.
