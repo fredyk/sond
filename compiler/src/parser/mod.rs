@@ -4,7 +4,7 @@
 
 use crate::ast::{
     Arg, BinOp, Block, EnumDef, EnumVariant, Expr, Function, Global, MatchArm, Param, PortDef,
-    ProviderDef, Signature, Stmt, StructDef, Type, UnOp, Visibility,
+    ProviderDef, Signature, Stmt, StructDef, Type, UnOp, UseDecl, Visibility,
 };
 use crate::token::Token;
 
@@ -22,6 +22,8 @@ pub struct Parser {
     ports: Vec<PortDef>,
     /// Top-level `provides` (per-target implementations) collected while parsing.
     providers: Vec<ProviderDef>,
+    /// Top-level `use Port` directives collected while parsing.
+    uses: Vec<UseDecl>,
     /// While true, `Name { ... }` is NOT parsed as a struct literal, set when
     /// parsing an `if`/`for` condition so `if x { }` stays condition + block.
     no_struct_lit: bool,
@@ -49,6 +51,7 @@ impl Parser {
             enums: Vec::new(),
             ports: Vec::new(),
             providers: Vec::new(),
+            uses: Vec::new(),
             no_struct_lit: false,
         }
     }
@@ -70,6 +73,7 @@ impl Parser {
                     | Token::Enum
                     | Token::Port
                     | Token::Provides
+                    | Token::Use
                     | Token::Pub
                     | Token::Priv
                     | Token::Impl
@@ -112,6 +116,10 @@ impl Parser {
                 Some(Token::Provides) => {
                     let p = self.parse_provides();
                     self.providers.push(p);
+                }
+                Some(Token::Use) => {
+                    let u = self.parse_use();
+                    self.uses.push(u);
                 }
                 Some(Token::Test) => {
                     let t = self.parse_test(funcs.len());
@@ -178,6 +186,11 @@ impl Parser {
     /// The top-level `provides` (per-target implementations) collected during `parse_program`.
     pub fn take_providers(&mut self) -> Vec<ProviderDef> {
         std::mem::take(&mut self.providers)
+    }
+
+    /// The top-level `use Port` directives collected during `parse_program`.
+    pub fn take_uses(&mut self) -> Vec<UseDecl> {
+        std::mem::take(&mut self.uses)
     }
 
     /// Parses `enum Name { A, B(T), C }`: a sum type; each variant is a bare tag or
@@ -404,6 +417,14 @@ impl Parser {
             target,
             methods,
         }
+    }
+
+    /// Parses `use Port`: a dependency on a port's interface (RFC-0014). Resolution
+    /// to the active target's provider is a later slice; this parses the directive.
+    fn parse_use(&mut self) -> UseDecl {
+        self.expect(Token::Use);
+        let port = self.expect_ident();
+        UseDecl { port }
     }
 
     /// Parses a `{ ... }` block: a sequence of statements plus an optional tail

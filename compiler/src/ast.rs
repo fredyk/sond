@@ -91,6 +91,14 @@ pub struct ProviderDef {
     pub methods: Vec<Function>,
 }
 
+/// A `use Port` directive: the program depends on `port`'s interface (RFC-0014).
+/// Resolution splices the one `provides Port for <active target>` in scope; a
+/// missing, ambiguous, or signature-incomplete provider is a compile error.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UseDecl {
+    pub port: String,
+}
+
 /// A module-level global binding: `let (mut)? NAME = <const expr>` at the top
 /// level. Lives in `.data`; the initializer must be a constant.
 #[derive(Debug, Clone, PartialEq)]

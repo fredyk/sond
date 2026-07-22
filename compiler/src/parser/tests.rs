@@ -591,3 +591,15 @@ fn a_port_and_two_providers_coexist() {
     let targets: Vec<&str> = provs.iter().map(|pr| pr.target.as_str()).collect();
     assert_eq!(targets, vec!["x86_64_linux", "pic16"]);
 }
+
+#[test]
+fn parses_a_use_directive() {
+    // `use Port` names the interface the program depends on; it is collected off the
+    // function list and resolved to a provider in a later pass.
+    let mut p = Parser::new(tokenize("use Serial\nfn main() -> i64 { 0 }"));
+    let funcs = p.parse_program();
+    assert_eq!(funcs.len(), 1, "main is the function; `use` is not one");
+    let uses = p.take_uses();
+    assert_eq!(uses.len(), 1);
+    assert_eq!(uses[0].port, "Serial");
+}

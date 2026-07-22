@@ -44,6 +44,8 @@ pub enum Token {
     Port,
     /// `provides Port for Target`: one target's implementation of a port (RFC-0014).
     Provides,
+    /// `use Port`: depend on a port's interface; resolved to the active target's provider (RFC-0014).
+    Use,
     /// `as`: an explicit numeric conversion (`x as u8`, `n as f64`).
     As,
     /// `match`: pattern match on a sum type (exhaustive).
