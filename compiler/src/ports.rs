@@ -23,6 +23,18 @@ pub fn resolve_ports(
     uses: &[UseDecl],
     target: &str,
 ) -> Result<Vec<Function>, String> {
+    // Every provider must implement a declared port. A typo in a provider's port name would
+    // otherwise leave it orphaned and silently unused, and a later `use` would fail as if the
+    // provider had never been written.
+    for pr in providers {
+        if !ports.iter().any(|p| p.name == pr.port) {
+            return Err(format!(
+                "`provides {} for {}`: no port named `{}` is declared.",
+                pr.port, pr.target, pr.port
+            ));
+        }
+    }
+
     let mut spliced = Vec::new();
     let mut seen: Vec<&str> = Vec::new();
     for u in uses {
@@ -353,6 +365,20 @@ mod tests {
     fn using_an_undeclared_port_is_an_error() {
         let e = resolve("use Serial", "pic16").unwrap_err();
         assert!(e.contains("no port named"), "a use of an undeclared port fails: {e}");
+    }
+
+    #[test]
+    fn a_provider_for_an_undeclared_port_is_rejected() {
+        // A typo in a provider's port name would otherwise leave it orphaned and silently
+        // unused, and a later `use` would fail as if the provider were never written.
+        let e = resolve(
+            "port Serial { fn putc(b: i64) }\n\
+             provides Serail for pic16 { fn putc(b: i64) { } }",
+            "pic16",
+        )
+        .unwrap_err();
+        assert!(e.contains("Serail"), "names the misspelled port: {e}");
+        assert!(e.contains("no port named"), "says the port is undeclared: {e}");
     }
 
     #[test]
