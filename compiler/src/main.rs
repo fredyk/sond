@@ -108,20 +108,32 @@ fn main() -> ExitCode {
     // backtrace, a good oracle explains the rejection.
     std::panic::set_hook(Box::new(|_| {}));
     let src_for_parse = src.clone();
-    let (mut funcs, globals, mut structs, enums) = match std::panic::catch_unwind(move || {
-        let mut p = Parser::new(tokenize(&src_for_parse));
-        let funcs = p.parse_program();
-        let globals = p.take_globals();
-        let structs = p.take_structs();
-        let enums = p.take_enums();
-        (funcs, globals, structs, enums)
-    }) {
-        Ok(fg) => fg,
-        Err(e) => {
-            eprintln!("sondc: parse error in {input}: {}", panic_message(&e));
-            return ExitCode::FAILURE;
-        }
-    };
+    let (mut funcs, globals, mut structs, enums, ports, providers, uses) =
+        match std::panic::catch_unwind(move || {
+            let mut p = Parser::new(tokenize(&src_for_parse));
+            let funcs = p.parse_program();
+            let globals = p.take_globals();
+            let structs = p.take_structs();
+            let enums = p.take_enums();
+            let ports = p.take_ports();
+            let providers = p.take_providers();
+            let uses = p.take_uses();
+            (funcs, globals, structs, enums, ports, providers, uses)
+        }) {
+            Ok(fg) => fg,
+            Err(e) => {
+                eprintln!("sondc: parse error in {input}: {}", panic_message(&e));
+                return ExitCode::FAILURE;
+            }
+        };
+
+    // RFC-0014: bind each `use Port` to the one provider for the active target. A missing,
+    // ambiguous, or signature-incomplete provider is a compile error here, before lowering.
+    let port_target = if pic16 { "pic16" } else { target_tag };
+    if let Err(msg) = sondc::ports::resolve_ports(&ports, &providers, &uses, port_target) {
+        eprintln!("sondc: {msg}");
+        return ExitCode::FAILURE;
+    }
 
     // `test "..." { .. }` blocks are inert in an ordinary compile, only `sond test`
     // gathers and runs them. In `--test` mode, keep the tests, drop the file's own

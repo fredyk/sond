@@ -13,6 +13,7 @@ pub mod eval;
 pub mod header;
 pub mod lexer;
 pub mod parser;
+pub mod ports;
 pub mod resolve;
 pub mod testing;
 pub mod token;
