@@ -240,6 +240,11 @@ adjustment: the concrete target identifiers are the compiler's own tags (`host`,
   proves the body meets the port's `ensures`. A provider returning `x + 1` against `ensures { r == x +
   x }` is rejected with a counterexample; `x + x` compiles and runs.
 
-What remains open (not blocking): the `default provider` question (section 9, leaning against), the
-generated-header emission of ports (section 9), and slice-plan step 6, migrating the real `Serial`
-to a port and deleting the firmware stubs, which is downstream product work, not language work.
+Header emission of ports (section 9) is also done: a public port is rendered into a module's
+generated header verbatim, its providers omitted like function bodies, so a consumer can `include`
+the header and check against the interface. There is a runnable example at
+`examples/host/language/ports/`.
+
+What remains open (not blocking): the `default provider` question (section 9, leaning against), and
+slice-plan step 6, migrating the real `Serial` to a port and deleting the firmware stubs, which is
+downstream product work, not language work.
