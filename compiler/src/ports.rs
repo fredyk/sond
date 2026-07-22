@@ -382,6 +382,43 @@ mod tests {
     }
 
     #[test]
+    fn two_distinct_ports_each_resolve_and_splice_independently() {
+        // A real program depends on several interfaces at once. Each `use` binds to its own
+        // port's provider for the active target, and both providers' methods are spliced.
+        let spliced = resolve(
+            "port Serial { fn putc(b: i64) }\n\
+             port Clock { fn now() -> i64 }\n\
+             provides Serial for host { fn putc(b: i64) { } }\n\
+             provides Clock for host { fn now() -> i64 { 0 } }\n\
+             use Serial\n\
+             use Clock",
+            "host",
+        )
+        .expect("both ports resolve for host");
+        let mut names: Vec<&str> = spliced.iter().map(|f| f.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["now", "putc"], "both providers' methods spliced");
+    }
+
+    #[test]
+    fn one_port_resolving_does_not_hide_another_ports_missing_provider() {
+        // Serial resolves for host, but Clock has no host provider: the whole program is
+        // rejected, not silently accepted because the first `use` happened to resolve.
+        let e = resolve(
+            "port Serial { fn putc(b: i64) }\n\
+             port Clock { fn now() -> i64 }\n\
+             provides Serial for host { fn putc(b: i64) { } }\n\
+             provides Clock for pic16 { fn now() -> i64 { 0 } }\n\
+             use Serial\n\
+             use Clock",
+            "host",
+        )
+        .unwrap_err();
+        assert!(e.contains("Clock"), "names the port with no host provider: {e}");
+        assert!(e.contains("host"), "names the target lacking it: {e}");
+    }
+
+    #[test]
     fn a_program_with_no_ports_resolves_trivially() {
         let r = resolve("fn main() -> i64 { 0 }", "host");
         assert!(r.is_ok(), "no ports, nothing to resolve");
