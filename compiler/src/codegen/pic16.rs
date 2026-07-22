@@ -91,79 +91,88 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
         l!("        return");
     }
     // A simple ~two-nested-loop busy delay (uses two GPRs at 0x70/0x71 in the common bank).
-    l!("delay:");
-    l!("        movlw   0xFF");
-    l!("        movwf   0x70");
-    l!("_dly1:  movlw   0xFF");
-    l!("        movwf   0x71");
-    l!("_dly2:  decfsz  0x71, f");
-    l!("        goto    _dly2");
-    l!("        decfsz  0x70, f");
-    l!("        goto    _dly1");
-    l!("        return");
+    // Ceded if the source defines its own `delay` (a user function of the same name wins).
+    if !fnp.contains_key("delay") {
+        l!("delay:");
+        l!("        movlw   0xFF");
+        l!("        movwf   0x70");
+        l!("_dly1:  movlw   0xFF");
+        l!("        movwf   0x71");
+        l!("_dly2:  decfsz  0x71, f");
+        l!("        goto    _dly2");
+        l!("        decfsz  0x70, f");
+        l!("        goto    _dly1");
+        l!("        return");
+    }
     // Bit-banged 9600-baud 8N1 UART on RA0 (TX). The 16F684 has no hardware UART, so this is
     // the physical layer of the PIC-cluster link (PC <-> CP2102 <-> PIC). BITDLY is tuned for
     // the internal oscillator at 8 MHz (~208 Tcy per bit); calibrate on real hardware if framing
     // is off (widen/narrow BITDLY by a few counts).
     l!("BITDLY  equ     0x41            ; ~one bit period at 8 MHz/9600 (calibrate on HW)");
     l!("HALFDLY equ     0x20            ; ~half a bit period (start-edge -> first-bit center)");
-    l!("serial_init:");
-    l!("        banksel OSCCON");
-    l!("        movlw   0x70            ; IRCF=111 -> 8 MHz internal oscillator");
-    l!("        movwf   OSCCON");
-    l!("        banksel ANSEL");
-    l!("        clrf    ANSEL           ; all pins digital (ADC off)");
-    l!("        banksel CMCON0");
-    l!("        movlw   0x07            ; CM<2:0>=111");
-    l!("        movwf   CMCON0          ; comparators off -> RA1 (C1IN-) is digital I/O");
-    l!("        banksel VRCON");
-    l!("        clrf    VRCON           ; CVref off (also shares RA1)");
-    l!("        banksel TRISA");
-    l!("        bcf     TRISA, 0        ; RA0 = TX = output");
-    l!("        bsf     TRISA, 1        ; RA1 = RX = input");
-    l!("        banksel PORTA");
-    l!("        bsf     PORTA, 0        ; idle line high");
-    l!("        return");
-    l!("serial_getc:                    ; receive one byte from RA1 (9600 8N1), return in W");
-    l!("        clrf    0x75            ; result accumulator");
-    l!("        movlw   0x08");
-    l!("        movwf   0x76            ; bit count");
-    l!("_sg_wait:                       ; wait for the start bit (line goes low)");
-    l!("        banksel PORTA");
-    l!("        btfsc   PORTA, 1");
-    l!("        goto    _sg_wait");
-    l!("        call    _halfdly        ; half a bit -> middle of the start bit (center sampling)");
-    l!("_sg_bit:");
-    l!("        call    _bitdly         ; advance ~one bit to the middle of this data bit");
-    l!("        banksel PORTA");
-    l!("        bcf     STATUS, 0       ; carry = sampled RX level");
-    l!("        btfsc   PORTA, 1");
-    l!("        bsf     STATUS, 0");
-    l!("        rrf     0x75, f         ; shift carry into the byte, LSB first");
-    l!("        decfsz  0x76, f");
-    l!("        goto    _sg_bit");
-    l!("        call    _bitdly         ; step over the stop bit");
-    l!("        movf    0x75, w");
-    l!("        return");
-    l!("serial_putc:                    ; transmit W as 9600 8N1, LSB first, on RA0");
-    l!("        movwf   0x72            ; byte");
-    l!("        movlw   0x08");
-    l!("        movwf   0x73            ; bit count");
-    l!("        banksel PORTA");
-    l!("        bcf     PORTA, 0        ; start bit");
-    l!("        call    _bitdly");
-    l!("_sp_bit:");
-    l!("        rrf     0x72, f         ; LSB -> C");
-    l!("        btfss   STATUS, 0       ; C is bit 0 of STATUS");
-    l!("        bcf     PORTA, 0");
-    l!("        btfsc   STATUS, 0");
-    l!("        bsf     PORTA, 0");
-    l!("        call    _bitdly");
-    l!("        decfsz  0x73, f");
-    l!("        goto    _sp_bit");
-    l!("        bsf     PORTA, 0        ; stop bit");
-    l!("        call    _bitdly");
-    l!("        return");
+    if !fnp.contains_key("serial_init") {
+        l!("serial_init:");
+        l!("        banksel OSCCON");
+        l!("        movlw   0x70            ; IRCF=111 -> 8 MHz internal oscillator");
+        l!("        movwf   OSCCON");
+        l!("        banksel ANSEL");
+        l!("        clrf    ANSEL           ; all pins digital (ADC off)");
+        l!("        banksel CMCON0");
+        l!("        movlw   0x07            ; CM<2:0>=111");
+        l!("        movwf   CMCON0          ; comparators off -> RA1 (C1IN-) is digital I/O");
+        l!("        banksel VRCON");
+        l!("        clrf    VRCON           ; CVref off (also shares RA1)");
+        l!("        banksel TRISA");
+        l!("        bcf     TRISA, 0        ; RA0 = TX = output");
+        l!("        bsf     TRISA, 1        ; RA1 = RX = input");
+        l!("        banksel PORTA");
+        l!("        bsf     PORTA, 0        ; idle line high");
+        l!("        return");
+    }
+    if !fnp.contains_key("serial_getc") {
+        l!("serial_getc:                    ; receive one byte from RA1 (9600 8N1), return in W");
+        l!("        clrf    0x75            ; result accumulator");
+        l!("        movlw   0x08");
+        l!("        movwf   0x76            ; bit count");
+        l!("_sg_wait:                       ; wait for the start bit (line goes low)");
+        l!("        banksel PORTA");
+        l!("        btfsc   PORTA, 1");
+        l!("        goto    _sg_wait");
+        l!("        call    _halfdly        ; half a bit -> middle of the start bit (center sampling)");
+        l!("_sg_bit:");
+        l!("        call    _bitdly         ; advance ~one bit to the middle of this data bit");
+        l!("        banksel PORTA");
+        l!("        bcf     STATUS, 0       ; carry = sampled RX level");
+        l!("        btfsc   PORTA, 1");
+        l!("        bsf     STATUS, 0");
+        l!("        rrf     0x75, f         ; shift carry into the byte, LSB first");
+        l!("        decfsz  0x76, f");
+        l!("        goto    _sg_bit");
+        l!("        call    _bitdly         ; step over the stop bit");
+        l!("        movf    0x75, w");
+        l!("        return");
+    }
+    if !fnp.contains_key("serial_putc") {
+        l!("serial_putc:                    ; transmit W as 9600 8N1, LSB first, on RA0");
+        l!("        movwf   0x72            ; byte");
+        l!("        movlw   0x08");
+        l!("        movwf   0x73            ; bit count");
+        l!("        banksel PORTA");
+        l!("        bcf     PORTA, 0        ; start bit");
+        l!("        call    _bitdly");
+        l!("_sp_bit:");
+        l!("        rrf     0x72, f         ; LSB -> C");
+        l!("        btfss   STATUS, 0       ; C is bit 0 of STATUS");
+        l!("        bcf     PORTA, 0");
+        l!("        btfsc   STATUS, 0");
+        l!("        bsf     PORTA, 0");
+        l!("        call    _bitdly");
+        l!("        decfsz  0x73, f");
+        l!("        goto    _sp_bit");
+        l!("        bsf     PORTA, 0        ; stop bit");
+        l!("        call    _bitdly");
+        l!("        return");
+    }
     l!("_bitdly:");
     l!("        movlw   BITDLY");
     l!("        movwf   0x74");
@@ -468,6 +477,10 @@ fn emit_call(
         return;
     };
     match (name, args.len()) {
+        // A user-defined function wins over a same-named backend intrinsic (so a
+        // `provides Serial for pic16` written in Sond is dispatched with proper
+        // argument passing, not the intrinsic's W convention).
+        (name, _) if fnp.contains_key(name) => emit_user_call(name, args, out, locals, fnp),
         ("poke8", 2) => match (const8(&args[0].value), const8(&args[1].value)) {
             (Some(r), Some(v)) => {
                 l!("        banksel 0x{r:02X}");
@@ -498,8 +511,6 @@ fn emit_call(
             eval_to_w(&args[0].value, out, locals, fnp);
             l!("        call    serial_putc");
         }
-        // A call to a user-defined function: pass args, then `call name`.
-        (name, _) if fnp.contains_key(name) => emit_user_call(name, args, out, locals, fnp),
         _ => l!("        ; (unsupported call `{name}` in Phase 1b)"),
     }
 }
@@ -571,6 +582,20 @@ mod tests {
             !asm.contains("unsupported expression"),
             "peek8 must be a supported expression"
         );
+    }
+
+    // When the source defines a function whose name is a backend intrinsic
+    // (serial_getc/putc/init/delay) — e.g. a `provides Serial for pic16` written
+    // in Sond — the backend must CEDE its intrinsic (else gpasm sees a duplicate
+    // label). The user's definition, emitted as a subroutine, wins.
+    #[test]
+    fn a_user_function_cedes_the_backend_intrinsic() {
+        let asm = asm_for("fn serial_getc() -> i64 { 42 } fn main() { let x = serial_getc() }");
+        assert!(
+            !asm.contains("receive one byte from RA1"),
+            "the backend must cede its serial_getc intrinsic to the user's definition:\n{asm}"
+        );
+        assert!(asm.contains("serial_getc:"), "the user's serial_getc subroutine must be emitted");
     }
 
     // User-defined functions must be compiled (emitted as subroutines) and
