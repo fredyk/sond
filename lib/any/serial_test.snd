@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/serial.snd: the Serial port (RFC-0014), exercised through a
+// fake host provider. The port is the interface; here a `provides Serial for
+// host` fakes the line with an in-memory buffer, so `use Serial` resolves and the
+// three primitives run under the real test harness.
+
+include "any/serial.snd"
+include "x86_64/linux/testing.snd"
+
+// The fake line: serial_getc replays a canned receive buffer; serial_putc records
+// the last byte transmitted. Enough state to observe both directions.
+let mut rx[4]
+let mut rx_pos = 0
+let mut tx_last = 0
+
+provides Serial for host {
+    fn serial_init() { rx_pos = 0 }
+    fn serial_getc() -> u8 {
+        let b = peek8(rx + rx_pos)
+        rx_pos = rx_pos + 1
+        b
+    }
+    fn serial_putc(b: u8) { tx_last = b }
+}
+
+use Serial
+
+test "putc records the byte sent" {
+    serial_init()
+    serial_putc(65)
+    assert_eq(tx_last, 65)
+}
+
+test "getc replays received bytes in order" {
+    poke8(rx + 0, 7)
+    poke8(rx + 1, 9)
+    serial_init()
+    assert_eq(serial_getc(), 7)
+    assert_eq(serial_getc(), 9)
+}
