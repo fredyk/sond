@@ -40,6 +40,8 @@ pub enum Token {
     Spawn,
     /// `enum`: a sum type (closed set of variants).
     Enum,
+    /// `port`: a named interface, a set of signatures implemented per target (RFC-0014).
+    Port,
     /// `as`: an explicit numeric conversion (`x as u8`, `n as f64`).
     As,
     /// `match`: pattern match on a sum type (exhaustive).

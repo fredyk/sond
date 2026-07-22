@@ -52,6 +52,33 @@ pub struct StructDef {
     pub fields: Vec<Param>,
 }
 
+/// A function signature without a body: the interface a `port` method declares
+/// (RFC-0014). It is exactly the head of a `Function` (name, params, return,
+/// contracts and effects) with no `body`, `is_interrupt` or `is_wrapping`, which
+/// are implementation concerns a port does not fix.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Signature {
+    pub vis: Visibility,
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret_name: Option<String>,
+    pub ret: Option<Type>,
+    pub requires: Vec<Expr>,
+    pub ensures: Vec<Expr>,
+    pub effects: Vec<String>,
+}
+
+/// A `port Name { <signatures> }`: a named interface (RFC-0014). A caller depends
+/// on the port; a per-target `provides Name for T { .. }` implements it, and the
+/// compiler splices the one provider matching the active target. The port's
+/// contracts are obligations on every provider and guarantees to every caller.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortDef {
+    pub vis: Visibility,
+    pub name: String,
+    pub methods: Vec<Signature>,
+}
+
 /// A module-level global binding: `let (mut)? NAME = <const expr>` at the top
 /// level. Lives in `.data`; the initializer must be a constant.
 #[derive(Debug, Clone, PartialEq)]

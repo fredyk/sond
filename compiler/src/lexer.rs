@@ -374,6 +374,7 @@ fn keyword_or_ident(word: String) -> Token {
         "struct" => Token::Struct,
         "test" => Token::Test,
         "enum" => Token::Enum,
+        "port" => Token::Port,
         "match" => Token::Match,
         "as" => Token::As,
         "impl" => Token::Impl,

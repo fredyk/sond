@@ -321,10 +321,10 @@ pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> 
                      instead of exiting; a `task_return` value is the intended way to end a task."
                 ));
             }
-            if let Expr::Var(n) = callee {
-                if map.contains_key(n.as_str()) {
-                    work.push(n);
-                }
+            if let Expr::Var(n) = callee
+                && map.contains_key(n.as_str())
+            {
+                work.push(n);
             }
         }
     }

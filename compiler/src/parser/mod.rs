@@ -3,8 +3,8 @@
 //! Grown with strict TDD. Only the productions exercised by a test exist.
 
 use crate::ast::{
-    Arg, BinOp, Block, EnumDef, EnumVariant, Expr, Function, Global, MatchArm, Param, Stmt,
-    StructDef, Type, UnOp, Visibility,
+    Arg, BinOp, Block, EnumDef, EnumVariant, Expr, Function, Global, MatchArm, Param, PortDef,
+    Signature, Stmt, StructDef, Type, UnOp, Visibility,
 };
 use crate::token::Token;
 
@@ -18,6 +18,8 @@ pub struct Parser {
     structs: Vec<StructDef>,
     /// Top-level `enum` (sum type) declarations collected while parsing the program.
     enums: Vec<EnumDef>,
+    /// Top-level `port` (interface) declarations collected while parsing the program.
+    ports: Vec<PortDef>,
     /// While true, `Name { ... }` is NOT parsed as a struct literal, set when
     /// parsing an `if`/`for` condition so `if x { }` stays condition + block.
     no_struct_lit: bool,
@@ -43,6 +45,7 @@ impl Parser {
             globals: Vec::new(),
             structs: Vec::new(),
             enums: Vec::new(),
+            ports: Vec::new(),
             no_struct_lit: false,
         }
     }
@@ -62,6 +65,7 @@ impl Parser {
                     | Token::Let
                     | Token::Struct
                     | Token::Enum
+                    | Token::Port
                     | Token::Pub
                     | Token::Priv
                     | Token::Impl
@@ -96,6 +100,10 @@ impl Parser {
                 Some(Token::Enum) => {
                     let e = self.parse_enum();
                     self.enums.push(e);
+                }
+                Some(Token::Port) => {
+                    let p = self.parse_port();
+                    self.ports.push(p);
                 }
                 Some(Token::Test) => {
                     let t = self.parse_test(funcs.len());
@@ -152,6 +160,11 @@ impl Parser {
     /// The top-level enum (sum type) declarations collected during `parse_program`.
     pub fn take_enums(&mut self) -> Vec<EnumDef> {
         std::mem::take(&mut self.enums)
+    }
+
+    /// The top-level `port` (interface) declarations collected during `parse_program`.
+    pub fn take_ports(&mut self) -> Vec<PortDef> {
+        std::mem::take(&mut self.ports)
     }
 
     /// Parses `enum Name { A, B(T), C }`: a sum type; each variant is a bare tag or
@@ -247,6 +260,31 @@ impl Parser {
         let is_interrupt = self.eat(Token::Interrupt);
         self.expect(Token::Fn);
         let name = self.expect_ident();
+        let sig = self.parse_sig_tail(vis, name);
+        let body = self.parse_block();
+
+        Function {
+            vis: sig.vis,
+            name: sig.name,
+            params: sig.params,
+            ret_name: sig.ret_name,
+            ret: sig.ret,
+            requires: sig.requires,
+            ensures: sig.ensures,
+            effects: sig.effects,
+            is_interrupt,
+            is_wrapping,
+            is_test: false,
+            test_name: None,
+            body,
+        }
+    }
+
+    /// Parses everything of a function head AFTER `fn NAME`: the parameter list,
+    /// return type, `requires`/`ensures` contracts and `effects` clause, into a
+    /// [`Signature`]. Shared by `parse_function` (which then parses a body) and
+    /// `parse_signature` (a port method, which has none), so the head is defined once.
+    fn parse_sig_tail(&mut self, vis: Visibility, name: String) -> Signature {
         self.expect(Token::LParen);
         let (params, param_refinements) = self.parse_params();
         self.expect(Token::RParen);
@@ -266,8 +304,8 @@ impl Parser {
             (None, None)
         };
 
-        // Implicit `;` may follow the signature line; the contract clauses,
-        // the effects clause and the body may each be separated by them.
+        // Implicit `;` may follow the signature line; the contract clauses and
+        // the effects clause may each be separated by them.
         self.skip_semicolons();
         let mut requires = if self.eat(Token::Requires) {
             self.parse_prop_block()
@@ -292,9 +330,7 @@ impl Parser {
             vec![]
         };
 
-        let body = self.parse_block();
-
-        Function {
+        Signature {
             vis,
             name,
             params,
@@ -303,12 +339,34 @@ impl Parser {
             requires,
             ensures,
             effects,
-            is_interrupt,
-            is_wrapping,
-            is_test: false,
-            test_name: None,
-            body,
         }
+    }
+
+    /// Parses a single port-method signature: `(pub)? fn NAME(params) -> ret
+    /// requires.. ensures.. effects..`, with NO body. Reuses `parse_sig_tail`.
+    fn parse_signature(&mut self) -> Signature {
+        let vis = self.parse_visibility();
+        self.expect(Token::Fn);
+        let name = self.expect_ident();
+        self.parse_sig_tail(vis, name)
+    }
+
+    /// Parses `(pub)? port Name { <signatures> }`: a named interface (RFC-0014). The
+    /// body is a sequence of bodyless `fn` signatures; implicit `;` between them is
+    /// skipped. Providers and `use` resolution are later slices.
+    fn parse_port(&mut self) -> PortDef {
+        let vis = self.parse_visibility();
+        self.expect(Token::Port);
+        let name = self.expect_ident();
+        self.expect(Token::LBrace);
+        let mut methods = Vec::new();
+        self.skip_semicolons();
+        while self.peek() != Some(&Token::RBrace) {
+            methods.push(self.parse_signature());
+            self.skip_semicolons();
+        }
+        self.expect(Token::RBrace);
+        PortDef { vis, name, methods }
     }
 
     /// Parses a `{ ... }` block: a sequence of statements plus an optional tail

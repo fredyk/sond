@@ -493,3 +493,61 @@ fn parses_a_spawn_statement() {
     let is_spawn_call = f.body.stmts.iter().any(|s| matches!(s, Stmt::Spawn(Expr::Call(_, _))));
     assert!(is_spawn_call, "the body should hold a Spawn of a call, got {:?}", f.body);
 }
+
+// --- RFC-0014: ports (interfaces implemented per target) ---
+
+#[test]
+fn parses_a_port_with_bodyless_signatures() {
+    // `port Name { fn a() fn b() -> T }` is a named interface: a set of signatures
+    // with no bodies. It is collected like structs/enums, off the function list.
+    let mut p = Parser::new(tokenize(
+        "port Serial {\n\
+           fn serial_init()\n\
+           fn serial_getc() -> i64\n\
+           fn serial_putc(b: i64)\n\
+         }",
+    ));
+    let funcs = p.parse_program();
+    assert!(funcs.is_empty(), "a port declares no functions, got {funcs:?}");
+    let ports = p.take_ports();
+    assert_eq!(ports.len(), 1, "one port parsed");
+    assert_eq!(ports[0].name, "Serial");
+    let names: Vec<&str> = ports[0].methods.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, vec!["serial_init", "serial_getc", "serial_putc"]);
+    assert_eq!(ports[0].methods[1].ret, Some(named("i64")), "keeps the return type");
+    assert_eq!(ports[0].methods[2].params[0].name, "b", "keeps the params");
+}
+
+#[test]
+fn a_port_signature_keeps_its_contracts() {
+    // A port method carries requires/ensures: the obligation every provider must meet
+    // and the guarantee every caller may rely on.
+    let mut p = Parser::new(tokenize(
+        "port Serial {\n\
+           fn serial_getc() -> (b: i64) ensures { b >= -1 }\n\
+         }",
+    ));
+    p.parse_program();
+    let ports = p.take_ports();
+    assert_eq!(ports[0].methods[0].ret_name.as_deref(), Some("b"));
+    assert_eq!(ports[0].methods[0].ensures.len(), 1, "the ensures clause is kept");
+}
+
+#[test]
+fn a_pub_port_is_public() {
+    let mut p = Parser::new(tokenize("pub port P { fn f() }"));
+    p.parse_program();
+    assert_eq!(p.take_ports()[0].vis, Visibility::Pub);
+}
+
+#[test]
+fn a_program_mixes_a_port_with_ordinary_functions() {
+    // A port coexists with functions in any order; the functions still land on the list.
+    let mut p = Parser::new(tokenize(
+        "fn main() -> i64 { 0 }\nport P { fn f() -> i64 }",
+    ));
+    let funcs = p.parse_program();
+    assert_eq!(funcs.len(), 1, "main is the only function");
+    assert_eq!(funcs[0].name, "main");
+    assert_eq!(p.take_ports().len(), 1, "the port is collected separately");
+}
