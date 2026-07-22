@@ -13,25 +13,22 @@
 // hosted API over the OS; this port is the minimal byte interface a bare-metal
 // node needs.
 
-// Types: a transmitted value is a byte (`u8`); a received value is a `short`
-// (`i16`) because it must also carry -1 for "no byte", which a `u8` cannot hold.
-// NOTE: today the compiler treats u8/i16 as names for a machine integer and does
-// not yet enforce their range (that is RFC-0012, bounded integers), so the
-// `requires`/`ensures` below are what actually enforce the byte range. When
-// RFC-0012 lands, `u8` carries `0..255` in the type and the redundant clause can
-// go; the interface already speaks in the right types.
+// Everything is a byte (`u8`): the smallest target this port must run on, an 8-bit
+// microcontroller (PIC16F684), has no wider integer. So `serial_getc` BLOCKS until
+// a byte arrives and returns it, rather than returning a wider "-1 for no byte":
+// there is no room for a sentinel on 8 bits. A non-blocking read is a separate
+// `serial_ready` predicate (added when a provider needs it), never a wider return.
+//
+// NOTE: today the compiler treats `u8` as a name for a machine integer and does not
+// yet enforce its `0..255` range (that is RFC-0012, bounded integers). The interface
+// already speaks in `u8`; when RFC-0012 lands the range is carried by the type.
 pub port Serial {
     // Bring the line up (baud, framing, pin directions) before any byte moves.
     fn serial_init()
 
-    // Receive one byte. Returns 0..255, or -1 when no byte arrived within the
-    // implementation's window (a timeout or an idle line). A caller that must not
-    // block indefinitely reads this and acts on -1.
-    fn serial_getc() -> (b: i16)
-        ensures { b >= -1; b <= 255 }
+    // Receive one byte, blocking until one arrives. The value is a byte.
+    fn serial_getc() -> u8
 
-    // Transmit one byte. `u8` says it is a byte; the contract enforces the range
-    // until the type does, so a provider may rely on `0 <= b <= 255`.
+    // Transmit one byte.
     fn serial_putc(b: u8)
-        requires { b >= 0; b <= 255 }
 }
