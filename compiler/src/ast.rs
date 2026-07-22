@@ -79,6 +79,18 @@ pub struct PortDef {
     pub methods: Vec<Signature>,
 }
 
+/// A `provides Port for Target { <functions> }`: one target's implementation of a
+/// port (RFC-0014). `target` is a target-profile name (`pic16`, `x86_64_linux`,
+/// ...). Resolution picks the single provider whose target matches the build and
+/// splices its `methods`; each must match a signature of `port`, honouring its
+/// contracts. Whether every port method is implemented is checked, not assumed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderDef {
+    pub port: String,
+    pub target: String,
+    pub methods: Vec<Function>,
+}
+
 /// A module-level global binding: `let (mut)? NAME = <const expr>` at the top
 /// level. Lives in `.data`; the initializer must be a constant.
 #[derive(Debug, Clone, PartialEq)]

@@ -551,3 +551,43 @@ fn a_program_mixes_a_port_with_ordinary_functions() {
     assert_eq!(funcs[0].name, "main");
     assert_eq!(p.take_ports().len(), 1, "the port is collected separately");
 }
+
+#[test]
+fn parses_a_provider_with_target_and_bodied_functions() {
+    // `provides Port for Target { fn .. { body } }` is one target's implementation.
+    // The functions have bodies (unlike a port's signatures) and are collected off the
+    // function list, like the port itself.
+    let mut p = Parser::new(tokenize(
+        "provides Serial for pic16 {\n\
+           fn serial_init() { }\n\
+           fn serial_getc() -> i64 { 0 }\n\
+         }",
+    ));
+    let funcs = p.parse_program();
+    assert!(funcs.is_empty(), "provider methods are not top-level functions, got {funcs:?}");
+    let provs = p.take_providers();
+    assert_eq!(provs.len(), 1, "one provider parsed");
+    assert_eq!(provs[0].port, "Serial", "names the port it implements");
+    assert_eq!(provs[0].target, "pic16", "names the target it implements for");
+    let names: Vec<&str> = provs[0].methods.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, vec!["serial_init", "serial_getc"]);
+}
+
+#[test]
+fn a_port_and_two_providers_coexist() {
+    // The whole shape of RFC-0014: one interface, two target implementations, all in one
+    // program, none of them polluting the ordinary function list.
+    let mut p = Parser::new(tokenize(
+        "port Serial { fn putc(b: i64) }\n\
+         provides Serial for x86_64_linux { fn putc(b: i64) { } }\n\
+         provides Serial for pic16 { fn putc(b: i64) { } }\n\
+         fn main() -> i64 { 0 }",
+    ));
+    let funcs = p.parse_program();
+    assert_eq!(funcs.len(), 1, "only main is a function");
+    assert_eq!(p.take_ports().len(), 1, "one port");
+    let provs = p.take_providers();
+    assert_eq!(provs.len(), 2, "two providers");
+    let targets: Vec<&str> = provs.iter().map(|pr| pr.target.as_str()).collect();
+    assert_eq!(targets, vec!["x86_64_linux", "pic16"]);
+}
