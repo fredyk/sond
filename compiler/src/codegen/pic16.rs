@@ -54,14 +54,42 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
     l!("        goto    main");
     l!("        org     0x004");
     l!("        retfie                  ; no interrupt handlers yet");
+    // Allocate every function's parameters + locals to DISJOINT bank-0 RAM
+    // (0x20..0x6F; 0x70+ is serial/delay scratch). Static allocation is sound
+    // because Phase 1b has no recursion. Record each function's parameter
+    // addresses so a call can drop its arguments into the callee's slots.
+    let mut next = 0x20u8;
+    let mut fn_locals: HashMap<String, HashMap<String, u8>> = HashMap::new();
+    let mut fnp: HashMap<String, Vec<u8>> = HashMap::new();
+    for f in funcs {
+        let mut lm = HashMap::new();
+        let mut params = Vec::new();
+        for p in &f.params {
+            lm.insert(p.name.clone(), next);
+            params.push(next);
+            next += 1;
+        }
+        collect_locals(&f.body, &mut lm, &mut next);
+        fn_locals.insert(f.name.clone(), lm);
+        fnp.insert(f.name.clone(), params);
+    }
+
     l!("main:");
     if let Some(m) = funcs.iter().find(|f| f.name == "main") {
-        let mut locals = HashMap::new();
-        let mut next = 0x20u8; // bank-0 GPRs 0x20..0x6F for locals (0x70+ used by serial/delay)
-        collect_locals(&m.body, &mut locals, &mut next);
-        emit_block(&m.body, &mut out, &mut lbl, &locals);
+        emit_block(&m.body, &mut out, &mut lbl, &fn_locals[&m.name], &fnp);
     }
     l!("        goto    $               ; halt");
+
+    // Every other function becomes a subroutine; its body's tail leaves the
+    // return value in W, and a `call name` reaches it.
+    for f in funcs {
+        if f.name == "main" {
+            continue;
+        }
+        l!("{}:", f.name);
+        emit_block(&f.body, &mut out, &mut lbl, &fn_locals[&f.name], &fnp);
+        l!("        return");
+    }
     // A simple ~two-nested-loop busy delay (uses two GPRs at 0x70/0x71 in the common bank).
     l!("delay:");
     l!("        movlw   0xFF");
@@ -207,7 +235,36 @@ fn collect_locals(b: &crate::ast::Block, map: &mut HashMap<String, u8>, next: &m
 
 /// Leaves the 8-bit value of `e` in W. Handles constants, locals, `serial_getc()`, and
 /// `+`/`-`/`&`/`|`/`^` of two sub-expressions (via a temp at 0x7E).
-fn eval_to_w(e: &Expr, out: &mut String, locals: &HashMap<String, u8>) {
+/// Emits a call to a user-defined function: each argument is evaluated into W and
+/// stored to the callee's fixed parameter slot, then `call name`. The callee
+/// leaves its return value in W. `fnp` maps a function name to its parameter
+/// register addresses (allocated disjointly, so there is no reentrancy hazard).
+fn emit_user_call(
+    name: &str,
+    args: &[crate::ast::Arg],
+    out: &mut String,
+    locals: &HashMap<String, u8>,
+    fnp: &HashMap<String, Vec<u8>>,
+) {
+    macro_rules! l {
+        ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
+    }
+    let addrs = &fnp[name];
+    for (i, arg) in args.iter().enumerate() {
+        eval_to_w(&arg.value, out, locals, fnp);
+        if let Some(&a) = addrs.get(i) {
+            l!("        movwf   0x{a:02X}            ; arg {i} -> param");
+        }
+    }
+    l!("        call    {name}");
+}
+
+fn eval_to_w(
+    e: &Expr,
+    out: &mut String,
+    locals: &HashMap<String, u8>,
+    fnp: &HashMap<String, Vec<u8>>,
+) {
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
     }
@@ -221,9 +278,9 @@ fn eval_to_w(e: &Expr, out: &mut String, locals: &HashMap<String, u8>) {
             None => l!("        ; unknown local `{v}`"),
         },
         Expr::Binary(op, a, b) => {
-            eval_to_w(a, out, locals);
+            eval_to_w(a, out, locals, fnp);
             l!("        movwf   0x7E            ; lhs");
-            eval_to_w(b, out, locals);
+            eval_to_w(b, out, locals, fnp);
             match op {
                 crate::ast::BinOp::Add => l!("        addwf   0x7E, w         ; lhs + rhs"),
                 crate::ast::BinOp::Sub => l!("        subwf   0x7E, w         ; lhs - rhs"),
@@ -245,6 +302,9 @@ fn eval_to_w(e: &Expr, out: &mut String, locals: &HashMap<String, u8>) {
                     l!("        ; peek8 needs a constant register in Phase 1b");
                 }
             }
+            Some((name, args)) if fnp.contains_key(name) => {
+                emit_user_call(name, args, out, locals, fnp)
+            }
             _ => l!("        ; unsupported expression in Phase 1b"),
         },
     }
@@ -252,9 +312,15 @@ fn eval_to_w(e: &Expr, out: &mut String, locals: &HashMap<String, u8>) {
 
 /// Emits a block: its statements, then its TAIL expression (Sond makes the last `if`/call in a
 /// block the tail, not a statement, so an `if`-dispatch at the end of a loop body lives here).
-fn emit_block(b: &crate::ast::Block, out: &mut String, lbl: &mut usize, locals: &HashMap<String, u8>) {
+fn emit_block(
+    b: &crate::ast::Block,
+    out: &mut String,
+    lbl: &mut usize,
+    locals: &HashMap<String, u8>,
+    fnp: &HashMap<String, Vec<u8>>,
+) {
     for s in &b.stmts {
-        emit_stmt(s, out, lbl, locals);
+        emit_stmt(s, out, lbl, locals, fnp);
     }
     if let Some(tail) = &b.tail {
         match tail.as_ref() {
@@ -262,20 +328,28 @@ fn emit_block(b: &crate::ast::Block, out: &mut String, lbl: &mut usize, locals: 
                 cond,
                 then_branch,
                 else_branch,
-            } => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals),
-            e if as_call(e).is_some() => emit_call(e, out, locals),
-            _ => {}
+            } => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals, fnp),
+            e if as_call(e).is_some() => emit_call(e, out, locals, fnp),
+            // A value tail is the block's result — for a function body it is the
+            // return value, left in W.
+            e => eval_to_w(e, out, locals, fnp),
         }
     }
 }
 
-fn emit_stmt(s: &Stmt, out: &mut String, lbl: &mut usize, locals: &HashMap<String, u8>) {
+fn emit_stmt(
+    s: &Stmt,
+    out: &mut String,
+    lbl: &mut usize,
+    locals: &HashMap<String, u8>,
+    fnp: &HashMap<String, Vec<u8>>,
+) {
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
     }
     match s {
         Stmt::Let { name, value, .. } => {
-            eval_to_w(value, out, locals);
+            eval_to_w(value, out, locals, fnp);
             if let Some(a) = locals.get(name) {
                 l!("        movwf   0x{a:02X}            ; let {name}");
             }
@@ -284,7 +358,7 @@ fn emit_stmt(s: &Stmt, out: &mut String, lbl: &mut usize, locals: &HashMap<Strin
             target: Expr::Var(v),
             value,
         } => {
-            eval_to_w(value, out, locals);
+            eval_to_w(value, out, locals, fnp);
             if let Some(a) = locals.get(v) {
                 l!("        movwf   0x{a:02X}            ; {v} =");
             }
@@ -296,7 +370,7 @@ fn emit_stmt(s: &Stmt, out: &mut String, lbl: &mut usize, locals: &HashMap<Strin
             let n = *lbl;
             *lbl += 1;
             l!("_loop{n}:");
-            emit_block(body, out, lbl, locals);
+            emit_block(body, out, lbl, locals, fnp);
             l!("        goto    _loop{n}");
         }
         // `for lhs < rhs { .. }`: an 8-bit counted loop (unsigned), the basis of compute kernels
@@ -309,13 +383,13 @@ fn emit_stmt(s: &Stmt, out: &mut String, lbl: &mut usize, locals: &HashMap<Strin
             let n = *lbl;
             *lbl += 1;
             l!("_loop{n}:");
-            eval_to_w(lhs, out, locals);
+            eval_to_w(lhs, out, locals, fnp);
             l!("        movwf   0x7E            ; loop lhs");
-            eval_to_w(rhs, out, locals);
+            eval_to_w(rhs, out, locals, fnp);
             l!("        subwf   0x7E, w         ; lhs - rhs, C set iff lhs >= rhs");
             l!("        btfsc   STATUS, 0       ; C is bit 0");
             l!("        goto    _end{n}         ; lhs >= rhs -> exit");
-            emit_block(body, out, lbl, locals);
+            emit_block(body, out, lbl, locals, fnp);
             l!("        goto    _loop{n}");
             l!("_end{n}:");
         }
@@ -324,8 +398,8 @@ fn emit_stmt(s: &Stmt, out: &mut String, lbl: &mut usize, locals: &HashMap<Strin
             cond,
             then_branch,
             else_branch,
-        }) => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals),
-        Stmt::Expr(e) => emit_call(e, out, locals),
+        }) => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals, fnp),
+        Stmt::Expr(e) => emit_call(e, out, locals, fnp),
         _ => l!("        ; (unsupported statement omitted in Phase 1b)"),
     }
 }
@@ -339,6 +413,7 @@ fn emit_if(
     out: &mut String,
     lbl: &mut usize,
     locals: &HashMap<String, u8>,
+    fnp: &HashMap<String, Vec<u8>>,
 ) {
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
@@ -348,14 +423,14 @@ fn emit_if(
     if let Expr::Binary(op @ (crate::ast::BinOp::Eq | crate::ast::BinOp::Ne), lhs, rhs) = cond {
         // Leave W = lhs XOR rhs, so the Z flag is set iff the two are equal.
         if let Some(c) = const8(rhs) {
-            eval_to_w(lhs, out, locals);
+            eval_to_w(lhs, out, locals, fnp);
             l!("        xorlw   0x{:02X}            ; Z set iff equal", c & 0xFF);
         } else {
             // General comparison of two runtime values (e.g. a frame checksum
             // `calc == chk`): stash rhs in a scratch register, then XOR lhs in.
-            eval_to_w(rhs, out, locals);
+            eval_to_w(rhs, out, locals, fnp);
             l!("        movwf   0x7D            ; rhs of the comparison");
-            eval_to_w(lhs, out, locals);
+            eval_to_w(lhs, out, locals, fnp);
             l!("        xorwf   0x7D, w         ; Z set iff lhs == rhs");
         }
         // Eq: skip the then-branch when NOT equal; Ne: skip when equal.
@@ -365,11 +440,11 @@ fn emit_if(
             l!("        btfsc   STATUS, 2");
         }
         l!("        goto    _else{n}");
-        emit_block(then_b, out, lbl, locals);
+        emit_block(then_b, out, lbl, locals, fnp);
         l!("        goto    _endif{n}");
         l!("_else{n}:");
         if let Some(eb) = else_b {
-            emit_block(eb, out, lbl, locals);
+            emit_block(eb, out, lbl, locals, fnp);
         }
         l!("_endif{n}:");
     } else {
@@ -379,7 +454,12 @@ fn emit_if(
 
 /// Emits a call in statement position: `poke8`, `delay`, `serial_init`, `serial_putc`, and a
 /// bare `serial_getc()` (value discarded).
-fn emit_call(e: &Expr, out: &mut String, locals: &HashMap<String, u8>) {
+fn emit_call(
+    e: &Expr,
+    out: &mut String,
+    locals: &HashMap<String, u8>,
+    fnp: &HashMap<String, Vec<u8>>,
+) {
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
     }
@@ -398,7 +478,7 @@ fn emit_call(e: &Expr, out: &mut String, locals: &HashMap<String, u8>) {
             // is bit-ops on STATUS, so W survives), then store it. The register
             // address must still be a constant so we can bank-select it.
             (Some(r), None) => {
-                eval_to_w(&args[1].value, out, locals);
+                eval_to_w(&args[1].value, out, locals, fnp);
                 l!("        banksel 0x{r:02X}");
                 l!("        movwf   0x{r:02X}");
             }
@@ -415,9 +495,11 @@ fn emit_call(e: &Expr, out: &mut String, locals: &HashMap<String, u8>) {
         ("serial_init", 0) => l!("        call    serial_init"),
         ("serial_getc", 0) => l!("        call    serial_getc"),
         ("serial_putc", 1) => {
-            eval_to_w(&args[0].value, out, locals);
+            eval_to_w(&args[0].value, out, locals, fnp);
             l!("        call    serial_putc");
         }
+        // A call to a user-defined function: pass args, then `call name`.
+        (name, _) if fnp.contains_key(name) => emit_user_call(name, args, out, locals, fnp),
         _ => l!("        ; (unsupported call `{name}` in Phase 1b)"),
     }
 }
@@ -489,6 +571,27 @@ mod tests {
             !asm.contains("unsupported expression"),
             "peek8 must be a supported expression"
         );
+    }
+
+    // User-defined functions must be compiled (emitted as subroutines) and
+    // callable with arguments and a return value — the enabler for reusable
+    // lib/pic/16F/684 code and for a `provides Serial for pic16` written in Sond
+    // (its methods, once spliced, ARE user functions).
+    #[test]
+    fn user_functions_are_compiled_and_called() {
+        let asm = asm_for(
+            "fn add1(x: i64) -> i64 { x + 1 } fn main() { serial_init() let y = add1(5) serial_putc(y) }",
+        );
+        assert!(asm.contains("add1:"), "the user function must be emitted as a subroutine:\n{asm}");
+        assert!(asm.contains("call    add1"), "main must call the user function");
+        assert!(
+            asm.contains("arg 0 -> param"),
+            "the argument must be passed into the callee's parameter slot:\n{asm}"
+        );
+        // The call is in value position (`let y = add1(5)`); it must not fall
+        // through to either unsupported arm.
+        assert!(!asm.contains("unsupported call"), "a user-function call must not be rejected");
+        assert!(!asm.contains("unsupported expression"), "a user call as a value must be compiled");
     }
 
     // delay_loop(n) is a calibrated busy-loop — the timing primitive a bit-bang
