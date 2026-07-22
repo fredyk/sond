@@ -10,7 +10,7 @@
 //! This module owns the SERIALIZATION of the interface; separate compilation
 //! (compile-against-header + link) is a later cycle.
 
-use crate::ast::{BinOp, Expr, Function, Global, StructDef, Type, UnOp, Visibility};
+use crate::ast::{BinOp, Expr, Function, Global, PortDef, Signature, StructDef, Type, UnOp, Visibility};
 
 /// Renders the public interface of a program (its `pub` fns, structs and globals)
 /// as Sond header text. Private (`Priv`) items are omitted; function bodies are
@@ -20,6 +20,7 @@ pub fn emit_header(
     funcs: &[Function],
     structs: &[StructDef],
     globals: &[Global],
+    ports: &[PortDef],
 ) -> String {
     // Each declaration becomes one block (its doc comment + signature). The blocks
     // are joined with a blank line, so there is an empty line between one
@@ -49,6 +50,18 @@ pub fn emit_header(
         emit_doc(&mut b, src, "fn", &f.name);
         b.push_str(&signature(f));
         b.push('\n');
+        blocks.push(b);
+    }
+    // A `port` IS an interface, so it belongs in the header verbatim (RFC-0014). Its `provides`
+    // are per-target implementation, like a function body, and never appear here.
+    for p in ports.iter().filter(|p| p.vis == Visibility::Pub) {
+        let mut b = String::new();
+        emit_doc(&mut b, src, "port", &p.name);
+        b.push_str(&format!("pub port {} {{\n", p.name));
+        for m in &p.methods {
+            b.push_str(&format!("    {}\n", port_method_line(m)));
+        }
+        b.push_str("}\n");
         blocks.push(b);
     }
     let mut out =
@@ -125,6 +138,30 @@ fn signature(f: &Function) -> String {
     }
     if !f.ensures.is_empty() {
         s.push_str(&format!(" ensures {{ {} }}", render_props(&f.ensures)));
+    }
+    s
+}
+
+/// Renders one port-method signature as it appears inside a `port { }` block: `fn
+/// name(params) -> ret` with the contract, no `pub`, no body. A named return is kept
+/// (`-> (r: T)`) because a port's `ensures` refers to it.
+fn port_method_line(m: &Signature) -> String {
+    let params = m
+        .params
+        .iter()
+        .map(|p| format!("{}: {}", p.name, type_name(&p.ty)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut s = match (&m.ret_name, &m.ret) {
+        (Some(rn), Some(t)) => format!("fn {}({params}) -> ({rn}: {})", m.name, type_name(t)),
+        (None, Some(t)) => format!("fn {}({params}) -> {}", m.name, type_name(t)),
+        _ => format!("fn {}({params})", m.name),
+    };
+    if !m.requires.is_empty() {
+        s.push_str(&format!(" requires {{ {} }}", render_props(&m.requires)));
+    }
+    if !m.ensures.is_empty() {
+        s.push_str(&format!(" ensures {{ {} }}", render_props(&m.ensures)));
     }
     s
 }
@@ -253,7 +290,7 @@ mod tests {
                    fn secret() -> i64 { 0 }";
         let mut p = Parser::new(tokenize(src));
         let funcs = p.parse_program();
-        let h = emit_header(src, &funcs, &[], &[]);
+        let h = emit_header(src, &funcs, &[], &[], &[]);
         assert!(h.contains("// Adds two numbers."), "first doc line kept");
         assert!(h.contains("// Wraps on overflow."), "second doc line kept");
         assert!(h.contains("pub fn add"), "signature kept");
@@ -266,7 +303,7 @@ mod tests {
         let src = "pub fn dec(x: i64) -> i64 requires { x > 0 } ensures { x >= 0 } { x - 1 }";
         let mut p = Parser::new(tokenize(src));
         let funcs = p.parse_program();
-        let h = emit_header(src, &funcs, &[], &[]);
+        let h = emit_header(src, &funcs, &[], &[], &[]);
         assert!(h.contains("pub fn dec(x: i64) -> i64"), "signature");
         assert!(h.contains("requires { x > 0 }"), "precondition rendered");
         assert!(h.contains("ensures { x >= 0 }"), "postcondition rendered");
@@ -284,7 +321,7 @@ mod tests {
         let funcs = p.parse_program();
         let structs = p.take_structs();
         let globals = p.take_globals();
-        let h = emit_header(src, &funcs, &structs, &globals);
+        let h = emit_header(src, &funcs, &structs, &globals, &[]);
 
         assert!(
             h.contains("pub fn add(a: i64, b: i64) -> i64"),
@@ -299,5 +336,45 @@ mod tests {
             "global initializer (implementation) omitted"
         );
         assert!(!h.contains("K"), "private global omitted");
+    }
+}
+
+#[cfg(test)]
+mod port_header_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    #[test]
+    fn a_public_port_is_emitted_as_the_interface_but_providers_are_not() {
+        // A `port` is the interface, so it belongs in the header (RFC-0014); a `provides`
+        // is per-target implementation, like a body, and must never appear.
+        let src = "// A serial line.\n\
+                   pub port Serial {\n\
+                     fn serial_getc() -> (b: i64) ensures { b >= -1 }\n\
+                     fn serial_putc(b: i64)\n\
+                   }\n\
+                   provides Serial for host { fn serial_getc() -> i64 { 0 } fn serial_putc(b: i64) { } }";
+        let mut p = Parser::new(tokenize(src));
+        p.parse_program();
+        let ports = p.take_ports();
+        let h = emit_header(src, &[], &[], &[], &ports);
+        assert!(h.contains("// A serial line."), "the port's doc comment is kept");
+        assert!(h.contains("pub port Serial {"), "the port is emitted");
+        assert!(h.contains("fn serial_getc() -> (b: i64)"), "a method keeps its named return");
+        assert!(h.contains("ensures { b >= -1 }"), "a method keeps its contract");
+        assert!(h.contains("fn serial_putc(b: i64)"), "a bodyless method is rendered");
+        assert!(!h.contains("provides"), "a provider is implementation, never in the header");
+        assert!(!h.contains("{ 0 }"), "no provider body leaks in");
+    }
+
+    #[test]
+    fn a_private_port_is_omitted() {
+        let src = "port Internal { fn f() }";
+        let mut p = Parser::new(tokenize(src));
+        p.parse_program();
+        let ports = p.take_ports();
+        let h = emit_header(src, &[], &[], &[], &ports);
+        assert!(!h.contains("Internal"), "a private (non-pub) port is not part of the interface");
     }
 }

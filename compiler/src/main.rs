@@ -237,7 +237,7 @@ fn main() -> ExitCode {
     if emit_header {
         print!(
             "{}",
-            sondc::header::emit_header(&src, &funcs, &structs, &globals)
+            sondc::header::emit_header(&src, &funcs, &structs, &globals, &ports)
         );
         return ExitCode::SUCCESS;
     }
