@@ -321,6 +321,22 @@ mod tests {
     }
 
     #[test]
+    fn a_spliced_method_carries_the_ports_requires_so_the_caller_is_checked() {
+        // The other half of the contract boundary: the port's `requires` is folded onto the
+        // spliced method, so the general verifier holds every caller to it (verified e2e:
+        // narrow(999) against requires { x <= 10 } is a call-site precondition failure).
+        let spliced = resolve(
+            "port Narrow { fn narrow(x: i64) -> (r: i64) requires { x <= 10 } ensures { r == x } }\n\
+             provides Narrow for host { fn narrow(x: i64) -> i64 { x } }\n\
+             use Narrow",
+            "host",
+        )
+        .expect("resolves");
+        assert_eq!(spliced[0].requires.len(), 1, "the port's requires is folded onto the method");
+        assert_eq!(spliced[0].ensures.len(), 1, "and its ensures");
+    }
+
+    #[test]
     fn a_provider_that_renames_a_parameter_is_rejected() {
         let e = resolve(
             "port Serial { fn putc(b: i64) }\n\
