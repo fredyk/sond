@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/pic/16F/684/pwm.snd — reusable ECCP PWM for the PIC16F684.
+//
+// Single PWM output on RC5 (P1A) via ECCP + Timer2, ~7.8 kHz at the 8 MHz
+// internal oscillator. Generic and reusable (LED dimming, motor speed, tone).
+// pwm_init touches only RC5's TRIS bit (read-modify-write), so it leaves other
+// PORTC pins alone. Registers (16F684): TRISC 0x87, PR2 0x92, CCP1CON 0x17,
+// T2CON 0x12, CCPR1L 0x15.
+
+fn pwm_init() {
+    poke8(0x87, peek8(0x87) & 0xDF)   // TRISC bit 5 = 0 -> RC5 output (leave the rest)
+    poke8(0x92, 0xFF)                 // PR2: ~7.8 kHz period
+    poke8(0x17, 0x0C)                 // CCP1CON: PWM mode, single P1A, active-high
+    poke8(0x12, 0x04)                 // T2CON: TMR2ON, prescale 1:1
+    poke8(0x15, 0x00)                 // CCPR1L: duty 0
+}
+
+fn pwm_duty(d: i64) {
+    poke8(0x15, d)                    // CCPR1L = duty (0..255 = 0..100%)
+}
