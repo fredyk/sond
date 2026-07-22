@@ -179,14 +179,37 @@ implementation, and the contract is the proof that ties them.
 
 ## 8. Migration: serial, ported
 
-1. Add `port Serial { ... }` (contracts included) under `lib/port/serial.snd`.
-2. Wrap the existing Linux body as `provides Serial for x86_64_linux`.
-3. Add `provides Serial for pic16` with the bit-bang body (the one that today lives, stubbed or
-   inline, in each firmware).
-4. Host and firmware replace their `include`/stubs with `use Serial`. The firmware's three empty
-   stubs are deleted; the compiler splices the pic16 provider.
-5. The same treatment retires the other bare-metal stubs (GPIO, timers, PWM) as `lib/pic16/`
-   providers grow, so the PIC16 stdlib fills in behind a stable, verified interface.
+The `port Serial` interface has landed at `lib/any/serial.snd` (commit `6aef049`), shaped by the
+target that constrains it hardest: an 8-bit microcontroller (PIC16F684) with no integer wider than a
+byte.
+
+```
+pub port Serial {
+    fn serial_init()
+    fn serial_getc() -> u8   // blocks until a byte arrives; no wider "-1 for none" fits on 8 bits
+    fn serial_putc(b: u8)
+}
+```
+
+Everything is `u8`. An earlier draft had `serial_getc` return an `i16` so it could signal "-1 for no
+byte", but the smallest target has no `i16`, so the interface would not be implementable there. The
+resolution is the classic bare-metal one: `serial_getc` **blocks** and returns a byte; a non-blocking
+read, if a provider ever needs it, is a separate `serial_ready` predicate, never a wider return. (The
+`u8` range is not yet type-enforced, that is RFC-0012; the interface already speaks in `u8` so the
+enforcement is free when it lands.)
+
+The remaining steps, downstream product/backend work, not language work:
+
+1. `provides Serial for pic16` with the bit-bang body **in Sond**, under `lib/pic/16F/684/serial.snd`
+   (the maintainer's placement: reusable per-target libraries live in the language repo, the product only uses
+   them). This requires the pic16 backend primitives currently in flight (a read-`peek8`, a
+   variable-value `poke8`, and a cycle-exact delay), because today the bit-bang is a **backend
+   intrinsic emitted by name** in `pic16.rs` (the `serial_getc:`/`serial_putc:` asm), not Sond, and
+   the firmware's empty stubs are placeholders the backend ignores.
+2. Removing that name-special-casing from `pic16.rs`, so the provider's Sond body *is* the
+   implementation (compiled normally). This deletes the hidden asm and the firmware stubs in one move.
+3. The same treatment retires the other bare-metal stubs (GPIO, PWM) as `lib/pic/16F/684/` providers
+   grow, so the PIC16 stdlib fills in behind stable, verified interfaces.
 
 ## 9. Honest limits and open questions
 
