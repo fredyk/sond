@@ -129,10 +129,15 @@ fn main() -> ExitCode {
 
     // RFC-0014: bind each `use Port` to the one provider for the active target. A missing,
     // ambiguous, or signature-incomplete provider is a compile error here, before lowering.
+    // The selected providers' methods are spliced into the function list, so the rest of the
+    // pipeline (typeck, codegen) sees them as ordinary functions.
     let port_target = if pic16 { "pic16" } else { target_tag };
-    if let Err(msg) = sondc::ports::resolve_ports(&ports, &providers, &uses, port_target) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
+    match sondc::ports::resolve_ports(&ports, &providers, &uses, port_target) {
+        Ok(spliced) => funcs.extend(spliced),
+        Err(msg) => {
+            eprintln!("sondc: {msg}");
+            return ExitCode::FAILURE;
+        }
     }
 
     // `test "..." { .. }` blocks are inert in an ordinary compile, only `sond test`

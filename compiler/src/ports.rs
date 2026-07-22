@@ -10,16 +10,21 @@
 //! contract verification of a provider against its port is a later slice; this
 //! pass establishes existence, uniqueness, and shape.
 
-use crate::ast::{PortDef, ProviderDef, UseDecl};
+use crate::ast::{Function, PortDef, ProviderDef, UseDecl};
 
-/// Checks every `use Port` against the providers for `target`. Returns `Ok` when
-/// each use resolves to exactly one complete provider, else the first error.
+/// Resolves every `use Port` against the providers for `target`, returning the
+/// selected providers' methods to splice into the translation unit (so codegen
+/// sees them as ordinary functions). Fails with the first error when a use does
+/// not resolve to exactly one complete provider. A port `use`d more than once
+/// splices its provider only once, so no duplicate symbols are introduced.
 pub fn resolve_ports(
     ports: &[PortDef],
     providers: &[ProviderDef],
     uses: &[UseDecl],
     target: &str,
-) -> Result<(), String> {
+) -> Result<Vec<Function>, String> {
+    let mut spliced = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
     for u in uses {
         let Some(port) = ports.iter().find(|p| p.name == u.port) else {
             return Err(format!(
@@ -36,7 +41,7 @@ pub fn resolve_ports(
             .filter(|pr| pr.target == target)
             .collect();
 
-        match matching.as_slice() {
+        let prov = match matching.as_slice() {
             [] => {
                 let mut targets: Vec<&str> =
                     for_port.iter().map(|pr| pr.target.as_str()).collect();
@@ -54,7 +59,7 @@ pub fn resolve_ports(
                     port_name = u.port,
                 ));
             }
-            [prov] => check_complete(port, prov, target)?,
+            [prov] => *prov,
             more => {
                 return Err(format!(
                     "port `{}` has {} providers for target `{}`; exactly one is allowed.",
@@ -63,9 +68,15 @@ pub fn resolve_ports(
                     target
                 ));
             }
+        };
+        check_complete(port, prov, target)?;
+        // Splice each used port's provider exactly once, even if `use`d repeatedly.
+        if !seen.contains(&u.port.as_str()) {
+            seen.push(&u.port);
+            spliced.extend(prov.methods.iter().cloned());
         }
     }
-    Ok(())
+    Ok(spliced)
 }
 
 /// A provider must implement every signature of its port, with a matching arity.
@@ -98,7 +109,7 @@ mod tests {
     use crate::parser::Parser;
 
     /// Parses a program and runs resolution for `target`.
-    fn resolve(src: &str, target: &str) -> Result<(), String> {
+    fn resolve(src: &str, target: &str) -> Result<Vec<Function>, String> {
         let mut p = Parser::new(tokenize(src));
         p.parse_program();
         let ports = p.take_ports();
@@ -108,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn a_use_with_a_matching_provider_resolves() {
+    fn a_use_with_a_matching_provider_resolves_and_splices_its_methods() {
         let r = resolve(
             "port Serial { fn putc(b: i64) }\n\
              provides Serial for pic16 { fn putc(b: i64) { } }\n\
@@ -116,7 +127,36 @@ mod tests {
              fn main() -> i64 { 0 }",
             "pic16",
         );
-        assert!(r.is_ok(), "a use with its target provider must resolve, got {r:?}");
+        let spliced = r.expect("a use with its target provider must resolve");
+        let names: Vec<&str> = spliced.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, vec!["putc"], "the selected provider's methods are spliced in");
+    }
+
+    #[test]
+    fn only_the_active_targets_provider_is_spliced() {
+        // Two providers exist; only the one for the build target contributes code.
+        let spliced = resolve(
+            "port Serial { fn putc(b: i64) }\n\
+             provides Serial for host { fn putc(b: i64) { let h = 1 } }\n\
+             provides Serial for pic16 { fn putc(b: i64) { let p = 2 } }\n\
+             use Serial",
+            "pic16",
+        )
+        .expect("resolves for pic16");
+        assert_eq!(spliced.len(), 1, "exactly one provider's methods, not both");
+    }
+
+    #[test]
+    fn a_port_used_twice_is_spliced_once() {
+        let spliced = resolve(
+            "port Serial { fn putc(b: i64) }\n\
+             provides Serial for pic16 { fn putc(b: i64) { } }\n\
+             use Serial\n\
+             use Serial",
+            "pic16",
+        )
+        .expect("resolves");
+        assert_eq!(spliced.len(), 1, "no duplicate symbols from a repeated use");
     }
 
     #[test]
