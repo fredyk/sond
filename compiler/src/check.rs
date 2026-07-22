@@ -331,6 +331,86 @@ pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> 
     Ok(())
 }
 
+/// Rejects `close_fd(fd)` in the continuation of a `spawn` that moved `fd` into the thread
+/// (RFC-0011 footgun #2, the use-after-move-into-a-thread case). Because a spawn is joined at
+/// the enclosing function's return, every statement after the spawn runs CONCURRENTLY with the
+/// child; closing a descriptor there closes it out from under the live thread, and the symptom
+/// is corruption, not an error. This is a conservative, order-sensitive static check (the sound
+/// general fix is the capability move of RFC-0011): a variable passed to a spawned call is
+/// "moved"; a later `close_fd` of it in the same function is a compile error, until the variable
+/// is reassigned (which un-moves it).
+pub fn check_no_close_fd_after_spawn(funcs: &[Function]) -> Result<(), String> {
+    // Any `close_fd(v)` where `v` is a moved variable, appearing in this expression.
+    fn closes_moved<'a>(e: &'a Expr, moved: &[&str]) -> Option<&'a str> {
+        if let Expr::Call(callee, args) = e
+            && let Expr::Var(name) = callee.as_ref()
+            && name == "close_fd"
+            && let Some(first) = args.first()
+            && let Expr::Var(v) = &first.value
+            && moved.contains(&v.as_str())
+        {
+            return Some(v);
+        }
+        // Recurse into subexpressions so a nested `close_fd` is still caught.
+        match e {
+            Expr::Call(callee, args) => closes_moved(callee, moved)
+                .or_else(|| args.iter().find_map(|a| closes_moved(&a.value, moved))),
+            Expr::Field(b, _) | Expr::Unary(_, b) => closes_moved(b, moved),
+            Expr::Index(b, i) => closes_moved(b, moved).or_else(|| closes_moved(i, moved)),
+            Expr::Binary(_, l, r) => closes_moved(l, moved).or_else(|| closes_moved(r, moved)),
+            Expr::List(xs) => xs.iter().find_map(|x| closes_moved(x, moved)),
+            _ => None,
+        }
+    }
+    fn walk<'a>(stmts: &'a [Stmt], moved: &mut Vec<&'a str>, fname: &str) -> Result<(), String> {
+        for s in stmts {
+            // 1. A close of a moved fd anywhere in this statement's expressions is the footgun.
+            let exprs: Vec<&Expr> = match s {
+                Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Spawn(value) => vec![value],
+                Stmt::Assign { target, value } => vec![target, value],
+                Stmt::Return(Some(e)) => vec![e],
+                Stmt::For { cond, .. } => cond.iter().collect(),
+                _ => vec![],
+            };
+            for e in exprs {
+                if let Some(v) = closes_moved(e, moved) {
+                    return Err(format!(
+                        "function `{fname}`: `close_fd({v})` runs after `{v}` was moved into a \
+                         spawned thread, so it closes the descriptor while the thread is still \
+                         using it (the continuation runs concurrently with the spawn). Close the \
+                         descriptor in the thread that owns it, or release it in the caller after \
+                         the join, not in the same function that spawned."
+                    ));
+                }
+            }
+            // 2. Update the moved set from this statement's effect.
+            match s {
+                Stmt::Spawn(Expr::Call(_, args)) => {
+                    for a in args {
+                        if let Expr::Var(v) = &a.value {
+                            moved.push(v);
+                        }
+                    }
+                }
+                // Reassigning a variable un-moves it: it now names a fresh descriptor.
+                Stmt::Let { name, .. } => moved.retain(|m| *m != name.as_str()),
+                Stmt::Assign { target: Expr::Var(name), .. } => {
+                    moved.retain(|m| *m != name.as_str())
+                }
+                // A nested block's statements run after the spawn too, so carry `moved` in.
+                Stmt::For { body, .. } => walk(&body.stmts, moved, fname)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    for f in funcs {
+        let mut moved = Vec::new();
+        walk(&f.body.stmts, &mut moved, &f.name)?;
+    }
+    Ok(())
+}
+
 pub fn check_receiver_kinds(funcs: &[Function]) -> Result<(), String> {
     // struct name -> (is_pointer, first method name seen) of its receiver kind.
     let mut kind: HashMap<&str, (bool, &str)> = HashMap::new();
@@ -2589,6 +2669,57 @@ mod spawn_loop_tests {
     fn accepts_spawn_outside_a_loop() {
         let ok = check("fn w() -> i64 { 0 }\nfn f() -> i64 { spawn w() spawn w() 0 }");
         assert!(ok.is_ok(), "two straight-line spawns are fine, got {ok:?}");
+    }
+}
+
+#[cfg(test)]
+mod close_fd_after_spawn_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn check(src: &str) -> Result<(), String> {
+        let funcs = Parser::new(tokenize(src)).parse_program();
+        check_no_close_fd_after_spawn(&funcs)
+    }
+
+    #[test]
+    fn rejects_close_fd_in_the_continuation_of_a_spawn_that_took_it() {
+        // `spawn pump(fd); close_fd(fd)`: the continuation runs concurrently with the thread,
+        // so it closes the descriptor out from under it. The reported relay corruption.
+        let e = check(
+            "fn pump(fd: i64) -> i64 { 0 }\n\
+             fn f(fd: i64) -> i64 { spawn pump(fd) close_fd(fd) 0 }",
+        );
+        assert!(e.is_err(), "close_fd after moving fd into a spawn must be rejected");
+        assert!(e.unwrap_err().contains("close_fd"), "the error should name the close");
+    }
+
+    #[test]
+    fn accepts_close_fd_with_no_spawn() {
+        let ok = check("fn f(fd: i64) -> i64 { close_fd(fd) 0 }");
+        assert!(ok.is_ok(), "close_fd without a spawn is fine, got {ok:?}");
+    }
+
+    #[test]
+    fn accepts_closing_a_different_descriptor_than_the_spawned_one() {
+        let ok = check(
+            "fn pump(fd: i64) -> i64 { 0 }\n\
+             fn f(a: i64, b: i64) -> i64 { spawn pump(a) close_fd(b) 0 }",
+        );
+        assert!(ok.is_ok(), "closing a descriptor the thread does not hold is fine, got {ok:?}");
+    }
+
+    #[test]
+    fn accepts_close_fd_after_the_variable_is_reassigned() {
+        // Reassigning `fd` after the spawn makes it a fresh descriptor the thread never saw,
+        // so closing it is legitimate: the move applied to the old value, not the new one.
+        let ok = check(
+            "fn pump(fd: i64) -> i64 { 0 }\n\
+             fn open_one() -> i64 { 3 }\n\
+             fn f(fd: i64) -> i64 { spawn pump(fd) fd = open_one() close_fd(fd) 0 }",
+        );
+        assert!(ok.is_ok(), "close of a reassigned fd is fine, got {ok:?}");
     }
 }
 
