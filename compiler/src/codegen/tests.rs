@@ -760,3 +760,31 @@ fn a_port_program_compiles_and_runs_end_to_end() {
     );
     assert_eq!(code, 42, "the spliced provider method runs on real hardware");
 }
+
+#[test]
+fn a_port_provider_compiles_to_a_pic16_subroutine_and_is_called() {
+    // RFC-0014 on the 8-bit target: a `provides Doubler for pic16` method, once resolved and
+    // spliced, compiles as a real PIC16 subroutine, and main's `use`-resolved call reaches it.
+    // Locks in that ports compose with user-function codegen on --pic16.
+    let mut p = Parser::new(tokenize(
+        "port Doubler { fn dbl(x: i64) -> i64 }\n\
+         provides Doubler for pic16 { fn dbl(x: i64) -> i64 { x + x } }\n\
+         use Doubler\n\
+         fn main() { let y = dbl(5) }",
+    ));
+    let mut funcs = p.parse_program();
+    let ports = p.take_ports();
+    let providers = p.take_providers();
+    let uses = p.take_uses();
+    funcs.extend(
+        crate::ports::resolve_ports(&ports, &providers, &uses, "pic16")
+            .expect("the pic16 provider resolves"),
+    );
+    let asm = super::pic16::emit_pic16(&funcs);
+    assert!(asm.contains("dbl"), "the provider method is emitted as a subroutine:\n{asm}");
+    assert!(asm.contains("call"), "main reaches the spliced provider via a call:\n{asm}");
+    assert!(
+        !asm.contains("unsupported call"),
+        "the spliced provider call must not be a no-op:\n{asm}"
+    );
+}
