@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// The byte-stream serial PORT (RFC-0014): a target-agnostic interface of three
+// primitives, implemented per target by a `provides Serial for <target>`. A
+// program depends on it with `use Serial`, and the compiler splices the provider
+// that matches the build (a bit-banged UART on a microcontroller, a UART
+// peripheral on other metal) and proves that provider against this contract.
+//
+// This is the INTERFACE only: it declares no bodies. The implementations live in
+// the per-target libraries (e.g. lib/pic16/serial.snd), never here. Distinct from
+// the file-descriptor serial of lib/x86_64/linux/serial.snd, which is a richer,
+// hosted API over the OS; this port is the minimal byte interface a bare-metal
+// node needs.
+
+// Types: a transmitted value is a byte (`u8`); a received value is a `short`
+// (`i16`) because it must also carry -1 for "no byte", which a `u8` cannot hold.
+// NOTE: today the compiler treats u8/i16 as names for a machine integer and does
+// not yet enforce their range (that is RFC-0012, bounded integers), so the
+// `requires`/`ensures` below are what actually enforce the byte range. When
+// RFC-0012 lands, `u8` carries `0..255` in the type and the redundant clause can
+// go; the interface already speaks in the right types.
+pub port Serial {
+    // Bring the line up (baud, framing, pin directions) before any byte moves.
+    fn serial_init()
+
+    // Receive one byte. Returns 0..255, or -1 when no byte arrived within the
+    // implementation's window (a timeout or an idle line). A caller that must not
+    // block indefinitely reads this and acts on -1.
+    fn serial_getc() -> (b: i16)
+        ensures { b >= -1; b <= 255 }
+
+    // Transmit one byte. `u8` says it is a byte; the contract enforces the range
+    // until the type does, so a provider may rely on `0 <= b <= 255`.
+    fn serial_putc(b: u8)
+        requires { b >= 0; b <= 255 }
+}
