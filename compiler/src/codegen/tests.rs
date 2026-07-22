@@ -746,3 +746,17 @@ fn cstr_is_gone_with_a_helpful_message() {
     // than failing as an unknown function.
     emit_program(&[parse_function("fn main() -> i64 { cstr(\"x\") }")]);
 }
+
+#[test]
+fn a_port_program_compiles_and_runs_end_to_end() {
+    // The full RFC-0014 pipeline on real x86-64: parse, resolve `use Doubler` to the host
+    // provider, splice its method, verify the body against the port's contract, codegen, run.
+    // `main` calls the spliced provider method; dbl(21) = 42 is the process exit code.
+    let code = compile_and_run(
+        "port Doubler { fn dbl(x: i64) -> (r: i64) ensures { r == x + x } }\n\
+         provides Doubler for host { fn dbl(x: i64) -> i64 { x + x } }\n\
+         use Doubler\n\
+         fn main() -> i64 { dbl(21) }",
+    );
+    assert_eq!(code, 42, "the spliced provider method runs on real hardware");
+}

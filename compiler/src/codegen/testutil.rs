@@ -12,11 +12,27 @@ pub(crate) fn parse_function(src: &str) -> Function {
     Parser::new(tokenize(src)).parse_function()
 }
 
+/// Parses a program and runs the same RFC-0014 port resolution + splicing the
+/// driver does for the hosted target, so a `use Port` program reaches codegen
+/// with its provider's methods present. A program with no ports is unaffected
+/// (resolution returns nothing to splice).
+pub(crate) fn parse_and_resolve_ports(src: &str) -> Vec<Function> {
+    let mut p = Parser::new(tokenize(src));
+    let mut funcs = p.parse_program();
+    let ports = p.take_ports();
+    let providers = p.take_providers();
+    let uses = p.take_uses();
+    let spliced = crate::ports::resolve_ports(&ports, &providers, &uses, "host")
+        .expect("port resolution should succeed in this test");
+    funcs.extend(spliced);
+    funcs
+}
+
 /// Assembles the emitted program into a real Linux/amd64 binary with `cc`,
 /// runs it, and returns its exit code.
 pub(crate) fn compile_and_run(src: &str) -> i32 {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let asm = emit_program(&Parser::new(tokenize(src)).parse_program());
+    let asm = emit_program(&parse_and_resolve_ports(src));
     let dir = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let stem = format!("sondc_cg_{}_{}", std::process::id(), n);
