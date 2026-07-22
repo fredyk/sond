@@ -148,6 +148,11 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
     l!("_hd:    decfsz  0x74, f");
     l!("        goto    _hd");
     l!("        return");
+    l!("_delayw:                        ; busy-loop W iterations (~3*W cycles); bit-bang timing");
+    l!("        movwf   0x74");
+    l!("_dw:    decfsz  0x74, f");
+    l!("        goto    _dw");
+    l!("        return");
     l!("        end");
     out
 }
@@ -400,6 +405,13 @@ fn emit_call(e: &Expr, out: &mut String, locals: &HashMap<String, u8>) {
             _ => l!("        ; poke8 needs a constant register in Phase 1b"),
         },
         ("delay", 0) => l!("        call    delay"),
+        ("delay_loop", 1) => match const8(&args[0].value) {
+            Some(n) => {
+                l!("        movlw   0x{:02X}", n & 0xFF);
+                l!("        call    _delayw");
+            }
+            None => l!("        ; delay_loop needs a constant count in Phase 1b"),
+        },
         ("serial_init", 0) => l!("        call    serial_init"),
         ("serial_getc", 0) => l!("        call    serial_getc"),
         ("serial_putc", 1) => {
@@ -477,6 +489,17 @@ mod tests {
             !asm.contains("unsupported expression"),
             "peek8 must be a supported expression"
         );
+    }
+
+    // delay_loop(n) is a calibrated busy-loop — the timing primitive a bit-bang
+    // serial written in Sond needs (to express _bitdly/_halfdly), so the hidden
+    // asm intrinsic can move into a lib/pic/16F/684 Serial provider.
+    #[test]
+    fn delay_loop_emits_a_calibrated_busy_loop() {
+        let asm = asm_for("fn main() { serial_init() delay_loop(20) }");
+        assert!(asm.contains("_delayw:"), "a parameterized delay subroutine must exist:\n{asm}");
+        assert!(asm.contains("movlw   0x14"), "delay_loop(20) must load the count 20");
+        assert!(asm.contains("call    _delayw"), "delay_loop must call the delay subroutine");
     }
 
     // poke8 must accept a runtime VALUE (not just a constant) into a fixed
