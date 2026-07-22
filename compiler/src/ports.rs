@@ -10,7 +10,7 @@
 //! contract verification of a provider against its port is a later slice; this
 //! pass establishes existence, uniqueness, and shape.
 
-use crate::ast::{Function, PortDef, ProviderDef, UseDecl};
+use crate::ast::{Function, PortDef, ProviderDef, Signature, UseDecl};
 
 /// Resolves every `use Port` against the providers for `target`, returning the
 /// selected providers' methods to splice into the translation unit (so codegen
@@ -70,13 +70,40 @@ pub fn resolve_ports(
             }
         };
         check_complete(port, prov, target)?;
-        // Splice each used port's provider exactly once, even if `use`d repeatedly.
+        // Splice each used port's provider exactly once, even if `use`d repeatedly. Each
+        // spliced method carries the port's contract, so `verify` proves the body meets it.
         if !seen.contains(&u.port.as_str()) {
             seen.push(&u.port);
-            spliced.extend(prov.methods.iter().cloned());
+            for m in &prov.methods {
+                let sig = port
+                    .methods
+                    .iter()
+                    .find(|s| s.name == m.name)
+                    .expect("check_complete ensured every provider method matches a signature");
+                spliced.push(fold_contract(m, sig));
+            }
         }
     }
     Ok(spliced)
+}
+
+/// Produces the provider method with the port signature's contract folded in: the
+/// port's `requires` become assumptions the body may rely on, its `ensures` become
+/// obligations `verify` proves the body meets, and the port's named return is
+/// adopted so an `ensures` that mentions it resolves. The provider's own clauses are
+/// kept alongside. This is what makes a port a verified boundary and not just a header.
+fn fold_contract(method: &Function, sig: &Signature) -> Function {
+    let mut f = method.clone();
+    let mut requires = sig.requires.clone();
+    requires.extend(f.requires);
+    f.requires = requires;
+    let mut ensures = sig.ensures.clone();
+    ensures.extend(f.ensures);
+    f.ensures = ensures;
+    if f.ret_name.is_none() {
+        f.ret_name = sig.ret_name.clone();
+    }
+    f
 }
 
 /// A provider must implement every signature of its port, with a matching arity.
@@ -97,6 +124,18 @@ fn check_complete(port: &PortDef, prov: &ProviderDef, target: &str) -> Result<()
                 m.params.len(),
                 sig.params.len()
             ));
+        }
+        // Parameter names must match the port's: the port's contract is written against
+        // those names, so a provider that renames a parameter would silence the contract.
+        for (mp, sp) in m.params.iter().zip(&sig.params) {
+            if mp.name != sp.name {
+                return Err(format!(
+                    "provider `{} for {}`: method `{}` names a parameter `{}` where the port \
+                     declares `{}`; a provider must use the port's parameter names so the \
+                     port's contract applies to it.",
+                    port.name, target, sig.name, mp.name, sp.name
+                ));
+            }
         }
     }
     Ok(())
@@ -212,6 +251,35 @@ mod tests {
         .unwrap_err();
         assert!(e.contains("putc"), "names the method: {e}");
         assert!(e.contains("parameters"), "explains the arity mismatch: {e}");
+    }
+
+    #[test]
+    fn a_spliced_method_carries_the_ports_contract() {
+        // The port's ensures is folded onto the provider method, so `verify` proves the body
+        // meets it. This is what makes a port a verified boundary, not a bare header.
+        let spliced = resolve(
+            "port Doubler { fn dbl(x: i64) -> (r: i64) ensures { r == x + x } }\n\
+             provides Doubler for host { fn dbl(x: i64) -> i64 { x + x } }\n\
+             use Doubler",
+            "host",
+        )
+        .expect("resolves");
+        assert_eq!(spliced.len(), 1);
+        assert_eq!(spliced[0].ensures.len(), 1, "the port's ensures is folded in");
+        assert_eq!(spliced[0].ret_name.as_deref(), Some("r"), "adopts the port's named return");
+    }
+
+    #[test]
+    fn a_provider_that_renames_a_parameter_is_rejected() {
+        let e = resolve(
+            "port Serial { fn putc(b: i64) }\n\
+             provides Serial for pic16 { fn putc(byte: i64) { } }\n\
+             use Serial",
+            "pic16",
+        )
+        .unwrap_err();
+        assert!(e.contains("parameter"), "explains the parameter-name mismatch: {e}");
+        assert!(e.contains('b'), "names the port's parameter: {e}");
     }
 
     #[test]
