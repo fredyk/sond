@@ -230,6 +230,16 @@ fn eval_to_w(e: &Expr, out: &mut String, locals: &HashMap<String, u8>) {
         }
         _ => match as_call(e) {
             Some(("serial_getc", [])) => l!("        call    serial_getc"),
+            // peek8(reg): read a register (e.g. an input port) into W. Needed for
+            // reading pins — node-ID straps, an SPI-slave data line, RX bits.
+            Some(("peek8", args)) if args.len() == 1 => {
+                if let Some(r) = const8(&args[0].value) {
+                    l!("        banksel 0x{:02X}", r & 0xFF);
+                    l!("        movf    0x{:02X}, w", r & 0xFF);
+                } else {
+                    l!("        ; peek8 needs a constant register in Phase 1b");
+                }
+            }
             _ => l!("        ; unsupported expression in Phase 1b"),
         },
     }
@@ -444,6 +454,21 @@ mod tests {
         assert!(asm.contains("movlw   0x07"), "serial_init must load CM<2:0>=111 to disable comparators");
         assert!(asm.contains("movwf   CMCON0"), "serial_init must write CMCON0 to make RA1 digital");
         assert!(asm.contains("clrf    VRCON"), "serial_init must disable CVref (also on RA1)");
+    }
+
+    // Reading an input register (peek8) must load it into W under a bank select,
+    // so a node can read pins — ID straps, a clock/data line, an RX bit.
+    #[test]
+    fn peek8_reads_a_register() {
+        let asm = asm_for("fn main() { serial_init() let x = peek8(0x05) serial_putc(x) }");
+        assert!(
+            asm.contains("movf    0x05, w"),
+            "peek8(reg) must read the register into W:\n{asm}"
+        );
+        assert!(
+            !asm.contains("unsupported expression"),
+            "peek8 must be a supported expression"
+        );
     }
 
     // A frame checksum test (`if calc == chk`) compares two VARIABLES. The
