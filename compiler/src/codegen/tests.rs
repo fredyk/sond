@@ -788,3 +788,30 @@ fn a_port_provider_compiles_to_a_pic16_subroutine_and_is_called() {
         "the spliced provider call must not be a no-op:\n{asm}"
     );
 }
+
+#[test]
+fn a_pic16_serial_provider_replaces_the_backend_intrinsic() {
+    // The end of the whole arc: with a `provides Serial for pic16` defining serial_getc, the
+    // backend cedes its hardcoded bit-bang intrinsic and the provider's Sond body is the
+    // implementation. The hidden asm dies; the firmware need no longer stub. Composition test
+    // of the port mechanism (resolve + splice) with the backend's user-function cede.
+    let mut p = Parser::new(tokenize(
+        "port Serial { fn serial_getc() -> i64 }\n\
+         provides Serial for pic16 { fn serial_getc() -> i64 { 7 } }\n\
+         use Serial\n\
+         fn main() { let c = serial_getc() }",
+    ));
+    let mut funcs = p.parse_program();
+    let ports = p.take_ports();
+    let providers = p.take_providers();
+    let uses = p.take_uses();
+    funcs.extend(
+        crate::ports::resolve_ports(&ports, &providers, &uses, "pic16").expect("resolves for pic16"),
+    );
+    let asm = super::pic16::emit_pic16(&funcs);
+    assert!(asm.contains("serial_getc"), "the provider's serial_getc is emitted:\n{asm}");
+    assert!(
+        !asm.contains("_sg_wait"),
+        "the backend's hidden bit-bang intrinsic ceded to the provider:\n{asm}"
+    );
+}
