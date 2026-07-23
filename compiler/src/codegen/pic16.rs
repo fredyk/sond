@@ -286,6 +286,26 @@ fn eval_to_w(
             Some(a) => l!("        movf    0x{a:02X}, w"),
             None => l!("        ; unknown local `{v}`"),
         },
+        // Shift by a COMPILE-TIME CONSTANT: the PIC14 has no barrel shifter, so
+        // emit N single-bit shifts. `<< 1` is a doubling (add to self); `>> 1` is
+        // an rrf with carry pre-cleared. This is the generic primitive a Sond
+        // bit-bang UART needs for rrf-style byte assembly (no variable shifts).
+        Expr::Binary(op @ (crate::ast::BinOp::Shl | crate::ast::BinOp::Shr), a, b)
+            if const8(b).is_some() =>
+        {
+            eval_to_w(a, out, locals, fnp);
+            let n = (const8(b).unwrap() as usize).min(8); // >=8 on an 8-bit value is 0
+            for _ in 0..n {
+                l!("        movwf   0x7E");
+                match op {
+                    crate::ast::BinOp::Shl => l!("        addwf   0x7E, w         ; << 1"),
+                    _ => {
+                        l!("        bcf     STATUS, 0");
+                        l!("        rrf     0x7E, w         ; >> 1");
+                    }
+                }
+            }
+        }
         Expr::Binary(op, a, b) => {
             eval_to_w(a, out, locals, fnp);
             l!("        movwf   0x7E            ; lhs");
@@ -594,6 +614,17 @@ mod tests {
             !asm.contains("unsupported expression"),
             "peek8 must be a supported expression"
         );
+    }
+
+    // Shift by a compile-time constant (no barrel shifter on PIC14): << N via N
+    // doublings, >> N via N rrf's. The generic primitive a Sond bit-bang UART
+    // needs for rrf-style byte assembly.
+    #[test]
+    fn shift_by_a_constant() {
+        let asm = asm_for("fn main() { serial_init() let x = serial_getc() serial_putc(x << 1) serial_putc(x >> 1) }");
+        assert!(!asm.contains("unsupported operator"), "a constant shift must be supported:\n{asm}");
+        assert!(asm.contains("addwf   0x7E, w         ; << 1"), "<< 1 doubles via addwf");
+        assert!(asm.contains("rrf     0x7E, w         ; >> 1"), ">> 1 uses rrf");
     }
 
     // `break` exits the enclosing loop — the construct the serial start-bit wait
