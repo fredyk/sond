@@ -244,8 +244,14 @@ compute-bound peers (a 2.8x speedup over the same work in series):
   (§5.3 applied to the reduction). This is the streaming-reduce case where §5.3 bites; the positional
   bind above buffers by source and so needs no such restriction.
 
-Still ahead: the full `graph { node .. }` block, the effect-conflict edges (§5.2), and the
-independence/confluence PROOF that turns `~~` from "run these" into a verified claim (§5.3).
+The independence/confluence PROOF (§5.3) has begun: `par` peers are verified confluent over the
+module's MUTABLE GLOBALS. A per-function read/write footprint over the mutable globals is computed
+transitively across the call graph, and a `par` whose peers write the same global (or one writes
+while another reads) is a COMPILE ERROR: a data race whose result depends on the schedule. Pure
+peers and peers on disjoint globals are admitted. So `~~` is now a verified claim w.r.t. global
+state. Still ahead: extend the proof to coupling through raw pointers / shared heap (needs the
+effect/capability system, RFC-0011), the full `graph { node .. }` block, and the effect-conflict
+edges (§5.2).
 
 ## 7. Worked example: a fiscal batch, honestly parallel
 
