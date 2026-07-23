@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of pbkdf2-sha256.snd. HMAC-SHA-256 is verified against RFC 4231 in its own suite,
+// so here we pin the PBKDF2 construction by reproducing it by hand: one iteration is
+// exactly HMAC(pw, salt || INT32BE(1)), and two iterations xor in HMAC(pw, U_1). Both are
+// derived from the verified primitive, so no external vector is fabricated.
+
+include "any/crypto/kdf/pbkdf2-sha256.snd"
+include "x86_64/linux/testing.snd"
+
+let mut p_salt[16]
+let mut p_block[32]
+let mut p_u1[32]
+let mut p_u2[32]
+let mut p_exp[32]
+let mut p_got[32]
+
+// One iteration: DK = U_1 = HMAC(pw, salt || 00 00 00 01).
+test "pbkdf2-sha256: one iteration equals HMAC over salt||INT32BE(1)" {
+    let pw = "password"
+    poke8(p_salt + 0, 115); poke8(p_salt + 1, 97); poke8(p_salt + 2, 108); poke8(p_salt + 3, 116)  // "salt"
+    // by hand: HMAC(pw, "salt" || 00000001)
+    poke8(p_block + 0, 115); poke8(p_block + 1, 97); poke8(p_block + 2, 108); poke8(p_block + 3, 116)
+    poke8(p_block + 4, 0); poke8(p_block + 5, 0); poke8(p_block + 6, 0); poke8(p_block + 7, 1)
+    hmac_sha256(pw, 8, p_block, 8, p_exp)
+    // through pbkdf2
+    pbkdf2_sha256(pw, 8, p_salt, 4, 1, p_got, 32)
+    let mut i = 0
+    for i < 32 { assert_eq(peek8(p_got + i), peek8(p_exp + i)); i = i + 1 }
+}
+
+// Two iterations: T = U_1 xor U_2, with U_2 = HMAC(pw, U_1).
+test "pbkdf2-sha256: two iterations xor in HMAC(pw, U_1)" {
+    let pw = "password"
+    poke8(p_salt + 0, 115); poke8(p_salt + 1, 97); poke8(p_salt + 2, 108); poke8(p_salt + 3, 116)
+    // by hand: U_1 = HMAC(pw, salt||INT(1)); U_2 = HMAC(pw, U_1); exp = U_1 xor U_2
+    poke8(p_block + 0, 115); poke8(p_block + 1, 97); poke8(p_block + 2, 108); poke8(p_block + 3, 116)
+    poke8(p_block + 4, 0); poke8(p_block + 5, 0); poke8(p_block + 6, 0); poke8(p_block + 7, 1)
+    hmac_sha256(pw, 8, p_block, 8, p_u1)
+    hmac_sha256(pw, 8, p_u1, 32, p_u2)
+    let mut i = 0
+    for i < 32 { poke8(p_exp + i, peek8(p_u1 + i) ^ peek8(p_u2 + i)); i = i + 1 }
+    // through pbkdf2
+    pbkdf2_sha256(pw, 8, p_salt, 4, 2, p_got, 32)
+    i = 0
+    for i < 32 { assert_eq(peek8(p_got + i), peek8(p_exp + i)); i = i + 1 }
+}
+
+// A shorter output length truncates the derived key.
+test "pbkdf2-sha256: dklen truncates the block" {
+    let pw = "pw"
+    poke8(p_salt + 0, 1); poke8(p_salt + 1, 2)
+    pbkdf2_sha256(pw, 2, p_salt, 2, 4, p_got, 16)
+    pbkdf2_sha256(pw, 2, p_salt, 2, 4, p_exp, 32)
+    let mut i = 0
+    for i < 16 { assert_eq(peek8(p_got + i), peek8(p_exp + i)); i = i + 1 }
+}

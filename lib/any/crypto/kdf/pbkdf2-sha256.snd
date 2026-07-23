@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/crypto/kdf/pbkdf2-sha256.snd: PBKDF2 with HMAC-SHA-256 (RFC 8018 §5.2), the
+// iterated-hash step SCRAM-SHA-256 needs for SaltedPassword. Built on the existing
+// hmac_sha256. v1 derives up to 32 bytes (one HMAC block), which is exactly SCRAM's
+// need; longer outputs (multiple blocks T_2, T_3, ...) are a straightforward extension.
+
+include "any/crypto/kdf/hkdf-sha256.snd"
+
+// Derives `dklen` (<= 32) bytes into `out` from `pw`/`salt` over `iters` iterations.
+// T_1 = U_1 xor U_2 xor ... xor U_c, with U_1 = HMAC(pw, salt || INT32BE(1)) and
+// U_j = HMAC(pw, U_{j-1}).
+fn pbkdf2_sha256(pw: i64, pwlen: i64, salt: i64, saltlen: i64, iters: i64, out: i64, dklen: i64) {
+    let block[512]                                   // salt || 4-byte block counter
+    let mut i = 0
+    for i < saltlen { poke8(block + i, peek8(salt + i)); i = i + 1 }
+    poke8(block + saltlen + 0, 0)
+    poke8(block + saltlen + 1, 0)
+    poke8(block + saltlen + 2, 0)
+    poke8(block + saltlen + 3, 1)                    // INT32BE(1): the first (only) block
+    let u[32]
+    hmac_sha256(pw, pwlen, block, saltlen + 4, u)    // U_1
+    let t[32]
+    let mut k = 0
+    for k < 32 { poke8(t + k, peek8(u + k)); k = k + 1 }   // T = U_1
+    let u2[32]
+    let mut c = 1
+    for c < iters {
+        hmac_sha256(pw, pwlen, u, 32, u2)            // U_j = HMAC(pw, U_{j-1})
+        k = 0
+        for k < 32 {
+            poke8(u + k, peek8(u2 + k))              // carry U_j forward
+            poke8(t + k, peek8(t + k) ^ peek8(u2 + k))   // T ^= U_j
+            k = k + 1
+        }
+        c = c + 1
+    }
+    k = 0
+    for k < dklen { poke8(out + k, peek8(t + k)); k = k + 1 }
+}
