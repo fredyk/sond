@@ -1,0 +1,220 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/tls/https.snd: a TLS 1.3 HTTPS GET on top of the handshake/auth in auth.snd. It
+// completes the handshake (server Finished, client Finished, application keys) and performs
+// an HTTP/1.1 GET, reading the response. Kept apart from the audited auth path (auth.snd) so
+// each has its own scope.
+
+include "any/tls/auth.snd"
+
+// Returns the byte offset of the first message of type `mt` in the flight, or -1.
+fn tls_flight_msg(buf: i64, n: i64, mt: i64) -> i64 {
+    let mut p = 0
+    for p + 4 <= n {
+        let t = peek8(buf + p)
+        let mlen = (peek8(buf + p + 1) << 16) | (peek8(buf + p + 2) << 8) | peek8(buf + p + 3)
+        if t == mt { return p }
+        p = p + 4 + mlen
+    }
+    0 - 1
+}
+
+// A full TLS 1.3 GET: completes the handshake (through the server Finished), sends the
+// client Finished, switches to application keys, sends an HTTP/1.1 request for `path`, and
+// reads the response into `out` (up to `cap`). Returns the response byte length, or <=0 on
+// failure. No certificate chain policy is enforced here beyond CertificateVerify, so the
+// caller should validate the leaf with x509_verify / x509_hostname_matches on the flight.
+//
+// STATUS: fetches complete HTTP responses from a standard TLS 1.3 server (openssl
+// s_server, verified). The handshake and server authentication are reliable against a real
+// public server (tls_handshake_auth returns 1 on 8/8 runs to cloudflare). Cloudflare's edge,
+// however, closes the connection during the application-data phase after our client
+// Finished + GET; the cause is on the server-policy side (likely the ALPN/HTTP-version it
+// expects, or edge filtering of a minimal client), not the crypto, and is still open. For
+// the audited identity check use tls_handshake_auth; for a plain server use this GET.
+fn tls_get(host: i64, port: i64, sni: i64, snilen: i64, path: i64, pathlen: i64, out: i64, cap: i64) -> i64 {
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { return 0 - 1 }
+    let sa[2]
+    sockaddr_in_build(sa, tls_ipv4(host), port)
+    if connect_sock(fd, sa, 16) < 0 { close_fd(fd); return 0 - 1 }
+
+    let cpriv[32]
+    tls_random(cpriv, 32)
+    let base9[32]
+    poke8(base9, 9)
+    let mut i = 0
+    for i < 31 { poke8(base9 + 1 + i, 0); i = i + 1 }
+    let cpub[32]
+    x25519(cpriv, base9, cpub)
+    let random[32]
+    tls_random(random, 32)
+    let ch = heap_alloc(1024)
+    let chlen = tls_build_client_hello(random, cpub, sni, snilen, ch)
+    let scratch = heap_alloc(4096)
+    tls_send_plain_handshake(fd, ch, chlen, scratch)
+
+    let rec = heap_alloc(20000)
+    let rl = tls_read_record(fd, rec, 20000)
+    if rl <= 0 { close_fd(fd); return 0 - 1 }
+    if peek8(rec) != 22 { close_fd(fd); return 0 - 1 }
+    let shlen = rl - 5
+    let spub[32]
+    if tls_sh_key_share(rec + 5, spub) != 0x001d { close_fd(fd); return 0 - 1 }
+
+    let tr = heap_alloc(20000)
+    i = 0
+    for i < chlen { poke8(tr + i, peek8(ch + i)); i = i + 1 }
+    i = 0
+    for i < shlen { poke8(tr + chlen + i, peek8(rec + 5 + i)); i = i + 1 }
+    let trlen = chlen + shlen
+
+    let ecdhe[32]
+    x25519(cpriv, spub, ecdhe)
+    let early[32]
+    tls_early_secret(early, 0, early)
+    let hs[32]
+    tls_derive_handshake_secret(early, ecdhe, 32, hs)
+    let s_hs[32]
+    tls_server_hs_traffic(hs, tr, trlen, s_hs)
+    let c_hs[32]
+    tls_client_hs_traffic(hs, tr, trlen, c_hs)
+    let skey[32]
+    let siv[12]
+    tls_traffic_key_iv(s_hs, skey, siv)
+    let ckey[32]
+    let civ[12]
+    tls_traffic_key_iv(c_hs, ckey, civ)
+
+    // decrypt the server flight until the server Finished (type 20) is present
+    let flight = heap_alloc(30000)
+    let mut flen = 0
+    let mut sseq = 0
+    let mut finoff = 0 - 1
+    for finoff < 0 {
+        let rl2 = tls_read_record(fd, rec, 20000)
+        if rl2 <= 0 { close_fd(fd); return 0 - 1 }
+        let ct = peek8(rec)
+        if ct != 20 {
+            if ct != 23 { close_fd(fd); return 0 - 1 }
+            let m = tls_open(skey, siv, sseq, rec, rl2, flight + flen)
+            if m < 0 { close_fd(fd); return 0 - 1 }
+            flen = flen + (m & 0xffffffff)
+            sseq = sseq + 1
+            finoff = tls_flight_msg(flight, flen, 20)
+        }
+    }
+    let finlen = (peek8(flight + finoff + 1) << 16) | (peek8(flight + finoff + 2) << 8) | peek8(flight + finoff + 3)
+    let finend = finoff + 4 + finlen
+
+    // verify the server Finished: HMAC(server_finished_key, transcript through CertificateVerify)
+    i = 0
+    for i < finoff { poke8(tr + trlen + i, peek8(flight + i)); i = i + 1 }
+    let th_sfin[32]
+    sha256_hash(tr, trlen + finoff, th_sfin)
+    let sfk[32]
+    hkdf_expand_label(s_hs, "finished", 8, sfk, 0, sfk, 32)
+    let sfin[32]
+    hmac_sha256(sfk, 32, th_sfin, 32, sfin)
+    i = 0
+    for i < 32 {
+        if peek8(sfin + i) != peek8(flight + finoff + 4 + i) { close_fd(fd); return 0 - 1 }
+        i = i + 1
+    }
+
+    // transcript through the server Finished (for the client Finished and the app keys)
+    i = 0
+    for i < finend { poke8(tr + trlen + i, peek8(flight + i)); i = i + 1 }
+    let th_full[32]
+    sha256_hash(tr, trlen + finend, th_full)
+
+    // client Finished, sealed with the client handshake key at sequence 0
+    let cfk[32]
+    hkdf_expand_label(c_hs, "finished", 8, cfk, 0, cfk, 32)
+    let cfin[32]
+    hmac_sha256(cfk, 32, th_full, 32, cfin)
+    let cfmsg[40]
+    poke8(cfmsg + 0, 20); poke8(cfmsg + 1, 0); poke8(cfmsg + 2, 0); poke8(cfmsg + 3, 32)
+    i = 0
+    for i < 32 { poke8(cfmsg + 4 + i, peek8(cfin + i)); i = i + 1 }
+    // client ChangeCipherSpec (middlebox compatibility), then the encrypted client Finished
+    let ccs[6]
+    poke8(ccs + 0, 20); poke8(ccs + 1, 3); poke8(ccs + 2, 3)
+    poke8(ccs + 3, 0); poke8(ccs + 4, 1); poke8(ccs + 5, 1)
+    write_buf(fd, ccs, 6)
+    let sealed = heap_alloc(128)
+    let sl = tls_seal(ckey, civ, 0, 22, cfmsg, 36, sealed)
+    write_buf(fd, sealed, sl)
+
+    // application traffic keys (master secret, transcript through the server Finished)
+    let master[32]
+    tls_derive_master_secret(hs, master)
+    let c_ap[32]
+    derive_secret(master, "c ap traffic", 12, tr, trlen + finend, c_ap)
+    let s_ap[32]
+    derive_secret(master, "s ap traffic", 12, tr, trlen + finend, s_ap)
+    let cakey[32]
+    let caiv[12]
+    tls_traffic_key_iv(c_ap, cakey, caiv)
+    let sakey[32]
+    let saiv[12]
+    tls_traffic_key_iv(s_ap, sakey, saiv)
+
+    // send the HTTP/1.1 GET (Host is the SNI hostname) as application data, client app seq 0
+    let req = heap_alloc(2048)
+    let rq = tls_http_req(sni, snilen, path, pathlen, req)
+    let sealed2 = heap_alloc(2048)
+    let sl2 = tls_seal(cakey, caiv, 0, 23, req, rq, sealed2)
+    write_buf(fd, sealed2, sl2)
+
+    // read the response: decrypt each server app record at an incrementing sequence, skip
+    // NewSessionTicket (inner type 22), collect application_data (23), stop on an alert (21).
+    let mut olen = 0
+    let mut aseq = 0
+    let mut reads = 0
+    let dec = heap_alloc(20000)
+    for reads < 16 {
+        let rl3 = tls_read_record(fd, rec, 20000)
+        if rl3 <= 0 { break }
+        reads = reads + 1
+        if peek8(rec) == 23 {
+            let m = tls_open(sakey, saiv, aseq, rec, rl3, dec)
+            if m < 0 { break }
+            aseq = aseq + 1
+            let typ = m >> 32
+            let dl = m & 0xffffffff
+            if typ == 21 { break }
+            if typ == 23 {
+                let mut j = 0
+                for j < dl {
+                    if olen < cap { poke8(out + olen, peek8(dec + j)); olen = olen + 1 }
+                    j = j + 1
+                }
+            }
+        }
+    }
+    close_fd(fd)
+
+    olen
+}
+
+// Builds a minimal HTTP/1.1 GET request into `buf`: "GET <path> HTTP/1.1\r\nHost: <host>\r\n
+// Connection: close\r\n\r\n". Returns the length.
+fn tls_http_req(hosthdr: i64, hosthdrlen: i64, path: i64, pathlen: i64, buf: i64) -> i64 {
+    let mut o = 0
+    let g = "GET "
+    let mut i = 0
+    for i < 4 { poke8(buf + o, peek8(g + i)); o = o + 1; i = i + 1 }
+    i = 0
+    for i < pathlen { poke8(buf + o, peek8(path + i)); o = o + 1; i = i + 1 }
+    let h = " HTTP/1.1\r\nHost: "
+    i = 0
+    for i < 16 { poke8(buf + o, peek8(h + i)); o = o + 1; i = i + 1 }
+    i = 0
+    for i < hosthdrlen { poke8(buf + o, peek8(hosthdr + i)); o = o + 1; i = i + 1 }
+    let tail = "\r\nConnection: close\r\n\r\n"
+    i = 0
+    for i < 22 { poke8(buf + o, peek8(tail + i)); o = o + 1; i = i + 1 }
+    o
+}

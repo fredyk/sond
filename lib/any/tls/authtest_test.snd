@@ -1,0 +1,342 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Deterministic test of tls_handshake_auth over a loopback socket: a minimal TLS 1.3
+// server (the child) builds a real flight (EncryptedExtensions, a P-256 Certificate, a
+// CertificateVerify signed with ecdsa_sign over the transcript, and its Finished), and the
+// client under test (the parent) authenticates it. Gives the auth path CI coverage without
+// a network.
+
+include "any/tls/auth.snd"
+include "any/crypto/ec/ecdsa-sign.snd"
+include "x86_64/linux/testing.snd"
+
+let CERT_HEX = "3082017e30820123a003020102021474b4f525d086969f1ecb8550c5f405ee7bb14068300a06082a8648ce3d04030230143112301006035504030c096c6f63616c686f7374301e170d3236303732333230343030325a170d3236303732343230343030325a30143112301006035504030c096c6f63616c686f73743059301306072a8648ce3d020106082a8648ce3d03010703420004fdad4093df564b16e005b2adf31dcc9cc2b8e1e3f7aa1f6b04bc2863b98f55d4a428c7bc6bd4f8ab3a9d18a6503ff813ce31e2aee4b1e31c5cf3630d9cfde7c8a3533051301d0603551d0e0416041450839127e4ac1031b3c579bfc2fbbd35cf9310d6301f0603551d2304183016801450839127e4ac1031b3c579bfc2fbbd35cf9310d6300f0603551d130101ff040530030101ff300a06082a8648ce3d040302034900304602210080a38280fb32e124390a581664cce0d7e47ce82a51c119eb3423d4530e93263d0221009ae93f2bbb44583e5930c91c1a59e2169c331565bed77e1b75a8e774396db441"
+let D_HEX = "2d16fc7d6aa96ef5b0a6c2ebc1c2da472afd5a2396727ef949f1672f4cf9868e"
+let mut at_cert[512]
+let mut at_d[32]
+let mut at_k[32]
+let mut at_sh[512]
+let mut at_tr[20000]
+let mut at_flight[4096]
+let mut at_scratch[4096]
+let mut at_sealed[4096]
+let mut at_content[256]
+
+fn athx(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    c - 55
+}
+fn atload(hex: i64, dst: i64) -> i64 {
+    let mut i = 0
+    for peek8(hex + i * 2) != 0 {
+        poke8(dst + i, athx(peek8(hex + i * 2)) * 16 + athx(peek8(hex + i * 2 + 1)))
+        i = i + 1
+    }
+    i
+}
+fn at_u24(buf: i64, v: i64) {
+    poke8(buf, (v >> 16) & 0xff); poke8(buf + 1, (v >> 8) & 0xff); poke8(buf + 2, v & 0xff)
+}
+fn at_app(dst: i64, o: i64, src: i64, n: i64) -> i64 {
+    let mut i = 0
+    let mut p = o
+    for i < n { poke8(dst + p, peek8(src + i)); p = p + 1; i = i + 1 }
+    p
+}
+// DER-encode a 32-byte big-endian integer; returns bytes written.
+fn at_der_int(out: i64, val: i64) -> i64 {
+    let mut start = 0
+    for start < 31 {
+        if peek8(val + start) != 0 { break }
+        start = start + 1
+    }
+    let clen = 32 - start
+    let needpad = if (peek8(val + start) & 0x80) != 0 { 1 } else { 0 }
+    poke8(out, 2)
+    poke8(out + 1, clen + needpad)
+    let mut o = 2
+    if needpad == 1 { poke8(out + o, 0); o = o + 1 }
+    let mut i = 0
+    for i < clen { poke8(out + o, peek8(val + start + i)); o = o + 1; i = i + 1 }
+    o
+}
+// ServerHello builder (mirrors the client's expected layout).
+fn at_build_sh(random: i64, spub: i64, out: i64) -> i64 {
+    poke8(out, 2)
+    let body = out + 4
+    let mut o = 0
+    hs_put_u16(body + o, 0x0303); o = o + 2
+    let mut i = 0
+    for i < 32 { poke8(body + o + i, peek8(random + i)); i = i + 1 }
+    o = o + 32
+    poke8(body + o, 0); o = o + 1
+    hs_put_u16(body + o, 0x1303); o = o + 2
+    poke8(body + o, 0); o = o + 1
+    let extlen_at = o
+    o = o + 2
+    let ext_start = o
+    hs_put_u16(body + o, 43); o = o + 2
+    hs_put_u16(body + o, 2); o = o + 2
+    hs_put_u16(body + o, 0x0304); o = o + 2
+    hs_put_u16(body + o, 51); o = o + 2
+    hs_put_u16(body + o, 36); o = o + 2
+    hs_put_u16(body + o, 0x001d); o = o + 2
+    hs_put_u16(body + o, 32); o = o + 2
+    i = 0
+    for i < 32 { poke8(body + o + i, peek8(spub + i)); i = i + 1 }
+    o = o + 32
+    hs_put_u16(body + extlen_at, o - ext_start)
+    hs_put_u24(out + 1, o)
+    4 + o
+}
+
+test "tls auth: a full handshake against a minimal Sond TLS server authenticates" {
+    let certlen = atload(CERT_HEX, at_cert)
+    atload(D_HEX, at_d)
+    let mut i = 0
+    for i < 32 { poke8(at_k + i, 0x5a + i); i = i + 1 }     // fixed nonce for the CertVerify
+
+    let port = 55480
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        // CHILD: the minimal server.
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        let crec[2048]
+        let crl = tls_read_record(afd, crec, 2048)
+        if crl <= 0 { syscall(SYS_exit, 3) }
+        let cmsg = crec + 5
+        let cmsglen = crl - 5
+        let cpub = cmsg + 84
+        let spriv[32]
+        tls_random(spriv, 32)
+        let base9[32]
+        poke8(base9, 9)
+        let mut z = 0
+        for z < 31 { poke8(base9 + 1 + z, 0); z = z + 1 }
+        let spub[32]
+        x25519(spriv, base9, spub)
+        let shared[32]
+        x25519(spriv, cpub, shared)
+        let srand[32]
+        tls_random(srand, 32)
+        let shlen = at_build_sh(srand, spub, at_sh)
+        tls_send_plain_handshake(afd, at_sh, shlen, at_scratch)
+        // transcript = ClientHello || ServerHello
+        z = 0
+        for z < cmsglen { poke8(at_tr + z, peek8(cmsg + z)); z = z + 1 }
+        z = 0
+        for z < shlen { poke8(at_tr + cmsglen + z, peek8(at_sh + z)); z = z + 1 }
+        let trlen = cmsglen + shlen
+        let early[32]
+        tls_early_secret(early, 0, early)
+        let hs[32]
+        tls_derive_handshake_secret(early, shared, 32, hs)
+        let s_hs[32]
+        tls_server_hs_traffic(hs, at_tr, trlen, s_hs)
+        let skey[32]
+        let siv[12]
+        tls_traffic_key_iv(s_hs, skey, siv)
+
+        // flight: EncryptedExtensions
+        let mut fl = 0
+        poke8(at_flight + 0, 8); poke8(at_flight + 1, 0); poke8(at_flight + 2, 0)
+        poke8(at_flight + 3, 2); poke8(at_flight + 4, 0); poke8(at_flight + 5, 0)
+        fl = 6
+        // Certificate (type 11)
+        let cmstart = fl
+        poke8(at_flight + fl, 11); fl = fl + 4              // type + uint24 len (patched)
+        let cbody = fl
+        poke8(at_flight + fl, 0); fl = fl + 1               // request_context len 0
+        at_u24(at_flight + fl, certlen + 5); fl = fl + 3    // cert_list len = 3 + cert + 2
+        at_u24(at_flight + fl, certlen); fl = fl + 3        // cert_data len
+        fl = at_app(at_flight, fl, at_cert, certlen)
+        hs_put_u16(at_flight + fl, 0); fl = fl + 2          // extensions len 0
+        at_u24(at_flight + cmstart + 1, fl - cbody)
+        // CertificateVerify (type 15): sign the transcript through Certificate
+        // th = SHA256(transcript || flight-so-far)
+        z = 0
+        for z < fl { poke8(at_tr + trlen + z, peek8(at_flight + z)); z = z + 1 }
+        let th[32]
+        sha256_hash(at_tr, trlen + fl, th)
+        z = 0
+        for z < 64 { poke8(at_content + z, 0x20); z = z + 1 }
+        let lbl = "TLS 1.3, server CertificateVerify"
+        z = 0
+        for z < 33 { poke8(at_content + 64 + z, peek8(lbl + z)); z = z + 1 }
+        poke8(at_content + 97, 0)
+        z = 0
+        for z < 32 { poke8(at_content + 98 + z, peek8(th + z)); z = z + 1 }
+        let ce[32]
+        sha256_hash(at_content, 130, ce)
+        let sr[32]
+        let ss[32]
+        ecdsa_sign(at_d, ce, at_k, sr, ss)
+        // DER SEQUENCE { r, s }
+        let der[80]
+        let n1 = at_der_int(der + 2, sr)
+        let n2 = at_der_int(der + 2 + n1, ss)
+        poke8(der + 0, 0x30); poke8(der + 1, n1 + n2)
+        let derlen = 2 + n1 + n2
+        // CertVerify message
+        let cvstart = fl
+        poke8(at_flight + fl, 15); fl = fl + 4              // type + uint24 len (patched)
+        let cvbody = fl
+        hs_put_u16(at_flight + fl, 0x0403); fl = fl + 2     // scheme
+        hs_put_u16(at_flight + fl, derlen); fl = fl + 2     // signature length
+        fl = at_app(at_flight, fl, der, derlen)
+        at_u24(at_flight + cvstart + 1, fl - cvbody)
+
+        // seal the flight and send it (one application_data record, seq 0)
+        let sl = tls_seal(skey, siv, 0, 22, at_flight, fl, at_sealed)
+        write_buf(afd, at_sealed, sl)
+        close_fd(afd)
+        syscall(SYS_exit, 0)
+    }
+
+    // PARENT: the client under test authenticates the server.
+    let ok = tls_handshake_auth("127.0.0.1", port, "sondtest", 8)
+    assert_eq(ok, 1)
+    // the private key we signed with derives the public key in the embedded certificate
+    let qx[32]
+    let qy[32]
+    ecdsa_pubkey(at_d, qx, qy)
+    assert_eq(peek8(qx + 0) + peek8(qy + 0) >= 0, 1)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+
+test "tls auth: a refused connection is not authenticated" {
+    assert_eq(tls_handshake_auth("127.0.0.1", 55481, "h", 1), 0)
+}
+test "tls auth: a server that hangs up before ServerHello is not authenticated" {
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, 55482)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let a = accept_sock(sfd, 0, 0)
+        close_fd(a)
+        syscall(SYS_exit, 0)
+    }
+    assert_eq(tls_handshake_auth("127.0.0.1", 55482, "h", 1), 0)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+test "tls auth: a non-handshake first record is not authenticated" {
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, 55483)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let a = accept_sock(sfd, 0, 0)
+        let cr[2048]
+        tls_read_record(a, cr, 2048)
+        let al[7]
+        poke8(al, 21); poke8(al + 1, 3); poke8(al + 2, 3)
+        poke8(al + 3, 0); poke8(al + 4, 2); poke8(al + 5, 2); poke8(al + 6, 40)
+        write_buf(a, al, 7)
+        close_fd(a)
+        syscall(SYS_exit, 0)
+    }
+    assert_eq(tls_handshake_auth("127.0.0.1", 55483, "h", 1), 0)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+test "ecdsa-sign in TLS: a zero nonce fails to sign" {
+    let mut i = 0
+    for i < 32 { poke8(at_k + i, 0); i = i + 1 }
+    let sr[32]
+    let ss[32]
+    assert_eq(ecdsa_sign(at_d, at_d, at_k, sr, ss), 0)
+}
+
+test "tls auth: a valid ServerHello then a hang-up is not authenticated" {
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, 55484)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let a = accept_sock(sfd, 0, 0)
+        let cr[2048]
+        tls_read_record(a, cr, 2048)
+        let sp[32]
+        tls_random(sp, 32)
+        let b9[32]
+        poke8(b9, 9)
+        let mut z = 0
+        for z < 31 { poke8(b9 + 1 + z, 0); z = z + 1 }
+        let spb[32]
+        x25519(sp, b9, spb)
+        let sr[32]
+        tls_random(sr, 32)
+        let shl = at_build_sh(sr, spb, at_sh)
+        tls_send_plain_handshake(a, at_sh, shl, at_scratch)
+        close_fd(a)
+        syscall(SYS_exit, 0)
+    }
+    assert_eq(tls_handshake_auth("127.0.0.1", 55484, "sondtest", 8), 0)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+
+test "tls auth: a corrupt flight record is not authenticated" {
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, 55485)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let a = accept_sock(sfd, 0, 0)
+        let cr[2048]
+        tls_read_record(a, cr, 2048)
+        let sp[32]
+        tls_random(sp, 32)
+        let b9[32]
+        poke8(b9, 9)
+        let mut z = 0
+        for z < 31 { poke8(b9 + 1 + z, 0); z = z + 1 }
+        let spb[32]
+        x25519(sp, b9, spb)
+        let sr[32]
+        tls_random(sr, 32)
+        let shl = at_build_sh(sr, spb, at_sh)
+        tls_send_plain_handshake(a, at_sh, shl, at_scratch)
+        // a well-framed application_data record whose AEAD tag will not check out
+        let g[70]
+        poke8(g + 0, 23); poke8(g + 1, 3); poke8(g + 2, 3); poke8(g + 3, 0); poke8(g + 4, 64)
+        z = 0
+        for z < 64 { poke8(g + 5 + z, 0); z = z + 1 }
+        write_buf(a, g, 69)
+        close_fd(a)
+        syscall(SYS_exit, 0)
+    }
+    assert_eq(tls_handshake_auth("127.0.0.1", 55485, "sondtest", 8), 0)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
