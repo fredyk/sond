@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/tls/handshake.snd: building the TLS 1.3 ClientHello (RFC 8446 §4.1.2). A
+// handshake message is HandshakeType(1) | uint24 length | body, carried as the fragment
+// of a handshake record. The ClientHello offers exactly what the rest of this client can
+// do: TLS 1.3 only, the TLS_CHACHA20_POLY1305_SHA256 cipher, the x25519 group with our
+// key share, the ecdsa_secp256r1_sha256 and rsa_pkcs1_sha256 signature algorithms, and
+// the server name (SNI). Lengths are back-patched once each section is written.
+
+// Big-endian scalar writes.
+fn hs_put_u16(buf: i64, v: i64) { poke8(buf, (v >> 8) & 0xff); poke8(buf + 1, v & 0xff) }
+fn hs_put_u24(buf: i64, v: i64) {
+    poke8(buf + 0, (v >> 16) & 0xff)
+    poke8(buf + 1, (v >> 8) & 0xff)
+    poke8(buf + 2, v & 0xff)
+}
+
+// Builds a ClientHello handshake message into `out` for `sni`/`snilen`, using the caller's
+// 32-byte ClientHello `random` and 32-byte x25519 public key `pub`. Returns the total
+// message length (including the 4-byte handshake header).
+fn tls_build_client_hello(random: i64, pubkey: i64, sni: i64, snilen: i64, out: i64) -> i64 {
+    // out[0] = handshake type 1 (ClientHello); out[1..4] = uint24 body length (patched last).
+    poke8(out, 1)
+    let body = out + 4
+    let mut o = 0
+    hs_put_u16(body + o, 0x0303)                     // legacy_version = TLS 1.2
+    o = o + 2
+    let mut i = 0
+    for i < 32 { poke8(body + o + i, peek8(random + i)); i = i + 1 }   // 32-byte random
+    o = o + 32
+    poke8(body + o, 0)                               // legacy_session_id: empty
+    o = o + 1
+    hs_put_u16(body + o, 2)                          // cipher_suites length = 2 (one suite)
+    hs_put_u16(body + o + 2, 0x1303)                 // TLS_CHACHA20_POLY1305_SHA256
+    o = o + 4
+    poke8(body + o, 1); poke8(body + o + 1, 0)       // compression: 1 method, null(0)
+    o = o + 2
+
+    // extensions: a 2-byte length prefix, then each extension.
+    let ext_len_at = o
+    o = o + 2
+    let ext_start = o
+
+    // supported_versions (43): list of 1 version, TLS 1.3 (0x0304).
+    hs_put_u16(body + o, 43); o = o + 2
+    hs_put_u16(body + o, 3); o = o + 2               // ext body length
+    poke8(body + o, 2); o = o + 1                    // list length
+    hs_put_u16(body + o, 0x0304); o = o + 2
+
+    // supported_groups (10): list of 1 group, x25519 (0x001d).
+    hs_put_u16(body + o, 10); o = o + 2
+    hs_put_u16(body + o, 4); o = o + 2
+    hs_put_u16(body + o, 2); o = o + 2               // list length
+    hs_put_u16(body + o, 0x001d); o = o + 2
+
+    // signature_algorithms (13): ecdsa_secp256r1_sha256 (0x0403), rsa_pkcs1_sha256 (0x0401).
+    hs_put_u16(body + o, 13); o = o + 2
+    hs_put_u16(body + o, 6); o = o + 2
+    hs_put_u16(body + o, 4); o = o + 2               // list length
+    hs_put_u16(body + o, 0x0403); o = o + 2
+    hs_put_u16(body + o, 0x0401); o = o + 2
+
+    // key_share (51): one KeyShareEntry { group x25519, 32-byte key }.
+    hs_put_u16(body + o, 51); o = o + 2
+    hs_put_u16(body + o, 38); o = o + 2              // ext body: 2 + (2+2+32)
+    hs_put_u16(body + o, 36); o = o + 2              // client_shares length
+    hs_put_u16(body + o, 0x001d); o = o + 2          // group
+    hs_put_u16(body + o, 32); o = o + 2              // key length
+    i = 0
+    for i < 32 { poke8(body + o + i, peek8(pubkey + i)); i = i + 1 }
+    o = o + 32
+
+    // server_name (0): a single host_name entry (SNI).
+    hs_put_u16(body + o, 0); o = o + 2
+    hs_put_u16(body + o, snilen + 5); o = o + 2      // ext body: 2 + 1 + 2 + snilen
+    hs_put_u16(body + o, snilen + 3); o = o + 2      // server_name_list length
+    poke8(body + o, 0); o = o + 1                    // name_type = host_name(0)
+    hs_put_u16(body + o, snilen); o = o + 2
+    i = 0
+    for i < snilen { poke8(body + o + i, peek8(sni + i)); i = i + 1 }
+    o = o + snilen
+
+    hs_put_u16(body + ext_len_at, o - ext_start)     // back-patch extensions length
+    hs_put_u24(out + 1, o)                           // back-patch handshake body length
+    4 + o
+}
