@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of scram-sha256.snd. Every underlying primitive (PBKDF2, HMAC-SHA-256, SHA-256) is
+// already verified against its own RFC vectors elsewhere, so here we pin the SCRAM key
+// schedule by SELF-CONSISTENCY: each SCRAM step is reproduced by hand from the verified
+// primitives and compared, no external base64 vector is fabricated from memory. The XOR
+// step (ClientProof) is checked for invertibility, which is exactly how a real client
+// recovers ClientKey to verify the server later.
+
+include "any/crypto/scram/scram-sha256.snd"
+include "x86_64/linux/testing.snd"
+
+// Local length-of-NUL-terminated-string, kept in the test so the suite does not pull in
+// the whole any/strings.snd surface (which would count uncovered helpers against us).
+fn t_strlen(s: i64) -> i64 {
+    let mut n = 0
+    for peek8(s + n) != 0 { n = n + 1 }
+    n
+}
+
+let mut t_salt[16]
+let mut t_salted[32]
+let mut t_exp[32]
+let mut t_got[32]
+let mut t_ck[32]
+let mut t_sk[32]
+let mut t_cs[32]
+let mut t_cp[32]
+let mut t_serverkey[32]
+let mut t_ssig[32]
+let mut t_recover[32]
+
+// A plausible SCRAM AuthMessage (client-first-bare "," server-first "," client-final-
+// without-proof). Its exact bytes do not matter for self-consistency, only that both the
+// module and the by-hand recomputation HMAC over the same buffer of the same length.
+let T_AUTHMSG = "n=user,r=fyko+d2lbbFgONRv9qkxdawL,r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j,s=QSXCR+Q6sek8bf92,i=4096,c=biws,r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j"
+
+fn fill_salt() {
+    poke8(t_salt + 0, 0x51); poke8(t_salt + 1, 0x24); poke8(t_salt + 2, 0xc2); poke8(t_salt + 3, 0x47)
+    poke8(t_salt + 4, 0x3f); poke8(t_salt + 5, 0xa3); poke8(t_salt + 6, 0x9c); poke8(t_salt + 7, 0x28)
+    poke8(t_salt + 8, 0x11); poke8(t_salt + 9, 0x02); poke8(t_salt + 10, 0xfe); poke8(t_salt + 11, 0x00)
+    poke8(t_salt + 12, 0xa5); poke8(t_salt + 13, 0x5b); poke8(t_salt + 14, 0x6d); poke8(t_salt + 15, 0x77)
+}
+
+// SaltedPassword := PBKDF2-HMAC-SHA256(pw, salt, iters, 32).
+test "scram: salted_password equals PBKDF2 with dkLen=32" {
+    let pw = "pencil"
+    fill_salt()
+    scram_salted_password(pw, 6, t_salt, 16, 512, t_got)
+    pbkdf2_sha256(pw, 6, t_salt, 16, 512, t_exp, 32)   // by hand
+    let mut i = 0
+    for i < 32 { assert_eq(peek8(t_got + i), peek8(t_exp + i)); i = i + 1 }
+}
+
+// ClientKey := HMAC(SaltedPassword, "Client Key").
+test "scram: client_key equals HMAC(salted, \"Client Key\")" {
+    let pw = "pencil"
+    fill_salt()
+    scram_salted_password(pw, 6, t_salt, 16, 512, t_salted)
+    scram_client_key(t_salted, t_got)
+    hmac_sha256(t_salted, 32, "Client Key", 10, t_exp)   // by hand
+    let mut i = 0
+    for i < 32 { assert_eq(peek8(t_got + i), peek8(t_exp + i)); i = i + 1 }
+}
+
+// StoredKey := SHA256(ClientKey).
+test "scram: stored_key equals SHA256(client_key)" {
+    let pw = "pencil"
+    fill_salt()
+    scram_salted_password(pw, 6, t_salt, 16, 512, t_salted)
+    scram_client_key(t_salted, t_ck)
+    scram_stored_key(t_ck, t_got)
+    sha256_hash(t_ck, 32, t_exp)   // by hand
+    let mut i = 0
+    for i < 32 { assert_eq(peek8(t_got + i), peek8(t_exp + i)); i = i + 1 }
+}
+
+// ClientSignature := HMAC(StoredKey, AuthMessage).
+test "scram: client_signature equals HMAC(stored_key, AuthMessage)" {
+    let pw = "pencil"
+    fill_salt()
+    scram_salted_password(pw, 6, t_salt, 16, 512, t_salted)
+    scram_client_key(t_salted, t_ck)
+    scram_stored_key(t_ck, t_sk)
+    let alen = t_strlen(T_AUTHMSG)
+    scram_client_signature(t_sk, T_AUTHMSG, alen, t_got)
+    hmac_sha256(t_sk, 32, T_AUTHMSG, alen, t_exp)   // by hand
+    let mut i = 0
+    for i < 32 { assert_eq(peek8(t_got + i), peek8(t_exp + i)); i = i + 1 }
+}
+
+// ClientProof := ClientKey XOR ClientSignature, and the XOR is invertible: a client that
+// keeps ClientProof and ClientSignature recovers ClientKey exactly.
+test "scram: client_proof is ClientKey XOR ClientSignature and is invertible" {
+    let pw = "pencil"
+    fill_salt()
+    scram_salted_password(pw, 6, t_salt, 16, 512, t_salted)
+    scram_client_key(t_salted, t_ck)
+    scram_stored_key(t_ck, t_sk)
+    let alen = t_strlen(T_AUTHMSG)
+    scram_client_signature(t_sk, T_AUTHMSG, alen, t_cs)
+    scram_client_proof(t_ck, t_cs, t_cp)
+    let mut i = 0
+    // by hand: proof[i] == ck[i] xor cs[i]
+    for i < 32 { assert_eq(peek8(t_cp + i), peek8(t_ck + i) ^ peek8(t_cs + i)); i = i + 1 }
+    // invertible: proof xor signature recovers the client key
+    i = 0
+    for i < 32 { poke8(t_recover + i, peek8(t_cp + i) ^ peek8(t_cs + i)); i = i + 1 }
+    i = 0
+    for i < 32 { assert_eq(peek8(t_recover + i), peek8(t_ck + i)); i = i + 1 }
+}
+
+// ServerKey := HMAC(SaltedPassword, "Server Key").
+test "scram: server_key equals HMAC(salted, \"Server Key\")" {
+    let pw = "pencil"
+    fill_salt()
+    scram_salted_password(pw, 6, t_salt, 16, 512, t_salted)
+    scram_server_key(t_salted, t_got)
+    hmac_sha256(t_salted, 32, "Server Key", 10, t_exp)   // by hand
+    let mut i = 0
+    for i < 32 { assert_eq(peek8(t_got + i), peek8(t_exp + i)); i = i + 1 }
+    // ServerKey and ClientKey are derived from the same salted password but differ.
+    scram_client_key(t_salted, t_ck)
+    let mut diff = 0
+    i = 0
+    for i < 32 { if peek8(t_got + i) != peek8(t_ck + i) { diff = 1 } i = i + 1 }
+    assert_eq(diff, 1)
+}
+
+// ServerSignature := HMAC(ServerKey, AuthMessage).
+test "scram: server_signature equals HMAC(server_key, AuthMessage)" {
+    let pw = "pencil"
+    fill_salt()
+    scram_salted_password(pw, 6, t_salt, 16, 512, t_salted)
+    scram_server_key(t_salted, t_serverkey)
+    let alen = t_strlen(T_AUTHMSG)
+    scram_server_signature(t_serverkey, T_AUTHMSG, alen, t_ssig)
+    hmac_sha256(t_serverkey, 32, T_AUTHMSG, alen, t_exp)   // by hand
+    let mut i = 0
+    for i < 32 { assert_eq(peek8(t_ssig + i), peek8(t_exp + i)); i = i + 1 }
+}

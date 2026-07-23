@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/crypto/scram/scram-sha256.snd: the client-side cryptographic core of
+// SCRAM-SHA-256 (RFC 5802, with the SHA-256 registration in RFC 7677). This module is
+// pure and socket-free: it does not touch the network, parse SASL messages, or manage
+// any state. The caller drives the SASL exchange, assembles the exact ASCII AuthMessage,
+// and provides every output buffer; these functions only perform the fixed key schedule
+// (SaltedPassword, ClientKey, StoredKey, ClientSignature, ClientProof, ServerKey,
+// ServerSignature) on top of primitives already verified elsewhere.
+//
+// All digests are 32 bytes (SHA-256 output). Output buffers are caller-provided in the
+// no-allocator style.
+
+include "any/crypto/kdf/pbkdf2-sha256.snd"
+include "any/crypto/kdf/hkdf-sha256.snd"
+include "any/crypto/hash/sha256.snd"
+
+// The two fixed HMAC labels of the SCRAM key schedule, each exactly 10 ASCII bytes.
+let SCRAM_CLIENT_KEY_LABEL = "Client Key"
+let SCRAM_SERVER_KEY_LABEL = "Server Key"
+
+// SaltedPassword := PBKDF2-HMAC-SHA256(password, salt, iterations, dkLen = 32).
+// out32 receives the 32-byte salted password.
+fn scram_salted_password(pw: i64, pwlen: i64, salt: i64, saltlen: i64, iters: i64, out32: i64) {
+    pbkdf2_sha256(pw, pwlen, salt, saltlen, iters, out32, 32)
+}
+
+// ClientKey := HMAC(SaltedPassword, "Client Key").
+fn scram_client_key(salted32: i64, out32: i64) {
+    hmac_sha256(salted32, 32, SCRAM_CLIENT_KEY_LABEL, 10, out32)
+}
+
+// StoredKey := SHA256(ClientKey).
+fn scram_stored_key(clientkey32: i64, out32: i64) {
+    sha256_hash(clientkey32, 32, out32)
+}
+
+// ClientSignature := HMAC(StoredKey, AuthMessage).
+fn scram_client_signature(storedkey32: i64, authmsg: i64, authlen: i64, out32: i64) {
+    hmac_sha256(storedkey32, 32, authmsg, authlen, out32)
+}
+
+// ClientProof := ClientKey XOR ClientSignature (byte-wise over 32 bytes).
+fn scram_client_proof(clientkey32: i64, clientsig32: i64, out32: i64) {
+    let mut i = 0
+    for i < 32 {
+        poke8(out32 + i, peek8(clientkey32 + i) ^ peek8(clientsig32 + i))
+        i = i + 1
+    }
+}
+
+// ServerKey := HMAC(SaltedPassword, "Server Key").
+fn scram_server_key(salted32: i64, out32: i64) {
+    hmac_sha256(salted32, 32, SCRAM_SERVER_KEY_LABEL, 10, out32)
+}
+
+// ServerSignature := HMAC(ServerKey, AuthMessage).
+fn scram_server_signature(serverkey32: i64, authmsg: i64, authlen: i64, out32: i64) {
+    hmac_sha256(serverkey32, 32, authmsg, authlen, out32)
+}
