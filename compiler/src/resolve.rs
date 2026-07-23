@@ -43,6 +43,37 @@ fn private_free_fn_names(src: &str) -> HashSet<String> {
     names
 }
 
+/// The PRIVATE (non-`pub`) module-level `let` names a file defines, i.e. its file-local global
+/// constants and state. A `let` at brace-depth 0 is a module global; a `let` inside a function
+/// body (depth > 0) is a local and is ignored. An optional `mut` (lexed as an identifier) between
+/// `let` and the name is skipped. These are file-scoped on collision exactly like private helper
+/// functions, so two bignum modules can each define `let BN_MASK16 = 0xFFFF`.
+fn module_global_names(src: &str) -> HashSet<String> {
+    let (toks, _) = tokenize_located(src);
+    let mut names = HashSet::new();
+    let mut depth: i32 = 0;
+    for (i, t) in toks.iter().enumerate() {
+        match t {
+            Token::LBrace => depth += 1,
+            Token::RBrace => depth -= 1,
+            Token::Let if depth == 0 => {
+                let is_pub = i > 0 && matches!(toks[i - 1], Token::Pub);
+                let mut j = i + 1;
+                if let Some(Token::Ident(m)) = toks.get(j)
+                    && m == "mut"
+                {
+                    j += 1;
+                }
+                if !is_pub && let Some(Token::Ident(n)) = toks.get(j) {
+                    names.insert(n.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
 /// Rewrites whole-identifier occurrences of each name in `map` to `name__f<id>` in one line,
 /// where `<id>` is the DEFINING file's id (map value), OUTSIDE string/char literals and line
 /// comments (so a helper's name inside a string is never touched). The map, keyed by the file
@@ -221,8 +252,11 @@ fn build_graph(path: &Path, depth: usize, seen: &mut HashSet<PathBuf>, g: &mut I
     let Ok(src) = std::fs::read_to_string(path) else {
         return;
     };
-    let names = private_free_fn_names(&src);
-    // Only files that define private helpers (below the entry) need a mangling id.
+    let mut names = private_free_fn_names(&src);
+    // Module-level private globals are file-scoped on collision too (e.g. two bignum modules
+    // both defining `let BN_MASK16 = 0xFFFF`), so fold them into the same defined-name set.
+    names.extend(module_global_names(&src));
+    // Only files that define private helpers/globals (below the entry) need a mangling id.
     if depth >= 1 && !names.is_empty() {
         g.ctr += 1;
         g.ids.insert(canon.clone(), g.ctr);
@@ -588,6 +622,46 @@ mod tests {
             .chars()
             .take_while(|c| c.is_alphanumeric() || *c == '_')
             .collect()
+    }
+
+    #[test]
+    fn a_colliding_module_level_global_is_file_scoped() {
+        // The same file-scoping must cover module-level `let` globals, not only functions: two
+        // bignum libraries each define a private `let MASK = ...` and use it internally, and a
+        // program that pulls in both would otherwise fail with "declared more than once".
+        let root = std::env::temp_dir().join(format!("sond_glob_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.snd"), "let MASK = 255\npub fn a() -> i64 { 7 & MASK }").unwrap();
+        std::fs::write(root.join("b.snd"), "let MASK = 255\npub fn b() -> i64 { 9 & MASK }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(&entry, "include \"a.snd\"\ninclude \"b.snd\"\nfn main() -> i64 { a() + b() }").unwrap();
+        let combined = resolve_includes(&entry).unwrap();
+        assert_eq!(
+            combined.matches("let MASK =").count(),
+            0,
+            "the colliding global `MASK` is file-scoped in both files:\n{combined}"
+        );
+        // two definitions + two uses of MASK are mangled
+        assert_eq!(
+            combined.matches("MASK__f").count(),
+            4,
+            "both definitions and both uses of `MASK` are mangled:\n{combined}"
+        );
+    }
+
+    #[test]
+    fn a_uniquely_named_global_shared_across_files_is_left_alone() {
+        // A global defined in ONE file and used in another (a shared constant) must NOT be
+        // mangled: it does not collide, so cross-file use keeps working.
+        let root = std::env::temp_dir().join(format!("sond_globshare_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("k.snd"), "let SHARED = 42").unwrap();
+        std::fs::write(root.join("u.snd"), "include \"k.snd\"\npub fn u() -> i64 { SHARED }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(&entry, "include \"u.snd\"\nfn main() -> i64 { u() }").unwrap();
+        let combined = resolve_includes(&entry).unwrap();
+        assert!(combined.contains("let SHARED = 42"), "a unique shared global is untouched:\n{combined}");
+        assert!(!combined.contains("SHARED__f"), "a non-colliding global is never mangled:\n{combined}");
     }
 
     #[test]
