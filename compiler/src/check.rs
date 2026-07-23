@@ -239,10 +239,53 @@ pub fn check_par_let_arity(funcs: &[Function]) -> Result<(), String> {
 
 /// Per-function effect on the program's MUTABLE globals: the set it reads and the set it writes,
 /// transitively across its call graph. This is the footprint that decides whether two `par` peers
-/// can run concurrently: disjoint footprints are confluent (RFC-0008 §5.3).
-struct GlobalEffects {
+/// (or two `graph` nodes) can run concurrently: disjoint footprints are confluent (RFC-0008 §5.3).
+pub(crate) struct GlobalEffects {
     reads: HashMap<String, HashSet<String>>,
     writes: HashMap<String, HashSet<String>>,
+}
+
+/// The set of MUTABLE globals declared by a program, the shared state a race could occur on.
+pub(crate) fn mutable_globals(globals: &[Global]) -> HashSet<String> {
+    globals
+        .iter()
+        .filter(|g| g.mutable)
+        .map(|g| g.name.clone())
+        .collect()
+}
+
+/// The (reads, writes) footprint over the mutable globals of one EXPRESSION, transitively: its own
+/// direct reads/writes plus every global touched by a function it calls. Used to decide whether two
+/// `graph` nodes conflict (and so need a serializing effect edge, RFC-0008 §5.2).
+pub(crate) fn expr_footprint(
+    e: &Expr,
+    eff: &GlobalEffects,
+    mut_globals: &HashSet<String>,
+) -> (HashSet<String>, HashSet<String>) {
+    let mut reads = HashSet::new();
+    let mut writes = HashSet::new();
+    let mut callees = HashSet::new();
+    expr_effects(e, mut_globals, &mut reads, &mut writes, &mut callees);
+    for c in &callees {
+        if let Some(r) = eff.reads.get(c) {
+            reads.extend(r.iter().cloned());
+        }
+        if let Some(w) = eff.writes.get(c) {
+            writes.extend(w.iter().cloned());
+        }
+    }
+    (reads, writes)
+}
+
+/// Whether two footprints CONFLICT: a write on one side meets a read or write of the same global on
+/// the other. Read-read never conflicts.
+pub(crate) fn footprints_conflict(
+    a: &(HashSet<String>, HashSet<String>),
+    b: &(HashSet<String>, HashSet<String>),
+) -> bool {
+    let (ra, wa) = a;
+    let (rb, wb) = b;
+    wa.iter().any(|g| wb.contains(g) || rb.contains(g)) || wb.iter().any(|g| ra.contains(g))
 }
 
 /// The root variable an assignment writes: `G` for `G = v`, `G[i] = v`, `G.f = v`, `G[i].f = v`.
@@ -399,7 +442,10 @@ fn stmts_effects(
 
 /// Computes each function's transitive read/write footprint over the mutable globals: the direct
 /// sets unioned with every callee's, to a fixpoint (so recursion and deep call graphs converge).
-fn compute_global_effects(funcs: &[Function], mut_globals: &HashSet<String>) -> GlobalEffects {
+pub(crate) fn compute_global_effects(
+    funcs: &[Function],
+    mut_globals: &HashSet<String>,
+) -> GlobalEffects {
     let mut reads: HashMap<String, HashSet<String>> = HashMap::new();
     let mut writes: HashMap<String, HashSet<String>> = HashMap::new();
     let mut callees: HashMap<String, HashSet<String>> = HashMap::new();

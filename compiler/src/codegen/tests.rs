@@ -241,6 +241,37 @@ fn graph_evaluates_nodes_in_dependency_order_not_source_order() {
 }
 
 #[test]
+fn a_graph_serializes_conflicting_nodes_but_parallelizes_disjoint_ones() {
+    // `0x250f00` is the clone flags of a thread spawn, so its presence means a level ran in
+    // parallel. Two nodes that write the SAME global conflict (RFC-0008 §5.2): an effect edge
+    // serializes them into separate levels, so NO thread is spawned. Two nodes on DISJOINT globals
+    // are independent and DO spawn.
+    let conflict = "let mut G = 0\n\
+        fn a() -> i64 { G = 1\n1 }\nfn b() -> i64 { G = 2\n2 }\nfn m(x: i64, y: i64) -> i64 { 0 }\n\
+        fn main() -> i64 { let r = graph { node x = a()\n node y = b()\n node z = m(x, y)\n yield z }\n r }";
+    let mut p = Parser::new(tokenize(conflict));
+    let funcs = p.parse_program();
+    let globals = p.take_globals();
+    let asm = emit_program_g(&globals, &[], &funcs);
+    assert!(
+        !asm.contains("0x250f00"),
+        "conflicting nodes are serialized by an effect edge, not spawned in parallel"
+    );
+
+    let disjoint = "let mut G = 0\nlet mut H = 0\n\
+        fn a() -> i64 { G = 1\n1 }\nfn b() -> i64 { H = 2\n2 }\nfn m(x: i64, y: i64) -> i64 { 0 }\n\
+        fn main() -> i64 { let r = graph { node x = a()\n node y = b()\n node z = m(x, y)\n yield z }\n r }";
+    let mut p2 = Parser::new(tokenize(disjoint));
+    let funcs2 = p2.parse_program();
+    let globals2 = p2.take_globals();
+    let asm2 = emit_program_g(&globals2, &[], &funcs2);
+    assert!(
+        asm2.contains("0x250f00"),
+        "nodes on disjoint globals stay parallel (an effect edge must not over-serialize)"
+    );
+}
+
+#[test]
 fn graph_runs_independent_nodes_in_parallel_and_binds_them_correctly() {
     // Level 0 = { a, b, c }, three INDEPENDENT call nodes: they run concurrently on threads. Level
     // 1 = { total } combines them. The positional formula a*16 + b*4 + c = 16 + 8 + 3 = 27 is 27

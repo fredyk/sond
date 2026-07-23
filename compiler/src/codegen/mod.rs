@@ -139,6 +139,11 @@ fn emit_all(cg: &mut Codegen, structs: &[StructDef], funcs: &[Function], entry: 
         .map(|f| (f.name.clone(), ret_kind(f)))
         .collect();
     cg.set_struct_sizes(structs);
+    // Per-function effect footprints, so a `graph` can serialize two same-level nodes that would
+    // race on a mutable global (RFC-0008 §5.2). Only needed when there is shared mutable state.
+    if !cg.mut_globals.is_empty() {
+        cg.graph_effects = Some(crate::check::compute_global_effects(funcs, &cg.mut_globals));
+    }
     for (i, f) in funcs.iter().enumerate() {
         if i == ep {
             cg.emit_function(f, "sond_start");
@@ -290,6 +295,9 @@ pub fn emit_shared_g(globals: &[Global], structs: &[StructDef], funcs: &[Functio
         .map(|f| (f.name.clone(), ret_kind(f)))
         .collect();
     cg.set_struct_sizes(structs);
+    if !cg.mut_globals.is_empty() {
+        cg.graph_effects = Some(crate::check::compute_global_effects(funcs, &cg.mut_globals));
+    }
     for f in funcs {
         cg.emit_function(f, &f.name.clone());
     }
@@ -667,14 +675,13 @@ fn node_deps(nodes: &[(String, Expr)]) -> Vec<Vec<usize>> {
         .collect()
 }
 
-/// Groups graph nodes into TOPOLOGICAL LEVELS: `level[i] = 1 + max(level over i's dependencies)`,
-/// or 0 for a source node. Nodes in the SAME level share no dependency (if one referenced another
-/// they would be in different levels), so a level's nodes are mutually independent and may run
-/// concurrently; levels run in order. Returned as a Vec of levels, each a Vec of node indices.
-/// Cycle-safe (relaxes at most `n` times); acyclicity is anyway guaranteed by `check_graph_acyclic`.
-fn topological_levels(nodes: &[(String, Expr)]) -> Vec<Vec<usize>> {
-    let deps = node_deps(nodes);
-    let n = nodes.len();
+/// Groups graph nodes into TOPOLOGICAL LEVELS over the given dependency edges (`deps[i]` = the
+/// nodes `i` must run after, DATA edges plus any effect edges): `level[i] = 1 + max(level over
+/// deps[i])`, or 0 for a source node. Nodes in the SAME level share no edge, so they are mutually
+/// independent and may run concurrently; levels run in order. Cycle-safe (relaxes at most `n`
+/// times); a data cycle is anyway rejected by `check_graph_acyclic`.
+fn topological_levels(deps: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let n = deps.len();
     let mut level = vec![0usize; n];
     for _ in 0..n {
         let mut changed = false;
@@ -838,6 +845,13 @@ struct Codegen {
     /// first slice traces the source line as it executes; the socket-served step agent builds on
     /// the same seam. Off by default (a normal build is byte-identical, like coverage).
     debug: bool,
+    /// The mutable globals of the program (the shared state a `graph`'s parallel nodes could race
+    /// on), and the per-function effect footprints over them. Populated before emission when the
+    /// program has both mutable globals and functions, so a `graph` can insert a serializing effect
+    /// edge between two same-level nodes that conflict (RFC-0008 §5.2). `None` = no shared state,
+    /// so no effect edges are needed.
+    mut_globals: HashSet<String>,
+    graph_effects: Option<crate::check::GlobalEffects>,
 }
 
 /// Functions excluded from coverage instrumentation: the synthesized `sond test` harness
@@ -1097,6 +1111,7 @@ impl Codegen {
     /// Registers the module-level globals: const-evaluates each initializer and
     /// records its `.data` label. A non-constant initializer is an error.
     fn set_globals(&mut self, globals: &[Global]) {
+        self.mut_globals = crate::check::mutable_globals(globals);
         for g in globals {
             if self.global_names.contains(&g.name) {
                 panic!("global `{}` is declared more than once", g.name);
@@ -1240,9 +1255,31 @@ impl Codegen {
     /// substrate as `par`), joined before the next level. A level with a single node, and any
     /// non-call node (cheap, not worth a thread), runs inline. Then `yield` is evaluated and bound
     /// to `name`. `check_graph_acyclic` has already rejected any cycle.
+    /// The dependency edges to schedule a graph over: the DATA edges (a node references another),
+    /// plus a serializing EFFECT edge (RFC-0008 §5.2) from an earlier node to a later one whenever
+    /// their footprints conflict on a mutable global, so two nodes that would race are placed in
+    /// different levels and run in sequence, source order deciding which goes first.
+    fn combined_deps(&self, nodes: &[(String, Expr)]) -> Vec<Vec<usize>> {
+        let mut deps = node_deps(nodes);
+        if let Some(eff) = &self.graph_effects {
+            let fps: Vec<(HashSet<String>, HashSet<String>)> = nodes
+                .iter()
+                .map(|(_, e)| crate::check::expr_footprint(e, eff, &self.mut_globals))
+                .collect();
+            for j in 0..nodes.len() {
+                for i in 0..j {
+                    if crate::check::footprints_conflict(&fps[i], &fps[j]) && !deps[j].contains(&i) {
+                        deps[j].push(i);
+                    }
+                }
+            }
+        }
+        deps
+    }
+
     fn emit_graph_let(&mut self, name: &str, nodes: &[(String, Expr)], yield_expr: &Expr) {
-        // Binds node `idx`'s result (in %rax) to its frame slot.
-        for level in topological_levels(nodes) {
+        let deps = self.combined_deps(nodes);
+        for level in topological_levels(&deps) {
             let call_nodes: Vec<usize> = level
                 .iter()
                 .copied()
