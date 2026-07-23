@@ -26,13 +26,12 @@ fn tls_flight_msg(buf: i64, n: i64, mt: i64) -> i64 {
 // failure. No certificate chain policy is enforced here beyond CertificateVerify, so the
 // caller should validate the leaf with x509_verify / x509_hostname_matches on the flight.
 //
-// STATUS: fetches complete HTTP responses from a standard TLS 1.3 server (openssl
-// s_server, verified). The handshake and server authentication are reliable against a real
-// public server (tls_handshake_auth returns 1 on 8/8 runs to cloudflare). Cloudflare's edge,
-// however, closes the connection during the application-data phase after our client
-// Finished + GET; the cause is on the server-policy side (likely the ALPN/HTTP-version it
-// expects, or edge filtering of a minimal client), not the crypto, and is still open. For
-// the audited identity check use tls_handshake_auth; for a plain server use this GET.
+// STATUS: proven end to end by a deterministic, network-free test (https_test.snd, a full
+// Sond TLS server), and it fetches complete HTTP responses from an openssl s_server. Note:
+// cloudflare's edge closes the application-data phase after our client Finished + GET, for a
+// server-policy reason (likely the ALPN/HTTP version it expects, or edge filtering of a
+// minimal client), not a crypto fault. For the audited identity check use tls_handshake_auth;
+// for a plain HTTP/1.1 server over TLS use this GET.
 fn tls_get(host: i64, port: i64, sni: i64, snilen: i64, path: i64, pathlen: i64, out: i64, cap: i64) -> i64 {
     let fd = sock(AF_INET, SOCK_STREAM, 0)
     if fd < 0 { return 0 - 1 }
