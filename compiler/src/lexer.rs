@@ -12,10 +12,21 @@ fn push1(chars: &mut Peekable<Chars>, tokens: &mut Vec<Token>, tok: Token) {
 
 /// Turns Sond source code into a sequence of tokens.
 pub fn tokenize(input: &str) -> Vec<Token> {
+    tokenize_located(input).0
+}
+
+/// Tokenizes AND returns the 1-based source LINE of each token (parallel to the tokens). The line
+/// is what a `--debug` build stamps on each statement's checkpoint and what a diagnostic can point
+/// at. Captured per loop iteration and padded to the token count, so an arm that pushes several
+/// tokens attributes them all to the line it started on (close enough for statement granularity).
+pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
     let mut tokens = Vec::new();
+    let mut lines: Vec<u32> = Vec::new();
+    let mut line: u32 = 1;
     let mut chars = input.chars().peekable();
 
     while let Some(&c) = chars.peek() {
+        let start_line = line;
         match c {
             // End of line: insert an implicit `;` if the line ends in a token
             // that can terminate a statement (RFC-0002 §3.5, Go-style).
@@ -24,6 +35,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                     tokens.push(Token::Semicolon);
                 }
                 chars.next();
+                line += 1;
             }
 
             // Other whitespace is skipped.
@@ -331,6 +343,10 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                 panic!("unexpected character {c:?}");
             }
         }
+        // Attribute every token pushed this iteration to the line it started on.
+        while lines.len() < tokens.len() {
+            lines.push(start_line);
+        }
     }
 
     // `test` is a keyword ONLY in a top-level `test "name" { .. }` block, i.e. when immediately
@@ -346,7 +362,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         }
     }
 
-    tokens
+    (tokens, lines)
 }
 
 /// Whether the given (last-emitted) token can terminate a statement, and thus

@@ -284,6 +284,21 @@ fn spawn_is_a_keyword() {
 }
 
 #[test]
+fn tokenize_located_reports_the_line_of_each_token() {
+    // Line tracking is the foundation of the --debug checkpoint and of source-pointing diagnostics.
+    let (tokens, lines) = tokenize_located("let x = 1\nlet y = 2\n");
+    assert_eq!(tokens.len(), lines.len(), "one line per token");
+    // First `let` is on line 1, the second `let` is on line 2.
+    let let_lines: Vec<u32> = tokens
+        .iter()
+        .zip(&lines)
+        .filter(|(t, _)| matches!(t, Token::Let))
+        .map(|(_, &l)| l)
+        .collect();
+    assert_eq!(let_lines, vec![1, 2], "the two `let`s are on lines 1 and 2");
+}
+
+#[test]
 fn par_is_a_keyword() {
     // `par a() ~~ b()` runs peers concurrently (RFC-0008 §5.1a), so `par` is a keyword.
     assert_eq!(tokenize("par"), vec![Token::Par]);
