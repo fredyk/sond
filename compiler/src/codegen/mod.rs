@@ -771,6 +771,10 @@ struct Codegen {
     global_names: HashSet<String>,
     /// The scalar globals to emit in `.data`, as `(label, constant value)`.
     global_data: Vec<(String, i64)>,
+    /// String-valued globals: `(global name, interned .rodata label)`. `let MSG = "hi"` stores the
+    /// ADDRESS of the NUL-terminated bytes, a valid compile-time constant, so a `Var` load yields a
+    /// cstr pointer (what strlen/json/etc. expect).
+    global_str_data: Vec<(String, String)>,
     /// Names of globals that are ARRAYS (a `Var` resolves to their ADDRESS, not a
     /// loaded value, so `K[i]` indexes into the table).
     global_arrays: HashSet<String>,
@@ -1091,6 +1095,13 @@ impl Codegen {
                 words.resize(n as usize, 0); // pad/truncate to the declared size
                 self.global_arrays.insert(g.name.clone());
                 self.global_array_data.push((g.name.clone(), words));
+                continue;
+            }
+            // A string-literal global is a pointer to its NUL-terminated bytes in `.rodata`: a
+            // valid compile-time constant (the string's address), so `let MSG = "hi"` works.
+            if let Expr::Str(s) = &g.init {
+                let label = self.intern_string(s);
+                self.global_str_data.push((g.name.clone(), label));
                 continue;
             }
             let value = self.const_eval(&g.init).unwrap_or_else(|| {
@@ -1447,6 +1458,11 @@ impl Codegen {
         }
         for (name, value) in data {
             self.line(&format!("{name}: .quad {value}"));
+        }
+        // A string global holds the address of its interned `.rodata` bytes (a `.quad <label>`).
+        let strs = std::mem::take(&mut self.global_str_data);
+        for (name, label) in strs {
+            self.line(&format!("{name}: .quad {label}"));
         }
         for (name, words) in arrays {
             let quads = words

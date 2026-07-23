@@ -115,6 +115,22 @@ fn compiles_and_runs_local_variables_on_real_x64() {
 }
 
 #[test]
+fn a_string_literal_global_is_a_pointer_to_rodata() {
+    // `let MSG = "hi"` at module level: the global holds the ADDRESS of the interned bytes (a valid
+    // compile-time constant), not an integer, so it works like any `.data` pointer.
+    let mut p = Parser::new(tokenize("pub let MSG = \"hi\"\npub fn f() -> i64 { 0 }"));
+    let funcs = p.parse_program();
+    let globals = p.take_globals();
+    let structs = p.take_structs();
+    let asm = emit_shared_g(&globals, &structs, &funcs);
+    assert!(
+        asm.contains("MSG: .quad .Lstr"),
+        "the global stores the string's rodata address: {asm}"
+    );
+    assert!(asm.contains("hi"), "the string bytes are emitted in rodata");
+}
+
+#[test]
 fn a_shared_pub_function_seeds_the_arena_at_the_c_abi_boundary() {
     // A `.so` (`--shared`) is called from a foreign host (Go/cgo, C) whose `%r15` is not Sond's
     // arena pointer. Each EXPORTED (`pub`) function must save the host's `%r15` (callee-saved) and
