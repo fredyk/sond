@@ -6,13 +6,13 @@
 let MLKEM_Q = 3329
 let MLKEM_N = 256
 
-fn compress_d(x: i64, d: i64) -> i64 {
+fn compress_d(x: i64, d: i64) -> i64 requires { d >= 0 } {
     if d >= 13 { x % MLKEM_Q } else {
         let p2 = 1 << d; let halfQ = MLKEM_Q / 2
         ((p2 * x + halfQ) / MLKEM_Q) % p2
     }
 }
-fn decompress_d(x: i64, d: i64) -> i64 {
+fn decompress_d(x: i64, d: i64) -> i64 requires { d >= 0 } {
     if d >= 13 { x % MLKEM_Q } else {
         let p2 = 1 << d; let half = p2 / 2
         ((MLKEM_Q * x + half) / p2) % MLKEM_Q

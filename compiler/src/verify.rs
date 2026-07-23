@@ -797,12 +797,59 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
         Expr::Binary(BinOp::Shl, l, r) => {
             let mut out = Vec::new();
             for (s1, lv) in eval_expr_paths(l, state, ctx)? {
-                for (s2, rv) in eval_expr_paths(r, s1, ctx)? {
+                for (mut s2, rv) in eval_expr_paths(r, s1, ctx)? {
                     let value = match simplify(rv) {
                         Sym::Const(k) if (0..63).contains(&k) => {
                             simplify(Sym::Mul(Box::new(Sym::Const(1i64 << k)), Box::new(lv.clone())))
                         }
-                        _ => ctx.fresh_var(),
+                        // A dynamic shift is opaque in general (it can overflow: `1 << 63` is
+                        // negative, `1 << 64` wraps to 0), but a POSITIVE CONSTANT base shifted by a
+                        // provably non-negative, bounded amount stays positive: `c << r` = c * 2^r
+                        // lies in [c, c << smax] with no overflow when `0 <= r <= smax` and
+                        // `c << smax` fits in i64. That lower bound `>= c >= 1` is what lets
+                        // `x % (1 << d)` discharge its nonzero-divisor obligation (the ML-KEM
+                        // `compress_d` pattern). Only sound for a constant base: the product bound
+                        // must be a compile-time constant to rule out overflow.
+                        rvs => {
+                            let v = ctx.fresh_var();
+                            if let Sym::Const(c) = simplify(lv.clone())
+                                && c >= 1
+                            {
+                                // Largest shift with `c << smax` still <= i64::MAX (no overflow).
+                                let mut smax: i64 = 0;
+                                while smax < 62 && ((c as i128) << (smax + 1)) <= i64::MAX as i128 {
+                                    smax += 1;
+                                }
+                                let mut asm = ctx.requires.clone();
+                                asm.extend(s2.cons.iter().cloned());
+                                let proven = |p: SymProp| {
+                                    matches!(prove(&p, &asm, &ctx.int_types), Outcome::Proven)
+                                };
+                                let nonneg = proven(SymProp {
+                                    op: BinOp::Ge,
+                                    lhs: rvs.clone(),
+                                    rhs: Sym::Const(0),
+                                });
+                                let bounded = proven(SymProp {
+                                    op: BinOp::Le,
+                                    lhs: rvs.clone(),
+                                    rhs: Sym::Const(smax),
+                                });
+                                if nonneg && bounded {
+                                    s2.cons.push(SymProp {
+                                        op: BinOp::Ge,
+                                        lhs: v.clone(),
+                                        rhs: Sym::Const(c),
+                                    });
+                                    s2.cons.push(SymProp {
+                                        op: BinOp::Le,
+                                        lhs: v.clone(),
+                                        rhs: Sym::Const(((c as i128) << smax) as i64),
+                                    });
+                                }
+                            }
+                            v
+                        }
                     };
                     out.push((s2, value));
                 }
@@ -2447,6 +2494,26 @@ mod tests {
             "fn f(x: i64) -> (r: i64) requires { x > 0; x < 100 } ensures { r > x } { x + 1 }",
         );
         assert!(verify(&funcs).is_ok());
+    }
+
+    #[test]
+    fn a_positive_constant_left_shifted_by_a_bounded_amount_is_a_nonzero_divisor() {
+        // `1 << d` for `0 <= d < 13` lies in [1, 2^12], so `x % (1 << d)` has a provably
+        // nonzero divisor. Without the shift-positivity fact the shifted value is opaque and
+        // the modulo obligation cannot be discharged. This is the ML-KEM `compress_d` pattern.
+        let funcs = parse(
+            "fn f(x: i64, d: i64) -> i64 requires { d >= 0 } { if d >= 13 { x } else { let p = 1 << d\n x % p } }",
+        );
+        assert!(verify(&funcs).is_ok());
+    }
+
+    #[test]
+    fn a_left_shift_by_an_unbounded_amount_is_still_opaque() {
+        // Without an upper bound on the shift, `1 << d` can overflow (d >= 63 gives i64::MIN
+        // or 0), so the result must NOT be assumed nonzero. The modulo stays undischarged.
+        let funcs =
+            parse("fn f(x: i64, d: i64) -> i64 requires { d >= 0 } { let p = 1 << d\n x % p }");
+        assert!(verify(&funcs).is_err());
     }
 
     #[test]
