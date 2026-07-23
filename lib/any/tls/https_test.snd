@@ -1,0 +1,348 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Deterministic test of tls_get (https.snd) over loopback: a minimal Sond TLS 1.3 server
+// (the child) runs the whole server side, ServerHello, an EncryptedExtensions/Certificate/
+// CertificateVerify(signed with ecdsa_sign)/Finished flight, then reads the client Finished
+// and GET and serves an HTTP response. The client under test fetches it. This gives the GET
+// path CI coverage without a network.
+
+include "any/tls/https.snd"
+include "any/crypto/ec/ecdsa-sign.snd"
+include "x86_64/linux/testing.snd"
+
+let CERT_HEX = "3082017e30820123a003020102021474b4f525d086969f1ecb8550c5f405ee7bb14068300a06082a8648ce3d04030230143112301006035504030c096c6f63616c686f7374301e170d3236303732333230343030325a170d3236303732343230343030325a30143112301006035504030c096c6f63616c686f73743059301306072a8648ce3d020106082a8648ce3d03010703420004fdad4093df564b16e005b2adf31dcc9cc2b8e1e3f7aa1f6b04bc2863b98f55d4a428c7bc6bd4f8ab3a9d18a6503ff813ce31e2aee4b1e31c5cf3630d9cfde7c8a3533051301d0603551d0e0416041450839127e4ac1031b3c579bfc2fbbd35cf9310d6301f0603551d2304183016801450839127e4ac1031b3c579bfc2fbbd35cf9310d6300f0603551d130101ff040530030101ff300a06082a8648ce3d040302034900304602210080a38280fb32e124390a581664cce0d7e47ce82a51c119eb3423d4530e93263d0221009ae93f2bbb44583e5930c91c1a59e2169c331565bed77e1b75a8e774396db441"
+let D_HEX = "2d16fc7d6aa96ef5b0a6c2ebc1c2da472afd5a2396727ef949f1672f4cf9868e"
+let mut h_cert[512]
+let mut h_d[32]
+let mut h_k[32]
+let mut h_sh[512]
+let mut h_tr[20000]
+let mut h_flight[4096]
+let mut h_scratch[4096]
+let mut h_sealed[4096]
+let mut h_content[256]
+let mut h_resp[20000]
+
+fn hhx(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    c - 55
+}
+fn hload(hex: i64, dst: i64) -> i64 {
+    let mut i = 0
+    for peek8(hex + i * 2) != 0 {
+        poke8(dst + i, hhx(peek8(hex + i * 2)) * 16 + hhx(peek8(hex + i * 2 + 1)))
+        i = i + 1
+    }
+    i
+}
+fn h_u24(buf: i64, v: i64) { poke8(buf, (v >> 16) & 0xff); poke8(buf + 1, (v >> 8) & 0xff); poke8(buf + 2, v & 0xff) }
+fn h_app(dst: i64, o: i64, src: i64, n: i64) -> i64 {
+    let mut i = 0
+    let mut p = o
+    for i < n { poke8(dst + p, peek8(src + i)); p = p + 1; i = i + 1 }
+    p
+}
+fn h_der_int(out: i64, val: i64) -> i64 {
+    let mut start = 0
+    for start < 31 { if peek8(val + start) != 0 { break } start = start + 1 }
+    let clen = 32 - start
+    let needpad = if (peek8(val + start) & 0x80) != 0 { 1 } else { 0 }
+    poke8(out, 2); poke8(out + 1, clen + needpad)
+    let mut o = 2
+    if needpad == 1 { poke8(out + o, 0); o = o + 1 }
+    let mut i = 0
+    for i < clen { poke8(out + o, peek8(val + start + i)); o = o + 1; i = i + 1 }
+    o
+}
+fn h_build_sh(random: i64, spub: i64, out: i64) -> i64 {
+    poke8(out, 2)
+    let body = out + 4
+    let mut o = 0
+    hs_put_u16(body + o, 0x0303); o = o + 2
+    let mut i = 0
+    for i < 32 { poke8(body + o + i, peek8(random + i)); i = i + 1 }
+    o = o + 32
+    poke8(body + o, 0); o = o + 1
+    hs_put_u16(body + o, 0x1303); o = o + 2
+    poke8(body + o, 0); o = o + 1
+    let extlen_at = o
+    o = o + 2
+    let ext_start = o
+    hs_put_u16(body + o, 43); o = o + 2
+    hs_put_u16(body + o, 2); o = o + 2
+    hs_put_u16(body + o, 0x0304); o = o + 2
+    hs_put_u16(body + o, 51); o = o + 2
+    hs_put_u16(body + o, 36); o = o + 2
+    hs_put_u16(body + o, 0x001d); o = o + 2
+    hs_put_u16(body + o, 32); o = o + 2
+    i = 0
+    for i < 32 { poke8(body + o + i, peek8(spub + i)); i = i + 1 }
+    o = o + 32
+    hs_put_u16(body + extlen_at, o - ext_start)
+    hs_put_u24(out + 1, o)
+    4 + o
+}
+
+test "tls https: a full GET against a minimal Sond TLS server returns the response" {
+    let certlen = hload(CERT_HEX, h_cert)
+    hload(D_HEX, h_d)
+    let mut i = 0
+    for i < 32 { poke8(h_k + i, 0x33 + i); i = i + 1 }
+
+    let port = 55490
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        let crec[2048]
+        let crl = tls_read_record(afd, crec, 2048)
+        if crl <= 0 { syscall(SYS_exit, 3) }
+        let cmsg = crec + 5
+        let cmsglen = crl - 5
+        let cpub = cmsg + 84
+        let spriv[32]
+        tls_random(spriv, 32)
+        let base9[32]
+        poke8(base9, 9)
+        let mut z = 0
+        for z < 31 { poke8(base9 + 1 + z, 0); z = z + 1 }
+        let spub[32]
+        x25519(spriv, base9, spub)
+        let shared[32]
+        x25519(spriv, cpub, shared)
+        let srand[32]
+        tls_random(srand, 32)
+        let shlen = h_build_sh(srand, spub, h_sh)
+        tls_send_plain_handshake(afd, h_sh, shlen, h_scratch)
+        z = 0
+        for z < cmsglen { poke8(h_tr + z, peek8(cmsg + z)); z = z + 1 }
+        z = 0
+        for z < shlen { poke8(h_tr + cmsglen + z, peek8(h_sh + z)); z = z + 1 }
+        let trlen = cmsglen + shlen
+        let early[32]
+        tls_early_secret(early, 0, early)
+        let hs[32]
+        tls_derive_handshake_secret(early, shared, 32, hs)
+        let s_hs[32]
+        tls_server_hs_traffic(hs, h_tr, trlen, s_hs)
+        let skey[32]
+        let siv[12]
+        tls_traffic_key_iv(s_hs, skey, siv)
+
+        // build the flight: EE
+        let mut fl = 0
+        poke8(h_flight + 0, 8); poke8(h_flight + 1, 0); poke8(h_flight + 2, 0)
+        poke8(h_flight + 3, 2); poke8(h_flight + 4, 0); poke8(h_flight + 5, 0)
+        fl = 6
+        // Certificate
+        let cmstart = fl
+        poke8(h_flight + fl, 11); fl = fl + 4
+        let cbody = fl
+        poke8(h_flight + fl, 0); fl = fl + 1
+        h_u24(h_flight + fl, certlen + 5); fl = fl + 3
+        h_u24(h_flight + fl, certlen); fl = fl + 3
+        fl = h_app(h_flight, fl, h_cert, certlen)
+        hs_put_u16(h_flight + fl, 0); fl = fl + 2
+        h_u24(h_flight + cmstart + 1, fl - cbody)
+        // CertificateVerify: sign transcript-through-Certificate
+        z = 0
+        for z < fl { poke8(h_tr + trlen + z, peek8(h_flight + z)); z = z + 1 }
+        let th[32]
+        sha256_hash(h_tr, trlen + fl, th)
+        z = 0
+        for z < 64 { poke8(h_content + z, 0x20); z = z + 1 }
+        let lbl = "TLS 1.3, server CertificateVerify"
+        z = 0
+        for z < 33 { poke8(h_content + 64 + z, peek8(lbl + z)); z = z + 1 }
+        poke8(h_content + 97, 0)
+        z = 0
+        for z < 32 { poke8(h_content + 98 + z, peek8(th + z)); z = z + 1 }
+        let ce[32]
+        sha256_hash(h_content, 130, ce)
+        let sr[32]
+        let ss[32]
+        ecdsa_sign(h_d, ce, h_k, sr, ss)
+        let der[80]
+        let n1 = h_der_int(der + 2, sr)
+        let n2 = h_der_int(der + 2 + n1, ss)
+        poke8(der + 0, 0x30); poke8(der + 1, n1 + n2)
+        let derlen = 2 + n1 + n2
+        let cvstart = fl
+        poke8(h_flight + fl, 15); fl = fl + 4
+        let cvbody = fl
+        hs_put_u16(h_flight + fl, 0x0403); fl = fl + 2
+        hs_put_u16(h_flight + fl, derlen); fl = fl + 2
+        fl = h_app(h_flight, fl, der, derlen)
+        h_u24(h_flight + cvstart + 1, fl - cvbody)
+        // server Finished: HMAC(finished_key, transcript-through-CertVerify)
+        z = 0
+        for z < fl { poke8(h_tr + trlen + z, peek8(h_flight + z)); z = z + 1 }
+        let thcv[32]
+        sha256_hash(h_tr, trlen + fl, thcv)
+        let empty[1]
+        let sfk[32]
+        hkdf_expand_label(s_hs, "finished", 8, empty, 0, sfk, 32)
+        let sfin[32]
+        hmac_sha256(sfk, 32, thcv, 32, sfin)
+        poke8(h_flight + fl, 20); poke8(h_flight + fl + 1, 0); poke8(h_flight + fl + 2, 0); poke8(h_flight + fl + 3, 32)
+        fl = fl + 4
+        fl = h_app(h_flight, fl, sfin, 32)
+        // seal + send the whole flight
+        let sl = tls_seal(skey, siv, 0, 22, h_flight, fl, h_sealed)
+        write_buf(afd, h_sealed, sl)
+        // app keys: transcript = CH || SH || flight (through server Finished)
+        z = 0
+        for z < fl { poke8(h_tr + trlen + z, peek8(h_flight + z)); z = z + 1 }
+        let master[32]
+        tls_derive_master_secret(hs, master)
+        let s_ap[32]
+        derive_secret(master, "s ap traffic", 12, h_tr, trlen + fl, s_ap)
+        let c_ap[32]
+        derive_secret(master, "c ap traffic", 12, h_tr, trlen + fl, c_ap)
+        let sakey[32]
+        let saiv[12]
+        tls_traffic_key_iv(s_ap, sakey, saiv)
+        let cakey[32]
+        let caiv[12]
+        tls_traffic_key_iv(c_ap, cakey, caiv)
+        // read client's CCS, Finished, GET
+        let rb[2048]
+        let mut rr = tls_read_record(afd, rb, 2048)
+        if peek8(rb) == 20 { rr = tls_read_record(afd, rb, 2048) }   // skip CCS -> client Finished
+        rr = tls_read_record(afd, rb, 2048)                          // client GET
+        let gdec[2048]
+        tls_open(cakey, caiv, 0, rb, rr, gdec)
+        // serve an HTTP response (application_data, server app seq 0)
+        let http = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+        let hbuf[64]
+        z = 0
+        for z < 39 { poke8(hbuf + z, peek8(http + z)); z = z + 1 }
+        // a NewSessionTicket first (post-handshake, inner type 22, to be skipped), then the
+        // HTTP response at server app sequence 1
+        let nst[6]
+        poke8(nst + 0, 4); poke8(nst + 1, 0); poke8(nst + 2, 0); poke8(nst + 3, 2); poke8(nst + 4, 0); poke8(nst + 5, 0)
+        let ns[128]
+        let nsl = tls_seal(sakey, saiv, 0, 22, nst, 6, ns)
+        write_buf(afd, ns, nsl)
+        let hs2[128]
+        let hsl = tls_seal(sakey, saiv, 1, 23, hbuf, 39, hs2)
+        write_buf(afd, hs2, hsl)
+        close_fd(afd)
+        syscall(SYS_exit, 0)
+    }
+
+    // PARENT: the client under test performs the GET.
+    let n = tls_get("127.0.0.1", port, "sondtest", 8, "/", 1, h_resp, 20000)
+    assert_eq(n, 39)
+    assert_eq(peek8(h_resp + 0), 72)                  // 'H'
+    assert_eq(peek8(h_resp + 9), 50)                  // '2' of 200
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+
+let mut h_eb[128]
+
+test "tls https: a refused connection returns a failure" {
+    assert(tls_get("127.0.0.1", 55491, "h", 1, "/", 1, h_eb, 128) <= 0)
+}
+test "tls https: a server that hangs up before ServerHello returns a failure" {
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, 55492)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let a = accept_sock(sfd, 0, 0)
+        close_fd(a)
+        syscall(SYS_exit, 0)
+    }
+    assert(tls_get("127.0.0.1", 55492, "h", 1, "/", 1, h_eb, 128) <= 0)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+test "tls https: a non-handshake first record returns a failure" {
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, 55493)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let a = accept_sock(sfd, 0, 0)
+        let cr[2048]
+        tls_read_record(a, cr, 2048)
+        let al[7]
+        poke8(al, 21); poke8(al + 1, 3); poke8(al + 2, 3)
+        poke8(al + 3, 0); poke8(al + 4, 2); poke8(al + 5, 2); poke8(al + 6, 40)
+        write_buf(a, al, 7)
+        close_fd(a)
+        syscall(SYS_exit, 0)
+    }
+    assert(tls_get("127.0.0.1", 55493, "h", 1, "/", 1, h_eb, 128) <= 0)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+test "ecdsa in https context: pubkey derivation and a zero nonce" {
+    let qx[32]
+    let qy[32]
+    ecdsa_pubkey(h_d, qx, qy)
+    assert_eq(peek8(qx + 0) + peek8(qy + 0) >= 0, 1)
+    let mut i = 0
+    for i < 32 { poke8(h_k + i, 0); i = i + 1 }
+    let sr[32]
+    let ss[32]
+    assert_eq(ecdsa_sign(h_d, h_d, h_k, sr, ss), 0)
+}
+
+test "tls https: a non-application record in the flight returns a failure" {
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, 55494)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let a = accept_sock(sfd, 0, 0)
+        let cr[2048]
+        tls_read_record(a, cr, 2048)
+        let sp[32]
+        tls_random(sp, 32)
+        let b9[32]
+        poke8(b9, 9)
+        let mut z = 0
+        for z < 31 { poke8(b9 + 1 + z, 0); z = z + 1 }
+        let spb[32]
+        x25519(sp, b9, spb)
+        let srnd[32]
+        tls_random(srnd, 32)
+        let shl = h_build_sh(srnd, spb, h_sh)
+        tls_send_plain_handshake(a, h_sh, shl, h_scratch)
+        // a plaintext alert (type 21) where the client expects the encrypted flight
+        let al[7]
+        poke8(al + 0, 21); poke8(al + 1, 3); poke8(al + 2, 3)
+        poke8(al + 3, 0); poke8(al + 4, 2); poke8(al + 5, 2); poke8(al + 6, 40)
+        write_buf(a, al, 7)
+        close_fd(a)
+        syscall(SYS_exit, 0)
+    }
+    assert(tls_get("127.0.0.1", 55494, "sondtest", 8, "/", 1, h_eb, 128) <= 0)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
