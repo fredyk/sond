@@ -1,0 +1,96 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/tls/clienthello.snd: a pure parser that extracts the SNI (server_name) from a
+// TLS ClientHello record. No I/O, no allocation: it reads a caller-owned buffer, so it is
+// unit-testable and safe on hostile input. It is the read side a TLS server (or an SNI
+// router) needs: the ClientHello is sent in the clear, so the requested host name can be
+// recovered before any key exchange.
+//
+// Every length read off the wire is bounds-checked against the caller's buffer before it
+// advances, so a malicious ClientHello cannot walk the parser past `n`.
+
+let TLS_EXT_SERVER_NAME = 0x0000
+let TLS_EXT_ECH = 0xfe0d          // encrypted_client_hello (draft ECH)
+
+fn tls_sni_u16(p: i64) -> i64 { (peek8(p) << 8) | peek8(p + 1) }
+
+// Parses the server_name extension body at `q` (length `elen`), copying the host_name into
+// `out`. Returns the name length, 0 if the list holds no host_name, -1 if malformed or it
+// does not fit in `outmax`.
+fn tls_sni_ext_name(buf: i64, q: i64, elen: i64, out: i64, outmax: i64) -> i64 {
+    if elen < 2 { return 0 - 1 }
+    let listlen = tls_sni_u16(buf + q)
+    if 2 + listlen > elen { return 0 - 1 }
+    let lend = q + 2 + listlen
+    let mut e = q + 2
+    for e + 3 <= lend {
+        let ntype = peek8(buf + e)
+        let nlen = tls_sni_u16(buf + e + 1)
+        if e + 3 + nlen > lend { return 0 - 1 }
+        if ntype == 0 {
+            if nlen >= outmax { return 0 - 1 }      // never truncate silently
+            let mut i = 0
+            for i < nlen {
+                poke8(out + i, peek8(buf + e + 3 + i))
+                i = i + 1
+            }
+            poke8(out + nlen, 0)
+            return nlen
+        }
+        e = e + 3 + nlen
+    }
+    0
+}
+
+// Extracts the SNI from the TLS ClientHello record in buf[0..n). Returns the name length
+// (>0), 0 for a valid ClientHello with no SNI, or -1 if the buffer is not a complete
+// ClientHello / is malformed / does not fit. `ech_out` receives 1 if the ClientHello also
+// carried the ECH extension, else 0.
+fn tls_sni_parse(buf: i64, n: i64, out: i64, outmax: i64, ech_out: i64) -> i64 {
+    poke64(ech_out, 0)
+    if n < 9 { return 0 - 1 }
+    if peek8(buf) != 0x16 { return 0 - 1 }              // not a handshake record
+    let reclen = tls_sni_u16(buf + 3)
+    if reclen < 4 { return 0 - 1 }
+    if 5 + reclen > n { return 0 - 1 }                  // record not fully here
+    if peek8(buf + 5) != 0x01 { return 0 - 1 }          // not a client_hello
+    let hslen = (peek8(buf + 6) << 16) | tls_sni_u16(buf + 7)
+    let end = 9 + hslen
+    if end > 5 + reclen { return 0 - 1 }
+
+    let mut p = 9
+    if p + 34 > end { return 0 - 1 }
+    p = p + 2 + 32                                      // client_version + random
+    if p + 1 > end { return 0 - 1 }
+    let sidlen = peek8(buf + p)                         // session_id
+    p = p + 1 + sidlen
+    if p + 2 > end { return 0 - 1 }
+    let cslen = tls_sni_u16(buf + p)                    // cipher_suites
+    p = p + 2 + cslen
+    if p + 1 > end { return 0 - 1 }
+    let cmlen = peek8(buf + p)                          // compression_methods
+    p = p + 1 + cmlen
+    if p + 2 > end { return 0 - 1 }
+    let extlen = tls_sni_u16(buf + p)                   // extensions block
+    p = p + 2
+    let extend = p + extlen
+    if extend > end { return 0 - 1 }
+
+    let mut q = p
+    let mut found = 0
+    for q + 4 <= extend {
+        let etype = tls_sni_u16(buf + q)
+        let elen = tls_sni_u16(buf + q + 2)
+        q = q + 4
+        if q + elen > extend { return 0 - 1 }
+        if etype == TLS_EXT_ECH { poke64(ech_out, 1) }
+        if etype == TLS_EXT_SERVER_NAME && found == 0 {
+            let r = tls_sni_ext_name(buf, q, elen, out, outmax)
+            if r < 0 { return 0 - 1 }
+            found = r
+        }
+        q = q + elen
+    }
+    found
+}

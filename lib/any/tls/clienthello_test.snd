@@ -1,0 +1,133 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of tls/clienthello.snd: extracting the SNI from a TLS ClientHello. ClientHellos are
+// built byte by byte (no network), covering the happy paths and, above all, the hostile
+// ones: a parser fed by the wire must never read past the buffer it was given.
+
+include "any/tls/clienthello.snd"
+include "x86_64/linux/testing.snd"
+
+let mut ch_buf[512]
+let mut ch_out[256]
+let mut ch_ech[1]
+let mut ch_long[200]
+
+// Builds a ClientHello into `buf`. snilen 0 omits the server_name extension; with_ech 1
+// also adds the ECH extension. Returns the total record length.
+fn build_ch(buf: i64, sni: i64, snilen: i64, with_ech: i64) -> i64 {
+    poke8(buf + 0, 0x16); poke8(buf + 1, 0x03); poke8(buf + 2, 0x01)   // record: handshake
+    poke8(buf + 5, 0x01)                                               // client_hello
+    poke8(buf + 9, 0x03); poke8(buf + 10, 0x03)                        // client_version
+    let mut i = 0
+    for i < 32 { poke8(buf + 11 + i, i); i = i + 1 }                   // random
+    poke8(buf + 43, 0)                                                 // session_id_len = 0
+    poke8(buf + 44, 0); poke8(buf + 45, 2)                             // cipher_suites_len = 2
+    poke8(buf + 46, 0x13); poke8(buf + 47, 0x01)
+    poke8(buf + 48, 1); poke8(buf + 49, 0)                             // 1 null compression
+    let mut o = 52
+    if snilen > 0 {
+        poke8(buf + o, 0x00); poke8(buf + o + 1, 0x00)                 // ext: server_name
+        let elen = 5 + snilen
+        poke8(buf + o + 2, (elen >>> 8) & 0xff); poke8(buf + o + 3, elen & 0xff)
+        let llen = 3 + snilen
+        poke8(buf + o + 4, (llen >>> 8) & 0xff); poke8(buf + o + 5, llen & 0xff)
+        poke8(buf + o + 6, 0)                                          // host_name
+        poke8(buf + o + 7, (snilen >>> 8) & 0xff); poke8(buf + o + 8, snilen & 0xff)
+        i = 0
+        for i < snilen { poke8(buf + o + 9 + i, peek8(sni + i)); i = i + 1 }
+        o = o + 9 + snilen
+    }
+    if with_ech == 1 {
+        poke8(buf + o, 0xfe); poke8(buf + o + 1, 0x0d)                 // ext: encrypted_client_hello
+        poke8(buf + o + 2, 0); poke8(buf + o + 3, 4)
+        poke8(buf + o + 4, 0xaa); poke8(buf + o + 5, 0xbb)
+        poke8(buf + o + 6, 0xcc); poke8(buf + o + 7, 0xdd)
+        o = o + 8
+    }
+    let extlen = o - 52
+    poke8(buf + 50, (extlen >>> 8) & 0xff); poke8(buf + 51, extlen & 0xff)
+    let hslen = o - 9
+    poke8(buf + 6, (hslen >>> 16) & 0xff); poke8(buf + 7, (hslen >>> 8) & 0xff)
+    poke8(buf + 8, hslen & 0xff)
+    let reclen = o - 5
+    poke8(buf + 3, (reclen >>> 8) & 0xff); poke8(buf + 4, reclen & 0xff)
+    o
+}
+
+fn ch_name_eq(a: i64, b: i64, n: i64) -> i64 {
+    let mut i = 0
+    for i < n {
+        if peek8(a + i) != peek8(b + i) { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+test "clienthello: SNI extraction, with and without ECH, and the no-SNI case" {
+    let name = "example.com"
+    let n1 = build_ch(ch_buf, name, 11, 0)
+    poke64(ch_ech, 7)                                    // poison; must be overwritten to 0
+    assert_eq(tls_sni_parse(ch_buf, n1, ch_out, 256, ch_ech), 11)
+    assert_eq(ch_name_eq(ch_out, name, 11), 1)
+    assert_eq(peek8(ch_out + 11), 0)                     // NUL terminated
+    assert_eq(peek64(ch_ech), 0)                         // no ECH
+    // SNI and ECH together (the GREASE case seen in the wild)
+    let n2 = build_ch(ch_buf, name, 11, 1)
+    assert_eq(tls_sni_parse(ch_buf, n2, ch_out, 256, ch_ech), 11)
+    assert_eq(peek64(ch_ech), 1)                         // ECH detected
+    // no server_name extension: 0, not an error
+    let n3 = build_ch(ch_buf, name, 0, 1)
+    assert_eq(tls_sni_parse(ch_buf, n3, ch_out, 256, ch_ech), 0)
+    assert_eq(peek64(ch_ech), 1)
+}
+
+test "clienthello: a long SNI exercises the two-byte length path" {
+    let mut i = 0
+    for i < 180 { poke8(ch_long + i, 97 + (i % 26)); i = i + 1 }
+    poke8(ch_long + 180, 0)
+    let n4 = build_ch(ch_buf, ch_long, 180, 0)
+    assert_eq(tls_sni_parse(ch_buf, n4, ch_out, 256, ch_ech), 180)
+    assert_eq(ch_name_eq(ch_out, ch_long, 180), 1)
+    // an output buffer too small must fail, never truncate silently
+    assert_eq(tls_sni_parse(ch_buf, n4, ch_out, 64, ch_ech), 0 - 1)
+}
+
+test "clienthello: hostile inputs are rejected, never read past the buffer" {
+    let name = "example.com"
+    // every truncated prefix must be rejected
+    let n = build_ch(ch_buf, name, 11, 0)
+    let mut k = 0
+    for k < n {
+        assert(tls_sni_parse(ch_buf, k, ch_out, 256, ch_ech) <= 0)
+        k = k + 1
+    }
+    // not a handshake record
+    build_ch(ch_buf, name, 11, 0); poke8(ch_buf, 0x17)
+    assert_eq(tls_sni_parse(ch_buf, n, ch_out, 256, ch_ech), 0 - 1)
+    // handshake, but a ServerHello, not a ClientHello
+    build_ch(ch_buf, name, 11, 0); poke8(ch_buf + 5, 0x02)
+    assert_eq(tls_sni_parse(ch_buf, n, ch_out, 256, ch_ech), 0 - 1)
+    // extensions length points far past the buffer
+    build_ch(ch_buf, name, 11, 0); poke8(ch_buf + 50, 0x7f); poke8(ch_buf + 51, 0xff)
+    assert_eq(tls_sni_parse(ch_buf, n, ch_out, 256, ch_ech), 0 - 1)
+    // a name length larger than the record
+    build_ch(ch_buf, name, 11, 0); poke8(ch_buf + 59, 0x7f); poke8(ch_buf + 60, 0xff)
+    assert_eq(tls_sni_parse(ch_buf, n, ch_out, 256, ch_ech), 0 - 1)
+    // internal length fields that overflow the record, with the record length left intact
+    build_ch(ch_buf, name, 11, 0); poke8(ch_buf + 43, 0xff)   // session_id
+    assert_eq(tls_sni_parse(ch_buf, n, ch_out, 256, ch_ech), 0 - 1)
+    build_ch(ch_buf, name, 11, 0); poke8(ch_buf + 44, 0xff)   // cipher_suites
+    assert_eq(tls_sni_parse(ch_buf, n, ch_out, 256, ch_ech), 0 - 1)
+    build_ch(ch_buf, name, 11, 0); poke8(ch_buf + 48, 0xff)   // compression_methods
+    assert_eq(tls_sni_parse(ch_buf, n, ch_out, 256, ch_ech), 0 - 1)
+    // record length below the minimum
+    build_ch(ch_buf, name, 11, 0); poke8(ch_buf + 3, 0); poke8(ch_buf + 4, 3)
+    assert_eq(tls_sni_parse(ch_buf, n, ch_out, 256, ch_ech), 0 - 1)
+    // handshake length too small for the fixed fields (version + random)
+    build_ch(ch_buf, name, 11, 0); poke8(ch_buf + 6, 0); poke8(ch_buf + 7, 0); poke8(ch_buf + 8, 0)
+    assert_eq(tls_sni_parse(ch_buf, n, ch_out, 256, ch_ech), 0 - 1)
+    // an extension whose declared length runs past the extensions block
+    build_ch(ch_buf, name, 11, 0); poke8(ch_buf + 54, 0x7f)
+    assert_eq(tls_sni_parse(ch_buf, n, ch_out, 256, ch_ech), 0 - 1)
+}
