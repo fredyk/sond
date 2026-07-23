@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/tls/keyschedule.snd: the TLS 1.3 key-schedule label helpers (RFC 8446 §7.1),
+// over HKDF-SHA-256 and SHA-256. The full ladder (early/handshake/master secrets and the
+// per-direction traffic keys) is built from these two functions plus hkdf_extract.
+//
+// HKDF-Expand-Label(secret, label, context, len) expands `secret` with the structured
+// HkdfLabel info, where the label is prefixed with "tls13 ":
+//   struct { uint16 length; opaque label<7..255>; opaque context<0..255>; } HkdfLabel;
+// Derive-Secret(secret, label, messages) = HKDF-Expand-Label(secret, label,
+// SHA-256(messages), Hash.length), i.e. it folds the handshake transcript into the
+// context. Both delegate to the RFC-5869-verified HKDF primitive; the wiring here is the
+// TLS-specific part.
+
+include "any/crypto/kdf/hkdf-sha256.snd"
+include "any/crypto/hash/sha256.snd"
+
+// Builds the HkdfLabel byte structure into `info` and returns its length.
+// info = uint16(outlen) || u8(6+llen) || "tls13 "||label || u8(clen) || context
+fn tls_hkdf_label_info(label: i64, llen: i64, context: i64, clen: i64, outlen: i64, info: i64) -> i64 {
+    poke8(info + 0, (outlen >> 8) & 0xff)
+    poke8(info + 1, outlen & 0xff)
+    poke8(info + 2, 6 + llen)                 // length of "tls13 " (6) + the label
+    poke8(info + 3, 116)                       // 't'
+    poke8(info + 4, 108)                       // 'l'
+    poke8(info + 5, 115)                       // 's'
+    poke8(info + 6, 49)                        // '1'
+    poke8(info + 7, 51)                        // '3'
+    poke8(info + 8, 32)                        // ' '
+    let mut i = 0
+    for i < llen { poke8(info + 9 + i, peek8(label + i)); i = i + 1 }
+    let mut p = 9 + llen
+    poke8(info + p, clen)                       // context length octet
+    p = p + 1
+    i = 0
+    for i < clen { poke8(info + p + i, peek8(context + i)); i = i + 1 }
+    p + clen
+}
+
+// HKDF-Expand-Label: expand `secret` (a 32-byte PRK/secret) with the HkdfLabel for
+// `label`/`context`, writing `outlen` bytes to `out`.
+fn hkdf_expand_label(secret: i64, label: i64, llen: i64, context: i64, clen: i64, out: i64, outlen: i64) {
+    let info[512]
+    let n = tls_hkdf_label_info(label, llen, context, clen, outlen, info)
+    hkdf_expand(secret, info, n, out, outlen)
+}
+
+// Derive-Secret: HKDF-Expand-Label(secret, label, SHA-256(messages), 32). Writes 32 bytes.
+fn derive_secret(secret: i64, label: i64, llen: i64, msgs: i64, mlen: i64, out: i64) {
+    let th[32]
+    sha256_hash(msgs, mlen, th)
+    hkdf_expand_label(secret, label, llen, th, 32, out, 32)
+}

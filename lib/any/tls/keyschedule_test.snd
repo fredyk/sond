@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of tls/keyschedule.snd: HKDF-Expand-Label and Derive-Secret (RFC 8446 §7.1).
+//
+// HKDF itself is verified against RFC 5869 in its own suite. What these helpers add is
+// only the TLS wiring: build the HkdfLabel structure and delegate. So we pin (1) the
+// HkdfLabel byte layout by construction (it is deterministic, not a borrowed vector),
+// and (2) that expand-label and derive-secret really delegate to HKDF/SHA-256 with that
+// structure, by reproducing the expected call by hand and asserting byte-for-byte. The
+// end-to-end §7.1 ladder against RFC 8448 traces is a follow-up on top of this.
+
+include "any/tls/keyschedule.snd"
+include "x86_64/linux/testing.snd"
+
+let mut ks_secret[32]
+let mut ks_label[32]
+let mut ks_ctx[64]
+let mut ks_info[512]
+let mut ks_out_a[64]
+let mut ks_out_b[64]
+let mut ks_th[32]
+
+// HkdfLabel for label="key", empty context, length=32:
+//   00 20 | 09 | "tls13 key" | 00
+//   = length(u16=32) | labellen(6+3) | "tls13 "+label | contextlen(0)
+test "tls keyschedule: the HkdfLabel byte layout (RFC 8446 §7.1)" {
+    poke8(ks_label + 0, 107); poke8(ks_label + 1, 101); poke8(ks_label + 2, 121)   // "key"
+    let n = tls_hkdf_label_info(ks_label, 3, ks_ctx, 0, 32, ks_info)
+    assert_eq(n, 13)
+    assert_eq(peek8(ks_info + 0), 0x00)   // length hi
+    assert_eq(peek8(ks_info + 1), 0x20)   // length lo = 32
+    assert_eq(peek8(ks_info + 2), 9)      // len("tls13 key")
+    assert_eq(peek8(ks_info + 3), 116)    // 't'
+    assert_eq(peek8(ks_info + 4), 108)    // 'l'
+    assert_eq(peek8(ks_info + 5), 115)    // 's'
+    assert_eq(peek8(ks_info + 6), 49)     // '1'
+    assert_eq(peek8(ks_info + 7), 51)     // '3'
+    assert_eq(peek8(ks_info + 8), 32)     // ' '
+    assert_eq(peek8(ks_info + 9), 107)    // 'k'
+    assert_eq(peek8(ks_info + 10), 101)   // 'e'
+    assert_eq(peek8(ks_info + 11), 121)   // 'y'
+    assert_eq(peek8(ks_info + 12), 0)     // context length = 0
+}
+
+// A non-empty context (a 4-byte transcript stand-in) appends after its length octet.
+test "tls keyschedule: the HkdfLabel carries a non-empty context" {
+    poke8(ks_label + 0, 105); poke8(ks_label + 1, 118)   // "iv"
+    poke8(ks_ctx + 0, 0xde); poke8(ks_ctx + 1, 0xad); poke8(ks_ctx + 2, 0xbe); poke8(ks_ctx + 3, 0xef)
+    let n = tls_hkdf_label_info(ks_label, 2, ks_ctx, 4, 12, ks_info)
+    // 2 length + 1 labellen + 8 ("tls13 iv") + 1 ctxlen + 4 ctx = 16
+    assert_eq(n, 16)
+    assert_eq(peek8(ks_info + 1), 12)     // length lo
+    assert_eq(peek8(ks_info + 2), 8)      // len("tls13 iv")
+    assert_eq(peek8(ks_info + 11), 0x04)  // context length
+    assert_eq(peek8(ks_info + 12), 0xde)
+    assert_eq(peek8(ks_info + 15), 0xef)
+}
+
+// expand-label must equal hkdf_expand over the exact HkdfLabel it builds.
+test "tls keyschedule: HKDF-Expand-Label delegates to HKDF with the HkdfLabel" {
+    let mut i = 0
+    for i < 32 { poke8(ks_secret + i, 0x0b); i = i + 1 }
+    poke8(ks_label + 0, 107); poke8(ks_label + 1, 101); poke8(ks_label + 2, 121)   // "key"
+    // by hand: build the label, expand with the primitive
+    let n = tls_hkdf_label_info(ks_label, 3, ks_ctx, 0, 32, ks_info)
+    hkdf_expand(ks_secret, ks_info, n, ks_out_a, 32)
+    // through the helper
+    hkdf_expand_label(ks_secret, ks_label, 3, ks_ctx, 0, ks_out_b, 32)
+    i = 0
+    for i < 32 { assert_eq(peek8(ks_out_b + i), peek8(ks_out_a + i)); i = i + 1 }
+}
+
+// derive-secret must equal expand-label with SHA-256(messages) as the context.
+test "tls keyschedule: Derive-Secret hashes the transcript into the context" {
+    let mut i = 0
+    for i < 32 { poke8(ks_secret + i, 0x2a); i = i + 1 }
+    poke8(ks_label + 0, 100); poke8(ks_label + 1, 101); poke8(ks_label + 2, 114); poke8(ks_label + 3, 105)
+    poke8(ks_label + 4, 118); poke8(ks_label + 5, 101); poke8(ks_label + 6, 100)   // "derived"
+    // messages = "abc"
+    poke8(ks_ctx + 0, 97); poke8(ks_ctx + 1, 98); poke8(ks_ctx + 2, 99)
+    // by hand: th = sha256("abc"); expand-label(secret, "derived", th, 32)
+    sha256_hash(ks_ctx, 3, ks_th)
+    hkdf_expand_label(ks_secret, ks_label, 7, ks_th, 32, ks_out_a, 32)
+    // through the helper
+    derive_secret(ks_secret, ks_label, 7, ks_ctx, 3, ks_out_b)
+    i = 0
+    for i < 32 { assert_eq(peek8(ks_out_b + i), peek8(ks_out_a + i)); i = i + 1 }
+}
