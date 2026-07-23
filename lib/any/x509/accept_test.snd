@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of x509/accept.snd against the REAL cloudflare.com leaf (embedded as hex): its
+// subjectAltName list (exact + wildcard entries) and its UTCTime validity window, plus
+// direct time-normalization checks for the UTCTime (>= 50) and GeneralizedTime forms.
+
+include "any/x509/accept.snd"
+include "x86_64/linux/testing.snd"
+
+let LEAF_HEX = "308203d130820378a00302010202105bb0f0aa84c8fece0e72d805ba7a5d2b300a06082a8648ce3d040302303b310b3009060355040613025553311e301c060355040a1315476f6f676c65205472757374205365727669636573310c300a06035504031303574531301e170d3236303730383231343733395a170d3236313030363232343732375a3019311730150603550403130e636c6f7564666c6172652e636f6d3059301306072a8648ce3d020106082a8648ce3d03010703420004d0ec2e24f05c3f2405e8e327ce251c2da903f764f4a997084bc6c3787c43eee4f15b0783e4530b9f592af181eb84b16bf55840a984ad52676952865bf666b69ca382027e3082027a300e0603551d0f0101ff04040302078030130603551d25040c300a06082b06010505070301300c0603551d130101ff04023000301d0603551d0e0416041469c5e528436b24dc892ababfb6e5bf73021b86df301f0603551d230418301680149077923567c4ffa8cca9e67bd980797bcc93f938303506082b0601050507010104293027302506082b060105050730028619687474703a2f2f692e706b692e676f6f672f7765312e63727430770603551d110470306e820e636c6f7564666c6172652e636f6d82116e732e636c6f7564666c6172652e636f6d82132a2e6e732e636c6f7564666c6172652e636f6d821a2a2e7365636f6e646172792e636c6f7564666c6172652e636f6d82187365636f6e646172792e636c6f7564666c6172652e636f6d30130603551d20040c300a3008060667810c01020130360603551d1f042f302d302ba029a0278625687474703a2f2f632e706b692e676f6f672f7765312f67784942763642326859772e63726c30820106060a2b06010401d6790204020481f70481f400f2007700d809553b944f7affc816196f944f85abb0f8fc5e8755260f15d12e72bb454b140000019f43ea5c1800000403004830460221009965ef2d23219719a2d52f8ae2444c09d2c45fec060406dd555df6767b796bab022100faa4a680d7c8ebd3a7dfbf7d6da630838aca1b73a28413ad49c2f571beac0b7a007700944e4387faecc1ef81f3192426a8186501c7d35f3802013f72677d55372e19d80000019f43ea5bea0000040300483046022100b9d916169f16b5c1e3125a2c8cb79b28319a953b451b19e8e145b5cceb14cef9022100fbc0df50267db8ecc73dc27fc047ae05b4e77b395eb71c1761e791d69b89d4fa300a06082a8648ce3d040302034700304402207a6251f1a2d5268f84d29d0511faf9b6bd5caa589e320273f7d678910daa57fd022039082dc1e66982a301bfc4d52457806cd220780bf32ac83eaef435087d1f888f"
+let mut cert[1100]
+let mut host[64]
+let mut nowbuf[16]
+let mut tbuf[32]
+let mut t14[14]
+
+fn ahx(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    c - 55
+}
+fn aload() {
+    let mut i = 0
+    for peek8(LEAF_HEX + i * 2) != 0 {
+        poke8(cert + i, ahx(peek8(LEAF_HEX + i * 2)) * 16 + ahx(peek8(LEAF_HEX + i * 2 + 1)))
+        i = i + 1
+    }
+}
+fn seth(s: i64) -> i64 {
+    let mut i = 0
+    for peek8(s + i) != 0 { poke8(host + i, peek8(s + i)); i = i + 1 }
+    i
+}
+fn setn(s: i64) {
+    let mut i = 0
+    for i < 14 { poke8(nowbuf + i, peek8(s + i)); i = i + 1 }
+}
+
+test "x509 accept: hostname matching against the real SAN list (exact and wildcard)" {
+    aload()
+    assert_eq(x509_hostname_matches(cert, 0, host, seth("cloudflare.com")), 1)
+    assert_eq(x509_hostname_matches(cert, 0, host, seth("secondary.cloudflare.com")), 1)
+    assert_eq(x509_hostname_matches(cert, 0, host, seth("foo.ns.cloudflare.com")), 1)
+    assert_eq(x509_hostname_matches(cert, 0, host, seth("a.b.ns.cloudflare.com")), 0)
+    assert_eq(x509_hostname_matches(cert, 0, host, seth("www.evil.com")), 0)
+    assert_eq(x509_hostname_matches(cert, 0, host, seth("cloudflare.org")), 0)
+    assert_eq(x509_hostname_matches(cert, 0, host, seth("localhost")), 0)   // no dot vs a wildcard
+}
+
+test "x509 accept: the validity window (notBefore 2026-07-08, notAfter 2026-10-06)" {
+    aload()
+    setn("20260723000000"); assert_eq(x509_valid_at(cert, 0, nowbuf), 1)
+    setn("20260101000000"); assert_eq(x509_valid_at(cert, 0, nowbuf), 0)
+    setn("20270101000000"); assert_eq(x509_valid_at(cert, 0, nowbuf), 0)
+}
+
+test "x509 accept: time normalization for UTCTime (>=50 is 19xx) and GeneralizedTime" {
+    // UTCTime "950101000000Z" -> 19950101000000
+    poke8(tbuf + 0, 23); poke8(tbuf + 1, 13)
+    let u = "950101000000Z"
+    let mut i = 0
+    for i < 13 { poke8(tbuf + 2 + i, peek8(u + i)); i = i + 1 }
+    x509_time14(tbuf, 0, t14)
+    assert_eq(peek8(t14 + 0), 49); assert_eq(peek8(t14 + 1), 57)   // "19"
+    assert_eq(peek8(t14 + 2), 57); assert_eq(peek8(t14 + 3), 53)   // "95"
+    // GeneralizedTime "20500101000000Z" -> 20500101000000
+    poke8(tbuf + 0, 24); poke8(tbuf + 1, 15)
+    let g = "20500101000000Z"
+    i = 0
+    for i < 15 { poke8(tbuf + 2 + i, peek8(g + i)); i = i + 1 }
+    x509_time14(tbuf, 0, t14)
+    assert_eq(peek8(t14 + 0), 50); assert_eq(peek8(t14 + 3), 48)   // "20" .. "0"
+    assert_eq(peek8(t14 + 2), 53)                                   // '5' of 2050
+}
