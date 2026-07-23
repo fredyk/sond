@@ -196,6 +196,11 @@ pub enum BinOp {
 pub struct Block {
     pub stmts: Vec<Stmt>,
     pub tail: Option<Box<Expr>>,
+    /// The 1-based source line of each statement in `stmts` (parallel to it), for the RFC-0016
+    /// `--debug` checkpoint. Empty for synthesized blocks (which carry no statements). May be
+    /// shorter than `stmts` for blocks built without line info; a consumer treats a missing entry
+    /// as line 0.
+    pub stmt_lines: Vec<u32>,
 }
 
 /// A statement inside a block.

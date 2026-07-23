@@ -550,6 +550,17 @@ fn parses_a_par_reduce() {
 }
 
 #[test]
+fn parse_block_stamps_each_statement_with_its_source_line() {
+    // Line 1: `fn f() {`; line 2: `let a = 1`; line 3: `let b = 2`; line 4: `a + b` (the tail).
+    let (toks, lines) = crate::lexer::tokenize_located("fn f() -> i64 {\nlet a = 1\nlet b = 2\na + b\n}");
+    let mut p = Parser::with_lines(toks, lines);
+    let funcs = p.parse_program();
+    let body = &funcs[0].body;
+    assert_eq!(body.stmts.len(), 2, "two statements; `a + b` is the tail");
+    assert_eq!(body.stmt_lines, vec![2, 3], "each statement stamped with its line");
+}
+
+#[test]
 fn parses_a_graph_block() {
     // `let r = graph { node a = e  node b = e  yield e }`: `node`/`yield` are contextual keywords.
     let f = parse_fn(

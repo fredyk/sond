@@ -11,6 +11,9 @@ use crate::token::Token;
 /// A recursive-descent parser over a flat token stream.
 pub struct Parser {
     tokens: Vec<Token>,
+    /// The source line of each token (parallel to `tokens`), or empty when the parser was built
+    /// from tokens alone. Used to stamp each statement with its line for the `--debug` checkpoint.
+    lines: Vec<u32>,
     pos: usize,
     /// Module-level `let` bindings collected while parsing the program.
     globals: Vec<Global>,
@@ -43,8 +46,15 @@ fn split_conjuncts(e: Expr, out: &mut Vec<Expr>) {
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
+        Parser::with_lines(tokens, Vec::new())
+    }
+
+    /// Builds a parser that also knows each token's source line (from `tokenize_located`), so the
+    /// blocks it parses carry per-statement line info for the `--debug` checkpoint.
+    pub fn with_lines(tokens: Vec<Token>, lines: Vec<u32>) -> Self {
         Parser {
             tokens,
+            lines,
             pos: 0,
             globals: Vec::new(),
             structs: Vec::new(),
@@ -54,6 +64,11 @@ impl Parser {
             uses: Vec::new(),
             no_struct_lit: false,
         }
+    }
+
+    /// The source line of the current token, or 0 if line info is absent.
+    fn cur_line(&self) -> u32 {
+        self.lines.get(self.pos).copied().unwrap_or(0)
     }
 
     /// Parses a whole program: top-level `fn` declarations, `let` globals and
@@ -458,9 +473,13 @@ impl Parser {
         self.expect(Token::LBrace);
         self.skip_semicolons();
         let mut stmts = Vec::new();
+        let mut stmt_lines = Vec::new();
         let mut tail = None;
 
         while self.peek() != Some(&Token::RBrace) {
+            // The line this statement starts on, stamped after it is pushed (an iteration parses at
+            // most one statement, or the tail expression, which is not stamped).
+            let stmt_line = self.cur_line();
             match self.peek() {
                 Some(Token::Let) => {
                     stmts.push(self.parse_let());
@@ -626,10 +645,18 @@ impl Parser {
                     }
                 }
             }
+            // An iteration parses at most one statement; attribute it to the line it began on.
+            while stmt_lines.len() < stmts.len() {
+                stmt_lines.push(stmt_line);
+            }
         }
 
         self.expect(Token::RBrace);
-        Block { stmts, tail }
+        Block {
+            stmts,
+            tail,
+            stmt_lines,
+        }
     }
 
     fn parse_let(&mut self) -> Stmt {

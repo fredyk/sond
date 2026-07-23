@@ -230,6 +230,7 @@ fn lower_match_int(scrutinee: &Expr, arms: &[MatchArm], info: &HashMap<String, V
         acc = Block {
             stmts: Vec::new(),
             tail: Some(Box::new(if_expr)),
+        stmt_lines: Vec::new(),
         };
     }
     match acc.tail {
@@ -263,6 +264,7 @@ fn lower_match_payload(
         acc = Block {
             stmts: Vec::new(),
             tail: Some(Box::new(if_expr)),
+        stmt_lines: Vec::new(),
         };
     }
     match acc.tail {

@@ -12,7 +12,7 @@
 use sondc::codegen::{
     emit_freestanding_g, emit_program_coverage_g, emit_program_g, emit_shared_g, emit_uefi_g,
 };
-use sondc::lexer::tokenize;
+use sondc::lexer::tokenize_located;
 use sondc::parser::Parser;
 use sondc::verify::verify_with_globals;
 use std::path::Path;
@@ -112,7 +112,8 @@ fn main() -> ExitCode {
     let src_for_parse = src.clone();
     let (mut funcs, globals, mut structs, enums, ports, providers, uses) =
         match std::panic::catch_unwind(move || {
-            let mut p = Parser::new(tokenize(&src_for_parse));
+            let (toks, lines) = tokenize_located(&src_for_parse);
+            let mut p = Parser::with_lines(toks, lines);
             let funcs = p.parse_program();
             let globals = p.take_globals();
             let structs = p.take_structs();
