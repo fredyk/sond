@@ -212,6 +212,29 @@ fn graph_evaluates_nodes_in_dependency_order_not_source_order() {
 }
 
 #[test]
+fn graph_runs_independent_nodes_in_parallel_and_binds_them_correctly() {
+    // Level 0 = { a, b, c }, three INDEPENDENT call nodes: they run concurrently on threads. Level
+    // 1 = { total } combines them. The positional formula a*16 + b*4 + c = 16 + 8 + 3 = 27 is 27
+    // only if each node was bound to its own result after the parallel level joined.
+    let src = "\
+        fn one() -> i64 { 1 }\n\
+        fn two() -> i64 { 2 }\n\
+        fn three() -> i64 { 3 }\n\
+        fn mix(a: i64, b: i64, c: i64) -> i64 { a * 16 + b * 4 + c }\n\
+        fn main() -> i64 {\n\
+            let r = graph {\n\
+                node total = mix(a, b, c)\n\
+                node a = one()\n\
+                node b = two()\n\
+                node c = three()\n\
+                yield total\n\
+            }\n\
+            r\n\
+        }";
+    assert_eq!(compile_and_run(src), 27, "parallel level nodes bound to their own results");
+}
+
+#[test]
 fn compiles_and_runs_early_return_on_real_x64() {
     assert_eq!(
         compile_and_run("fn f() -> i64 { let x = 5\nreturn x + x\n }"),

@@ -629,52 +629,52 @@ pub(crate) fn collect_node_refs(expr: &Expr, node_idx: &HashMap<&str, usize>, ou
     }
 }
 
-/// A topological order of graph nodes: each node comes after every node it references. A DFS
-/// post-order gives it; a cycle (already rejected by `check_graph_acyclic`) would be broken by the
-/// visited-marks, so this never loops.
-fn topological_order(nodes: &[(String, Expr)]) -> Vec<usize> {
+/// The dependency edges of each graph node: `deps[i]` is the set of node indices that node `i`
+/// references. An edge `i -> d` means `i` must be evaluated after `d`.
+fn node_deps(nodes: &[(String, Expr)]) -> Vec<Vec<usize>> {
     let node_idx: HashMap<&str, usize> = nodes
         .iter()
         .enumerate()
         .map(|(i, (n, _))| (n.as_str(), i))
         .collect();
-    let deps: Vec<Vec<usize>> = nodes
+    nodes
         .iter()
         .map(|(_, e)| {
             let mut refs = HashSet::new();
             collect_node_refs(e, &node_idx, &mut refs);
             refs.into_iter().collect()
         })
-        .collect();
-    let mut order = Vec::new();
-    let mut done = vec![false; nodes.len()];
-    // Explicit stack DFS (avoids recursion depth limits on a huge graph): push a node, then its
-    // unvisited deps; a node is emitted once all its deps are done.
-    for start in 0..nodes.len() {
-        if done[start] {
-            continue;
+        .collect()
+}
+
+/// Groups graph nodes into TOPOLOGICAL LEVELS: `level[i] = 1 + max(level over i's dependencies)`,
+/// or 0 for a source node. Nodes in the SAME level share no dependency (if one referenced another
+/// they would be in different levels), so a level's nodes are mutually independent and may run
+/// concurrently; levels run in order. Returned as a Vec of levels, each a Vec of node indices.
+/// Cycle-safe (relaxes at most `n` times); acyclicity is anyway guaranteed by `check_graph_acyclic`.
+fn topological_levels(nodes: &[(String, Expr)]) -> Vec<Vec<usize>> {
+    let deps = node_deps(nodes);
+    let n = nodes.len();
+    let mut level = vec![0usize; n];
+    for _ in 0..n {
+        let mut changed = false;
+        for i in 0..n {
+            let m = deps[i].iter().map(|&d| level[d] + 1).max().unwrap_or(0);
+            if m != level[i] {
+                level[i] = m;
+                changed = true;
+            }
         }
-        let mut stack = vec![(start, false)];
-        while let Some((n, expanded)) = stack.pop() {
-            if expanded {
-                if !done[n] {
-                    done[n] = true;
-                    order.push(n);
-                }
-                continue;
-            }
-            if done[n] {
-                continue;
-            }
-            stack.push((n, true));
-            for &d in &deps[n] {
-                if !done[d] {
-                    stack.push((d, false));
-                }
-            }
+        if !changed {
+            break;
         }
     }
-    order
+    let depth = level.iter().copied().max().unwrap_or(0);
+    let mut groups = vec![Vec::new(); depth + 1];
+    for (i, &l) in level.iter().enumerate() {
+        groups[l].push(i);
+    }
+    groups
 }
 
 fn collect_locals_in_expr(expr: &Expr, out: &mut Vec<String>) {
@@ -1200,18 +1200,58 @@ impl Codegen {
     }
 
     /// Emits `let r = graph { node a = e1  node b = e2  yield e3 }` (RFC-0008 §5.1). The nodes are
-    /// evaluated in a TOPOLOGICAL order of their data dependencies (each node's expression may
-    /// reference earlier nodes; the only ordering constraint is that a node's dependencies run
-    /// first), then the `yield` expression is evaluated and bound to `name`. A single sequential
-    /// worker over the DAG is a valid schedule (RFC-0008 §5.5); running independent nodes
-    /// concurrently is a later refinement. `check_graph_acyclic` has already rejected any cycle.
+    /// grouped into topological LEVELS (dependencies first); each level's nodes are mutually
+    /// independent, so its CALL nodes run CONCURRENTLY, each on its own thread (the same Layer B
+    /// substrate as `par`), joined before the next level. A level with a single node, and any
+    /// non-call node (cheap, not worth a thread), runs inline. Then `yield` is evaluated and bound
+    /// to `name`. `check_graph_acyclic` has already rejected any cycle.
     fn emit_graph_let(&mut self, name: &str, nodes: &[(String, Expr)], yield_expr: &Expr) {
-        for idx in topological_order(nodes) {
-            let (node_name, value) = &nodes[idx];
-            self.expr(value); // -> %rax
-            let off = self.slot(node_name);
-            self.line(&format!("    movq %rax, {off}(%rbp)"));
-            self.var_types.insert(node_name.clone(), self.ty_of(value));
+        // Binds node `idx`'s result (in %rax) to its frame slot.
+        for level in topological_levels(nodes) {
+            let call_nodes: Vec<usize> = level
+                .iter()
+                .copied()
+                .filter(|&i| matches!(nodes[i].1, Expr::Call(..)))
+                .collect();
+            // A single node, or a non-call node, runs inline: no thread is worth the overhead, and
+            // a lone node has no peer to run beside.
+            if level.len() == 1 || call_nodes.len() < 2 {
+                for &idx in &level {
+                    self.expr(&nodes[idx].1);
+                    let off = self.slot(&nodes[idx].0);
+                    self.line(&format!("    movq %rax, {off}(%rbp)"));
+                    self.var_types
+                        .insert(nodes[idx].0.clone(), self.ty_of(&nodes[idx].1));
+                }
+                continue;
+            }
+            // Two or more independent call nodes: spawn each on a thread, capturing its result;
+            // evaluate any non-call node inline; join, then bind every result.
+            let ctid_start = self.spawn_ctids.len();
+            let mut cells: Vec<(usize, String)> = Vec::new();
+            for &idx in &level {
+                if matches!(nodes[idx].1, Expr::Call(..)) {
+                    let cell = format!("sond_par_result_{}", self.all_result_cells.len());
+                    self.all_result_cells.push(cell.clone());
+                    self.emit_spawn_capturing(&nodes[idx].1, Some(&cell));
+                    cells.push((idx, cell));
+                } else {
+                    self.expr(&nodes[idx].1);
+                    let off = self.slot(&nodes[idx].0);
+                    self.line(&format!("    movq %rax, {off}(%rbp)"));
+                    self.var_types
+                        .insert(nodes[idx].0.clone(), self.ty_of(&nodes[idx].1));
+                }
+            }
+            let par_ctids: Vec<String> = self.spawn_ctids.split_off(ctid_start);
+            self.emit_join(&par_ctids);
+            for (idx, cell) in &cells {
+                self.line(&format!("    movq {cell}(%rip), %rax"));
+                let off = self.slot(&nodes[*idx].0);
+                self.line(&format!("    movq %rax, {off}(%rbp)"));
+                self.var_types
+                    .insert(nodes[*idx].0.clone(), self.ty_of(&nodes[*idx].1));
+            }
         }
         self.expr(yield_expr);
         let off = self.slot(name);
