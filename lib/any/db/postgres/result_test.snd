@@ -67,6 +67,7 @@ test "pg result: rows, columns, NULL, tag and end signal" {
     // (1,0) = "2", (1,1) = NULL
     assert_eq(peek8(pgx_val(r, 1, 0)), 50)
     assert_eq(pgx_val(r, 1, 1), 0)                  // SQL NULL
+    assert_eq(pgx_cell(r, 0, 0), pgx_val(r, 0, 0))  // pgx_cell is a synonym for pgx_val
     // out-of-range cells (too high, and a negative index) read as 0
     assert_eq(pgx_val(r, 5, 0), 0)
     assert_eq(pgx_val(r, 0 - 1, 0), 0)

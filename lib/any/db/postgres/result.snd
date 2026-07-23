@@ -96,3 +96,6 @@ fn pgx_val(r: i64, row: i64, col: i64) -> i64 {
     if idx >= vec_len(r[4]) { return 0 }
     vec_get(r[4], idx)
 }
+
+// `pgx_cell` is a synonym for `pgx_val`, so callers written against either name bind.
+fn pgx_cell(r: i64, row: i64, col: i64) -> i64 { pgx_val(r, row, col) }
