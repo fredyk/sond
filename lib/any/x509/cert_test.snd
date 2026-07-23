@@ -1,0 +1,44 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of x509/cert.snd on a minimal certificate-shaped DER (the outer three-element
+// SEQUENCE), so the structural navigation is pinned without a real certificate.
+
+include "any/x509/cert.snd"
+include "x86_64/linux/testing.snd"
+
+let mut c_buf[64]
+let mut c_out[3]
+
+// Certificate = SEQUENCE {
+//   tbsCertificate     = SEQUENCE { INTEGER 1 }        30 03 02 01 01
+//   signatureAlgorithm = SEQUENCE { NULL }             30 02 05 00
+//   signatureValue     = BIT STRING { 00 de ad }       03 03 00 de ad
+// }  ->  30 0E <14 bytes>
+test "x509: split the outer Certificate, the tbs span, and the signature" {
+    poke8(c_buf + 0, 0x30); poke8(c_buf + 1, 0x0e)
+    // tbsCertificate at 2..7
+    poke8(c_buf + 2, 0x30); poke8(c_buf + 3, 0x03); poke8(c_buf + 4, 0x02)
+    poke8(c_buf + 5, 0x01); poke8(c_buf + 6, 0x01)
+    // signatureAlgorithm at 7..11
+    poke8(c_buf + 7, 0x30); poke8(c_buf + 8, 0x02); poke8(c_buf + 9, 0x05); poke8(c_buf + 10, 0x00)
+    // signatureValue at 11..16
+    poke8(c_buf + 11, 0x03); poke8(c_buf + 12, 0x03); poke8(c_buf + 13, 0x00)
+    poke8(c_buf + 14, 0xde); poke8(c_buf + 15, 0xad)
+
+    x509_cert_parts(c_buf, 0, c_out)
+    assert_eq(c_out[0], 2)                            // tbsCertificate tag position
+    assert_eq(c_out[1], 7)                            // signatureAlgorithm tag position
+    assert_eq(c_out[2], 11)                           // signatureValue tag position
+    assert_eq(der_tag(c_buf, c_out[0]), DER_SEQUENCE)
+    assert_eq(der_tag(c_buf, c_out[2]), DER_BITSTRING)
+
+    x509_tbs_span(c_buf, 0, c_out)
+    assert_eq(c_out[0], 2)                            // starts at the tbs tag
+    assert_eq(c_out[1], 5)                            // 30 03 02 01 01 = 5 bytes signed
+
+    x509_signature(c_buf, 0, c_out)
+    assert_eq(c_out[1], 2)                            // two signature bytes after the unused octet
+    assert_eq(peek8(c_buf + c_out[0]), 0xde)
+    assert_eq(peek8(c_buf + c_out[0] + 1), 0xad)
+}

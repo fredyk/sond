@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/x509/cert.snd: the outer structure of an X.509 certificate (RFC 5280), on top
+// of the DER reader. A Certificate is
+//   SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue BIT STRING }
+// and the signature is computed over the exact DER bytes of tbsCertificate. These helpers
+// give a TLS client the three pieces it needs to verify a certificate: what was signed
+// (the tbsCertificate span), which algorithm signed it, and the signature bytes.
+//
+// Walking INTO tbsCertificate for the SubjectPublicKeyInfo, validity and SAN is the next
+// step (it must handle the optional EXPLICIT [0] version); this file does the outer split.
+
+include "any/asn1/der.snd"
+
+// Fills `out` with the tag positions of the three Certificate children:
+//   out[0] = tbsCertificate, out[1] = signatureAlgorithm, out[2] = signatureValue.
+fn x509_cert_parts(buf: i64, pos: i64, out: i64) {
+    let tbs = der_enter(buf, pos)                    // first child of the Certificate SEQUENCE
+    out[0] = tbs
+    let t[3]
+    let sigalg = der_tlv(buf, tbs, t)               // position just past tbsCertificate
+    out[1] = sigalg
+    out[2] = der_tlv(buf, sigalg, t)                // position just past signatureAlgorithm
+}
+
+// The DER span of tbsCertificate (the bytes the signature covers): out[0] = start (the
+// tag position), out[1] = total length (tag + length + content).
+fn x509_tbs_span(buf: i64, pos: i64, out: i64) {
+    let tbs = der_enter(buf, pos)
+    let t[3]
+    let after = der_tlv(buf, tbs, t)
+    out[0] = tbs
+    out[1] = after - tbs
+}
+
+// The raw signature bytes from the signatureValue BIT STRING: out[0] = start position,
+// out[1] = length, skipping the BIT STRING's leading "unused bits" octet (0 for the
+// byte-aligned signatures TLS uses).
+fn x509_signature(buf: i64, pos: i64, out: i64) {
+    let parts[3]
+    x509_cert_parts(buf, pos, parts)
+    let t[3]
+    der_tlv(buf, parts[2], t)                        // signatureValue TLV
+    out[0] = t[1] + 1                                // skip the unused-bits octet
+    out[1] = t[2] - 1
+}
