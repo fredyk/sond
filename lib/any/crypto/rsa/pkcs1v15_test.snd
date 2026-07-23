@@ -43,7 +43,7 @@ fn hexdecode(hexstr: i64, out: i64) -> i64 {
 }
 
 // Zero a 64-limb bignum.
-fn rbn_zero(a: i64) {
+fn bn_zero(a: i64) {
     let mut i = 0
     for i < 64 { a[i] = 0; i = i + 1 }
 }
@@ -57,68 +57,68 @@ test "hexdecode: parses a byte string" {
     assert_eq(peek8(t_hash + 3), 0xff)
 }
 
-test "rbn_from_bytes / rbn_to_bytes: big-endian round trip" {
+test "bn_from_bytes / bn_to_bytes: big-endian round trip" {
     // 256 bytes: 0x01 followed by zeros -> value = 2^2040; low limb 0, top limb has 0x01<<24.
     let mut i = 0
     for i < 256 { poke8(t_n + i, 0); i = i + 1 }
     poke8(t_n + 0, 0x01)      // most-significant byte
     poke8(t_n + 255, 0xAB)    // least-significant byte
-    rbn_from_bytes(t_n, ba)
+    bn_from_bytes(t_n, ba)
     assert_eq(ba[0], 0xAB)              // least significant limb
     assert_eq(ba[63], 0x01000000)      // most significant limb
     // round trip back to bytes
-    rbn_to_bytes(ba, t_sig)
+    bn_to_bytes(ba, t_sig)
     assert_eq(peek8(t_sig + 0), 0x01)
     assert_eq(peek8(t_sig + 255), 0xAB)
     i = 1
     for i < 255 { assert_eq(peek8(t_sig + i), 0); i = i + 1 }
 }
 
-test "rbn_cmp: orders bignums by magnitude" {
-    rbn_zero(ba); rbn_zero(bb)
+test "bn_cmp: orders bignums by magnitude" {
+    bn_zero(ba); bn_zero(bb)
     ba[0] = 5; bb[0] = 7
-    assert_eq(rbn_cmp(ba, bb), 0 - 1)
-    assert_eq(rbn_cmp(bb, ba), 1)
-    assert_eq(rbn_cmp(ba, ba), 0)
+    assert_eq(bn_cmp(ba, bb), 0 - 1)
+    assert_eq(bn_cmp(bb, ba), 1)
+    assert_eq(bn_cmp(ba, ba), 0)
     // high limb dominates
     bb[0] = 0; bb[5] = 1
-    assert_eq(rbn_cmp(ba, bb), 0 - 1)
+    assert_eq(bn_cmp(ba, bb), 0 - 1)
 }
 
-test "rbn_mulmod: 7 * 6 mod 10 == 2" {
-    rbn_zero(ba); rbn_zero(bb); rbn_zero(bn); rbn_zero(bout)
+test "bn_mulmod: 7 * 6 mod 10 == 2" {
+    bn_zero(ba); bn_zero(bb); bn_zero(bn); bn_zero(bout)
     ba[0] = 7; bb[0] = 6; bn[0] = 10
-    rbn_mulmod(ba, bb, bn, bout)
+    bn_mulmod(ba, bb, bn, bout)
     assert_eq(bout[0], 2)
     let mut i = 1
     for i < 64 { assert_eq(bout[i], 0); i = i + 1 }
 }
 
-test "rbn_mulmod: multi-limb (2^40+123)*(2^40+456) mod (2^64+7)" {
-    rbn_zero(ba); rbn_zero(bb); rbn_zero(bn); rbn_zero(bout)
+test "bn_mulmod: multi-limb (2^40+123)*(2^40+456) mod (2^64+7)" {
+    bn_zero(ba); bn_zero(bb); bn_zero(bn); bn_zero(bout)
     ba[0] = 123; ba[1] = 256      // 2^40 + 123
     bb[0] = 456; bb[1] = 256      // 2^40 + 456
     bn[0] = 7; bn[2] = 1          // 2^64 + 7
-    rbn_mulmod(ba, bb, bn, bout)
+    bn_mulmod(ba, bb, bn, bout)
     assert_eq(bout[0], 4294564632)
     assert_eq(bout[1], 148223)
     assert_eq(bout[2], 0)
 }
 
-test "rbn_modexp_65537: 4^65537 mod 1000000007 == 502620676" {
-    rbn_zero(ba); rbn_zero(bn); rbn_zero(bout)
+test "bn_modexp_65537: 4^65537 mod 1000000007 == 502620676" {
+    bn_zero(ba); bn_zero(bn); bn_zero(bout)
     ba[0] = 4; bn[0] = 1000000007
-    rbn_modexp_65537(ba, bn, bout)
+    bn_modexp_65537(ba, bn, bout)
     assert_eq(bout[0], 502620676)
     let mut i = 1
     for i < 64 { assert_eq(bout[i], 0); i = i + 1 }
 }
 
-test "rbn_modexp_65537: 123456^65537 mod 4294967311 == 227596699" {
-    rbn_zero(ba); rbn_zero(bn); rbn_zero(bout)
+test "bn_modexp_65537: 123456^65537 mod 4294967311 == 227596699" {
+    bn_zero(ba); bn_zero(bn); bn_zero(bout)
     ba[0] = 123456
     bn[0] = 15; bn[1] = 1         // 4294967311 = 2^32 + 15
-    rbn_modexp_65537(ba, bn, bout)
+    bn_modexp_65537(ba, bn, bout)
     assert_eq(bout[0], 227596699)
     assert_eq(bout[1], 0)
 }
