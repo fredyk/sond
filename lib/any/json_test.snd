@@ -104,3 +104,37 @@ test "top-level scalars parse" {
     assert_eq(json_type(parse("null")), JSON_NULL)
     assert_eq(streq(json_str(parse("\"hi\"")), "hi"), 1)
 }
+
+test "builds and encodes an object, round-trips through the parser" {
+    let o = json_new_obj()
+    json_obj_put(o, "port", json_new_int(5432))
+    json_obj_put(o, "name", json_new_str("pgv"))
+    json_obj_put(o, "ok", json_new_bool(1))
+    let tags = json_new_arr()
+    json_arr_push(tags, json_new_str("a"))
+    json_arr_push(tags, json_new_int(2))
+    json_obj_put(o, "tags", tags)
+    let buf = json_encode(o)
+    // parse the encoded bytes back and check the values survived
+    let p = json_parse(peek64(buf), bytes_len(buf))
+    assert_eq(json_int(json_get(p, "port")), 5432)
+    assert_eq(streq(json_str(json_get(p, "name")), "pgv"), 1)
+    assert_eq(json_bool(json_get(p, "ok")), 1)
+    assert_eq(json_arr_len(json_get(p, "tags")), 2)
+    assert_eq(streq(json_str(json_arr_get(json_get(p, "tags"), 0)), "a"), 1)
+}
+
+test "encode escapes quotes and control chars" {
+    let o = json_new_obj()
+    json_obj_put(o, "s", json_new_str("a\"b"))
+    let buf = json_encode(o)
+    let p = json_parse(peek64(buf), bytes_len(buf))
+    assert_eq(streq(json_str(json_get(p, "s")), "a\"b"), 1)
+}
+
+test "encodes null and empties" {
+    let buf = json_encode(json_new_null())
+    assert_eq(json_type(json_parse(peek64(buf), bytes_len(buf))), JSON_NULL)
+    let e = json_encode(json_new_obj())
+    assert_eq(json_type(json_parse(peek64(e), bytes_len(e))), JSON_OBJ)
+}

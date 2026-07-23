@@ -20,6 +20,7 @@
 include "any/strings.snd"
 include "x86_64/linux/heap.snd"
 include "x86_64/linux/vec.snd"
+include "x86_64/linux/bytes.snd"
 
 let JSON_NULL = 0
 let JSON_BOOL = 1
@@ -198,4 +199,82 @@ pub fn json_get(obj: i64, key: i64) -> i64 {
         i = i + 1
     }
     0 - 1
+}
+
+
+// ── Builders (construct a value tree, then json_encode it) ──────────
+pub fn json_new_null() -> i64 { __node(JSON_NULL, 0, 0) }
+pub fn json_new_bool(b: i64) -> i64 { __node(JSON_BOOL, b, 0) }
+pub fn json_new_int(n: i64) -> i64 { __node(JSON_INT, n, 0) }
+pub fn json_new_str(s: i64) -> i64 { __node(JSON_STR, s, strlen(s)) }
+pub fn json_new_obj() -> i64 { __node(JSON_OBJ, vec_new(), 0) }
+pub fn json_new_arr() -> i64 { __node(JSON_ARR, vec_new(), 0) }
+
+// Adds key -> value to an object node (key is a cstr the caller keeps alive).
+pub fn json_obj_put(obj: i64, key: i64, val: i64) {
+    let e = heap_alloc(24)
+    e[0] = key
+    e[1] = strlen(key)
+    e[2] = val
+    vec_push(obj[1], e)
+}
+pub fn json_arr_push(arr: i64, val: i64) { vec_push(arr[1], val) }
+
+// Appends `s` to `b` as a JSON string literal (quoted, escapes applied).
+fn __enc_str(s: i64, b: i64) {
+    bytes_push(b, 34)                     // opening quote
+    let n = strlen(s)
+    let mut i = 0
+    for i < n {
+        let c = peek8(s + i)
+        let esc = if c == 34 { 34 } else { if c == 92 { 92 } else { if c == 10 { 110 } else { if c == 13 { 114 } else { if c == 9 { 116 } else { if c == 8 { 98 } else { if c == 12 { 102 } else { 0 } } } } } } }
+        if esc == 0 { bytes_push(b, c) } else { bytes_push(b, 92); bytes_push(b, esc) }
+        i = i + 1
+    }
+    bytes_push(b, 34)                     // closing quote
+}
+
+fn __encode(node: i64, b: i64) {
+    let t = node[0]
+    if t == JSON_NULL { bytes_append_cstr(b, "null"); return }
+    if t == JSON_BOOL {
+        if node[1] == 1 { bytes_append_cstr(b, "true") } else { bytes_append_cstr(b, "false") }
+        return
+    }
+    if t == JSON_INT { bytes_append_int(b, node[1]); return }
+    if t == JSON_STR { __enc_str(node[1], b); return }
+    if t == JSON_ARR {
+        bytes_push(b, 91)                 // [
+        let items = node[1]
+        let n = vec_len(items)
+        let mut i = 0
+        for i < n {
+            if i > 0 { bytes_push(b, 44) }
+            __encode(vec_get(items, i), b)
+            i = i + 1
+        }
+        bytes_push(b, 93)                 // ]
+        return
+    }
+    // object
+    bytes_push(b, 123)                    // {
+    let entries = node[1]
+    let m = vec_len(entries)
+    let mut j = 0
+    for j < m {
+        if j > 0 { bytes_push(b, 44) }
+        let e = vec_get(entries, j)
+        __enc_str(e[0], b)
+        bytes_push(b, 58)                 // :
+        __encode(e[2], b)
+        j = j + 1
+    }
+    bytes_push(b, 125)                    // }
+}
+
+// Encodes a value tree to a fresh byte buffer (data at peek64(buf), len bytes_len(buf)).
+pub fn json_encode(node: i64) -> i64 {
+    let b = bytes_new()
+    __encode(node, b)
+    b
 }
