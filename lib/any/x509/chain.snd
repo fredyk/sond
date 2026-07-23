@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/x509/chain.snd: accept a leaf certificate. This ties the three independent
+// checks a TLS client must make into one entry point: the leaf's signature verifies under
+// a trusted issuer's key, the leaf is for the host we meant to reach, and it is inside its
+// validity window. A full path builder (leaf -> intermediates -> a trusted root set) walks
+// this per link; here we accept a leaf against a single directly-trusted issuer.
+
+include "any/x509/verify.snd"
+include "any/x509/accept.snd"
+
+// 1 if `leaf` (at leafpos) is signed by `issuer` (at issuerpos), names `host`, and is valid
+// at the instant `now14` ("YYYYMMDDHHMMSS"); 0 otherwise.
+fn x509_accept_leaf(leaf: i64, leafpos: i64, issuer: i64, issuerpos: i64,
+                    host: i64, hostlen: i64, now14: i64) -> i64 {
+    if x509_verify(leaf, leafpos, issuer, issuerpos) != 1 { return 0 }
+    if x509_hostname_matches(leaf, leafpos, host, hostlen) != 1 { return 0 }
+    if x509_valid_at(leaf, leafpos, now14) != 1 { return 0 }
+    1
+}
