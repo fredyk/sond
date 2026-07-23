@@ -66,7 +66,15 @@ fn resolve_into(
     if !seen.insert(canon) {
         return Ok(()); // already included, skip to avoid duplicate definitions
     }
-    let src = std::fs::read_to_string(path)?;
+    // Name the file that actually failed. Without this the caller reports the ENTRY path for
+    // every read error, so a missing NESTED include (`any/json.snd` not on any root) is blamed on
+    // the top file, which is deeply confusing to debug.
+    let src = std::fs::read_to_string(path).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("cannot read `{}`: {e}", path.display()),
+        )
+    })?;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     for line in src.lines() {
         match parse_include(line.trim()) {
@@ -248,6 +256,28 @@ mod tests {
         std::fs::write(&entry, "include \"serial\"\ninclude \"any/serial.snd\"\nfn main() -> i64 { 0 }").unwrap();
         let combined = resolve_includes(&entry).unwrap();
         assert_eq!(combined.matches("fn serial_putc").count(), 1, "included once despite two spellings");
+    }
+
+    #[test]
+    fn a_missing_nested_include_names_the_nested_file_not_the_entry() {
+        // When an include cannot be resolved on any root, the error must name the file that was
+        // not found, NOT the entry file. Before this, every read failure was blamed on the entry,
+        // so a missing `any/json.snd` read as "cannot read main.snd", which is deeply misleading.
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let k = N.fetch_add(1, Ordering::Relaxed);
+        let main = tmp(
+            &format!("sond_missinginc_{k}.snd"),
+            "include \"any/does_not_exist_xyz.snd\"\nfn main() -> i64 { 0 }",
+        );
+        let err = resolve_includes(&main).unwrap_err().to_string();
+        assert!(
+            err.contains("does_not_exist_xyz"),
+            "the error names the missing include, got: {err}"
+        );
+        assert!(
+            !err.contains("sond_missinginc"),
+            "the error does not blame the entry file, got: {err}"
+        );
     }
 
     #[test]

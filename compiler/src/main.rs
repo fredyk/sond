@@ -65,7 +65,9 @@ fn main() -> ExitCode {
     {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("sondc: cannot read {input}: {e}");
+            // `e` already names the file that failed (the entry, or the nested include that could
+            // not be resolved), so it is not re-blamed on `input` here.
+            eprintln!("sondc: {e}");
             return ExitCode::FAILURE;
         }
     };
