@@ -28,3 +28,44 @@ test "growing past the initial capacity preserves elements" {
     assert_eq(vec_get(v, 7), 49)
     assert_eq(vec_get(v, 49), 2401)
 }
+test "pop returns and removes the last element" {
+    let v = vec_new()
+    vec_push(v, 10)
+    vec_push(v, 20)
+    vec_push(v, 30)
+    assert_eq(vec_pop(v), 30)
+    assert_eq(vec_len(v), 2)
+    assert_eq(vec_pop(v), 20)
+    assert_eq(vec_len(v), 1)
+    assert_eq(vec_get(v, 0), 10)
+}
+test "remove deletes an element and shifts the rest left, preserving order" {
+    let v = vec_new()
+    vec_push(v, 10)
+    vec_push(v, 20)
+    vec_push(v, 30)
+    vec_push(v, 40)
+    vec_remove(v, 1)
+    assert_eq(vec_len(v), 3)
+    assert_eq(vec_get(v, 0), 10)
+    assert_eq(vec_get(v, 1), 30)
+    assert_eq(vec_get(v, 2), 40)
+}
+test "remove the first element" {
+    let v = vec_new()
+    vec_push(v, 1)
+    vec_push(v, 2)
+    vec_push(v, 3)
+    vec_remove(v, 0)
+    assert_eq(vec_len(v), 2)
+    assert_eq(vec_get(v, 0), 2)
+    assert_eq(vec_get(v, 1), 3)
+}
+test "remove the last element" {
+    let v = vec_new()
+    vec_push(v, 1)
+    vec_push(v, 2)
+    vec_remove(v, 1)
+    assert_eq(vec_len(v), 1)
+    assert_eq(vec_get(v, 0), 1)
+}

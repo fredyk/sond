@@ -46,3 +46,26 @@ pub fn vec_push(v: i64, x: i64) {
     poke64(peek64(v) + len * 8, x)
     poke64(v + 8, len + 1)
 }
+
+// Removes and returns the last element. The caller must ensure the vec is non-empty
+// (`vec_len(v) > 0`); popping an empty vec reads before the buffer.
+pub fn vec_pop(v: i64) -> i64 {
+    let len = peek64(v + 8)
+    let last = peek64(peek64(v) + (len - 1) * 8)
+    poke64(v + 8, len - 1)
+    last
+}
+
+// Removes the element at index `i`, shifting every later element one slot to the left, so the
+// order of the remaining elements is preserved (unlike a tombstone/swap-remove). `i` must be a
+// valid index (`0 <= i < vec_len(v)`).
+pub fn vec_remove(v: i64, i: i64) {
+    let len = peek64(v + 8)
+    let data = peek64(v)
+    let mut j = i
+    for j < len - 1 {
+        poke64(data + j * 8, peek64(data + (j + 1) * 8))
+        j = j + 1
+    }
+    poke64(v + 8, len - 1)
+}
