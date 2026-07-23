@@ -259,6 +259,7 @@ pub fn emit_program_coverage_g(
 pub fn emit_shared_g(globals: &[Global], structs: &[StructDef], funcs: &[Function]) -> String {
     let mut cg = Codegen {
         check_contracts: true,
+        shared_arena_boundary: true,
         ..Default::default()
     };
     cg.set_globals(globals);
@@ -429,6 +430,19 @@ fn collect_locals(block: &Block, out: &mut Vec<String>) {
                 }
                 out.push(name.clone());
             }
+            Stmt::GraphLet {
+                name,
+                nodes,
+                yield_expr,
+                ..
+            } => {
+                for (nn, ne) in nodes {
+                    collect_locals_in_expr(ne, out);
+                    out.push(nn.clone());
+                }
+                collect_locals_in_expr(yield_expr, out);
+                out.push(name.clone());
+            }
             Stmt::Return(Some(e)) => collect_locals_in_expr(e, out),
             Stmt::Return(None) => {}
             Stmt::For { cond, body, .. } => {
@@ -483,6 +497,14 @@ fn collect_arrays(block: &Block, out: &mut Vec<(String, i64)>) {
                     collect_arrays_in_expr(p, out);
                 }
             }
+            Stmt::GraphLet {
+                nodes, yield_expr, ..
+            } => {
+                for (_, ne) in nodes {
+                    collect_arrays_in_expr(ne, out);
+                }
+                collect_arrays_in_expr(yield_expr, out);
+            }
             Stmt::Return(Some(e)) => collect_arrays_in_expr(e, out),
             Stmt::Return(None) => {}
             Stmt::For { cond, body, .. } => {
@@ -532,6 +554,127 @@ fn collect_arrays_in_expr(expr: &Expr, out: &mut Vec<(String, i64)>) {
         Expr::List(items) => items.iter().for_each(|it| collect_arrays_in_expr(it, out)),
         _ => {}
     }
+}
+
+/// Collects, into `out`, the indices of the graph nodes that `expr` references (a data-dependency
+/// edge). Exhaustive over `Expr` so no reference is missed, which would let a node be scheduled
+/// before a node it depends on.
+fn collect_node_refs(expr: &Expr, node_idx: &HashMap<&str, usize>, out: &mut HashSet<usize>) {
+    match expr {
+        Expr::Var(name) => {
+            if let Some(&i) = node_idx.get(name.as_str()) {
+                out.insert(i);
+            }
+        }
+        Expr::Int(_) | Expr::Decimal(_) | Expr::Str(_) | Expr::Bool(_) => {}
+        Expr::Field(b, _) | Expr::Unary(_, b) | Expr::Cast(b, _) => {
+            collect_node_refs(b, node_idx, out)
+        }
+        Expr::Call(callee, args) => {
+            collect_node_refs(callee, node_idx, out);
+            for a in args {
+                collect_node_refs(&a.value, node_idx, out);
+            }
+        }
+        Expr::List(items) => {
+            for it in items {
+                collect_node_refs(it, node_idx, out);
+            }
+        }
+        Expr::Index(b, i) => {
+            collect_node_refs(b, node_idx, out);
+            collect_node_refs(i, node_idx, out);
+        }
+        Expr::SliceRange(b, lo, hi) => {
+            collect_node_refs(b, node_idx, out);
+            if let Some(l) = lo {
+                collect_node_refs(l, node_idx, out);
+            }
+            if let Some(h) = hi {
+                collect_node_refs(h, node_idx, out);
+            }
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields {
+                collect_node_refs(v, node_idx, out);
+            }
+        }
+        Expr::Binary(_, l, r) => {
+            collect_node_refs(l, node_idx, out);
+            collect_node_refs(r, node_idx, out);
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_node_refs(cond, node_idx, out);
+            if let Some(t) = &then_branch.tail {
+                collect_node_refs(t, node_idx, out);
+            }
+            if let Some(eb) = else_branch
+                && let Some(t) = &eb.tail
+            {
+                collect_node_refs(t, node_idx, out);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            collect_node_refs(scrutinee, node_idx, out);
+            for arm in arms {
+                if let Some(t) = &arm.body.tail {
+                    collect_node_refs(t, node_idx, out);
+                }
+            }
+        }
+    }
+}
+
+/// A topological order of graph nodes: each node comes after every node it references. A DFS
+/// post-order gives it; a cycle (already rejected by `check_graph_acyclic`) would be broken by the
+/// visited-marks, so this never loops.
+fn topological_order(nodes: &[(String, Expr)]) -> Vec<usize> {
+    let node_idx: HashMap<&str, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, (n, _))| (n.as_str(), i))
+        .collect();
+    let deps: Vec<Vec<usize>> = nodes
+        .iter()
+        .map(|(_, e)| {
+            let mut refs = HashSet::new();
+            collect_node_refs(e, &node_idx, &mut refs);
+            refs.into_iter().collect()
+        })
+        .collect();
+    let mut order = Vec::new();
+    let mut done = vec![false; nodes.len()];
+    // Explicit stack DFS (avoids recursion depth limits on a huge graph): push a node, then its
+    // unvisited deps; a node is emitted once all its deps are done.
+    for start in 0..nodes.len() {
+        if done[start] {
+            continue;
+        }
+        let mut stack = vec![(start, false)];
+        while let Some((n, expanded)) = stack.pop() {
+            if expanded {
+                if !done[n] {
+                    done[n] = true;
+                    order.push(n);
+                }
+                continue;
+            }
+            if done[n] {
+                continue;
+            }
+            stack.push((n, true));
+            for &d in &deps[n] {
+                if !done[d] {
+                    stack.push((d, false));
+                }
+            }
+        }
+    }
+    order
 }
 
 fn collect_locals_in_expr(expr: &Expr, out: &mut Vec<String>) {
@@ -662,6 +805,11 @@ struct Codegen {
     all_result_cells: Vec<String>,
     /// Set once any `spawn` is emitted, so the thread stack size constant is emitted.
     uses_spawn: bool,
+    /// `--shared` (`.so`) build: each exported (`pub`) function is a C-ABI boundary, entered from a
+    /// FOREIGN host (Go/cgo, C). It must save the host's `%r15` (callee-saved in System V) and seed
+    /// `%r15` with the arena TCB, or an allocation inside would fault on the host's `%r15`. Set in
+    /// `emit_shared_g`; unset elsewhere (a hosted program seeds `%r15` once at its own entry).
+    shared_arena_boundary: bool,
 }
 
 /// Functions excluded from coverage instrumentation: the synthesized `sond test` harness
@@ -743,6 +891,17 @@ impl Codegen {
             for r in ISR_SAVED_REGS {
                 self.line(&format!("    pushq {r}"));
             }
+        }
+        // C-ABI boundary of a `.so` (`--shared`): save the host's `%r15` and seed ours to the arena
+        // TCB. Two 8-byte pushes (the save + a padding slot) keep the 16-byte stack alignment the
+        // body's `call`s need. Done before the frame, so rbp-relative locals are unaffected. Only
+        // `pub` functions are entered from the host; a hidden callee inherits `%r15` (it is
+        // invariant within a call, pointing at the same TCB), so it needs nothing.
+        let shared_boundary = self.shared_arena_boundary && func.vis == Visibility::Pub;
+        if shared_boundary {
+            self.line("    pushq %r15"); // save the host's callee-saved %r15
+            self.line("    subq $8, %rsp"); // padding, keep rsp 16-aligned
+            self.line("    leaq sond_arena_tcb(%rip), %r15"); // seed the arena pointer
         }
         self.line("    pushq %rbp");
         self.line("    movq %rsp, %rbp");
@@ -836,6 +995,11 @@ impl Codegen {
         }
         self.line("    movq %rbp, %rsp");
         self.line("    popq %rbp");
+        // Restore the host's %r15 at the C-ABI boundary (mirror of the prologue save + padding).
+        if shared_boundary {
+            self.line("    addq $8, %rsp"); // drop the padding slot
+            self.line("    popq %r15"); // restore the host's callee-saved %r15
+        }
         if func.is_interrupt {
             for r in ISR_SAVED_REGS.iter().rev() {
                 self.line(&format!("    popq {r}"));
@@ -1033,6 +1197,25 @@ impl Codegen {
 
     fn emit_spawn(&mut self, call: &Expr) {
         self.emit_spawn_capturing(call, None);
+    }
+
+    /// Emits `let r = graph { node a = e1  node b = e2  yield e3 }` (RFC-0008 §5.1). The nodes are
+    /// evaluated in a TOPOLOGICAL order of their data dependencies (each node's expression may
+    /// reference earlier nodes; the only ordering constraint is that a node's dependencies run
+    /// first), then the `yield` expression is evaluated and bound to `name`. A single sequential
+    /// worker over the DAG is a valid schedule (RFC-0008 §5.5); running independent nodes
+    /// concurrently is a later refinement. `check_graph_acyclic` has already rejected any cycle.
+    fn emit_graph_let(&mut self, name: &str, nodes: &[(String, Expr)], yield_expr: &Expr) {
+        for idx in topological_order(nodes) {
+            let (node_name, value) = &nodes[idx];
+            self.expr(value); // -> %rax
+            let off = self.slot(node_name);
+            self.line(&format!("    movq %rax, {off}(%rbp)"));
+            self.var_types.insert(node_name.clone(), self.ty_of(value));
+        }
+        self.expr(yield_expr);
+        let off = self.slot(name);
+        self.line(&format!("    movq %rax, {off}(%rbp)"));
     }
 
     /// Emits `let a ~~ b ~~ c = par f() ~~ g() ~~ h()` (RFC-0008 §5.1a, positional result
@@ -1358,6 +1541,12 @@ impl Codegen {
                 Stmt::ParReduce {
                     name, op, peers, ..
                 } => self.emit_par_reduce(name, op, peers),
+                Stmt::GraphLet {
+                    name,
+                    nodes,
+                    yield_expr,
+                    ..
+                } => self.emit_graph_let(name, nodes, yield_expr),
                 Stmt::Return(e) => {
                     match e {
                         Some(e) => self.expr(e),

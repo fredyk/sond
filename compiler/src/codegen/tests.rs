@@ -115,6 +115,29 @@ fn compiles_and_runs_local_variables_on_real_x64() {
 }
 
 #[test]
+fn a_shared_pub_function_seeds_the_arena_at_the_c_abi_boundary() {
+    // A `.so` (`--shared`) is called from a foreign host (Go/cgo, C) whose `%r15` is not Sond's
+    // arena pointer. Each EXPORTED (`pub`) function must save the host's `%r15` (callee-saved) and
+    // seed the arena TCB, or an allocation inside faults. A hidden (`priv`) function is internal
+    // only and inherits `%r15`, so it must NOT re-seed.
+    let mut p = Parser::new(tokenize(
+        "pub fn ex() -> i64 { 1 }\npriv fn hidden() -> i64 { 2 }",
+    ));
+    let funcs = p.parse_program();
+    let globals = p.take_globals();
+    let structs = p.take_structs();
+    let asm = emit_shared_g(&globals, &structs, &funcs);
+    assert!(asm.contains("pushq %r15"), "the pub boundary saves the host's %r15");
+    assert!(asm.contains("popq %r15"), "and restores it before returning");
+    // The seed appears exactly once: for the single `pub` function, not the hidden one.
+    assert_eq!(
+        asm.matches("leaq sond_arena_tcb(%rip), %r15").count(),
+        1,
+        "only the exported function seeds the arena, not the hidden one"
+    );
+}
+
+#[test]
 fn par_runs_every_peer_on_a_thread_and_joins_before_continuing() {
     // `par w(a,0) ~~ w(a,1) ~~ w(a,2)` spawns each peer on its own OS thread and joins ALL
     // of them before the next statement. Each peer writes 1 into a distinct slot of a shared
