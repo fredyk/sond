@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/json.snd
+
+include "any/json.snd"
+include "x86_64/linux/testing.snd"
+
+fn parse(s: i64) -> i64 { json_parse(s, strlen(s)) }
+
+test "parses a flat object and reads scalar fields" {
+    let o = parse("{\"port\": 5432, \"name\": \"pgv\", \"ok\": true, \"off\": false, \"z\": null}")
+    assert_eq(json_type(o), JSON_OBJ)
+    assert_eq(json_type(json_get(o, "port")), JSON_INT)
+    assert_eq(json_int(json_get(o, "port")), 5432)
+    assert_eq(json_type(json_get(o, "name")), JSON_STR)
+    assert_eq(streq(json_str(json_get(o, "name")), "pgv"), 1)
+    assert_eq(json_bool(json_get(o, "ok")), 1)
+    assert_eq(json_bool(json_get(o, "off")), 0)
+    assert_eq(json_type(json_get(o, "z")), JSON_NULL)
+}
+
+test "a missing key returns -1" {
+    let o = parse("{\"a\": 1}")
+    assert_eq(json_get(o, "b"), 0 - 1)
+}
+
+test "parses an array of integers" {
+    let a = parse("[10, 20, 30]")
+    assert_eq(json_type(a), JSON_ARR)
+    assert_eq(json_arr_len(a), 3)
+    assert_eq(json_int(json_arr_get(a, 1)), 20)
+}
+
+test "a negative integer" {
+    let o = parse("{\"n\": -7}")
+    assert_eq(json_int(json_get(o, "n")), 0 - 7)
+}
+
+test "decodes a backslash-n escape in a string" {
+    let o = parse("{\"s\": \"a\\nb\"}")
+    let s = json_str(json_get(o, "s"))
+    assert_eq(json_str_len(json_get(o, "s")), 3)
+    assert_eq(peek8(s + 1), 10)
+}
+
+test "nested object and array" {
+    let o = parse("{\"cfg\": {\"dim\": 384}, \"tags\": [\"a\", \"b\"]}")
+    let cfg = json_get(o, "cfg")
+    assert_eq(json_int(json_get(cfg, "dim")), 384)
+    let tags = json_get(o, "tags")
+    assert_eq(json_arr_len(tags), 2)
+    assert_eq(streq(json_str(json_arr_get(tags, 1)), "b"), 1)
+}
+
+test "malformed input returns -1" {
+    assert_eq(parse("{\"a\": }"), 0 - 1)
+}
+
+test "empty object and empty array" {
+    assert_eq(json_type(parse("{}")), JSON_OBJ)
+    assert_eq(json_arr_len(parse("[]")), 0)
+}
+
+test "a float keeps its integer part" {
+    let o = parse("{\"x\": 3.14, \"e\": 2e3}")
+    assert_eq(json_int(json_get(o, "x")), 3)
+}
+
+test "decodes all simple escapes" {
+    // "\t\r\\\"/\b\f" -> tab cr backslash quote slash backspace formfeed
+    let o = parse("{\"s\": \"\\t\\r\\\\\\\"\\/\\b\\f\"}")
+    let s = json_str(json_get(o, "s"))
+    assert_eq(peek8(s + 0), 9)     // \t
+    assert_eq(peek8(s + 1), 13)    // \r
+    assert_eq(peek8(s + 2), 92)    // backslash
+    assert_eq(peek8(s + 3), 34)    // quote
+    assert_eq(peek8(s + 4), 47)    // slash (unknown escape -> the char itself)
+    assert_eq(peek8(s + 5), 8)     // \b
+    assert_eq(peek8(s + 6), 12)    // \f
+}
+
+test "a truncated literal is an error" {
+    assert_eq(parse("tru"), 0 - 1)
+    assert_eq(parse("nul"), 0 - 1)
+    assert_eq(parse("fals"), 0 - 1)
+}
+
+test "empty input is an error" {
+    assert_eq(parse(""), 0 - 1)
+}
+
+test "an unterminated string is an error" {
+    assert_eq(parse("{\"a\": \"xyz"), 0 - 1)
+}
+
+test "an unterminated array is an error" {
+    assert_eq(parse("[1, 2"), 0 - 1)
+}
+
+test "top-level scalars parse" {
+    assert_eq(json_int(parse("42")), 42)
+    assert_eq(json_bool(parse("true")), 1)
+    assert_eq(json_type(parse("null")), JSON_NULL)
+    assert_eq(streq(json_str(parse("\"hi\"")), "hi"), 1)
+}

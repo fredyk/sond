@@ -1,0 +1,201 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/json.snd: a small JSON parser (RFC 8259 subset).
+//
+// Parses one JSON value into a node tree and lets a caller walk it. A node is a
+// heap-allocated record [tag, a, b]: for BOOL a is 0/1; for INT a is the value;
+// for STR a is a pointer to a NUL-terminated decoded copy and b its length; for
+// ARR a is a vec of child nodes; for OBJ a is a vec of entries, each entry a
+// record [key_ptr, key_len, value_node] (key NUL-terminated).
+//
+// Numbers are parsed as i64 (a leading fraction/exponent is not decoded yet, so a
+// float truncates; adequate for config and identifiers, extend when needed).
+// String escapes \" \\ \/ \b \f \n \r \t are decoded; \uXXXX is not yet.
+//
+// API: json_parse(data,len) -> root node, or -1 on error. json_type(node).
+// json_get(obj,key_cstr) -> value node or -1. json_int/json_bool/json_str/
+// json_str_len. json_arr_len/json_arr_get.
+
+include "any/strings.snd"
+include "x86_64/linux/heap.snd"
+include "x86_64/linux/vec.snd"
+
+let JSON_NULL = 0
+let JSON_BOOL = 1
+let JSON_INT  = 2
+let JSON_STR  = 3
+let JSON_ARR  = 4
+let JSON_OBJ  = 5
+
+let JSON_EOF = 256           // sentinel returned past the end (no real byte is 256)
+
+// Parser cursor (module-level, set per json_parse call).
+let mut __j_data = 0
+let mut __j_pos  = 0
+let mut __j_len  = 0
+let mut __j_err  = 0         // set to 1 on a parse error
+
+fn __node(tag: i64, a: i64, b: i64) -> i64 {
+    let n = heap_alloc(32)
+    n[0] = tag
+    n[1] = a
+    n[2] = b
+    n
+}
+
+fn __peek() -> i64 {
+    if __j_pos >= __j_len { JSON_EOF } else { peek8(__j_data + __j_pos) }
+}
+
+fn __ws() {
+    for {
+        let c = __peek()
+        if c == 32 || c == 9 || c == 10 || c == 13 { __j_pos = __j_pos + 1 } else { break }
+    }
+}
+
+// Reads a JSON string (cursor on the opening quote), returns a NUL-terminated
+// decoded copy in the heap. On the way it decodes the simple backslash escapes.
+fn __string() -> i64 {
+    __j_pos = __j_pos + 1                 // skip opening quote
+    let out = heap_alloc(__j_len - __j_pos + 2)   // upper bound: no escape grows the string
+    let mut w = 0
+    for {
+        let c = __peek()
+        if c == JSON_EOF { __j_err = 1; break }
+        if c == 34 { __j_pos = __j_pos + 1; break }     // closing quote
+        if c == 92 {                                    // backslash
+            __j_pos = __j_pos + 1
+            let e = __peek()
+            let d = if e == 110 { 10 } else { if e == 116 { 9 } else { if e == 114 { 13 } else { if e == 98 { 8 } else { if e == 102 { 12 } else { e } } } } }
+            poke8(out + w, d)
+            w = w + 1
+            __j_pos = __j_pos + 1
+        } else {
+            poke8(out + w, c)
+            w = w + 1
+            __j_pos = __j_pos + 1
+        }
+    }
+    poke8(out + w, 0)                     // NUL-terminate
+    __node(JSON_STR, out, w)
+}
+
+// Reads a JSON number as an integer (optional leading minus). A fraction or
+// exponent is consumed but not decoded (the integer part is kept).
+fn __number() -> i64 {
+    let mut neg = 0
+    if __peek() == 45 { neg = 1; __j_pos = __j_pos + 1 }   // '-'
+    let mut v = 0
+    for {
+        let c = __peek()
+        if c >= 48 && c <= 57 { v = v * 10 + (c - 48); __j_pos = __j_pos + 1 } else { break }
+    }
+    // consume a fractional/exponent tail without decoding it
+    for {
+        let c = __peek()
+        if c == 46 || c == 101 || c == 69 || c == 43 || c == 45 || (c >= 48 && c <= 57) { __j_pos = __j_pos + 1 } else { break }
+    }
+    if neg == 1 { v = 0 - v }
+    __node(JSON_INT, v, 0)
+}
+
+// Consumes `word` (a cstr like "true") at the cursor; returns 1 if it matched.
+fn __lit(word: i64) -> i64 {
+    let n = strlen(word)
+    let mut i = 0
+    for i < n {
+        if __peek() != peek8(word + i) { return 0 }
+        __j_pos = __j_pos + 1
+        i = i + 1
+    }
+    1
+}
+
+fn __value() -> i64 {
+    __ws()
+    let c = __peek()
+    if c == 123 { return __object() }     // {
+    if c == 91 { return __array() }       // [
+    if c == 34 { return __string() }      // "
+    if c == 116 { if __lit("true") == 1 { return __node(JSON_BOOL, 1, 0) } __j_err = 1; return __node(JSON_NULL, 0, 0) }
+    if c == 102 { if __lit("false") == 1 { return __node(JSON_BOOL, 0, 0) } __j_err = 1; return __node(JSON_NULL, 0, 0) }
+    if c == 110 { if __lit("null") == 1 { return __node(JSON_NULL, 0, 0) } __j_err = 1; return __node(JSON_NULL, 0, 0) }
+    if c == 45 || (c >= 48 && c <= 57) { return __number() }
+    __j_err = 1
+    __node(JSON_NULL, 0, 0)
+}
+
+fn __array() -> i64 {
+    __j_pos = __j_pos + 1                 // skip [
+    let items = vec_new()
+    __ws()
+    if __peek() == 93 { __j_pos = __j_pos + 1; return __node(JSON_ARR, items, 0) }  // empty ]
+    for {
+        vec_push(items, __value())
+        __ws()
+        let c = __peek()
+        if c == 44 { __j_pos = __j_pos + 1 }              // comma -> another item
+        else { if c == 93 { __j_pos = __j_pos + 1; break } else { __j_err = 1; break } }
+    }
+    __node(JSON_ARR, items, 0)
+}
+
+fn __object() -> i64 {
+    __j_pos = __j_pos + 1                 // skip {
+    let entries = vec_new()
+    __ws()
+    if __peek() == 125 { __j_pos = __j_pos + 1; return __node(JSON_OBJ, entries, 0) }  // empty }
+    for {
+        __ws()
+        if __peek() != 34 { __j_err = 1; break }
+        let key = __string()              // STR node
+        __ws()
+        if __peek() != 58 { __j_err = 1; break }          // ':'
+        __j_pos = __j_pos + 1
+        let val = __value()
+        let entry = heap_alloc(24)
+        entry[0] = key[1]                 // key_ptr (the decoded cstr)
+        entry[1] = key[2]                 // key_len
+        entry[2] = val                    // value node
+        vec_push(entries, entry)
+        __ws()
+        let c = __peek()
+        if c == 44 { __j_pos = __j_pos + 1 }
+        else { if c == 125 { __j_pos = __j_pos + 1; break } else { __j_err = 1; break } }
+    }
+    __node(JSON_OBJ, entries, 0)
+}
+
+// Parses one JSON value from `data`/`len`. Returns the root node, or -1 on error.
+pub fn json_parse(data: i64, len: i64) -> i64 {
+    __j_data = data
+    __j_pos = 0
+    __j_len = len
+    __j_err = 0
+    let root = __value()
+    if __j_err == 1 { 0 - 1 } else { root }
+}
+
+pub fn json_type(node: i64) -> i64 { node[0] }
+pub fn json_int(node: i64) -> i64 { node[1] }
+pub fn json_bool(node: i64) -> i64 { node[1] }
+pub fn json_str(node: i64) -> i64 { node[1] }        // NUL-terminated cstr
+pub fn json_str_len(node: i64) -> i64 { node[2] }
+
+pub fn json_arr_len(node: i64) -> i64 { vec_len(node[1]) }
+pub fn json_arr_get(node: i64, i: i64) -> i64 { vec_get(node[1], i) }
+
+// Looks up `key` (a cstr) in an OBJ node; returns the value node, or -1.
+pub fn json_get(obj: i64, key: i64) -> i64 {
+    let entries = obj[1]
+    let n = vec_len(entries)
+    let mut i = 0
+    for i < n {
+        let entry = vec_get(entries, i)
+        if streq(entry[0], key) == 1 { return entry[2] }
+        i = i + 1
+    }
+    0 - 1
+}
