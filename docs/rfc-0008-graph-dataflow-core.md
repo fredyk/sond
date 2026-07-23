@@ -248,8 +248,12 @@ The `graph { node .. yield e }` block (§5.1) is IMPLEMENTED, including its para
 grouped into topological levels, and a level's independent CALL nodes run concurrently on the Layer
 B thread substrate, joined before the next level (verified at ~290% CPU on a level of three
 independent nodes). The author writes only the data dependencies; the compiler extracts the
-concurrency. A dependency cycle is a compile error. Still ahead for the graph: effect edges between
-nodes (§5.2), the confluence proof extended to nodes (as below for `par`), and `effects` clauses.
+concurrency. A dependency cycle is a compile error. EFFECT EDGES (§5.2) are implemented: two same-level nodes
+whose footprints conflict on a mutable global get a serializing edge, so they run in sequence
+instead of racing, while independent nodes stay parallel (verified: conflicting nodes serialize
+deterministically with no thread spawned; disjoint nodes still spawn). Still ahead for the graph:
+effect edges through pointer/heap aliasing (needs RFC-0011 capabilities, as for `par`), and explicit
+`effects` clauses on nodes.
 
 The independence/confluence PROOF (§5.3) has begun: `par` peers are verified confluent over the
 module's MUTABLE GLOBALS. A per-function read/write footprint over the mutable globals is computed
