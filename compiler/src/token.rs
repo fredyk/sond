@@ -41,6 +41,11 @@ pub enum Token {
     /// `par`: the inline concurrent-peers form, `par a() ~~ b() ~~ c()` (RFC-0008 §5.1a).
     /// Runs the peers in parallel over Layer B threads and joins them before the next statement.
     Par,
+    /// `graph`: opens the dependency-graph block (RFC-0008 §5.1). `graph { node a = .. node b = ..
+    /// yield e }` binds nodes whose only order is their data dependency; the block evaluates to the
+    /// `yield` expression. `node` and `yield` are CONTEXTUAL keywords, recognized only inside the
+    /// block, so `node` stays a free identifier everywhere else (a common variable name).
+    Graph,
     /// `enum`: a sum type (closed set of variants).
     Enum,
     /// `iface`: a named interface, a set of signatures implemented per target (RFC-0014). The

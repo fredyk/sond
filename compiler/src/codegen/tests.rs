@@ -191,6 +191,27 @@ fn par_reduce_folds_peer_results_with_a_commutative_op() {
 }
 
 #[test]
+fn graph_evaluates_nodes_in_dependency_order_not_source_order() {
+    // The `graph` nodes are written in a NON-topological source order (`z` before its inputs), yet
+    // the block evaluates them in dependency order: `fx = 20`, `fy = 21`, then `z = fx + fy = 41`.
+    // Reordering the `node` lines changes nothing (RFC-0008 §5.1), which the topological schedule is.
+    let src = "\
+        fn dbl(x: i64) -> i64 { x + x }\n\
+        fn inc(x: i64) -> i64 { x + 1 }\n\
+        fn add(a: i64, b: i64) -> i64 { a + b }\n\
+        fn main() -> i64 {\n\
+            let r = graph {\n\
+                node z = add(fx, fy)\n\
+                node fx = dbl(10)\n\
+                node fy = inc(20)\n\
+                yield z\n\
+            }\n\
+            r\n\
+        }";
+    assert_eq!(compile_and_run(src), 41, "nodes evaluate in dependency order regardless of source order");
+}
+
+#[test]
 fn compiles_and_runs_early_return_on_real_x64() {
     assert_eq!(
         compile_and_run("fn f() -> i64 { let x = 5\nreturn x + x\n }"),

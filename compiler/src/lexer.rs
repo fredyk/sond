@@ -404,6 +404,7 @@ fn keyword_or_ident(word: String) -> Token {
         "continue" => Token::Continue,
         "spawn" => Token::Spawn,
         "par" => Token::Par,
+        "graph" => Token::Graph,
         "and" => Token::And,
         "or" => Token::Or,
         "not" => Token::Not,

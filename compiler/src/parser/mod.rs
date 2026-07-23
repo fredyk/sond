@@ -702,6 +702,42 @@ impl Parser {
                 peers,
             };
         }
+        // `let r = graph { node a = e1  node b = e2  yield e3 }`: the dependency-graph block. Only
+        // valid as a `let` initializer for now. `node` and `yield` are CONTEXTUAL keywords (plain
+        // identifiers, recognized only here), so `node` stays a free identifier elsewhere.
+        if self.peek() == Some(&Token::Eq) && self.tokens.get(self.pos + 1) == Some(&Token::Graph) {
+            self.expect(Token::Eq);
+            self.expect(Token::Graph);
+            self.expect(Token::LBrace);
+            let is_kw = |t: Option<&Token>, kw: &str| matches!(t, Some(Token::Ident(s)) if s == kw);
+            let mut nodes = Vec::new();
+            loop {
+                self.skip_semicolons();
+                if is_kw(self.peek(), "node") {
+                    self.advance();
+                    let nn = self.expect_ident();
+                    self.expect(Token::Eq);
+                    let e = self.parse_expr();
+                    nodes.push((nn, e));
+                } else if is_kw(self.peek(), "yield") {
+                    self.advance();
+                    let y = self.parse_expr();
+                    self.skip_semicolons();
+                    self.expect(Token::RBrace);
+                    return Stmt::GraphLet {
+                        mutable,
+                        name,
+                        nodes,
+                        yield_expr: y,
+                    };
+                } else {
+                    panic!(
+                        "graph block: expected `node NAME = ..` or `yield ..`, got {:?}",
+                        self.peek()
+                    );
+                }
+            }
+        }
         // `let x = value`, or `let mut x` / `let a[N]` with no initializer (0),
         // the C-style "declare now, assign later" that AI writers reach for.
         let value = if self.eat(Token::Eq) {

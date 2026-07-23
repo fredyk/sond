@@ -189,6 +189,10 @@ fn main() -> ExitCode {
         eprintln!("sondc: {msg}");
         std::process::exit(1);
     }
+    if let Err(msg) = sondc::check::check_graph_acyclic(&funcs) {
+        eprintln!("sondc: {msg}");
+        std::process::exit(1);
+    }
     if let Err(msg) = sondc::check::check_no_process_exit_in_spawn(&funcs) {
         eprintln!("sondc: {msg}");
         std::process::exit(1);

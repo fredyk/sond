@@ -559,7 +559,7 @@ fn collect_arrays_in_expr(expr: &Expr, out: &mut Vec<(String, i64)>) {
 /// Collects, into `out`, the indices of the graph nodes that `expr` references (a data-dependency
 /// edge). Exhaustive over `Expr` so no reference is missed, which would let a node be scheduled
 /// before a node it depends on.
-fn collect_node_refs(expr: &Expr, node_idx: &HashMap<&str, usize>, out: &mut HashSet<usize>) {
+pub(crate) fn collect_node_refs(expr: &Expr, node_idx: &HashMap<&str, usize>, out: &mut HashSet<usize>) {
     match expr {
         Expr::Var(name) => {
             if let Some(&i) = node_idx.get(name.as_str()) {

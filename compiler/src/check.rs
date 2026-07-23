@@ -378,6 +378,14 @@ fn stmts_effects(
                     expr_effects(p, mut_globals, reads, writes, callees);
                 }
             }
+            Stmt::GraphLet {
+                nodes, yield_expr, ..
+            } => {
+                for (_, e) in nodes {
+                    expr_effects(e, mut_globals, reads, writes, callees);
+                }
+                expr_effects(yield_expr, mut_globals, reads, writes, callees);
+            }
             Stmt::For { cond, body, .. } => {
                 if let Some(c) = cond {
                     expr_effects(c, mut_globals, reads, writes, callees);
@@ -562,6 +570,14 @@ pub fn check_par_confluence(funcs: &[Function], globals: &[Global]) -> Result<()
                         walk_expr(p, fname, eff)?;
                     }
                 }
+                Stmt::GraphLet {
+                    nodes, yield_expr, ..
+                } => {
+                    for (_, e) in nodes {
+                        walk_expr(e, fname, eff)?;
+                    }
+                    walk_expr(yield_expr, fname, eff)?;
+                }
                 Stmt::Let { value, .. } => walk_expr(value, fname, eff)?,
                 Stmt::Assign { target, value } => {
                     walk_expr(target, fname, eff)?;
@@ -586,6 +602,76 @@ pub fn check_par_confluence(funcs: &[Function], globals: &[Global]) -> Result<()
     }
     for f in funcs {
         walk_block(&f.body, &f.name, &eff)?;
+    }
+    Ok(())
+}
+
+/// Rejects a `graph { .. }` block whose nodes form a dependency CYCLE (`node a = b  node b = a`):
+/// there is no order in which to evaluate them, so it cannot be scheduled (RFC-0008 §10 forbids
+/// pure data cycles in v1). A DFS with an in-progress mark finds a back edge.
+pub fn check_graph_acyclic(funcs: &[Function]) -> Result<(), String> {
+    fn check_nodes(nodes: &[(String, Expr)], fname: &str) -> Result<(), String> {
+        let idx: HashMap<&str, usize> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, (n, _))| (n.as_str(), i))
+            .collect();
+        let deps: Vec<Vec<usize>> = nodes
+            .iter()
+            .map(|(_, e)| {
+                let mut r = HashSet::new();
+                crate::codegen::collect_node_refs(e, &idx, &mut r);
+                r.into_iter().collect()
+            })
+            .collect();
+        // 0 = unvisited, 1 = on the current DFS path, 2 = fully explored.
+        let mut state = vec![0u8; nodes.len()];
+        // Explicit stack DFS carrying whether we are entering (false) or leaving (true) a node.
+        for root in 0..nodes.len() {
+            if state[root] != 0 {
+                continue;
+            }
+            let mut stack = vec![(root, false)];
+            while let Some((n, leaving)) = stack.pop() {
+                if leaving {
+                    state[n] = 2;
+                    continue;
+                }
+                if state[n] == 2 {
+                    continue;
+                }
+                state[n] = 1;
+                stack.push((n, true));
+                for &d in &deps[n] {
+                    match state[d] {
+                        1 => {
+                            return Err(format!(
+                                "function `{fname}`: the `graph` nodes `{}` and `{}` depend on each \
+                                 other (a cycle), so there is no order to evaluate them in. Break \
+                                 the cycle; a `graph` is a DAG.",
+                                nodes[n].0, nodes[d].0
+                            ));
+                        }
+                        0 => stack.push((d, false)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    fn walk(stmts: &[Stmt], fname: &str) -> Result<(), String> {
+        for s in stmts {
+            match s {
+                Stmt::GraphLet { nodes, .. } => check_nodes(nodes, fname)?,
+                Stmt::For { body, .. } => walk(&body.stmts, fname)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    for f in funcs {
+        walk(&f.body.stmts, &f.name)?;
     }
     Ok(())
 }
@@ -615,6 +701,14 @@ pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> 
                     for p in peers {
                         collect_calls_expr(p, out);
                     }
+                }
+                Stmt::GraphLet {
+                    nodes, yield_expr, ..
+                } => {
+                    for (_, e) in nodes {
+                        collect_calls_expr(e, out);
+                    }
+                    collect_calls_expr(yield_expr, out);
                 }
                 Stmt::Assign { target, value } => {
                     collect_calls_expr(target, out);
@@ -1016,6 +1110,14 @@ fn check_stmt(s: &Stmt, immutable: &HashMap<&str, &str>, fname: &str) -> Result<
                 check_expr(p, immutable, fname)?;
             }
             Ok(())
+        }
+        Stmt::GraphLet {
+            nodes, yield_expr, ..
+        } => {
+            for (_, e) in nodes {
+                check_expr(e, immutable, fname)?;
+            }
+            check_expr(yield_expr, immutable, fname)
         }
         Stmt::For { body, cond, .. } => {
             if let Some(c) = cond {
@@ -3243,6 +3345,30 @@ mod par_let_tests {
              fn run() { par a() ~~ b() }",
         );
         assert!(ok.is_ok(), "peers that touch no global are confluent, got {ok:?}");
+    }
+
+    fn acyclic(src: &str) -> Result<(), String> {
+        let funcs = Parser::new(tokenize(src)).parse_program();
+        check_graph_acyclic(&funcs)
+    }
+
+    #[test]
+    fn rejects_a_cyclic_graph() {
+        let e = acyclic(
+            "fn id(x: i64) -> i64 { x }\n\
+             fn run() -> i64 { let r = graph { node a = id(b)\n node b = id(a)\n yield a }\n r }",
+        );
+        assert!(e.is_err(), "a dependency cycle in a graph must be rejected");
+        assert!(e.unwrap_err().contains("cycle"), "the error explains the cycle");
+    }
+
+    #[test]
+    fn accepts_an_acyclic_graph() {
+        let ok = acyclic(
+            "fn id(x: i64) -> i64 { x }\nfn add(a: i64, b: i64) -> i64 { a + b }\n\
+             fn run() -> i64 { let r = graph { node c = add(a, b)\n node a = id(1)\n node b = id(2)\n yield c }\n r }",
+        );
+        assert!(ok.is_ok(), "a DAG is fine even out of source order, got {ok:?}");
     }
 
     #[test]

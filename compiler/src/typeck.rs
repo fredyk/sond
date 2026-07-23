@@ -97,6 +97,14 @@ fn check_block(block: &Block, env: &mut Env) -> Result<Ty, TypeError> {
                     infer(p, env)?;
                 }
             }
+            Stmt::GraphLet {
+                nodes, yield_expr, ..
+            } => {
+                for (_, e) in nodes {
+                    infer(e, env)?;
+                }
+                infer(yield_expr, env)?;
+            }
             Stmt::Return(Some(e)) => {
                 infer(e, env)?;
             }

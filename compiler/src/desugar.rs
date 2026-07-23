@@ -639,6 +639,14 @@ fn desugar_stmt(
                 desugar_expr(p, fields, sizes, locals, methods);
             }
         }
+        Stmt::GraphLet {
+            nodes, yield_expr, ..
+        } => {
+            for (_, e) in nodes {
+                desugar_expr(e, fields, sizes, locals, methods);
+            }
+            desugar_expr(yield_expr, fields, sizes, locals, methods);
+        }
         Stmt::For { cond, body, .. } => {
             if let Some(c) = cond {
                 desugar_expr(c, fields, sizes, locals, methods);

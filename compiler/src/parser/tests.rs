@@ -549,6 +549,35 @@ fn parses_a_par_reduce() {
     assert_eq!(peers.len(), 3, "three peers folded into one value");
 }
 
+#[test]
+fn parses_a_graph_block() {
+    // `let r = graph { node a = e  node b = e  yield e }`: `node`/`yield` are contextual keywords.
+    let f = parse_fn(
+        "fn run() -> i64 { let r = graph { node a = f(1)\n node b = g(a)\n yield b }\n r }",
+    );
+    let (nodes, _) = f
+        .body
+        .stmts
+        .iter()
+        .find_map(|s| match s {
+            Stmt::GraphLet {
+                nodes, yield_expr, ..
+            } => Some((nodes, yield_expr)),
+            _ => None,
+        })
+        .expect("the body should hold a GraphLet");
+    let names: Vec<&str> = nodes.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, &["a", "b"], "two nodes in source order");
+}
+
+#[test]
+fn node_is_a_free_identifier_outside_a_graph() {
+    // `node` is contextual: it must still work as an ordinary parameter/variable name (json.snd
+    // uses `fn json_type(node: i64)`), so making it a keyword only inside `graph` matters.
+    let f = parse_fn("fn json_type(node: i64) -> i64 { node }");
+    assert_eq!(f.params[0].name, "node", "`node` is a normal parameter name");
+}
+
 // --- RFC-0014: ports (interfaces implemented per target) ---
 
 #[test]

@@ -103,6 +103,14 @@ pub fn eval_block(block: &Block, env: &mut Env) -> Value {
                     eval_expr(p, env);
                 }
             }
+            Stmt::GraphLet {
+                nodes, yield_expr, ..
+            } => {
+                for (_, e) in nodes {
+                    eval_expr(e, env);
+                }
+                eval_expr(yield_expr, env);
+            }
             Stmt::Return(e) => {
                 return e.as_ref().map_or(Value::Unit, |e| eval_expr(e, env));
             }
