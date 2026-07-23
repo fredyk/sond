@@ -1,0 +1,123 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/crypto/scram/scram-flow.snd: the SCRAM-SHA-256 message flow (RFC 5802) on top of
+// the crypto core (scram-sha256.snd) and base64. It assembles the ASCII messages a client
+// exchanges: the client-first-message-bare, and the client-final-message carrying the
+// ClientProof, plus it parses the server-first-message (nonce, salt, iteration count) and
+// produces the ServerSignature the caller checks against the server-final "v=" field.
+//
+// The caller provides a random client nonce (base64/printable, no comma) and the channel
+// binding is "n,," (no binding), whose base64 is the constant "biws".
+
+include "any/crypto/scram/scram-sha256.snd"
+include "any/encoding/base64.snd"
+
+// Writes the client-first-message-bare "n=<user>,r=<nonce>" and returns its length.
+fn scram_client_first_bare(user: i64, userlen: i64, nonce: i64, noncelen: i64, out: i64) -> i64 {
+    let mut o = 0
+    poke8(out + o, 110); poke8(out + o + 1, 61); o = o + 2          // "n="
+    let mut i = 0
+    for i < userlen { poke8(out + o, peek8(user + i)); o = o + 1; i = i + 1 }
+    poke8(out + o, 44); poke8(out + o + 1, 114); poke8(out + o + 2, 61); o = o + 3   // ",r="
+    i = 0
+    for i < noncelen { poke8(out + o, peek8(nonce + i)); o = o + 1; i = i + 1 }
+    o
+}
+
+// Copies the value of the "<c>=..." attribute of a SCRAM message (comma-separated
+// attributes) into `out`, returning its length, or -1 if the attribute is absent.
+fn scram_attr(msg: i64, msglen: i64, c: i64, out: i64) -> i64 {
+    let mut i = 0
+    for i < msglen {
+        let at_start = if i == 0 { 1 } else { if peek8(msg + i - 1) == 44 { 1 } else { 0 } }
+        if at_start == 1 && peek8(msg + i) == c && peek8(msg + i + 1) == 61 {
+            let mut j = i + 2
+            let mut k = 0
+            for j < msglen {
+                if peek8(msg + j) == 44 { break }
+                poke8(out + k, peek8(msg + j))
+                k = k + 1
+                j = j + 1
+            }
+            return k
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Parses the base-10 integer at `s`/`n`.
+fn scram_atoi(s: i64, n: i64) -> i64 {
+    let mut v = 0
+    let mut i = 0
+    for i < n { v = v * 10 + (peek8(s + i) - 48); i = i + 1 }
+    v
+}
+
+// Appends `n` bytes of `src` to `dst+o`, returning the new offset.
+fn scram_app(dst: i64, o: i64, src: i64, n: i64) -> i64 {
+    let mut i = 0
+    let mut p = o
+    for i < n { poke8(dst + p, peek8(src + i)); p = p + 1; i = i + 1 }
+    p
+}
+
+// Builds the client-final-message from the password, the client-first-bare and the
+// server-first message, writing it to `out` (returns its length) and the 32-byte
+// ServerSignature to `srvsig_out`. The server-first supplies the full nonce (r), the salt
+// (s, base64) and the iteration count (i).
+fn scram_client_final(pw: i64, pwlen: i64, cfbare: i64, cfbarelen: i64,
+                      sf: i64, sflen: i64, out: i64, srvsig_out: i64) -> i64 {
+    let nonce[256]
+    let noncelen = scram_attr(sf, sflen, 114, nonce)               // r=
+    let saltb64[128]
+    let saltb64len = scram_attr(sf, sflen, 115, saltb64)           // s=
+    let salt[128]
+    let saltlen = b64_decode(saltb64, saltb64len, salt)
+    let itbuf[16]
+    let itlen = scram_attr(sf, sflen, 105, itbuf)                  // i=
+    let iters = scram_atoi(itbuf, itlen)
+
+    // client-final-without-proof = "c=biws,r=<full nonce>"
+    let cfwop[300]
+    let mut w = 0
+    poke8(cfwop + 0, 99); poke8(cfwop + 1, 61); poke8(cfwop + 2, 98)   // "c=b"
+    poke8(cfwop + 3, 105); poke8(cfwop + 4, 119); poke8(cfwop + 5, 115) // "iws"
+    poke8(cfwop + 6, 44); poke8(cfwop + 7, 114); poke8(cfwop + 8, 61)   // ",r="
+    w = 9
+    w = scram_app(cfwop, w, nonce, noncelen)
+    let cfwoplen = w
+
+    // AuthMessage = client-first-bare + "," + server-first + "," + client-final-without-proof
+    let auth[1024]
+    let mut a = 0
+    a = scram_app(auth, a, cfbare, cfbarelen)
+    poke8(auth + a, 44); a = a + 1
+    a = scram_app(auth, a, sf, sflen)
+    poke8(auth + a, 44); a = a + 1
+    a = scram_app(auth, a, cfwop, cfwoplen)
+    let authlen = a
+
+    // ClientProof = ClientKey xor HMAC(StoredKey, AuthMessage)
+    let salted[32]
+    scram_salted_password(pw, pwlen, salt, saltlen, iters, salted)
+    let ckey[32]
+    scram_client_key(salted, ckey)
+    let skey[32]
+    scram_stored_key(ckey, skey)
+    let csig[32]
+    scram_client_signature(skey, auth, authlen, csig)
+    let proof[32]
+    scram_client_proof(ckey, csig, proof)
+    // ServerSignature for the caller to check the server-final "v=" field
+    let serverkey[32]
+    scram_server_key(salted, serverkey)
+    scram_server_signature(serverkey, auth, authlen, srvsig_out)
+
+    // client-final = client-final-without-proof + ",p=" + base64(ClientProof)
+    let mut o = scram_app(out, 0, cfwop, cfwoplen)
+    poke8(out + o, 44); poke8(out + o + 1, 112); poke8(out + o + 2, 61); o = o + 3   // ",p="
+    o = o + b64_encode(proof, 32, out + o)
+    o
+}

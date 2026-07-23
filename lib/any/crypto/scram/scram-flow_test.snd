@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of scram-flow.snd. The crypto core is verified elsewhere; here the message assembly
+// and parsing are pinned by reconstructing the ClientProof independently and checking it
+// matches the p= field the flow produced.
+
+include "any/crypto/scram/scram-flow.snd"
+include "x86_64/linux/testing.snd"
+
+let mut f_salt[16]
+let mut f_saltb64[32]
+let mut f_sf[128]
+let mut f_cfbare[128]
+let mut f_out[512]
+let mut f_srvsig[32]
+let mut f_scratch[64]
+let mut f_auth[1024]
+let mut f_expproof[32]
+let mut f_expb64[64]
+
+fn f_app(dst: i64, o: i64, src: i64, n: i64) -> i64 {
+    let mut i = 0
+    let mut p = o
+    for i < n { poke8(dst + p, peek8(src + i)); p = p + 1; i = i + 1 }
+    p
+}
+
+test "scram-flow: client-final carries the ClientProof matching an independent recompute" {
+    // salt = 0x01..0x10, base64'd into the server-first message
+    let mut i = 0
+    for i < 16 { poke8(f_salt + i, i + 1); i = i + 1 }
+    let sb = b64_encode(f_salt, 16, f_saltb64)
+
+    // client-first-bare for user "user" with a client nonce
+    let cfbarelen = scram_client_first_bare("user", 4, "rOprNGfwEbeRWgbNEkqO", 20, f_cfbare)
+
+    // server-first = "r=<full nonce>,s=<salt b64>,i=4096"
+    let mut o = 0
+    o = f_app(f_sf, o, "r=rOprNGfwEbeRWgbNEkqO3rfcNHYJY1ZVvWVs7j,s=", 43)
+    o = f_app(f_sf, o, f_saltb64, sb)
+    o = f_app(f_sf, o, ",i=4096", 7)
+    let sflen = o
+
+    let outlen = scram_client_final("pencil", 6, f_cfbare, cfbarelen, f_sf, sflen, f_out, f_srvsig)
+
+    // the message begins with "c=biws,r=" and contains ",p="
+    assert_eq(peek8(f_out + 0), 99)                  // 'c'
+    assert_eq(peek8(f_out + 2), 98)                  // 'b' of biws
+
+    // attribute parsing works, and reports a missing attribute
+    let full[64]
+    let flen = scram_attr(f_sf, sflen, 114, full)    // r=
+    assert_eq(flen, 38)
+    assert_eq(scram_attr(f_sf, sflen, 120, full), 0 - 1)   // no x= attribute
+
+    // recompute the ClientProof independently: AuthMessage = cfbare "," sf "," "c=biws,r=<r>"
+    let mut a = 0
+    a = f_app(f_auth, a, f_cfbare, cfbarelen)
+    poke8(f_auth + a, 44); a = a + 1
+    a = f_app(f_auth, a, f_sf, sflen)
+    poke8(f_auth + a, 44); a = a + 1
+    a = f_app(f_auth, a, "c=biws,r=", 9)
+    a = f_app(f_auth, a, full, flen)
+    let salted[32]
+    scram_salted_password("pencil", 6, f_salt, 16, 4096, salted)
+    let ck[32]
+    scram_client_key(salted, ck)
+    let sk[32]
+    scram_stored_key(ck, sk)
+    let cs[32]
+    scram_client_signature(sk, f_auth, a, cs)
+    scram_client_proof(ck, cs, f_expproof)
+    let eb = b64_encode(f_expproof, 32, f_expb64)
+
+    // extract the p= field of the produced client-final and compare
+    let got[64]
+    let gl = scram_attr(f_out, outlen, 112, got)     // p=
+    assert_eq(gl, eb)
+    i = 0
+    for i < eb { assert_eq(peek8(got + i), peek8(f_expb64 + i)); i = i + 1 }
+}
