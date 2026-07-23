@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/net6.snd: IPv6 socket addressing on top of net.snd. The socket calls
+// themselves (sock, connect_sock, bind_sock, accept_sock) are address-family agnostic and
+// come from net.snd; this file adds the sockaddr_in6 layout and the AF_INET6 constant so a
+// caller can reach an IPv6 peer:
+//   let fd = sock(AF_INET6, SOCK_STREAM, 0); sockaddr_in6_build(sa, addr16, port);
+//   connect_sock(fd, sa, 28)
+//
+// struct sockaddr_in6 (28 bytes): sin6_family(u16) sin6_port(u16 big-endian)
+//   sin6_flowinfo(u32) sin6_addr(16 bytes) sin6_scope_id(u32).
+
+include "x86_64/linux/net.snd"
+
+let AF_INET6 = 10
+let SOL_IPV6 = 41
+let IP6_SO_ORIGINAL_DST = 80
+
+// Fills a sockaddr_in6 (28 bytes) at `sa`: AF_INET6, `port` (host order), and the 16
+// address bytes (already in network order). flowinfo and scope_id are 0.
+fn sockaddr_in6_build(sa: i64, addr16: i64, port: i64) {
+    poke8(sa + 0, AF_INET6)                  // sin6_family, little-endian u16 (10)
+    poke8(sa + 1, 0)
+    poke8(sa + 2, (port >>> 8) & 0xff)       // sin6_port, big-endian
+    poke8(sa + 3, port & 0xff)
+    poke8(sa + 4, 0); poke8(sa + 5, 0); poke8(sa + 6, 0); poke8(sa + 7, 0)   // flowinfo
+    let mut i = 0
+    for i < 16 { poke8(sa + 8 + i, peek8(addr16 + i)); i = i + 1 }           // sin6_addr
+    poke8(sa + 24, 0); poke8(sa + 25, 0); poke8(sa + 26, 0); poke8(sa + 27, 0)  // scope_id
+}
+
+// The port (host order) of a sockaddr_in6.
+fn sockaddr_in6_port(sa: i64) -> i64 { (peek8(sa + 2) << 8) | peek8(sa + 3) }
+
+// Copies the 16 address bytes of a sockaddr_in6 into `out16`.
+fn sockaddr_in6_ip(sa: i64, out16: i64) {
+    let mut i = 0
+    for i < 16 { poke8(out16 + i, peek8(sa + 8 + i)); i = i + 1 }
+}
+
+// The original destination (a sockaddr_in6) of a REDIRECTed IPv6 TCP connection.
+fn get_original_dst6(fd: i64, sa: i64) -> i64 {
+    let len[1]
+    poke32(len, 28)
+    syscall(SYS_getsockopt, fd, SOL_IPV6, IP6_SO_ORIGINAL_DST, sa, len)
+}
