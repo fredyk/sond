@@ -109,24 +109,29 @@ The design above is the target. What is implemented today (the agent source live
 that the same pipeline parses, PROVES, and lowers) is the core interactive loop over a real Unix
 socket, deliberately narrower than the framed protocol so it could land end to end:
 
-- **State.** Three module `let mut` globals: `__dbg_mode` (`0` run-free, `1` single-step, `2` run-to
-  a line), `__dbg_target` (the run-to line), and `__dbg_fd`/`__dbg_started` (the connection, bound
-  once). No breakpoint SET or call-depth yet, so step-over / step-out and multi-breakpoint are not in
-  this slice, run-to-line stands in for a single breakpoint.
+- **State.** Module globals: `__dbg_mode` (`0` run-free, `1` single-step, `2` run-to a line),
+  `__dbg_target` (the run-to line), `__dbg_fd`/`__dbg_started` (the connection, bound once), and
+  `__dbg_bp[64]` (the breakpoint set, a writable `.data` array indexed with raw peek64/poke64). No
+  call-depth yet, so step-over / step-out are not in this slice.
+- **Breakpoints.** A breakpoint is a source line that always stops, whatever the mode, so `continue`
+  runs to the next one. Membership (`__dbg_bp_has`) is checked in `should_stop`; the set is edited
+  live over the socket (see the protocol) and holds up to 64 lines.
 - **Attach.** On the first checkpoint the agent binds `/tmp/sond.dbg.sock`, announces the path on
   stderr, and BLOCKS on `accept` until a client connects, so `main` is caught from its first line.
   The listener is bound exactly once; after a detach or a client disconnect the program runs free and
   is never rebound.
 - **Wire protocol (line-oriented, not yet length-prefixed).** Each stop is reported to the client as
   `L<line>\n`. The client replies with one-byte commands: `s` (single-step, stop at the next
-  checkpoint), `c` (continue, run free), `g<line>\n` (run until the given source line), `q` (detach
-  and run free). A client disconnect is treated as `c`.
+  checkpoint), `c` (continue, run to the next breakpoint or to the end), `g<line>\n` (run until the
+  given source line), `b<line>\n` / `d<line>\n` (add / delete a breakpoint, acknowledged as
+  `B<line>\n` / `D<line>\n`, without resuming), `q` (detach and run free). A client disconnect is
+  treated as `c`.
 - **Reentrancy.** Codegen excludes the whole `__dbg_` namespace from the checkpoint, so the agent (and
   every helper it calls to serve the socket) never re-enters itself.
 
-The framed protocol of §3.4, the breakpoint set, call-depth (step-over/out), and `Inspect`/`Backtrace`
-(which need §3.3's symbol table) are the following slices; this one proves the pause/step/resume loop
-over the socket works against a native binary.
+The framed protocol of §3.4, call-depth (step-over/out), and `Inspect`/`Backtrace` (which need §3.3's
+symbol table) are the following slices; this one proves the pause/step/breakpoint/resume loop over the
+socket works against a native binary.
 
 ### 3.3 The line -> locals symbol table (the compiler already knows this)
 

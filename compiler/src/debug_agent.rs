@@ -32,6 +32,10 @@ let mut __dbg_started = 0
 // 2 = run-to (stop only when the line equals __dbg_target).
 let mut __dbg_mode = 1
 let mut __dbg_target = 0
+// Breakpoint set: source lines that always stop, whatever the mode (so `continue` runs to the next
+// one). A writable `.data` array; slot value 0 means empty (line 0 never occurs). Indexed with raw
+// peek64/poke64, so there is no array-bounds obligation on the prover.
+let __dbg_bp[64] = [0]
 
 // Length of a NUL-terminated string at `s` (bounded, so a missing NUL cannot loop forever).
 fn __dbg_strlen(s: i64) -> (r: i64) {
@@ -116,8 +120,42 @@ fn __dbg_ensure_attached() {
     }
 }
 
+// Is `line` an active breakpoint? Scans all 64 slots (a bounded, tiny set).
+fn __dbg_bp_has(line: i64) -> (r: i64) {
+    let mut i = 0
+    for i < 64 {
+        if peek64(__dbg_bp + i * 8) == line { return 1 }
+        i = i + 1
+    }
+    0
+}
+
+// Add `line` to the breakpoint set (no-op if already present or the set is full).
+fn __dbg_bp_add(line: i64) {
+    if __dbg_bp_has(line) == 0 {
+        let mut i = 0
+        for i < 64 {
+            if peek64(__dbg_bp + i * 8) == 0 {
+                poke64(__dbg_bp + i * 8, line)
+                return
+            }
+            i = i + 1
+        }
+    }
+}
+
+// Remove `line` from the breakpoint set (clears every slot that holds it).
+fn __dbg_bp_del(line: i64) {
+    let mut i = 0
+    for i < 64 {
+        if peek64(__dbg_bp + i * 8) == line { poke64(__dbg_bp + i * 8, 0) }
+        i = i + 1
+    }
+}
+
 fn __dbg_should_stop(line: i64) -> (r: i64) {
     if __dbg_mode == 1 { return 1 }
+    if __dbg_bp_has(line) == 1 { return 1 }
     if __dbg_mode == 2 {
         if line == __dbg_target { return 1 }
     }
@@ -146,6 +184,22 @@ fn __dbg_interact(line: i64) {
             __dbg_target = __dbg_parse_int(buf, 1, n)
             __dbg_mode = 2
             waiting = 0
+        }
+        if c == 98 {
+            let bp = __dbg_parse_int(buf, 1, n)
+            __dbg_bp_add(bp)
+            let ack[1]
+            poke8(ack, 66)
+            syscall(1, __dbg_fd, ack, 1)
+            __dbg_emit_int(__dbg_fd, bp)
+        }
+        if c == 100 {
+            let bp = __dbg_parse_int(buf, 1, n)
+            __dbg_bp_del(bp)
+            let ack[1]
+            poke8(ack, 68)
+            syscall(1, __dbg_fd, ack, 1)
+            __dbg_emit_int(__dbg_fd, bp)
         }
         if c == 113 {
             syscall(3, __dbg_fd, 0, 0)
@@ -194,6 +248,17 @@ mod tests {
         assert!(
             funcs.iter().any(|f| f.name == "__dbg_step"),
             "the checkpoint entry point is present"
+        );
+        // The breakpoint set is a writable global array, and membership drives `continue`.
+        assert!(
+            globals
+                .iter()
+                .any(|g| g.name == "__dbg_bp" && g.array_len.is_some()),
+            "breakpoints are held in a global array"
+        );
+        assert!(
+            funcs.iter().any(|f| f.name == "__dbg_bp_has"),
+            "the breakpoint membership test is present"
         );
 
         // The prover must accept the agent: its buffers use raw poke/peek (no bounds obligation) and
