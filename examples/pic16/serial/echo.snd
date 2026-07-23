@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// UART echo on the PIC16F684, entirely in Sond (RFC-0014 ports).
+//
+// `use Serial` brings in the byte-stream serial port; the pic16 provider
+// bit-bangs it IN SOND (lib/pic/16F/684/serial.snd), built from generic backend
+// primitives (pin read/write, delay, shift-by-constant), with no serial-specific
+// assembly or backend intrinsic. This program never sees any of that: it uses the
+// interface. One include pulls the provider, which pulls the port.
+//
+//   sondc examples/pic16/serial/echo.snd --pic16 -o /tmp/echo.hex   # then flash it
+//
+// Reads each byte from the line and sends it straight back. (The provider's bit
+// delays are calibrated for 8 MHz; tune them for another clock.)
+
+include "pic/16F/684/serial"
+use Serial
+
+fn main() {
+    serial_init()
+    for {
+        let c = serial_getc()
+        serial_putc(c)
+    }
+}
