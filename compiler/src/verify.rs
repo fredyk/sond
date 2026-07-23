@@ -13,7 +13,7 @@
 //! and to a fuller prover (Fourier–Motzkin / SMT) later, never silently passed
 //! off as "verified".
 
-use crate::ast::{BinOp, Block, Expr, Function, Param, Stmt, Type};
+use crate::ast::{BinOp, Block, Expr, Function, Global, Param, Stmt, Type, UnOp};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// A symbolic integer value expressed in terms of the parameters.
@@ -49,14 +49,52 @@ pub struct VerifyError {
 /// Verify every function's contract. `Err` if any postcondition is provably false
 /// for an input the precondition allows, the program is rejected, not run.
 pub fn verify(funcs: &[Function]) -> Result<(), VerifyError> {
+    verify_with_globals(funcs, &[])
+}
+
+/// Like [`verify`], but also given the module's globals. An IMMUTABLE scalar global
+/// (`let NAME = <const>`, not `let mut`) is a compile-time constant: the verifier seeds it
+/// into every function's environment as its folded value, so a body that returns it (e.g.
+/// `else { ACT_RECREATE }` with `let ACT_RECREATE = 3`) is proven against a contract exactly
+/// as if the literal were written inline. Without this, a global read as a value is an opaque
+/// symbol and the postcondition bails as "a construct the verifier does not support yet".
+pub fn verify_with_globals(funcs: &[Function], globals: &[Global]) -> Result<(), VerifyError> {
     // The contract of every function, so a caller can verify modularly against a callee's
     // `requires`/`ensures` (its summary) without re-analysing the callee's body.
     let contracts: HashMap<String, &Function> =
         funcs.iter().map(|f| (f.name.clone(), f)).collect();
+    // Fold every immutable scalar global to its constant value. A `let mut` global can change,
+    // so it is NOT a constant and must be left opaque; an array global is not a scalar value.
+    let global_consts: HashMap<String, i64> = globals
+        .iter()
+        .filter(|g| !g.mutable && g.array_len.is_none())
+        .filter_map(|g| fold_const_int(&g.init).map(|v| (g.name.clone(), v)))
+        .collect();
     for f in funcs {
-        verify_function(f, &contracts)?;
+        verify_function(f, &contracts, &global_consts)?;
     }
     Ok(())
+}
+
+/// Folds a constant integer expression (a global initializer) to its value, or `None` if it is
+/// not a compile-time integer constant. Mirrors the arithmetic the codegen constant-folds; it is
+/// deliberately conservative (anything it cannot fold stays an opaque symbol, never a wrong value).
+fn fold_const_int(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Int(n) => Some(*n),
+        Expr::Unary(UnOp::Neg, inner) => fold_const_int(inner)?.checked_neg(),
+        Expr::Binary(op, l, r) => {
+            let a = fold_const_int(l)?;
+            let b = fold_const_int(r)?;
+            match op {
+                BinOp::Add => a.checked_add(b),
+                BinOp::Sub => a.checked_sub(b),
+                BinOp::Mul => a.checked_mul(b),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Verifies a single loop's `invariant` (Hoare's init + preservation) in ISOLATION, so the bounds
@@ -243,18 +281,25 @@ impl Ctx<'_> {
 fn verify_function(
     f: &Function,
     contracts: &HashMap<String, &Function>,
+    global_consts: &HashMap<String, i64>,
 ) -> Result<(), VerifyError> {
     let reject = |msg: String| {
         Err(VerifyError {
             message: format!("function `{}`: {msg}", f.name),
         })
     };
-    // Seed the environment with the parameters as free symbolic variables.
-    let env: HashMap<String, Sym> = f
-        .params
+    // Seed the environment: immutable scalar globals as their constant value, then the parameters
+    // as free symbolic variables. Params are inserted last so a parameter shadowing a global wins;
+    // a local `let` binding introduced during the walk likewise overrides either.
+    let mut env: HashMap<String, Sym> = global_consts
         .iter()
-        .map(|p| (p.name.clone(), Sym::Var(p.name.clone())))
+        .map(|(name, v)| (name.clone(), Sym::Const(*v)))
         .collect();
+    env.extend(
+        f.params
+            .iter()
+            .map(|p| (p.name.clone(), Sym::Var(p.name.clone()))),
+    );
     // The preconditions, as constraints. Held in the Ctx so reasoning DONE DURING symbolic
     // evaluation can use them (e.g. deciding a divisor is positive, so `a / b` and `a % b` gain
     // their sign/range bounds), not only when the postcondition is discharged afterwards. They
@@ -2136,6 +2181,59 @@ mod tests {
 
     fn parse(src: &str) -> Vec<Function> {
         Parser::new(tokenize(src)).parse_program()
+    }
+
+    /// Parses a program into its functions AND globals, for verifying a body that reads a global.
+    fn parse_with_globals(src: &str) -> (Vec<Function>, Vec<Global>) {
+        let mut p = Parser::new(tokenize(src));
+        let funcs = p.parse_program();
+        (funcs, p.take_globals())
+    }
+
+    #[test]
+    fn folds_an_immutable_global_returned_as_a_value() {
+        // Named constants (`let Q* = k`) returned from the branches of a nested if-expression, under
+        // a range postcondition. The verifier must fold each immutable global to its value and prove
+        // `0 <= r <= 3`, exactly as if the literal were written inline.
+        let (funcs, globals) = parse_with_globals(
+            "let Q0 = 0\nlet Q1 = 1\nlet Q2 = 2\nlet Q3 = 3\n\
+             fn quadrant(s: i64) -> (r: i64) ensures { r >= 0; r <= 3 } { \
+             if s == 0 { Q0 } else { if s == 1 { Q1 } \
+             else { if s == 2 { Q2 } else { Q3 } } } }",
+        );
+        assert!(
+            verify_with_globals(&funcs, &globals).is_ok(),
+            "an immutable global returned as a value folds to its constant"
+        );
+    }
+
+    #[test]
+    fn rejects_a_global_whose_value_violates_the_range() {
+        // The same shape, but `Q3 = 9` is outside `0..=3`: folding must make this a provable
+        // violation (a real bug caught), not a silent pass.
+        let (funcs, globals) = parse_with_globals(
+            "let Q0 = 0\nlet Q3 = 9\n\
+             fn quadrant(s: i64) -> (r: i64) ensures { r >= 0; r <= 3 } { \
+             if s == 0 { Q0 } else { Q3 } }",
+        );
+        assert!(
+            verify_with_globals(&funcs, &globals).is_err(),
+            "a global folded to 9 violates r <= 3"
+        );
+    }
+
+    #[test]
+    fn does_not_fold_a_mutable_global() {
+        // A `let mut` global can change at runtime, so it is NOT a compile-time constant: the
+        // verifier must leave it opaque (the contract cannot be proven), never assume its initializer.
+        let (funcs, globals) = parse_with_globals(
+            "let mut COUNTER = 0\n\
+             fn get() -> (r: i64) ensures { r >= 0; r <= 3 } { COUNTER }",
+        );
+        assert!(
+            verify_with_globals(&funcs, &globals).is_err(),
+            "a mutable global must not be folded to its initializer"
+        );
     }
 
     #[test]

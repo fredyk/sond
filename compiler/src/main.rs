@@ -14,7 +14,7 @@ use sondc::codegen::{
 };
 use sondc::lexer::tokenize;
 use sondc::parser::Parser;
-use sondc::verify::verify;
+use sondc::verify::verify_with_globals;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
@@ -260,7 +260,7 @@ fn main() -> ExitCode {
 
     // The oracle: prove the contracts before emitting anything. A postcondition
     // that cannot hold is a compile error, the program is rejected, not run.
-    if let Err(e) = verify(&funcs) {
+    if let Err(e) = verify_with_globals(&funcs, &globals) {
         eprintln!("sondc: contract violation: {}", e.message);
         return ExitCode::FAILURE;
     }
