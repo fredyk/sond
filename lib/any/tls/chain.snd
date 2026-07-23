@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/tls/chain.snd: bridge the TLS 1.3 Certificate message to X.509 chain validation.
+// The server sends its certificate chain (leaf first, then intermediates) inside the
+// Certificate handshake message; this collects each certificate's DER into a pointer array
+// and hands it to x509_verify_chain against a caller-provided trust store. Kept apart from
+// the socket-facing handshake so it can be tested on a captured flight, no network involved.
+
+include "any/tls/certmsg.snd"
+include "any/x509/chain.snd"
+
+// Returns the byte offset of the first handshake message of type `mt` in the decrypted
+// flight buf[0..n), or -1. Each message is type(1) | uint24 length | body.
+fn tls_flight_find_msg(buf: i64, n: i64, mt: i64) -> i64 {
+    let mut p = 0
+    for p + 4 <= n {
+        let t = peek8(buf + p)
+        let mlen = (peek8(buf + p + 1) << 16) | (peek8(buf + p + 2) << 8) | peek8(buf + p + 3)
+        if t == mt { return p }
+        p = p + 4 + mlen
+    }
+    0 - 1
+}
+
+// Fills `certs` with up to `max` DER pointers, one per CertificateEntry of the Certificate
+// message at `msg`, and returns how many were written (the leaf is certs[0]). Each pointer
+// aims into the message buffer (the DER is not copied), ready for x509_verify_chain.
+fn tls_flight_chain(msg: i64, certs: i64, max: i64) -> i64 {
+    let mut n = tls_cert_count(msg)
+    if n > max { n = max }
+    let mut i = 0
+    for i < n {
+        let entry[2]
+        tls_cert_entry(msg, i, entry)
+        certs[i] = msg + entry[0]
+        i = i + 1
+    }
+    n
+}
+
+// Validate the server's certificate chain from a decrypted handshake flight buf[0..n)
+// against the trust store `roots` (nroots DER pointers). Finds the Certificate message,
+// collects its chain, and calls x509_verify_chain (leaf names `host`, every certificate is
+// valid at `now14`, each link is signed by the next, the top is anchored to a trusted root).
+// Returns 1 if the chain is trusted, 0 otherwise.
+fn tls_verify_server_chain(buf: i64, n: i64, roots: i64, nroots: i64,
+                           host: i64, hostlen: i64, now14: i64) -> i64 {
+    let off = tls_flight_find_msg(buf, n, 11)
+    if off < 0 { return 0 }
+    let certs[16]
+    let cnt = tls_flight_chain(buf + off, certs, 16)
+    x509_verify_chain(certs, cnt, roots, nroots, host, hostlen, now14)
+}
