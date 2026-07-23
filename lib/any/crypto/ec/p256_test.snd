@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for ECDSA P-256 verification and its underlying bignum layer.
+// The ECDSA anchor is a real signature generated locally with OpenSSL.
+
+include "any/crypto/ec/p256.snd"
+include "x86_64/linux/testing.snd"
+
+// ---- Bignum unit tests -----------------------------------------------------
+
+test "bignum: mulmod of a small product stays exact" {
+    let mut a[16]
+    bn_set_small(a, 12345)
+    let mut b[16]
+    bn_set_small(b, 6789)
+    let mut got[16]
+    bn_mulmod(a, b, P256_P, got)
+    let mut want[16]
+    bn_set_small(want, 83810205)
+    assert_eq(bn_cmp(got, want), 0)
+}
+
+test "bignum: (n-1)^2 mod n == 1" {
+    let mut one[16]
+    bn_set_small(one, 1)
+    let mut nm1[16]
+    bn_sub_n(P256_N, one, nm1, 16)
+    let mut got[16]
+    bn_mulmod(nm1, nm1, P256_N, got)
+    assert_eq(bn_cmp(got, one), 0)
+}
+
+test "bignum: addmod wraps ((p-1)+3) mod p == 2" {
+    let mut one[16]
+    bn_set_small(one, 1)
+    let mut pm1[16]
+    bn_sub_n(P256_P, one, pm1, 16)
+    let mut three[16]
+    bn_set_small(three, 3)
+    let mut got[16]
+    bn_addmod(pm1, three, P256_P, got)
+    let mut want[16]
+    bn_set_small(want, 2)
+    assert_eq(bn_cmp(got, want), 0)
+}
+
+test "bignum: submod borrows (3-5) mod p == p-2" {
+    let mut three[16]
+    bn_set_small(three, 3)
+    let mut five[16]
+    bn_set_small(five, 5)
+    let mut got[16]
+    bn_submod(three, five, P256_P, got)
+    let mut two[16]
+    bn_set_small(two, 2)
+    let mut want[16]
+    bn_sub_n(P256_P, two, want, 16)
+    assert_eq(bn_cmp(got, want), 0)
+}
+
+test "bignum: invmod gives a * a^-1 mod p == 1" {
+    let mut a[16]
+    bn_set_small(a, 123456789)
+    let mut inv[16]
+    bn_invmod(a, P256_P, inv)
+    let mut got[16]
+    bn_mulmod(a, inv, P256_P, got)
+    let mut one[16]
+    bn_set_small(one, 1)
+    assert_eq(bn_cmp(got, one), 0)
+}
+
+test "bignum: from_bytes / to_bytes round trip" {
+    let mut buf[4]
+    let mut i = 0
+    for i < 32 { poke8(buf + i, (7 * i + 3) & 0xFF); i = i + 1 }
+    let mut v[16]
+    bn_from_bytes(v, buf)
+    let mut out[4]
+    bn_to_bytes(out, v)
+    i = 0
+    for i < 32 { assert_eq(peek8(out + i), (7 * i + 3) & 0xFF); i = i + 1 }
+}
+
+// ---- ECDSA anchor (real OpenSSL-generated P-256 signature) ----------------
+
+let QX_W[32] = [
+    76, 20, 32, 1, 142, 31, 160, 63, 119, 151, 110, 66, 30, 249, 9, 198, 55, 154, 188, 240, 179, 187, 175, 47, 59, 26, 28, 89, 118, 222, 27, 200
+]
+let QY_W[32] = [
+    84, 3, 180, 157, 130, 85, 182, 69, 6, 92, 159, 8, 243, 123, 160, 202, 254, 176, 204, 37, 42, 207, 123, 0, 143, 185, 136, 248, 1, 209, 26, 239
+]
+let E_W[32] = [
+    173, 26, 196, 41, 81, 62, 136, 171, 225, 18, 224, 64, 69, 168, 24, 155, 158, 196, 66, 46, 86, 74, 159, 228, 238, 64, 216, 204, 204, 235, 203, 166
+]
+let R_W[32] = [
+    132, 154, 83, 119, 95, 112, 198, 0, 42, 181, 123, 63, 226, 184, 181, 60, 48, 187, 142, 7, 200, 143, 36, 45, 167, 154, 21, 68, 221, 243, 73, 75
+]
+let S_W[32] = [
+    141, 177, 205, 213, 86, 121, 108, 234, 209, 74, 179, 64, 208, 99, 0, 155, 77, 227, 8, 116, 244, 15, 11, 172, 79, 185, 59, 50, 188, 66, 118, 212
+]
+
+// Pack a 32-word (one byte per word) source into a 32-byte packed buffer.
+fn pack32(dst: i64, src: i64) {
+    let mut i = 0
+    for i < 32 { poke8(dst + i, src[i]); i = i + 1 }
+}
+
+let mut qx_buf[4]
+let mut qy_buf[4]
+let mut e_buf[4]
+let mut r_buf[4]
+let mut s_buf[4]
+
+test "ecdsa: the real P-256 signature verifies" {
+    pack32(qx_buf, QX_W)
+    pack32(qy_buf, QY_W)
+    pack32(e_buf, E_W)
+    pack32(r_buf, R_W)
+    pack32(s_buf, S_W)
+    assert_eq(ecdsa_verify(qx_buf, qy_buf, e_buf, r_buf, s_buf), 1)
+}
+
+test "ecdsa: a tampered r is rejected" {
+    pack32(qx_buf, QX_W)
+    pack32(qy_buf, QY_W)
+    pack32(e_buf, E_W)
+    pack32(r_buf, R_W)
+    pack32(s_buf, S_W)
+    // Flip one byte of r.
+    poke8(r_buf + 5, peek8(r_buf + 5) ^ 1)
+    assert_eq(ecdsa_verify(qx_buf, qy_buf, e_buf, r_buf, s_buf), 0)
+}

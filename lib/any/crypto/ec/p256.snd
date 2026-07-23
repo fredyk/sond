@@ -1,0 +1,492 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// ECDSA signature verification over the NIST P-256 curve.
+//
+// Design: correctness over speed. Big integers are fixed arrays of 16-bit
+// limbs (little-endian) stored one per i64 word. A 256-bit value uses 16
+// limbs; a 512-bit product uses 32 limbs. Every limb product is 16x16 = 32
+// bits and a full multiply column accumulates at most 16 of them, so nothing
+// overflows a signed i64. Modular reduction is plain binary long division
+// (shift and conditional subtract), which is simple and exact. Curve points
+// use Jacobian coordinates so a scalar multiply needs a single field
+// inversion at the very end.
+
+let BN_MASK16 = 0xFFFF
+
+// ---------------------------------------------------------------------------
+// Generic fixed-width bignum layer (little-endian 16-bit limbs)
+// ---------------------------------------------------------------------------
+
+fn bn_copy_n(dst: i64, src: i64, n: i64) {
+    let mut i = 0
+    for i < n { dst[i] = src[i]; i = i + 1 }
+}
+
+fn bn_zero_n(dst: i64, n: i64) {
+    let mut i = 0
+    for i < n { dst[i] = 0; i = i + 1 }
+}
+
+// 1 if the 16-limb value is zero, else 0.
+fn bn_is_zero(a: i64) -> i64 {
+    let mut acc = 0
+    let mut i = 0
+    for i < 16 { acc = acc | a[i]; i = i + 1 }
+    if acc == 0 { 1 } else { 0 }
+}
+
+// Compare two 16-limb values: 1 if a>b, -1 if a<b, 0 if equal.
+fn bn_cmp(a: i64, b: i64) -> i64 {
+    let mut i = 15
+    for {
+        if a[i] > b[i] { return 1 }
+        if a[i] < b[i] { return 0 - 1 }
+        if i == 0 { break }
+        i = i - 1
+    }
+    0
+}
+
+// 1 if a>=b over n limbs, else 0.
+fn bn_is_ge_n(a: i64, b: i64, n: i64) -> i64 {
+    let mut i = n - 1
+    for {
+        if a[i] > b[i] { return 1 }
+        if a[i] < b[i] { return 0 }
+        if i == 0 { break }
+        i = i - 1
+    }
+    1
+}
+
+// out = a + b over n limbs; returns the carry out of the top limb.
+fn bn_add_n(a: i64, b: i64, out: i64, n: i64) -> i64 {
+    let mut carry = 0
+    let mut i = 0
+    for i < n {
+        let v = a[i] + b[i] + carry
+        out[i] = v & BN_MASK16
+        carry = v >>> 16
+        i = i + 1
+    }
+    carry
+}
+
+// out = a - b over n limbs; returns the borrow out of the top limb.
+fn bn_sub_n(a: i64, b: i64, out: i64, n: i64) -> i64 {
+    let mut borrow = 0
+    let mut i = 0
+    for i < n {
+        let mut v = a[i] - b[i] - borrow
+        if v < 0 { v = v + 0x10000; borrow = 1 } else { borrow = 0 }
+        out[i] = v
+        i = i + 1
+    }
+    borrow
+}
+
+// out (32 limbs) = a (16 limbs) * b (16 limbs), schoolbook.
+fn bn_mul(a: i64, b: i64, out: i64) {
+    let mut i = 0
+    for i < 32 { out[i] = 0; i = i + 1 }
+    i = 0
+    for i < 16 {
+        let mut j = 0
+        for j < 16 {
+            out[i + j] = out[i + j] + a[i] * b[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // Single carry-propagation pass over the whole 512-bit accumulator.
+    let mut carry = 0
+    i = 0
+    for i < 32 {
+        let v = out[i] + carry
+        out[i] = v & BN_MASK16
+        carry = v >>> 16
+        i = i + 1
+    }
+}
+
+// out (16 limbs) = dividend (32 limbs) mod m (16 limbs), binary long division.
+fn bn_mod(dividend: i64, m: i64, out: i64) {
+    let mut rem[17]
+    bn_zero_n(rem, 17)
+    let mut m17[17]
+    bn_copy_n(m17, m, 16)
+    m17[16] = 0
+    let mut bit = 511
+    for {
+        // rem <<= 1
+        let mut carry = 0
+        let mut i = 0
+        for i < 17 {
+            let v = (rem[i] << 1) | carry
+            rem[i] = v & BN_MASK16
+            carry = v >>> 16
+            i = i + 1
+        }
+        // bring in bit `bit` of the dividend
+        let limb = bit >>> 4
+        let bp = bit & 15
+        let db = (dividend[limb] >>> bp) & 1
+        rem[0] = rem[0] | db
+        if bn_is_ge_n(rem, m17, 17) != 0 {
+            bn_sub_n(rem, m17, rem, 17)
+        }
+        if bit == 0 { break }
+        bit = bit - 1
+    }
+    bn_copy_n(out, rem, 16)
+}
+
+// out = a * b mod m (all 16-limb; out separate from inputs).
+fn bn_mulmod(a: i64, b: i64, m: i64, out: i64) {
+    let mut prod[32]
+    bn_mul(a, b, prod)
+    bn_mod(prod, m, out)
+}
+
+// out = a + b mod m; requires a<m and b<m.
+fn bn_addmod(a: i64, b: i64, m: i64, out: i64) {
+    let mut tmp[17]
+    let c = bn_add_n(a, b, tmp, 16)
+    tmp[16] = c
+    let mut m17[17]
+    bn_copy_n(m17, m, 16)
+    m17[16] = 0
+    if bn_is_ge_n(tmp, m17, 17) != 0 { bn_sub_n(tmp, m17, tmp, 17) }
+    bn_copy_n(out, tmp, 16)
+}
+
+// out = a - b mod m; requires a<m and b<m.
+fn bn_submod(a: i64, b: i64, m: i64, out: i64) {
+    let borrow = bn_sub_n(a, b, out, 16)
+    if borrow != 0 { bn_add_n(out, m, out, 16) }
+}
+
+// out = base^exp mod m; exp is a 16-limb (256-bit) exponent, base<m.
+fn bn_modexp(base: i64, exp: i64, m: i64, out: i64) {
+    let mut result[16]
+    bn_zero_n(result, 16)
+    result[0] = 1
+    let mut tmp[16]
+    let mut bit = 255
+    for {
+        bn_mulmod(result, result, m, tmp)
+        bn_copy_n(result, tmp, 16)
+        let limb = bit >>> 4
+        let bp = bit & 15
+        let eb = (exp[limb] >>> bp) & 1
+        if eb != 0 {
+            bn_mulmod(result, base, m, tmp)
+            bn_copy_n(result, tmp, 16)
+        }
+        if bit == 0 { break }
+        bit = bit - 1
+    }
+    bn_copy_n(out, result, 16)
+}
+
+// out = a^-1 mod m via Fermat (m must be prime): a^(m-2) mod m.
+fn bn_invmod(a: i64, m: i64, out: i64) {
+    let mut two[16]
+    bn_zero_n(two, 16)
+    two[0] = 2
+    let mut em2[16]
+    bn_sub_n(m, two, em2, 16)
+    bn_modexp(a, em2, m, out)
+}
+
+// out (16 limbs) = big-endian 32-byte integer at `ptr`.
+fn bn_from_bytes(out: i64, ptr: i64) {
+    let mut i = 0
+    for i < 16 {
+        let hi = peek8(ptr + 30 - 2 * i)
+        let lo = peek8(ptr + 31 - 2 * i)
+        out[i] = lo | (hi << 8)
+        i = i + 1
+    }
+}
+
+// Write 16-limb value `a` as a big-endian 32-byte integer at `ptr`.
+fn bn_to_bytes(ptr: i64, a: i64) {
+    let mut i = 0
+    for i < 16 {
+        poke8(ptr + 31 - 2 * i, a[i] & 0xFF)
+        poke8(ptr + 30 - 2 * i, (a[i] >>> 8) & 0xFF)
+        i = i + 1
+    }
+}
+
+// out (16 limbs) = a small non-negative value that fits in 64 bits.
+fn bn_set_small(out: i64, v: i64) {
+    bn_zero_n(out, 16)
+    out[0] = v & BN_MASK16
+    out[1] = (v >>> 16) & BN_MASK16
+    out[2] = (v >>> 32) & BN_MASK16
+    out[3] = (v >>> 48) & BN_MASK16
+}
+
+// ---------------------------------------------------------------------------
+// NIST P-256 domain parameters (little-endian 16-bit limbs)
+// ---------------------------------------------------------------------------
+
+let P256_P[16] = [
+    65535, 65535, 65535, 65535, 65535, 65535, 0, 0, 0, 0, 0, 0, 1, 0, 65535, 65535
+]
+let P256_N[16] = [
+    9553, 64611, 51906, 62393, 40580, 42775, 64173, 48358, 65535, 65535, 65535, 65535, 0, 0, 65535, 65535
+]
+let P256_A[16] = [
+    65532, 65535, 65535, 65535, 65535, 65535, 0, 0, 0, 0, 0, 0, 1, 0, 65535, 65535
+]
+let P256_GX[16] = [
+    49814, 55448, 14661, 62625, 13216, 11755, 32129, 30467, 16626, 25508, 59109, 63676, 16967, 57644, 53746, 27415
+]
+let P256_GY[16] = [
+    20981, 14271, 16488, 52150, 24270, 27441, 13143, 11214, 40470, 31759, 60234, 36583, 32667, 65050, 17122, 20451
+]
+
+// ---------------------------------------------------------------------------
+// Field arithmetic modulo p (thin wrappers over the bignum layer)
+// ---------------------------------------------------------------------------
+
+fn fp_mul(r: i64, a: i64, b: i64) { bn_mulmod(a, b, P256_P, r) }
+fn fp_sqr(r: i64, a: i64) { bn_mulmod(a, a, P256_P, r) }
+fn fp_add(r: i64, a: i64, b: i64) { bn_addmod(a, b, P256_P, r) }
+fn fp_sub(r: i64, a: i64, b: i64) { bn_submod(a, b, P256_P, r) }
+fn fp_inv(r: i64, a: i64) { bn_invmod(a, P256_P, r) }
+
+// ---------------------------------------------------------------------------
+// Jacobian point layout: 48 words = X[16] | Y[16] | Z[16].
+// Coordinate addresses are byte offsets (16 words = 128 bytes each).
+// The point at infinity is represented by Z = 0.
+// ---------------------------------------------------------------------------
+
+fn jac_x(p: i64) -> i64 { p }
+fn jac_y(p: i64) -> i64 { p + 128 }
+fn jac_z(p: i64) -> i64 { p + 256 }
+
+fn point_copy(dst: i64, src: i64) { bn_copy_n(dst, src, 48) }
+
+fn set_infinity(p: i64) {
+    bn_zero_n(jac_x(p), 16)
+    bn_zero_n(jac_y(p), 16)
+    bn_zero_n(jac_z(p), 16)
+    let xp = jac_x(p)
+    xp[0] = 1
+    let yp = jac_y(p)
+    yp[0] = 1
+}
+
+// out = 2 * p (Jacobian), general short-Weierstrass doubling with a = -3.
+fn point_double(out: i64, p: i64) {
+    if bn_is_zero(jac_z(p)) != 0 { set_infinity(out); return }
+    let mut ysq[16]
+    fp_sqr(ysq, jac_y(p))
+    if bn_is_zero(ysq) != 0 { set_infinity(out); return }
+    // S = 4 * X * Y^2
+    let mut xy[16]
+    fp_mul(xy, jac_x(p), ysq)
+    let mut S[16]
+    fp_add(S, xy, xy)
+    fp_add(S, S, S)
+    // M = 3 * X^2 + a * Z^4
+    let mut xsq[16]
+    fp_sqr(xsq, jac_x(p))
+    let mut M[16]
+    fp_add(M, xsq, xsq)
+    fp_add(M, M, xsq)
+    let mut zsq[16]
+    fp_sqr(zsq, jac_z(p))
+    let mut z4[16]
+    fp_sqr(z4, zsq)
+    let mut az4[16]
+    fp_mul(az4, P256_A, z4)
+    fp_add(M, M, az4)
+    // X3 = M^2 - 2S
+    let mut m2[16]
+    fp_sqr(m2, M)
+    let mut twoS[16]
+    fp_add(twoS, S, S)
+    let mut X3[16]
+    fp_sub(X3, m2, twoS)
+    // Y3 = M * (S - X3) - 8 * Y^4
+    let mut smx[16]
+    fp_sub(smx, S, X3)
+    let mut y3a[16]
+    fp_mul(y3a, M, smx)
+    let mut y4[16]
+    fp_sqr(y4, ysq)
+    let mut e8[16]
+    fp_add(e8, y4, y4)
+    fp_add(e8, e8, e8)
+    fp_add(e8, e8, e8)
+    let mut Y3[16]
+    fp_sub(Y3, y3a, e8)
+    // Z3 = 2 * Y * Z
+    let mut yz[16]
+    fp_mul(yz, jac_y(p), jac_z(p))
+    let mut Z3[16]
+    fp_add(Z3, yz, yz)
+    bn_copy_n(jac_x(out), X3, 16)
+    bn_copy_n(jac_y(out), Y3, 16)
+    bn_copy_n(jac_z(out), Z3, 16)
+}
+
+// out = pa + pb (Jacobian), with identity handling.
+fn point_add(out: i64, pa: i64, pb: i64) {
+    if bn_is_zero(jac_z(pa)) != 0 { point_copy(out, pb); return }
+    if bn_is_zero(jac_z(pb)) != 0 { point_copy(out, pa); return }
+    let mut z1sq[16]
+    fp_sqr(z1sq, jac_z(pa))
+    let mut z2sq[16]
+    fp_sqr(z2sq, jac_z(pb))
+    let mut U1[16]
+    fp_mul(U1, jac_x(pa), z2sq)
+    let mut U2[16]
+    fp_mul(U2, jac_x(pb), z1sq)
+    let mut z1cu[16]
+    fp_mul(z1cu, z1sq, jac_z(pa))
+    let mut z2cu[16]
+    fp_mul(z2cu, z2sq, jac_z(pb))
+    let mut S1[16]
+    fp_mul(S1, jac_y(pa), z2cu)
+    let mut S2[16]
+    fp_mul(S2, jac_y(pb), z1cu)
+    let mut H[16]
+    fp_sub(H, U2, U1)
+    let mut R[16]
+    fp_sub(R, S2, S1)
+    if bn_is_zero(H) != 0 {
+        if bn_is_zero(R) != 0 { point_double(out, pa); return }
+        set_infinity(out)
+        return
+    }
+    let mut Hsq[16]
+    fp_sqr(Hsq, H)
+    let mut Hcu[16]
+    fp_mul(Hcu, Hsq, H)
+    let mut U1H2[16]
+    fp_mul(U1H2, U1, Hsq)
+    let mut Rsq[16]
+    fp_sqr(Rsq, R)
+    let mut t[16]
+    fp_sub(t, Rsq, Hcu)
+    let mut twoU1H2[16]
+    fp_add(twoU1H2, U1H2, U1H2)
+    let mut X3[16]
+    fp_sub(X3, t, twoU1H2)
+    let mut d[16]
+    fp_sub(d, U1H2, X3)
+    let mut Rd[16]
+    fp_mul(Rd, R, d)
+    let mut S1H3[16]
+    fp_mul(S1H3, S1, Hcu)
+    let mut Y3[16]
+    fp_sub(Y3, Rd, S1H3)
+    let mut z1z2[16]
+    fp_mul(z1z2, jac_z(pa), jac_z(pb))
+    let mut Z3[16]
+    fp_mul(Z3, H, z1z2)
+    bn_copy_n(jac_x(out), X3, 16)
+    bn_copy_n(jac_y(out), Y3, 16)
+    bn_copy_n(jac_z(out), Z3, 16)
+}
+
+// outP (Jacobian) = k * (ax, ay), with k a 16-limb scalar and (ax, ay) affine.
+fn scalar_mult_jac(outP: i64, k: i64, ax: i64, ay: i64) {
+    let mut Rp[48]
+    set_infinity(Rp)
+    let mut Qp[48]
+    bn_copy_n(jac_x(Qp), ax, 16)
+    bn_copy_n(jac_y(Qp), ay, 16)
+    let zp = jac_z(Qp)
+    bn_zero_n(zp, 16)
+    zp[0] = 1
+    let mut Tp[48]
+    let mut bit = 255
+    for {
+        point_double(Tp, Rp)
+        point_copy(Rp, Tp)
+        let limb = bit >>> 4
+        let bp = bit & 15
+        let kb = (k[limb] >>> bp) & 1
+        if kb != 0 {
+            point_add(Tp, Rp, Qp)
+            point_copy(Rp, Tp)
+        }
+        if bit == 0 { break }
+        bit = bit - 1
+    }
+    point_copy(outP, Rp)
+}
+
+// Convert Jacobian p to affine (outX, outY). Returns 1 if p is infinity.
+fn jac_to_affine(outX: i64, outY: i64, p: i64) -> i64 {
+    if bn_is_zero(jac_z(p)) != 0 { return 1 }
+    let mut zinv[16]
+    fp_inv(zinv, jac_z(p))
+    let mut zinv2[16]
+    fp_sqr(zinv2, zinv)
+    let mut zinv3[16]
+    fp_mul(zinv3, zinv2, zinv)
+    fp_mul(outX, jac_x(p), zinv2)
+    fp_mul(outY, jac_y(p), zinv3)
+    0
+}
+
+// ---------------------------------------------------------------------------
+// ECDSA verification
+// ---------------------------------------------------------------------------
+
+// Verify an ECDSA P-256 signature. Qxp/Qyp/ep/rp/sp each point to 32 big-endian
+// bytes: public key x, public key y, message hash (as an integer), r, and s.
+// Returns 1 if the signature is valid, 0 otherwise.
+fn ecdsa_verify(Qxp: i64, Qyp: i64, ep: i64, rp: i64, sp: i64) -> i64 {
+    let mut Qx[16]
+    bn_from_bytes(Qx, Qxp)
+    let mut Qy[16]
+    bn_from_bytes(Qy, Qyp)
+    let mut e[16]
+    bn_from_bytes(e, ep)
+    let mut r[16]
+    bn_from_bytes(r, rp)
+    let mut s[16]
+    bn_from_bytes(s, sp)
+    // r, s must be in [1, n-1]
+    if bn_is_zero(r) != 0 { return 0 }
+    if bn_is_zero(s) != 0 { return 0 }
+    if bn_is_ge_n(r, P256_N, 16) != 0 { return 0 }
+    if bn_is_ge_n(s, P256_N, 16) != 0 { return 0 }
+    // w = s^-1 mod n
+    let mut w[16]
+    bn_invmod(s, P256_N, w)
+    // u1 = e*w mod n ; u2 = r*w mod n
+    let mut u1[16]
+    bn_mulmod(e, w, P256_N, u1)
+    let mut u2[16]
+    bn_mulmod(r, w, P256_N, u2)
+    // R = u1*G + u2*Q
+    let mut P1[48]
+    scalar_mult_jac(P1, u1, P256_GX, P256_GY)
+    let mut P2[48]
+    scalar_mult_jac(P2, u2, Qx, Qy)
+    let mut Rp[48]
+    point_add(Rp, P1, P2)
+    if bn_is_zero(jac_z(Rp)) != 0 { return 0 }
+    let mut Rx[16]
+    let mut Ry[16]
+    jac_to_affine(Rx, Ry, Rp)
+    // x1 = R.x mod n
+    let mut dv[32]
+    bn_zero_n(dv, 32)
+    bn_copy_n(dv, Rx, 16)
+    let mut x1[16]
+    bn_mod(dv, P256_N, x1)
+    if bn_cmp(x1, r) == 0 { return 1 }
+    0
+}
