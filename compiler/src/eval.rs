@@ -98,7 +98,7 @@ pub fn eval_block(block: &Block, env: &mut Env) -> Value {
                     eval_expr(p, env);
                 }
             }
-            Stmt::ParLet { peers, .. } => {
+            Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
                 for p in peers {
                     eval_expr(p, env);
                 }

@@ -537,7 +537,7 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
             // `let a ~~ b = par ..` binds the peer results; for the prover the bound names are
             // opaque call results (like any `let x = f()` whose callee it cannot summarize), so the
             // scalar state is left unchanged. The confluence proof is the same separate pass.
-            Stmt::ParLet { .. } => live,
+            Stmt::ParLet { .. } | Stmt::ParReduce { .. } => live,
             // A loop is verified via its invariant (init + preservation), then continues
             // with (invariant ∧ ¬condition). Without an invariant it is unverifiable.
             Stmt::For {

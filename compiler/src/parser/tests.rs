@@ -532,6 +532,23 @@ fn parses_a_positional_par_binding() {
     assert_eq!(peers.len(), 3, "one peer per name");
 }
 
+#[test]
+fn parses_a_par_reduce() {
+    // `let s = par(+) f() ~~ g() ~~ h()`: the reducer op in parens, then the peers.
+    let f = parse_fn("fn run() -> i64 { let s = par(*) f() ~~ g() ~~ h()\n s }");
+    let (op, peers) = f
+        .body
+        .stmts
+        .iter()
+        .find_map(|s| match s {
+            Stmt::ParReduce { op, peers, .. } => Some((op, peers)),
+            _ => None,
+        })
+        .expect("the body should hold a ParReduce");
+    assert_eq!(*op, crate::ast::BinOp::Mul, "the reducer is `*`");
+    assert_eq!(peers.len(), 3, "three peers folded into one value");
+}
+
 // --- RFC-0014: ports (interfaces implemented per target) ---
 
 #[test]

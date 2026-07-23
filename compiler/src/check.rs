@@ -182,9 +182,23 @@ pub fn check_spawn_not_in_loop(funcs: &[Function]) -> Result<(), String> {
     Ok(())
 }
 
-/// Rejects a `par`-let whose name count does not match its peer count: `let a ~~ b = par f() ~~
-/// g() ~~ h()` would bind three results to two names. Each name binds exactly one peer's result by
-/// position, so a mismatch is a source error, caught here instead of silently dropping a result.
+/// The source symbol of a binary operator, for diagnostics.
+fn op_symbol(op: &BinOp) -> &'static str {
+    match op {
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::BitAnd => "&",
+        BinOp::BitOr => "|",
+        BinOp::BitXor => "^",
+        _ => "?",
+    }
+}
+
+/// Rejects a `par`-let whose name count does not match its peer count (`let a ~~ b = par f() ~~
+/// g() ~~ h()` binds three results to two names), and a `par(op)` reduce whose operator is not a
+/// commutative-associative monoid. Both are source errors, caught here instead of miscompiling.
 pub fn check_par_let_arity(funcs: &[Function]) -> Result<(), String> {
     fn walk(stmts: &[Stmt], fname: &str) -> Result<(), String> {
         for s in stmts {
@@ -195,6 +209,20 @@ pub fn check_par_let_arity(funcs: &[Function]) -> Result<(), String> {
                          each name binds exactly one peer's result, so the counts must match.",
                         names.len(),
                         peers.len()
+                    ));
+                }
+                Stmt::ParReduce { op, .. }
+                    if !matches!(
+                        op,
+                        BinOp::Add | BinOp::Mul | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor
+                    ) =>
+                {
+                    return Err(format!(
+                        "function `{fname}`: a `par(op)` reducer must be COMMUTATIVE and \
+                         associative (`+ * & | ^`), because the peers finish in an unspecified \
+                         order and the result must not depend on it. `{}` is not; use a positional \
+                         binding `let a ~~ b = par ..` if you need order.",
+                        op_symbol(op)
                     ));
                 }
                 Stmt::For { body, .. } => walk(&body.stmts, fname)?,
@@ -230,7 +258,7 @@ pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> 
                         collect_calls_expr(p, out);
                     }
                 }
-                Stmt::ParLet { peers, .. } => {
+                Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
                     for p in peers {
                         collect_calls_expr(p, out);
                     }
@@ -630,7 +658,7 @@ fn check_stmt(s: &Stmt, immutable: &HashMap<&str, &str>, fname: &str) -> Result<
             }
             Ok(())
         }
-        Stmt::ParLet { peers, .. } => {
+        Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
             for p in peers {
                 check_expr(p, immutable, fname)?;
             }
@@ -2772,6 +2800,32 @@ mod par_let_tests {
              fn run() -> i64 { let a ~~ b = par f() ~~ g()\n a + b }",
         );
         assert!(ok.is_ok(), "equal counts are fine, got {ok:?}");
+    }
+
+    #[test]
+    fn rejects_a_non_commutative_par_reduce() {
+        // `par(-)`: the peers finish in an unspecified order, so a non-commutative fold would give
+        // an order-dependent result. Rejected, with the fix (a positional binding) named.
+        let e = check(
+            "fn f() -> i64 { 1 }\nfn g() -> i64 { 2 }\n\
+             fn run() -> i64 { let s = par(-) f() ~~ g()\n s }",
+        );
+        assert!(e.is_err(), "a non-commutative reducer must be rejected");
+        assert!(
+            e.unwrap_err().contains("COMMUTATIVE"),
+            "the error explains the commutativity requirement"
+        );
+    }
+
+    #[test]
+    fn accepts_commutative_par_reduces() {
+        for op in ["+", "*", "&", "|", "^"] {
+            let src = format!(
+                "fn f() -> i64 {{ 1 }}\nfn g() -> i64 {{ 2 }}\n\
+                 fn run() -> i64 {{ let s = par({op}) f() ~~ g()\n s }}"
+            );
+            assert!(check(&src).is_ok(), "`par({op})` is a commutative monoid");
+        }
     }
 }
 

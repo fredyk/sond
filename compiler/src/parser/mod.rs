@@ -672,6 +672,36 @@ impl Parser {
         } else {
             None
         };
+        // `let s = par(op) f() ~~ g() ~~ h()`: the parallel reduce. The peers run concurrently and
+        // fold with `op` into `s`. Recognized before the general value parse because `par` is a
+        // statement keyword, not an expression.
+        if self.peek() == Some(&Token::Eq) && self.tokens.get(self.pos + 1) == Some(&Token::Par) {
+            self.expect(Token::Eq);
+            self.expect(Token::Par);
+            self.expect(Token::LParen);
+            let op = match self.advance() {
+                Token::Plus => BinOp::Add,
+                Token::Star => BinOp::Mul,
+                Token::Amp => BinOp::BitAnd,
+                Token::Pipe => BinOp::BitOr,
+                Token::Caret => BinOp::BitXor,
+                // Parsed so the checker can reject it with a clear message; not in the monoid set.
+                Token::Minus => BinOp::Sub,
+                Token::Slash => BinOp::Div,
+                other => panic!("`par(op)` reducer must be an operator, got {other:?}"),
+            };
+            self.expect(Token::RParen);
+            let mut peers = vec![self.parse_expr()];
+            while self.eat(Token::TildeTilde) {
+                peers.push(self.parse_expr());
+            }
+            return Stmt::ParReduce {
+                mutable,
+                name,
+                op,
+                peers,
+            };
+        }
         // `let x = value`, or `let mut x` / `let a[N]` with no initializer (0),
         // the C-style "declare now, assign later" that AI writers reach for.
         let value = if self.eat(Token::Eq) {

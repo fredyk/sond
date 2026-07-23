@@ -150,6 +150,24 @@ fn par_let_binds_each_peer_result_by_source_position() {
 }
 
 #[test]
+fn par_reduce_folds_peer_results_with_a_commutative_op() {
+    // `let s = par(+) ...` runs the peers on threads and folds their results with `+`. 10+20+12=42.
+    let sum = "\
+        fn a() -> i64 { 10 }\n\
+        fn b() -> i64 { 20 }\n\
+        fn c() -> i64 { 12 }\n\
+        fn main() -> i64 { let s = par(+) a() ~~ b() ~~ c()\n s }";
+    assert_eq!(compile_and_run(sum), 42, "par(+) sums the peer results");
+    // `par(*)` multiplies: 2*3*7 = 42.
+    let prod = "\
+        fn a() -> i64 { 2 }\n\
+        fn b() -> i64 { 3 }\n\
+        fn c() -> i64 { 7 }\n\
+        fn main() -> i64 { let s = par(*) a() ~~ b() ~~ c()\n s }";
+    assert_eq!(compile_and_run(prod), 42, "par(*) multiplies the peer results");
+}
+
+#[test]
 fn compiles_and_runs_early_return_on_real_x64() {
     assert_eq!(
         compile_and_run("fn f() -> i64 { let x = 5\nreturn x + x\n }"),

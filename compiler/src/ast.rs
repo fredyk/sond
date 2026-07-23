@@ -251,6 +251,17 @@ pub enum Stmt {
         names: Vec<String>,
         peers: Vec<Expr>,
     },
+    /// `let s = par(+) f() ~~ g() ~~ h()`: the parallel REDUCE. The peers run concurrently and
+    /// their results are folded with `op` into a single value bound to `name`. Because the peers
+    /// finish in an unspecified order, `op` MUST be commutative and associative (a commutative
+    /// monoid: `+ * & | ^`), so the result is identical under every schedule (RFC-0008 §5.3).
+    /// A non-commutative reducer (`-`, `/`) is a compile error.
+    ParReduce {
+        mutable: bool,
+        name: String,
+        op: BinOp,
+        peers: Vec<Expr>,
+    },
 }
 
 /// An expression (used in bodies and in `requires`/`ensures` propositions).

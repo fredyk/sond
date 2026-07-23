@@ -92,7 +92,7 @@ fn check_block(block: &Block, env: &mut Env) -> Result<Ty, TypeError> {
                     infer(p, env)?;
                 }
             }
-            Stmt::ParLet { peers, .. } => {
+            Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
                 for p in peers {
                     infer(p, env)?;
                 }

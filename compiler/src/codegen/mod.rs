@@ -423,6 +423,12 @@ fn collect_locals(block: &Block, out: &mut Vec<String>) {
                     out.push(n.clone());
                 }
             }
+            Stmt::ParReduce { name, peers, .. } => {
+                for p in peers {
+                    collect_locals_in_expr(p, out);
+                }
+                out.push(name.clone());
+            }
             Stmt::Return(Some(e)) => collect_locals_in_expr(e, out),
             Stmt::Return(None) => {}
             Stmt::For { cond, body, .. } => {
@@ -468,6 +474,11 @@ fn collect_arrays(block: &Block, out: &mut Vec<(String, i64)>) {
                 }
             }
             Stmt::ParLet { peers, .. } => {
+                for p in peers {
+                    collect_arrays_in_expr(p, out);
+                }
+            }
+            Stmt::ParReduce { peers, .. } => {
                 for p in peers {
                     collect_arrays_in_expr(p, out);
                 }
@@ -1048,6 +1059,39 @@ impl Codegen {
         }
     }
 
+    /// Emits `let s = par(op) f() ~~ g() ~~ h()` (RFC-0008 §5.1a, the parallel reduce). The peers
+    /// are spawned with result cells and joined like `par`-let, then their results are folded with
+    /// `op` into a single value bound to `name`. `op` is a commutative-associative operator (the
+    /// checker guarantees it), so folding the cells in any order gives the same result: the value
+    /// is independent of which thread finished first (RFC-0008 §5.3).
+    fn emit_par_reduce(&mut self, name: &str, op: &BinOp, peers: &[Expr]) {
+        let ctid_start = self.spawn_ctids.len();
+        let mut cells = Vec::with_capacity(peers.len());
+        for peer in peers {
+            let cell = format!("sond_par_result_{}", self.all_result_cells.len());
+            self.all_result_cells.push(cell.clone());
+            self.emit_spawn_capturing(peer, Some(&cell));
+            cells.push(cell);
+        }
+        let par_ctids: Vec<String> = self.spawn_ctids.split_off(ctid_start);
+        self.emit_join(&par_ctids);
+        // Fold the results into %rax with the monoid op.
+        let insn = match op {
+            BinOp::Add => "addq",
+            BinOp::Mul => "imulq",
+            BinOp::BitAnd => "andq",
+            BinOp::BitOr => "orq",
+            BinOp::BitXor => "xorq",
+            other => unreachable!("check_par_reduce_op rejects a non-monoid reducer: {other:?}"),
+        };
+        self.line(&format!("    movq {}(%rip), %rax", cells[0]));
+        for cell in &cells[1..] {
+            self.line(&format!("    {insn} {cell}(%rip), %rax"));
+        }
+        let off = self.slot(name);
+        self.line(&format!("    movq %rax, {off}(%rbp)"));
+    }
+
     /// Spawns `call` on a new thread. If `result_cell` is `Some`, the child stores the call's
     /// return value (%rax) into that cell just before it exits, so the parent can read the peer's
     /// result after the join (the `par`-let binding). The store happens strictly before `SYS_exit`,
@@ -1311,6 +1355,9 @@ impl Codegen {
                 Stmt::Spawn(call) => self.emit_spawn(call),
                 Stmt::Par(peers) => self.emit_par(peers),
                 Stmt::ParLet { names, peers, .. } => self.emit_par_let(names, peers),
+                Stmt::ParReduce {
+                    name, op, peers, ..
+                } => self.emit_par_reduce(name, op, peers),
                 Stmt::Return(e) => {
                     match e {
                         Some(e) => self.expr(e),

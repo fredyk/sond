@@ -634,7 +634,7 @@ fn desugar_stmt(
                 desugar_expr(p, fields, sizes, locals, methods);
             }
         }
-        Stmt::ParLet { peers, .. } => {
+        Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
             for p in peers {
                 desugar_expr(p, fields, sizes, locals, methods);
             }
