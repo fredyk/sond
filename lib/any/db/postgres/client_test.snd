@@ -107,6 +107,267 @@ fn srv_send_error(fd: i64, msg: i64) {
     write_buf(fd, b, e)
 }
 
+// --- scripted SCRAM-SHA-256 server (child): offers SASL, then verifies the client proof and
+// answers with a correct ServerSignature, so the happy path exercises the real crypto both
+// ways. Uses the same scram-flow primitives the client does (available transitively). ---
+
+// AuthenticationSASL ('R' code 10) offering exactly SCRAM-SHA-256 (a NUL-terminated name,
+// then the empty name that ends the mechanism list).
+fn srv_send_sasl_offer(fd: i64) {
+    let b[64]
+    poke8(b, 82)                                    // 'R'
+    pg_put_u32be(b + 5, 10)                         // AuthenticationSASL
+    let mech = "SCRAM-SHA-256"
+    let mut i = 0
+    for i < 13 { poke8(b + 9 + i, peek8(mech + i)); i = i + 1 }
+    poke8(b + 9 + 13, 0)                            // mechanism name NUL
+    poke8(b + 9 + 14, 0)                            // empty name ends the list
+    pg_put_u32be(b + 1, 23)                         // 4 self + 4 code + 14 mech + 1
+    write_buf(fd, b, 24)
+}
+
+// AuthenticationSASLContinue/Final ('R' | int32 len | int32 code | data).
+fn srv_send_sasl_data(fd: i64, code: i64, data: i64, datalen: i64) {
+    let b = heap_alloc(512)
+    poke8(b, 82)                                    // 'R'
+    pg_put_u32be(b + 5, code)
+    let mut i = 0
+    for i < datalen { poke8(b + 9 + i, peek8(data + i)); i = i + 1 }
+    pg_put_u32be(b + 1, 8 + datalen)               // 4 self + 4 code + data
+    write_buf(fd, b, 9 + datalen)
+}
+
+// The whole server side of a SCRAM-SHA-256 exchange for password "pencil". Returns 1 if the
+// client proof verified (and it answered AuthenticationSASLFinal + Ok + ReadyForQuery), 0 not.
+fn srv_scram(fd: i64) -> i64 {
+    srv_send_sasl_offer(fd)
+
+    // SASLInitialResponse: mechanism cstr, then int32 initial-response length, then the
+    // client-first-message "n,,n=<user>,r=<client nonce>".
+    let m = heap_alloc(4096)
+    if pg_read_msg(fd, m, 4096) <= 0 { return 0 }
+    let mut q = 5
+    for peek8(m + q) != 0 { q = q + 1 }             // skip the mechanism name
+    q = q + 1
+    let irlen = pg_get_u32be(m + q)
+    q = q + 4
+    let cfbare = m + q + 3                           // skip the GS2 header "n,,"
+    let cfbarelen = irlen - 3
+    let cnonce[128]
+    let cnoncelen = scram_attr(cfbare, cfbarelen, 114, cnonce)   // r=
+
+    // salt is the fixed byte pattern 1..16; iteration count 4096.
+    let salt[16]
+    let mut i = 0
+    for i < 16 { poke8(salt + i, i + 1); i = i + 1 }
+    let saltb64[32]
+    let saltb64len = b64_encode(salt, 16, saltb64)
+    let snonce = "SscramServerNonce01"              // fixed 19-char server nonce
+    let snoncelen = 19
+
+    // server-first = "r=<client+server nonce>,s=<salt b64>,i=4096"
+    let sf[256]
+    let mut s = 0
+    poke8(sf + 0, 114); poke8(sf + 1, 61); s = 2    // "r="
+    s = scram_app(sf, s, cnonce, cnoncelen)
+    s = scram_app(sf, s, snonce, snoncelen)
+    poke8(sf + s, 44); poke8(sf + s + 1, 115); poke8(sf + s + 2, 61); s = s + 3   // ",s="
+    s = scram_app(sf, s, saltb64, saltb64len)
+    poke8(sf + s, 44); poke8(sf + s + 1, 105); poke8(sf + s + 2, 61); s = s + 3   // ",i="
+    poke8(sf + s, 52); poke8(sf + s + 1, 48); poke8(sf + s + 2, 57); poke8(sf + s + 3, 54)
+    s = s + 4                                       // "4096"
+    let sflen = s
+    srv_send_sasl_data(fd, 11, sf, sflen)           // AuthenticationSASLContinue
+
+    // SASLResponse: the client-final "c=biws,r=<full nonce>,p=<proof b64>". Read it into a
+    // SEPARATE buffer: cfbare still points into `m` (the initial response) and the AuthMessage
+    // needs it, so reusing `m` here would clobber it.
+    let m2 = heap_alloc(4096)
+    if pg_read_msg(fd, m2, 4096) <= 0 { return 0 }
+    let cflen = pg_get_u32be(m2 + 1) - 4
+    let cf = m2 + 5
+    let proofb64[64]
+    let pb64len = scram_attr(cf, cflen, 112, proofb64)   // p=
+    let proof[48]
+    b64_decode(proofb64, pb64len, proof)
+
+    // client-final-without-proof, then AuthMessage, then the expected ClientProof.
+    let cfwop[256]
+    let mut w = 0
+    poke8(cfwop + 0, 99); poke8(cfwop + 1, 61); poke8(cfwop + 2, 98)     // "c=b"
+    poke8(cfwop + 3, 105); poke8(cfwop + 4, 119); poke8(cfwop + 5, 115)  // "iws"
+    poke8(cfwop + 6, 44); poke8(cfwop + 7, 114); poke8(cfwop + 8, 61)    // ",r="
+    w = 9
+    w = scram_app(cfwop, w, cnonce, cnoncelen)
+    w = scram_app(cfwop, w, snonce, snoncelen)
+    let cfwoplen = w
+    let auth[1024]
+    let mut a = 0
+    a = scram_app(auth, a, cfbare, cfbarelen)
+    poke8(auth + a, 44); a = a + 1
+    a = scram_app(auth, a, sf, sflen)
+    poke8(auth + a, 44); a = a + 1
+    a = scram_app(auth, a, cfwop, cfwoplen)
+    let authlen = a
+
+    let salted[32]
+    scram_salted_password("pencil", 6, salt, 16, 4096, salted)
+    let ckey[32]
+    scram_client_key(salted, ckey)
+    let skey[32]
+    scram_stored_key(ckey, skey)
+    let csig[32]
+    scram_client_signature(skey, auth, authlen, csig)
+    let expected[32]
+    scram_client_proof(ckey, csig, expected)
+    i = 0
+    for i < 32 {
+        if peek8(expected + i) != peek8(proof + i) { return 0 }
+        i = i + 1
+    }
+
+    // proof verified: answer with the ServerSignature, then Ok and ReadyForQuery.
+    let serverkey[32]
+    scram_server_key(salted, serverkey)
+    let ssig[32]
+    scram_server_signature(serverkey, auth, authlen, ssig)
+    let vbuf[64]
+    poke8(vbuf + 0, 118); poke8(vbuf + 1, 61)       // "v="
+    let vlen = 2 + b64_encode(ssig, 32, vbuf + 2)
+    srv_send_sasl_data(fd, 12, vbuf, vlen)          // AuthenticationSASLFinal
+    srv_send_auth(fd, 0)                            // AuthenticationOk
+    srv_send_ready(fd)
+    1
+}
+
+// Runs the SCRAM exchange far enough to answer the client-final, but replies with a WRONG
+// ServerSignature: the client must reject it (a server that cannot prove it holds the stored
+// key is not trusted). Does not verify the client proof; it only needs to reach the reply.
+fn srv_scram_bad_serversig(fd: i64) {
+    srv_send_sasl_offer(fd)
+    let m = heap_alloc(4096)
+    if pg_read_msg(fd, m, 4096) <= 0 { return }
+    let mut q = 5
+    for peek8(m + q) != 0 { q = q + 1 }
+    q = q + 1
+    let irlen = pg_get_u32be(m + q)
+    q = q + 4
+    let cfbare = m + q + 3
+    let cnonce[128]
+    let cnoncelen = scram_attr(cfbare, irlen - 3, 114, cnonce)
+    let salt[16]
+    let mut i = 0
+    for i < 16 { poke8(salt + i, i + 1); i = i + 1 }
+    let saltb64[32]
+    let saltb64len = b64_encode(salt, 16, saltb64)
+    let sf[256]
+    let mut s = 0
+    poke8(sf + 0, 114); poke8(sf + 1, 61); s = 2
+    s = scram_app(sf, s, cnonce, cnoncelen)
+    s = scram_app(sf, s, "SscramServerNonce01", 19)
+    poke8(sf + s, 44); poke8(sf + s + 1, 115); poke8(sf + s + 2, 61); s = s + 3
+    s = scram_app(sf, s, saltb64, saltb64len)
+    poke8(sf + s, 44); poke8(sf + s + 1, 105); poke8(sf + s + 2, 61); s = s + 3
+    poke8(sf + s, 52); poke8(sf + s + 1, 48); poke8(sf + s + 2, 57); poke8(sf + s + 3, 54); s = s + 4
+    srv_send_sasl_data(fd, 11, sf, s)
+    let m2 = heap_alloc(4096)
+    if pg_read_msg(fd, m2, 4096) <= 0 { return }
+    // SASLFinal with a bogus "v=" (base64 of 32 zero bytes): a signature the client cannot match.
+    let z[32]
+    i = 0
+    for i < 32 { poke8(z + i, 0); i = i + 1 }
+    let vbuf[64]
+    poke8(vbuf + 0, 118); poke8(vbuf + 1, 61)
+    let vlen = 2 + b64_encode(z, 32, vbuf + 2)
+    srv_send_sasl_data(fd, 12, vbuf, vlen)
+}
+
+test "pg client: SCRAM-SHA-256 authentication over loopback" {
+    let port = 54334
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        srv_drain_startup(afd)
+        let ok = srv_scram(afd)
+        close_fd(afd)
+        syscall(SYS_exit, 1 - ok)                   // exit 0 on a verified proof
+    }
+
+    let conn = pgx_connect("127.0.0.1", port, "user", "pencil", "db")
+    assert_ne(conn, 0)
+    assert_eq(pgx_ok(conn), 1)                       // authenticated via SCRAM
+    pgx_close(conn)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    assert_eq((st[0] >> 8) & 255, 0)                 // the server verified the client proof
+}
+
+// The server asks for SASL but hangs up before the server-first message: the client's SCRAM
+// exchange must fail the connection, not hang or proceed unauthenticated.
+test "pg client: SASL offered then hung up fails the connection" {
+    let port = 54335
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        srv_drain_startup(afd)
+        srv_send_sasl_offer(afd)                     // ask for SASL, then hang up
+        close_fd(afd)
+        syscall(SYS_exit, 0)
+    }
+
+    assert_eq(pgx_connect("127.0.0.1", port, "user", "pencil", "db"), 0)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+
+// The server completes the exchange but returns a WRONG ServerSignature: the client must not
+// trust it, because the server has not proven it holds the stored key.
+test "pg client: a bad SCRAM ServerSignature fails the connection" {
+    let port = 54336
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        srv_drain_startup(afd)
+        srv_scram_bad_serversig(afd)
+        close_fd(afd)
+        syscall(SYS_exit, 0)
+    }
+
+    assert_eq(pgx_connect("127.0.0.1", port, "user", "pencil", "db"), 0)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+
 test "pg client: connect (cleartext), query, and read rows over loopback" {
     let port = 54329
     let ip = 0x7f000001

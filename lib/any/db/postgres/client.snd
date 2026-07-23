@@ -5,12 +5,13 @@
 // `pgx_*` connection API. It only does I/O and framing; the message byte layout lives in
 // wire.snd and the row/column assembly in result.snd (both socket-free and unit-tested).
 //
-// Auth supported here: trust (AuthenticationOk) and cleartext password. MD5 and
-// SCRAM-SHA-256 are follow-ups (SCRAM needs base64 + PBKDF2, not yet in crypto). The
-// host is a numeric IPv4 dotted quad (a local sidecar is 127.0.0.1); there is no DNS
-// resolver in the standard library yet.
+// Auth supported here: trust (AuthenticationOk), cleartext password, and SASL
+// SCRAM-SHA-256 (RFC 5802 / 7677), the default on modern PostgreSQL. MD5 is still a
+// follow-up. The host is a numeric IPv4 dotted quad (a local sidecar is 127.0.0.1);
+// there is no DNS resolver in the standard library yet.
 
 include "any/db/postgres/result.snd"
+include "any/crypto/scram/scram-flow.snd"
 include "x86_64/linux/net.snd"
 include "x86_64/linux/io.snd"
 include "any/strings.snd"
@@ -73,9 +74,74 @@ fn pg_send_password(fd: i64, pass: i64) {
     write_buf(fd, buf, 1 + len)
 }
 
+// Fills `buf` with `n` random bytes from the kernel, looping over short reads (a signal can
+// interrupt getrandom): a partial nonce would weaken the SCRAM exchange.
+fn pg_random(buf: i64, n: i64) {
+    let mut got = 0
+    for got < n {
+        let r = syscall(SYS_getrandom, buf + got, n - got, 0)
+        if r > 0 { got = got + r }
+    }
+}
+
+// Runs the client side of a SASL SCRAM-SHA-256 exchange (RFC 5802) on `fd`, after the server
+// asked for it (AuthenticationSASL). Sends the client-first, reads the server-first, sends
+// the client-final carrying the ClientProof, and verifies the server-final ServerSignature.
+// Returns 1 if the server proved knowledge of the password, 0 on any failure. The caller's
+// loop then reads AuthenticationOk and ReadyForQuery as usual.
+fn pg_sasl_scram(fd: i64, user: i64, pass: i64) -> i64 {
+    // client nonce: base64 of 18 random bytes (24 printable chars, none of them a comma).
+    let rnd[18]
+    pg_random(rnd, 18)
+    let nonce[32]
+    let noncelen = b64_encode(rnd, 18, nonce)
+    // client-first-message-bare, then the initial response with the GS2 header "n,,".
+    let cfbare[256]
+    let cfbarelen = scram_client_first_bare(user, strlen(user), nonce, noncelen, cfbare)
+    let ir[300]
+    poke8(ir + 0, 110); poke8(ir + 1, 44); poke8(ir + 2, 44)   // "n,,"
+    let mut i = 0
+    for i < cfbarelen { poke8(ir + 3 + i, peek8(cfbare + i)); i = i + 1 }
+    let irlen = 3 + cfbarelen
+    let ib = heap_alloc(512)
+    let iblen = pg_sasl_initial(ib, "SCRAM-SHA-256", ir, irlen)
+    write_buf(fd, ib, iblen)
+
+    // AuthenticationSASLContinue (code 11): the server-first-message.
+    let m = heap_alloc(4096)
+    if pg_read_msg(fd, m, 4096) <= 0 { return 0 }
+    if pg_msg_type(m) != 82 { return 0 }            // 'R'
+    if pg_auth_type(m) != 11 { return 0 }
+    let sf = pg_sasl_data_ptr(m)
+    let sflen = pg_sasl_data_len(m)
+
+    // client-final carrying the ClientProof; keep the ServerSignature to check the reply.
+    let cf = heap_alloc(512)
+    let srvsig[32]
+    let cflen = scram_client_final(pass, strlen(pass), cfbare, cfbarelen, sf, sflen, cf, srvsig)
+    let rb = heap_alloc(512)
+    let rblen = pg_sasl_response(rb, cf, cflen)
+    write_buf(fd, rb, rblen)
+
+    // AuthenticationSASLFinal (code 12): verify the server-final "v=<ServerSignature>".
+    if pg_read_msg(fd, m, 4096) <= 0 { return 0 }
+    if pg_auth_type(m) != 12 { return 0 }
+    let vb64[64]
+    let vb64len = scram_attr(pg_sasl_data_ptr(m), pg_sasl_data_len(m), 118, vb64)   // v=
+    if vb64len < 0 { return 0 }
+    let vsig[48]
+    b64_decode(vb64, vb64len, vsig)
+    i = 0
+    for i < 32 {
+        if peek8(vsig + i) != peek8(srvsig + i) { return 0 }
+        i = i + 1
+    }
+    1
+}
+
 // Opens a TCP connection to `host`:`port`, runs the startup + authentication exchange
-// (trust or cleartext password), and drains to ReadyForQuery. Returns a connection
-// handle ([fd, ok]) with ok=1 on success, or 0 on a hard failure.
+// (trust, cleartext password, or SASL SCRAM-SHA-256), and drains to ReadyForQuery. Returns
+// a connection handle ([fd, ok]) with ok=1 on success, or 0 on a hard failure.
 fn pgx_connect(host: i64, port: i64, user: i64, pass: i64, db: i64) -> i64 {
     let fd = sock(AF_INET, SOCK_STREAM, 0)
     if fd < 0 { return 0 }
@@ -95,7 +161,11 @@ fn pgx_connect(host: i64, port: i64, user: i64, pass: i64, db: i64) -> i64 {
             let code = pg_auth_type(mbuf)
             if code == 0 { ok = 1 }                 // AuthenticationOk
             if code == 3 { pg_send_password(fd, pass) }   // cleartext requested
-            if code != 0 { if code != 3 { close_fd(fd); return 0 } }   // md5/SASL unsupported
+            if code == 10 {                         // SASL: run SCRAM-SHA-256
+                if pg_sasl_scram(fd, user, pass) != 1 { close_fd(fd); return 0 }
+            }
+            // reject anything else (MD5 = 5, etc.): never proceed unauthenticated
+            if code != 0 { if code != 3 { if code != 10 { close_fd(fd); return 0 } } }
         }
         if t == 69 { close_fd(fd); return 0 }       // 'E' ErrorResponse during startup
         if t == 90 { break }                        // 'Z' ReadyForQuery: startup done
