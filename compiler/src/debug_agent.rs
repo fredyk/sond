@@ -118,6 +118,103 @@ fn __dbg_emit_signed(fd: i64, n: i64) {
     __dbg_emit_int(fd, n)
 }
 
+// Find the symbol-table function record whose line span contains `line`; returns its index, or -1.
+// The symbol table (__dbg_nfuncs / __dbg_fn / __dbg_loc / __dbg_names) is synthesized by the compiler
+// in a --debug build and read here raw. __dbg_fn is 4 words per function: lo, hi, local_start, count.
+fn __dbg_find_fn(line: i64) -> (r: i64) {
+    let mut fi = 0
+    for fi < __dbg_nfuncs {
+        let lo = peek64(__dbg_fn + fi * 32)
+        let hi = peek64(__dbg_fn + fi * 32 + 8)
+        if line >= lo {
+            if line <= hi { return fi }
+        }
+        fi = fi + 1
+    }
+    0 - 1
+}
+
+// Send the name bytes of local `k` (__dbg_loc is 3 words per local: offset, name_start, name_len).
+fn __dbg_send_name(k: i64) {
+    let ns = peek64(__dbg_loc + k * 24 + 8)
+    let nl = peek64(__dbg_loc + k * 24 + 16)
+    syscall(1, __dbg_fd, __dbg_names + ns, nl)
+}
+
+// Dump every named local of the function at `line` as `K<name>=<value>\n` lines, terminated by
+// `.\n`, so the client knows the list is complete. Values are read from the live frame.
+fn __dbg_locals(line: i64) {
+    let fi = __dbg_find_fn(line)
+    if fi >= 0 {
+        let start = peek64(__dbg_fn + fi * 32 + 16)
+        let count = peek64(__dbg_fn + fi * 32 + 24)
+        let mut k = start
+        let last = start + count
+        for k < last {
+            let head[1]
+            poke8(head, 75)
+            syscall(1, __dbg_fd, head, 1)
+            __dbg_send_name(k)
+            let eq[1]
+            poke8(eq, 61)
+            syscall(1, __dbg_fd, eq, 1)
+            __dbg_emit_signed(__dbg_fd, peek64(__dbg_frame + peek64(__dbg_loc + k * 24)))
+            k = k + 1
+        }
+    }
+    let dot[2]
+    poke8(dot, 46)
+    poke8(dot + 1, 10)
+    syscall(1, __dbg_fd, dot, 2)
+}
+
+// Does the requested name buf[off..off+len] equal local k's name?
+fn __dbg_name_eq(buf: i64, off: i64, len: i64, k: i64) -> (r: i64) {
+    let nl = peek64(__dbg_loc + k * 24 + 16)
+    if nl != len { return 0 }
+    let ns = peek64(__dbg_loc + k * 24 + 8)
+    let mut i = 0
+    for i < len {
+        if peek8(buf + off + i) != peek8(__dbg_names + ns + i) { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+// Inspect a single named local: reply `V<value>\n` if found at this line, else `E\n`. The name is
+// buf[1..], up to the first byte that is not a name character (so a trailing newline stops it).
+fn __dbg_inspect(line: i64, buf: i64, n: i64) {
+    let mut reqlen = 0
+    for 1 + reqlen < n {
+        if peek8(buf + 1 + reqlen) <= 32 { return __dbg_inspect_found(line, buf, reqlen) }
+        reqlen = reqlen + 1
+    }
+    __dbg_inspect_found(line, buf, reqlen)
+}
+
+fn __dbg_inspect_found(line: i64, buf: i64, reqlen: i64) {
+    let fi = __dbg_find_fn(line)
+    if fi >= 0 {
+        let start = peek64(__dbg_fn + fi * 32 + 16)
+        let last = start + peek64(__dbg_fn + fi * 32 + 24)
+        let mut k = start
+        for k < last {
+            if __dbg_name_eq(buf, 1, reqlen, k) == 1 {
+                let v[1]
+                poke8(v, 86)
+                syscall(1, __dbg_fd, v, 1)
+                __dbg_emit_signed(__dbg_fd, peek64(__dbg_frame + peek64(__dbg_loc + k * 24)))
+                return
+            }
+            k = k + 1
+        }
+    }
+    let e[2]
+    poke8(e, 69)
+    poke8(e + 1, 10)
+    syscall(1, __dbg_fd, e, 2)
+}
+
 // Walk the saved-rbp chain from the current frame, sending each return address as `T<addr>\n`, so
 // the client can render a backtrace. Bounded, and stops if the chain is not strictly ascending (the
 // stack grows downward, so each caller frame sits at a higher address than its callee).
@@ -265,6 +362,8 @@ fn __dbg_interact(line: i64) {
             __dbg_emit_signed(__dbg_fd, peek64(__dbg_frame + off))
         }
         if c == 116 { __dbg_backtrace() }
+        if c == 108 { __dbg_locals(line) }
+        if c == 105 { __dbg_inspect(line, buf, n) }
         if c == 113 {
             syscall(3, __dbg_fd, 0, 0)
             __dbg_fd = 0 - 1
@@ -302,8 +401,11 @@ mod tests {
         let (toks, lines) = tokenize_located(&program);
         let mut p = Parser::with_lines(toks, lines);
         let funcs = p.parse_program();
-        let globals = p.take_globals();
+        let mut globals = p.take_globals();
         let structs = p.take_structs();
+        // The agent references the RFC-0016 §3.3 symbol-table globals, which the --debug driver
+        // synthesizes from the program's functions; add them here just as the driver does.
+        globals.extend(crate::debug_symtab::build_symtab_globals(&funcs));
 
         // The agent declares its state as module globals and its logic as `__dbg_*` functions.
         assert!(
@@ -324,6 +426,15 @@ mod tests {
         assert!(
             funcs.iter().any(|f| f.name == "__dbg_bp_has"),
             "the breakpoint membership test is present"
+        );
+        // Named inspection reads the synthesized symbol table.
+        assert!(
+            funcs.iter().any(|f| f.name == "__dbg_locals"),
+            "the named-locals dump is present"
+        );
+        assert!(
+            globals.iter().any(|g| g.name == "__dbg_names"),
+            "the symbol table's name blob is in scope for the agent"
         );
 
         // The prover must accept the agent: its buffers use raw poke/peek (no bounds obligation) and

@@ -128,9 +128,19 @@ socket, deliberately narrower than the framed protocol so it could land end to e
   base (`movq %rbp, %rsi`), stored in `__dbg_frame`. Two primitives read it directly, needing no
   symbol table: `x<offset>` reads `peek64(frame + offset)` (locals sit at negative offsets), and a
   backtrace walks the saved-rbp chain (`[frame]` is the caller frame, `[frame+8]` its return
-  address), emitting each return address. Names are not resolved yet; that needs the line-to-locals
-  table of §3.3, which is the next slice, so for now the client examines by offset and renders raw
-  return addresses.
+  address), emitting each return address.
+- **Named inspection (§3.3 symbol table).** A `--debug` build folds the line-to-locals table into the
+  program as data globals (`build_symtab_globals`): `__dbg_nfuncs`, `__dbg_fn` (per function
+  `[line_lo, line_hi, local_start, local_count]`), `__dbg_loc` (per local `[frame_offset, name_start,
+  name_len]`), and `__dbg_names` (every name concatenated). The offsets come from the shared
+  `frame_layout`, so they match the prologue exactly; only single-word params and locals are listed
+  (arrays and the return slot are skipped). The agent finds the function whose line span holds the
+  current line, then answers `locals` (dump every `name=value` for that function, read live from the
+  frame) and `inspect <name>` (one variable by name). This is what makes the raw offsets and
+  addresses above human-readable, and it keeps the debugger self-contained: no sidecar file, no
+  symbol the agent could not reference, the table is just more Sond data in the same binary. A local
+  whose `let` has not executed yet still reads its slot (it shows whatever is there), as in a C
+  debugger before a variable's line.
 - **Attach.** On the first checkpoint the agent binds `/tmp/sond.dbg.sock`, announces the path on
   stderr, and BLOCKS on `accept` until a client connects, so `main` is caught from its first line.
   The listener is bound exactly once; after a detach or a client disconnect the program runs free and
@@ -142,16 +152,19 @@ socket, deliberately narrower than the framed protocol so it could land end to e
   (run until the given source line), `b<line>\n` / `d<line>\n` (add / delete a breakpoint,
   acknowledged as `B<line>\n` / `D<line>\n`, without resuming), `x<offset>\n` (examine, replies
   `V<value>\n` with the signed word at `frame + offset`, without resuming), `t` (backtrace, replies a
-  `T<addr>\n` line per stack frame, without resuming), `q` (detach and run free). A client disconnect
-  is treated as `c`.
+  `T<addr>\n` line per stack frame, without resuming), `l` (locals, replies a `K<name>=<value>\n` line
+  per named local of the current function then a `.\n` terminator, without resuming), `i<name>\n`
+  (inspect one named local, replies `V<value>\n` or `E\n` if not found, without resuming), `q` (detach
+  and run free). A client disconnect is treated as `c`.
 - **Reentrancy.** Codegen excludes the whole `__dbg_` namespace from the checkpoint, so the agent (and
   every helper it calls to serve the socket) never re-enters itself.
 
-The remaining slices are NAMED inspection (mapping the raw offsets and return addresses above to
-local names, types, and source locations through the §3.3 line-to-locals table) and the framed
-protocol of §3.4. This slice already serves the full control surface, pause, step-in / over / out,
-breakpoints, run-to-line, continue, detach, plus raw state inspection (examine a frame word, walk the
-call stack), over the socket against a native binary.
+What remains is refinement: resolving return addresses in the backtrace to function names and source
+lines (the reverse of the §3.3 table), formatting non-scalar locals (structs and slices, not just
+single words), scoping a local to the line its `let` runs, and the framed protocol of §3.4. The
+current implementation already serves the whole working model, pause, step-in / over / out,
+breakpoints, run-to-line, continue, detach, examine a frame word, walk the call stack, and read locals
+by name, over the socket against a native binary, with the debugger written entirely in Sond.
 
 ### 3.3 The line -> locals symbol table (the compiler already knows this)
 

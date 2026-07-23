@@ -123,7 +123,7 @@ fn main() -> ExitCode {
     // backtrace, a good oracle explains the rejection.
     std::panic::set_hook(Box::new(|_| {}));
     let src_for_parse = src.clone();
-    let (mut funcs, globals, mut structs, enums, ports, providers, uses) =
+    let (mut funcs, mut globals, mut structs, enums, ports, providers, uses) =
         match std::panic::catch_unwind(move || {
             let (toks, lines) = tokenize_located(&src_for_parse);
             let mut p = Parser::with_lines(toks, lines);
@@ -142,6 +142,13 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+
+    // RFC-0016 §3.3: in a --debug build, fold the line-to-locals symbol table into the program as
+    // data globals the agent reads, so it can name the debuggee's locals. Added before the checks and
+    // the prover so the agent's references to these globals resolve like any other.
+    if debug {
+        globals.extend(sondc::debug_symtab::build_symtab_globals(&funcs));
+    }
 
     // RFC-0014: bind each `use Port` to the one provider for the active target. A missing,
     // ambiguous, or signature-incomplete provider is a compile error here, before lowering.

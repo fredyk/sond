@@ -8,6 +8,7 @@ pub mod ast;
 pub mod check;
 pub mod codegen;
 pub mod debug_agent;
+pub mod debug_symtab;
 pub mod decimal;
 pub mod desugar;
 pub mod eval;

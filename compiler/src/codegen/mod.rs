@@ -424,6 +424,69 @@ pub fn emit_uefi_g(globals: &[Global], structs: &[StructDef], funcs: &[Function]
     cg.out
 }
 
+/// The rbp-relative frame layout of a function: where every parameter, local, array, and the
+/// optional return slot live. Computed once so both the codegen prologue and the RFC-0016 symbol
+/// table (which lets the debugger name locals) agree on every offset. Offsets are negative (locals
+/// sit below the saved frame pointer).
+pub(crate) struct FrameLayout {
+    /// Parameters as (name, offset, kind), in declaration order.
+    pub params: Vec<(String, i32, Ty)>,
+    /// Scalar and array-pointer locals as (name, offset), in first-seen order. Array names appear
+    /// here too (their one-word pointer slot); `arrays` records their storage separately.
+    pub locals: Vec<(String, i32)>,
+    /// Arrays as (name, pointer-slot offset, storage-base offset).
+    pub arrays: Vec<(String, i32, i32)>,
+    /// The return-value slot offset (present iff the function has `ensures`).
+    pub ret_slot: Option<i32>,
+    /// The named return bound to that slot, if any.
+    pub ret_name: Option<(String, i32)>,
+    /// Total frame size, 16-byte aligned.
+    pub frame: i32,
+}
+
+pub(crate) fn frame_layout(func: &Function) -> FrameLayout {
+    let mut slot = 0i32;
+    let mut params = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for p in &func.params {
+        slot += 1;
+        params.push((p.name.clone(), -8 * slot, kind_of_type(&p.ty)));
+        seen.insert(p.name.clone());
+    }
+    let mut names = Vec::new();
+    collect_locals(&func.body, &mut names);
+    let mut locals = Vec::new();
+    for name in &names {
+        if !seen.contains(name) {
+            slot += 1;
+            seen.insert(name.clone());
+            locals.push((name.clone(), -8 * slot));
+        }
+    }
+    let off_of = |n: &str| -> i32 {
+        if let Some((_, o, _)) = params.iter().find(|(nm, _, _)| nm == n) {
+            return *o;
+        }
+        locals.iter().find(|(nm, _)| nm == n).map(|(_, o)| *o).unwrap_or(0)
+    };
+    let mut arr = Vec::new();
+    collect_arrays(&func.body, &mut arr);
+    let mut arrays = Vec::new();
+    for (name, len) in &arr {
+        slot += *len as i32;
+        arrays.push((name.clone(), off_of(name), -8 * slot));
+    }
+    let (ret_slot, ret_name) = if func.ensures.is_empty() {
+        (None, None)
+    } else {
+        slot += 1;
+        let off = -8 * slot;
+        (Some(off), func.ret_name.clone().map(|rn| (rn, off)))
+    };
+    let frame = (slot * 8 + 15) & !15;
+    FrameLayout { params, locals, arrays, ret_slot, ret_name, frame }
+}
+
 /// Collects the names of all local bindings in a block (recursing into the
 /// branches of `if` expressions), in definition order.
 fn collect_locals(block: &Block, out: &mut Vec<String>) {
@@ -885,45 +948,27 @@ impl Codegen {
         // Does this function return a small struct/enum by value? If so, the body leaves
         // its base ADDRESS in %rax; the return point expands that to the value in RAX:RDX.
         self.cur_ret_struct = self.ret_struct_words(&func.ret);
-        let mut slot = 0i32;
-        // Parameters take the first stack slots (filled from the arg registers
-        // in the prologue); then the block's locals.
-        for p in &func.params {
-            slot += 1;
-            self.locals.insert(p.name.clone(), -8 * slot);
-            self.var_types.insert(p.name.clone(), kind_of_type(&p.ty));
+        // The rbp-relative frame layout: parameters first, then locals, then array storage, then the
+        // optional return slot. Computed by `frame_layout` so this prologue and the RFC-0016 symbol
+        // table (which names the locals for the debugger) agree on every offset.
+        let layout = frame_layout(func);
+        for (name, off, kind) in &layout.params {
+            self.locals.insert(name.clone(), *off);
+            self.var_types.insert(name.clone(), *kind);
         }
-        let mut names = Vec::new();
-        collect_locals(&func.body, &mut names);
-        for name in &names {
-            if !self.locals.contains_key(name) {
-                slot += 1;
-                self.locals.insert(name.clone(), -8 * slot);
-            }
+        for (name, off) in &layout.locals {
+            self.locals.insert(name.clone(), *off);
         }
-        // Fixed-size stack arrays `let a[N]`: reserve N words below the scalars and
-        // point the name's slot at the base (element 0 at the lowest address).
-        let mut arrays = Vec::new();
-        collect_arrays(&func.body, &mut arrays);
-        let mut array_bases = Vec::new();
-        for (name, len) in &arrays {
-            slot += *len as i32;
-            let base_off = -8 * slot; // element 0
-            array_bases.push((self.locals[name], base_off));
+        // Fixed-size stack arrays `let a[N]`: the name's pointer slot is made to point at the
+        // reserved N-word storage region (element 0 at the lowest address).
+        let array_bases: Vec<(i32, i32)> =
+            layout.arrays.iter().map(|(_, ptr, base)| (*ptr, *base)).collect();
+        // The return slot binds the named return (e.g. `vat_amount`) so `ensures` can read it.
+        if let Some((rn, off)) = &layout.ret_name {
+            self.locals.insert(rn.clone(), *off);
         }
-        // A slot to hold the return value while the postconditions are checked;
-        // the named return (e.g. `vat_amount`) binds to it so `ensures` can read it.
-        let ret_slot = if func.ensures.is_empty() {
-            None
-        } else {
-            slot += 1;
-            let off = -8 * slot;
-            if let Some(rn) = &func.ret_name {
-                self.locals.insert(rn.clone(), off);
-            }
-            Some(off)
-        };
-        let frame = (slot * 8 + 15) & !15; // 16-byte aligned
+        let ret_slot = layout.ret_slot;
+        let frame = layout.frame;
         self.ret_label = self.fresh_label("ret");
         self.spawn_ctids.clear();
 
