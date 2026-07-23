@@ -1,0 +1,77 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/asn1/der.snd: a minimal ASN.1 DER reader (ITU-T X.690), the foundation for
+// walking X.509 certificates in a TLS client. DER encodes every value as a TLV:
+//   tag(1) | length | contents[length]
+// The length is either short form (one byte < 128 = the length) or long form (first
+// byte 0x80|n, then n big-endian length bytes). This reader is a pure cursor walker over
+// a caller-provided buffer, no allocation, so it is testable byte for byte with no I/O.
+//
+// v1 scope: single-byte tags (enough for the SEQUENCE/SET/INTEGER/BIT STRING/OID/OCTET
+// STRING that make up a certificate's structure) and definite lengths (DER never uses
+// the indefinite form). Multi-byte high-tag-number tags are not needed for X.509.
+
+let DER_INTEGER = 2
+let DER_BITSTRING = 3
+let DER_OCTETSTRING = 4
+let DER_NULL = 5
+let DER_OID = 6
+let DER_SEQUENCE = 48        // 0x30, constructed
+let DER_SET = 49            // 0x31, constructed
+
+// Decodes the length field at position `p` (the byte just after a tag). Writes the
+// decoded length into `len_out[0]` and returns the position of the first content byte.
+fn der_read_len(buf: i64, p: i64, len_out: i64) -> i64 {
+    let b0 = peek8(buf + p)
+    if b0 < 128 {
+        len_out[0] = b0                             // short form: the byte is the length
+        return p + 1
+    }
+    let nbytes = b0 & 0x7f                           // long form: n length bytes follow
+    let mut v = 0
+    let mut i = 0
+    for i < nbytes {
+        v = (v << 8) | peek8(buf + p + 1 + i)
+        i = i + 1
+    }
+    len_out[0] = v
+    p + 1 + nbytes
+}
+
+// Reads one TLV at `pos`, filling `out`: out[0]=tag, out[1]=content start position,
+// out[2]=content length. Returns the position just past this TLV (the next sibling).
+fn der_tlv(buf: i64, pos: i64, out: i64) -> i64 {
+    out[0] = peek8(buf + pos)
+    let ln[1]
+    let cstart = der_read_len(buf, pos + 1, ln)
+    out[1] = cstart
+    out[2] = ln[0]
+    cstart + ln[0]
+}
+
+// The content start of the value at `pos` (for a constructed type like SEQUENCE, this
+// is the position of its first child TLV).
+fn der_enter(buf: i64, pos: i64) -> i64 {
+    let ln[1]
+    der_read_len(buf, pos + 1, ln)
+}
+
+// The tag byte of the value at `pos`.
+fn der_tag(buf: i64, pos: i64) -> i64 { peek8(buf + pos) }
+
+// 1 if the OID value at `pos` (a DER OID TLV) has contents byte-equal to `oid[0..oidlen]`,
+// else 0. Used to match algorithm identifiers (e.g. ecPublicKey, sha256WithRSA).
+fn der_oid_eq(buf: i64, pos: i64, oid: i64, oidlen: i64) -> i64 {
+    let out[3]
+    der_tlv(buf, pos, out)
+    if out[0] != DER_OID { return 0 }
+    if out[2] != oidlen { return 0 }
+    let cstart = out[1]
+    let mut i = 0
+    for i < oidlen {
+        if peek8(buf + cstart + i) != peek8(oid + i) { return 0 }
+        i = i + 1
+    }
+    1
+}
