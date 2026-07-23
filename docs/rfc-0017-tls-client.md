@@ -3,7 +3,7 @@
 | Field       | Value                                                                 |
 |-------------|-----------------------------------------------------------------------|
 | RFC         | 0017                                                                  |
-| Status      | Draft (design; record layer + handshake buildable now, public-CA auth gated on new primitives) |
+| Status      | Partially implemented (record layer landed in `lib/any/tls/record.snd`; key schedule + handshake next; public-CA auth gated on new primitives) |
 | Date        | 2026-07-23                                                           |
 | Authors     | Jhon Magdalena Vila                                                         |
 | Motivation  | Talk to an HTTPS upstream without an external TLS-terminating sidecar: the program speaks TLS itself, in Sond |
@@ -87,7 +87,13 @@ originate TLS to a public CA endpoint; the honest fallbacks are (a) keep a TLS-t
 front of the public upstream, or (b) route through an edge we control and speak Tier A (PSK / ed25519)
 to that edge, letting it do the public-internet TLS. This RFC does not pretend Tier B is done.
 
-## 4. The record layer (Tier A and B share this)
+## 4. The record layer (Tier A and B share this) — IMPLEMENTED
+
+Landed in `lib/any/tls/record.snd` (`tls_nonce` / `tls_seal` / `tls_open`), verified by
+`lib/any/tls/record_test.snd`: the per-record nonce construction, the `TLSCiphertext` framing, the
+content type carried inside the encrypted `TLSInnerPlaintext`, the round trip, and the malformed and
+tampered cases (truncated frame, declared-length mismatch, oversized inner, missing content type,
+flipped tag). The design below is what the code implements.
 
 A TLS record is a 5-byte header `{ ContentType(1), legacy_version(2)=0x0303, length(2) }` followed by
 the fragment. After the handshake keys are installed, every record is a `TLSCiphertext`: the plaintext

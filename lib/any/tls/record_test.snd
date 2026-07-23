@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of tls/record.snd, the TLS 1.3 record layer (RFC 8446 §5).
+//
+// The AEAD itself is verified against RFC 8439 in its own suite; here we pin the
+// record-layer logic the record adds on top of it: the per-record nonce (iv XOR
+// seq, right-aligned big-endian, §5.3), the TLSCiphertext framing (§5.2), the
+// content-type carried inside the encrypted TLSInnerPlaintext, and that a tampered
+// record fails to open. The nonce is deterministic arithmetic, so its vector is
+// checked by construction rather than borrowed from a document.
+
+include "any/tls/record.snd"
+include "x86_64/linux/testing.snd"
+
+let mut r_key[32]
+let mut r_iv[12]
+let mut r_nonce[12]
+let mut r_content[64]
+let mut r_record[256]
+let mut r_plain[256]
+let mut r_big[4090]      // content over the per-record cap, to exercise the seal size guard
+let mut r_over[4110]     // a record whose declared inner exceeds the open scratch guard
+
+// iv[i]=0x40+i, seq=0x0001020304050607; the low 8 iv bytes xor the big-endian seq,
+// the high 4 are untouched: 40 41 42 43 | 44^00 45^01 46^02 47^03 | 48^04 .. 4b^07
+//                         = 40 41 42 43   44 44 44 44               4c 4c 4c 4c
+test "tls record: the per-record nonce is iv xor big-endian seq (RFC 8446 §5.3)" {
+    let mut i = 0
+    for i < 12 { poke8(r_iv + i, 0x40 + i); i = i + 1 }
+    tls_nonce(r_iv, 0x0001020304050607, r_nonce)
+    assert_eq(peek8(r_nonce + 0), 0x40)
+    assert_eq(peek8(r_nonce + 3), 0x43)
+    assert_eq(peek8(r_nonce + 4), 0x44)
+    assert_eq(peek8(r_nonce + 5), 0x44)
+    assert_eq(peek8(r_nonce + 6), 0x44)
+    assert_eq(peek8(r_nonce + 7), 0x44)
+    assert_eq(peek8(r_nonce + 8), 0x4c)
+    assert_eq(peek8(r_nonce + 11), 0x4c)
+}
+
+// seq=0 leaves the iv unchanged: nonce == iv.
+test "tls record: seq 0 yields the iv unchanged" {
+    let mut i = 0
+    for i < 12 { poke8(r_iv + i, 0x11 + i); i = i + 1 }
+    tls_nonce(r_iv, 0, r_nonce)
+    i = 0
+    for i < 12 { assert_eq(peek8(r_nonce + i), peek8(r_iv + i)); i = i + 1 }
+}
+
+// Seal a handshake message, then open it back: same content, same type, and the
+// wire framing is a TLSCiphertext with opaque_type=23, version=0x0303, and the
+// length covering inner (content + 1 type byte) + the 16-byte tag.
+test "tls record: seal then open round-trips content and type (RFC 8446 §5.2)" {
+    let mut i = 0
+    for i < 32 { poke8(r_key + i, 0x80 + i); i = i + 1 }
+    i = 0
+    for i < 12 { poke8(r_iv + i, 0x40 + i); i = i + 1 }
+    // content = "hello TLS" (9 bytes), type 22 = handshake
+    poke8(r_content + 0, 104); poke8(r_content + 1, 101); poke8(r_content + 2, 108)
+    poke8(r_content + 3, 108); poke8(r_content + 4, 111); poke8(r_content + 5, 32)
+    poke8(r_content + 6, 84); poke8(r_content + 7, 76); poke8(r_content + 8, 83)
+
+    let reclen = tls_seal(r_key, r_iv, 0, 22, r_content, 9, r_record)
+    // 5 header + (9 content + 1 type = 10 inner) + 16 tag = 31
+    assert_eq(reclen, 31)
+    assert_eq(peek8(r_record + 0), 23)      // opaque_type = application_data
+    assert_eq(peek8(r_record + 1), 0x03)    // legacy_record_version high
+    assert_eq(peek8(r_record + 2), 0x03)    // legacy_record_version low
+    assert_eq(peek8(r_record + 3), 0x00)    // length high: (10 + 16) = 26 = 0x001a
+    assert_eq(peek8(r_record + 4), 0x1a)    // length low
+
+    let got = tls_open(r_key, r_iv, 0, r_record, reclen, r_plain)
+    // returns (content_type << 32) | plaintext_len
+    assert_eq(got >> 32, 22)
+    assert_eq(got & 0xffffffff, 9)
+    i = 0
+    for i < 9 { assert_eq(peek8(r_plain + i), peek8(r_content + i)); i = i + 1 }
+}
+
+// A single flipped ciphertext byte must make the AEAD tag check fail: open returns -1.
+test "tls record: a tampered record fails to open" {
+    let mut i = 0
+    for i < 32 { poke8(r_key + i, 0x80 + i); i = i + 1 }
+    i = 0
+    for i < 12 { poke8(r_iv + i, 0x40 + i); i = i + 1 }
+    poke8(r_content + 0, 65); poke8(r_content + 1, 66); poke8(r_content + 2, 67)
+    let reclen = tls_seal(r_key, r_iv, 7, 23, r_content, 3, r_record)
+    // flip one byte of the encrypted body (past the 5-byte header)
+    poke8(r_record + 6, peek8(r_record + 6) ^ 1)
+    let got = tls_open(r_key, r_iv, 7, r_record, reclen, r_plain)
+    assert_eq(got, 0 - 1)
+}
+
+// A record shorter than a 5-byte header + one inner byte + 16-byte tag is malformed.
+test "tls record: a truncated record is rejected" {
+    assert_eq(tls_open(r_key, r_iv, 0, r_record, 21, r_plain), 0 - 1)
+}
+
+// The header length field must match the bytes actually presented.
+test "tls record: a declared-length mismatch is rejected" {
+    let mut i = 0
+    for i < 32 { poke8(r_key + i, 0x80 + i); i = i + 1 }
+    i = 0
+    for i < 12 { poke8(r_iv + i, 0x40 + i); i = i + 1 }
+    poke8(r_content + 0, 65)
+    let reclen = tls_seal(r_key, r_iv, 0, 23, r_content, 1, r_record)
+    // claim one byte fewer than we hand over
+    assert_eq(tls_open(r_key, r_iv, 0, r_record, reclen - 1, r_plain), 0 - 1)
+}
+
+// Sealing more than the per-record cap is refused rather than overrunning the scratch.
+test "tls record: sealing over the per-record cap is refused" {
+    assert_eq(tls_seal(r_key, r_iv, 0, 22, r_big, 4085, r_record), 0 - 1)
+}
+
+// A record whose declared inner length exceeds the open scratch is refused before the AEAD.
+test "tls record: an oversized declared inner is refused" {
+    // clen = 4097 -> ilen = 4081 > 4080; reclen = 5 + clen = 4102 must match.
+    poke8(r_over + 0, 23); poke8(r_over + 1, 0x03); poke8(r_over + 2, 0x03)
+    poke8(r_over + 3, (4097 >> 8) & 0xff); poke8(r_over + 4, 4097 & 0xff)
+    assert_eq(tls_open(r_key, r_iv, 0, r_over, 4102, r_plain), 0 - 1)
+}
+
+// A record that authenticates but decodes to all-zero inner has no content type: rejected
+// (RFC 8446 §5.2, "if a receiving implementation does not find a non-zero octet ... error").
+test "tls record: a record with no content type is rejected" {
+    let mut i = 0
+    for i < 32 { poke8(r_key + i, 0x80 + i); i = i + 1 }
+    i = 0
+    for i < 12 { poke8(r_iv + i, 0x40 + i); i = i + 1 }
+    // Craft a valid AEAD record over a 16-byte all-zero inner, at the record layer directly.
+    i = 0
+    for i < 16 { poke8(r_content + i, 0); i = i + 1 }
+    poke8(r_record + 0, 23); poke8(r_record + 1, 0x03); poke8(r_record + 2, 0x03)
+    poke8(r_record + 3, 0x00); poke8(r_record + 4, 0x20)   // clen = 16 inner + 16 tag = 32
+    tls_nonce(r_iv, 0, r_nonce)
+    aead_seal(r_key, r_nonce, r_record, 5, r_content, 16, r_record + 5, r_record + 21)
+    assert_eq(tls_open(r_key, r_iv, 0, r_record, 37, r_plain), 0 - 1)
+}

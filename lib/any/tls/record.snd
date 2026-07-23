@@ -1,0 +1,92 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/tls/record.snd: the TLS 1.3 record layer (RFC 8446 §5), over the
+// ChaCha20-Poly1305 AEAD for the TLS_CHACHA20_POLY1305_SHA256 cipher suite.
+//
+// A protected record is a TLSCiphertext (§5.2):
+//   opaque_type = application_data(23) | legacy_record_version = 0x0303 | uint16 length
+//   | encrypted_record
+// where encrypted_record = AEAD-Seal(key, nonce, header, inner), and the inner
+// plaintext (TLSInnerPlaintext, §5.4) is `content || real_content_type` (this v1
+// adds no zero padding). The 5-byte record header is the AEAD associated data, and
+// its length field is len(inner) + 16 (the Poly1305 tag).
+//
+// The nonce (§5.3) is the 12-byte write IV with the 64-bit record sequence number
+// XORed into its low 8 bytes, right-aligned and big-endian. The caller owns the IV
+// and the sequence counter (one pair per key/direction) and passes seq per record.
+
+include "any/crypto/aead/chacha20poly1305.snd"
+
+// The largest inner plaintext (content + type + padding) a single record carries in
+// this v1, bounded by the AEAD's one-call scratch. TLS caps records at 2^14, but the
+// ChaCha20-Poly1305 helper works one buffer at a time, so records stay well under it.
+let TLS_INNER_MAX = 4080
+
+// Writes the 12-byte per-record nonce into `out`: iv, with `seq` XORed big-endian
+// into the last 8 bytes (the first 4 bytes are the iv unchanged).
+fn tls_nonce(iv: i64, seq: i64, out: i64) {
+    let mut i = 0
+    for i < 4 { poke8(out + i, peek8(iv + i)); i = i + 1 }
+    let mut j = 0
+    for j < 8 {
+        let sb = (seq >>> (8 * (7 - j))) & 0xff
+        poke8(out + 4 + j, peek8(iv + 4 + j) ^ sb)
+        j = j + 1
+    }
+}
+
+// Seals `content` (n bytes) of TLS content type `ctype` into a full TLSCiphertext
+// record in `out`. key=32B, iv=12B, seq=this record's sequence number. Returns the
+// total record length written (5 + n + 1 + 16), or -1 if `n` exceeds the per-record cap.
+fn tls_seal(key: i64, iv: i64, seq: i64, ctype: i64, content: i64, n: i64, out: i64) -> i64 {
+    if n + 1 > TLS_INNER_MAX { return 0 - 1 }
+    // inner (TLSInnerPlaintext) = content || real content type; no zero padding in v1.
+    let inner[4080]
+    let mut i = 0
+    for i < n { poke8(inner + i, peek8(content + i)); i = i + 1 }
+    poke8(inner + n, ctype)
+    let ilen = n + 1
+    let clen = ilen + 16                   // encrypted_record = ciphertext + 16-byte tag
+    // 5-byte record header, also the AEAD associated data.
+    poke8(out + 0, 23)                      // opaque_type = application_data
+    poke8(out + 1, 0x03)                    // legacy_record_version = 0x0303
+    poke8(out + 2, 0x03)
+    poke8(out + 3, (clen >> 8) & 0xff)
+    poke8(out + 4, clen & 0xff)
+    let nonce[12]
+    tls_nonce(iv, seq, nonce)
+    // ct -> out+5, tag -> out+5+ilen; the header (out..out+5) is the aad.
+    aead_seal(key, nonce, out, 5, inner, ilen, out + 5, out + 5 + ilen)
+    5 + clen
+}
+
+// Opens the TLSCiphertext record in `rec` (reclen bytes) with key/iv/seq, writing
+// the recovered content into `out`. Returns (content_type << 32) | plaintext_len on
+// success, or -1 if the record is malformed or the AEAD tag check fails.
+fn tls_open(key: i64, iv: i64, seq: i64, rec: i64, reclen: i64, out: i64) -> i64 {
+    if reclen < 5 + 1 + 16 { return 0 - 1 }        // header + at least one inner byte + tag
+    let clen = (peek8(rec + 3) << 8) | peek8(rec + 4)
+    if 5 + clen != reclen { return 0 - 1 }         // declared length must match the frame
+    let ilen = clen - 16                           // >= 1 here: reclen >= 22 and 5+clen == reclen
+    if ilen > TLS_INNER_MAX { return 0 - 1 }        // guards the fixed-size inner scratch below
+    let nonce[12]
+    tls_nonce(iv, seq, nonce)
+    let inner[4080]
+    let ct = rec + 5
+    let tag = rec + 5 + ilen
+    if aead_open(key, nonce, rec, 5, ct, ilen, tag, inner) != 0 { return 0 - 1 }
+    // TLSInnerPlaintext = content || content_type || zeros*; the content type is the
+    // last non-zero octet (RFC 8446 §5.2). Scan back over any zero padding.
+    let mut p = ilen - 1
+    for p >= 0 {
+        if peek8(inner + p) != 0 { break }
+        p = p - 1
+    }
+    if p < 0 { return 0 - 1 }                       // all zeros: no content type present
+    let ctype = peek8(inner + p)
+    let plen = p                                     // content occupies inner[0..p]
+    let mut i = 0
+    for i < plen { poke8(out + i, peek8(inner + i)); i = i + 1 }
+    (ctype << 32) | plen
+}
