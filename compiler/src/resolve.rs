@@ -43,10 +43,13 @@ fn private_free_fn_names(src: &str) -> HashSet<String> {
     names
 }
 
-/// Rewrites whole-identifier occurrences of each name in `names` to `name__f<id>` in one line,
-/// OUTSIDE string/char literals and line comments (so a helper's name inside a string is never
-/// touched). Preserves the line count, so source-line info stays accurate.
-fn mangle_line(line: &str, names: &HashSet<String>, id: u32) -> String {
+/// Rewrites whole-identifier occurrences of each name in `map` to `name__f<id>` in one line,
+/// where `<id>` is the DEFINING file's id (map value), OUTSIDE string/char literals and line
+/// comments (so a helper's name inside a string is never touched). The map, keyed by the file
+/// being emitted, resolves each colliding private to the definition visible in THAT file's
+/// include closure, so a caller and the definition it includes get the same mangled name even
+/// across files. Preserves the line count, so source-line info stays accurate.
+fn mangle_line(line: &str, map: &std::collections::HashMap<String, u32>) -> String {
     let chars: Vec<char> = line.chars().collect();
     let mut out = String::new();
     let mut i = 0;
@@ -82,7 +85,7 @@ fn mangle_line(line: &str, names: &HashSet<String>, id: u32) -> String {
                     i += 1;
                 }
                 let ident: String = chars[start..i].iter().collect();
-                if names.contains(&ident) {
+                if let Some(id) = map.get(&ident) {
                     out.push_str(&format!("{ident}__f{id}"));
                 } else {
                     out.push_str(&ident);
@@ -110,19 +113,52 @@ pub fn resolve_includes(entry: &Path) -> std::io::Result<String> {
 /// transitively-included dependencies are assumed tested by their own suites, so they do not
 /// drag down the entry's coverage. (The testing library is filtered out downstream.)
 pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet<String>)> {
-    // First pass: assign each included file an id and find the private helper names that collide
-    // across files (defined privately in more than one). Only those are file-scoped below.
-    let mut cseen = HashSet::new();
-    let mut file_ids = std::collections::HashMap::new();
-    let mut name_files: std::collections::HashMap<String, HashSet<u32>> =
+    // First pass: walk the include graph, recording each file's private helper names, its direct
+    // include edges, and a mangling id for the files that define private helpers. From that graph
+    // we precompute, per file, how each COLLIDING private name (defined privately in more than one
+    // file) resolves within THAT file's include closure.
+    let mut g = IncludeGraph::default();
+    let mut gseen = HashSet::new();
+    build_graph(entry, 0, &mut gseen, &mut g);
+
+    // A private name is colliding if two or more DISTINCT files define it privately.
+    let mut name_files: std::collections::HashMap<&String, HashSet<&PathBuf>> =
         std::collections::HashMap::new();
-    let mut file_ctr = 0u32;
-    collect_collisions(entry, 0, &mut cseen, &mut file_ids, &mut name_files, &mut file_ctr);
+    for (path, names) in &g.defines {
+        for n in names {
+            name_files.entry(n).or_default().insert(path);
+        }
+    }
     let colliding: HashSet<String> = name_files
-        .into_iter()
+        .iter()
         .filter(|(_, files)| files.len() > 1)
-        .map(|(name, _)| name)
+        .map(|(name, _)| (*name).clone())
         .collect();
+
+    // Per file, resolve each colliding name to the single definition visible in its include
+    // closure (the file itself plus everything it includes, transitively). If the closure sees
+    // more than one definer, the name is genuinely ambiguous from that file and is left alone.
+    let mut resolve_map: std::collections::HashMap<PathBuf, std::collections::HashMap<String, u32>> =
+        std::collections::HashMap::new();
+    if !colliding.is_empty() {
+        for f in g.edges.keys() {
+            let closure = include_closure(f, &g.edges);
+            let mut map = std::collections::HashMap::new();
+            for name in &colliding {
+                let ids: HashSet<u32> = closure
+                    .iter()
+                    .filter(|c| g.defines.get(*c).is_some_and(|d| d.contains(name)))
+                    .filter_map(|c| g.ids.get(c).copied())
+                    .collect();
+                if ids.len() == 1 {
+                    map.insert(name.clone(), *ids.iter().next().unwrap());
+                }
+            }
+            if !map.is_empty() {
+                resolve_map.insert(f.clone(), map);
+            }
+        }
+    }
 
     let mut seen = HashSet::new();
     let mut out = String::new();
@@ -135,8 +171,7 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
         0,
         &mut depth0,
         &mut depth1,
-        &file_ids,
-        &colliding,
+        &resolve_map,
     )?;
     // Which functions is this entry on the hook for covering?
     //
@@ -162,19 +197,23 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
     Ok((out, scope))
 }
 
-/// First pass: walk the include tree and record, per INCLUDED file (by canonical path), a unique id
-/// and its private free-function names, and which names are defined privately in MORE THAN ONE
-/// file. Only those COLLIDING names are file-scoped in the emit pass; a private helper with a
-/// unique name is left untouched, so nothing that currently calls it across files (Sond has no
-/// visibility enforcement yet) breaks. Read errors are ignored here; the emit pass reports them.
-fn collect_collisions(
-    path: &Path,
-    depth: usize,
-    seen: &mut HashSet<PathBuf>,
-    file_ids: &mut std::collections::HashMap<PathBuf, u32>,
-    name_files: &mut std::collections::HashMap<String, HashSet<u32>>,
-    file_ctr: &mut u32,
-) {
+/// The include graph gathered in the first pass, keyed by canonical file path: each file's
+/// private free-function `defines`, its direct include `edges`, and a mangling `id` for the
+/// files that define private helpers (assigned in visit order, at depth >= 1). The entry file
+/// (depth 0) gets no id, so a program's own functions are never mangled.
+#[derive(Default)]
+struct IncludeGraph {
+    ids: std::collections::HashMap<PathBuf, u32>,
+    defines: std::collections::HashMap<PathBuf, HashSet<String>>,
+    edges: std::collections::HashMap<PathBuf, Vec<PathBuf>>,
+    ctr: u32,
+}
+
+/// First pass: walk the include tree once and populate [`IncludeGraph`]. Each visited file records
+/// its private helper names and the canonical paths it directly includes, so the emit pass can
+/// resolve a colliding private to the definition visible in each file's include closure. Read
+/// errors are ignored here; the emit pass reports them.
+fn build_graph(path: &Path, depth: usize, seen: &mut HashSet<PathBuf>, g: &mut IncludeGraph) {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !seen.insert(canon.clone()) {
         return;
@@ -182,30 +221,43 @@ fn collect_collisions(
     let Ok(src) = std::fs::read_to_string(path) else {
         return;
     };
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    if depth >= 1 {
-        let names = private_free_fn_names(&src);
-        if !names.is_empty() {
-            *file_ctr += 1;
-            let id = *file_ctr;
-            file_ids.insert(canon, id);
-            for n in names {
-                name_files.entry(n).or_default().insert(id);
-            }
-        }
+    let names = private_free_fn_names(&src);
+    // Only files that define private helpers (below the entry) need a mangling id.
+    if depth >= 1 && !names.is_empty() {
+        g.ctr += 1;
+        g.ids.insert(canon.clone(), g.ctr);
     }
+    g.defines.insert(canon.clone(), names);
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut es = Vec::new();
     for line in src.lines() {
         if let Some(rel) = parse_include(line.trim()) {
-            collect_collisions(
-                &resolve_target(dir, rel),
-                depth + 1,
-                seen,
-                file_ids,
-                name_files,
-                file_ctr,
-            );
+            let target = resolve_target(dir, rel);
+            let tcanon = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+            es.push(tcanon);
+            build_graph(&target, depth + 1, seen, g);
         }
     }
+    g.edges.insert(canon, es);
+}
+
+/// The set of files reachable from `start` through include edges, including `start` itself: the
+/// file's include closure, i.e. everything it can see in Sond's single flat namespace.
+fn include_closure(
+    start: &PathBuf,
+    edges: &std::collections::HashMap<PathBuf, Vec<PathBuf>>,
+) -> HashSet<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut stack = vec![start.clone()];
+    while let Some(p) = stack.pop() {
+        if !seen.insert(p.clone()) {
+            continue;
+        }
+        if let Some(es) = edges.get(&p) {
+            stack.extend(es.iter().cloned());
+        }
+    }
+    seen
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -216,8 +268,7 @@ fn resolve_into(
     depth: usize,
     depth0: &mut HashSet<String>,
     depth1: &mut HashSet<String>,
-    file_ids: &std::collections::HashMap<PathBuf, u32>,
-    colliding: &HashSet<String>,
+    resolve_map: &std::collections::HashMap<PathBuf, std::collections::HashMap<String, u32>>,
 ) -> std::io::Result<()> {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !seen.insert(canon) {
@@ -234,17 +285,12 @@ fn resolve_into(
     })?;
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    // File-scope only the COLLIDING private helpers of this included file (names also defined
-    // privately in another file), renaming them `name__f<id>`. A unique private name is left
-    // alone, so nothing that currently calls it across files breaks. The entry file (depth 0) has
-    // no id, so `main` and the program's own functions are never touched.
-    let mangle = file_ids.get(&canon).and_then(|&id| {
-        let names: HashSet<String> = private_free_fn_names(&src)
-            .into_iter()
-            .filter(|n| colliding.contains(n))
-            .collect();
-        (!names.is_empty()).then_some((names, id))
-    });
+    // File-scope the COLLIDING private helpers this file can see, renaming each occurrence to
+    // `name__f<id>` where `<id>` is the defining file in THIS file's include closure. That binds a
+    // cross-file CALLER to the same mangled name as the definition it includes, not just the file
+    // that defines the name. A unique private name is not in the map and is left alone. The entry
+    // file (depth 0) has no id, so `main` and the program's own functions are never renamed.
+    let mangle = resolve_map.get(&canon);
     for line in src.lines() {
         match parse_include(line.trim()) {
             Some(rel) => resolve_into(
@@ -254,14 +300,13 @@ fn resolve_into(
                 depth + 1,
                 depth0,
                 depth1,
-                file_ids,
-                colliding,
+                resolve_map,
             )?,
             None => {
                 let owned;
-                let line: &str = match &mangle {
-                    Some((names, id)) => {
-                        owned = mangle_line(line, names, *id);
+                let line: &str = match mangle {
+                    Some(map) => {
+                        owned = mangle_line(line, map);
                         &owned
                     }
                     None => line,
@@ -492,6 +537,57 @@ mod tests {
         );
         // The unique private `only_b` is NOT touched (nothing that calls it across files breaks).
         assert!(combined.contains("fn only_b()"), "a unique private helper is left alone");
+    }
+
+    #[test]
+    fn a_cross_file_call_to_a_colliding_private_binds_to_the_definer_in_its_closure() {
+        // The real bug behind the bignum `rbn_` workaround: two libs define the same PRIVATE
+        // name, and a THIRD file that includes only ONE of them CALLS it. That caller does not
+        // itself define the name, so the old emit pass (which mangled only names a file defines)
+        // left its call BARE, while both definitions were mangled per file. Result: the bare
+        // call resolved to nothing. A caller must bind to the definition visible in ITS include
+        // closure.
+        let root = std::env::temp_dir().join(format!("sond_xfile_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.snd"), "fn shared() -> i64 { 1 }").unwrap();
+        std::fs::write(root.join("b.snd"), "fn shared() -> i64 { 2 }").unwrap();
+        // c includes ONLY b, and calls `shared` without defining it: it must bind to b's `shared`.
+        std::fs::write(root.join("c.snd"), "include \"b.snd\"\npub fn c_call() -> i64 { shared() }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(&entry, "include \"a.snd\"\ninclude \"c.snd\"\nfn main() -> i64 { c_call() }").unwrap();
+        let combined = resolve_includes(&entry).unwrap();
+
+        // Both definitions are file-scoped: no bare `fn shared(` survives.
+        assert_eq!(
+            combined.matches("fn shared(").count(),
+            0,
+            "both colliding definitions are mangled:\n{combined}"
+        );
+        // c's cross-file call is NOT left bare (the bug): it is mangled.
+        assert!(
+            !combined.contains("{ shared() }"),
+            "c's cross-file call must be mangled, not left bare:\n{combined}"
+        );
+        // And it binds to the SAME mangled name as b's definition (`{ 2 }`), the definer in c's
+        // closure, NOT a's (`{ 1 }`).
+        let b_mangled = mangled_name_on_line_with(&combined, "{ 2 }");
+        assert!(
+            combined.contains(&format!("{{ {b_mangled}() }}")),
+            "c must call b's `{b_mangled}` (the definer it includes):\n{combined}"
+        );
+    }
+
+    // Extracts the `shared__f<id>` token from the (single) line that also contains `marker`.
+    fn mangled_name_on_line_with(combined: &str, marker: &str) -> String {
+        let line = combined
+            .lines()
+            .find(|l| l.contains("shared__f") && l.contains(marker))
+            .unwrap_or_else(|| panic!("no mangled `shared__f` line with `{marker}` in:\n{combined}"));
+        let start = line.find("shared__f").unwrap();
+        line[start..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect()
     }
 
     #[test]
