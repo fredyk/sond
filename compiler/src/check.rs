@@ -725,16 +725,17 @@ pub fn check_graph_acyclic(funcs: &[Function]) -> Result<(), String> {
 /// Rejects two top-level functions with the same name (after include flattening and method
 /// mangling, so methods `Type_m` never false-match). Two same-named free functions become two
 /// identical assembler labels: a `symbol already defined` link error whose cause is opaque. This
-/// catches it early and names the fix. The common case is a private helper of the same name in two
-/// different files (private functions are not yet file-scoped, so their names are program-global).
+/// catches it early and names the fix. Colliding PRIVATE helpers across files are already
+/// file-scoped away by the resolver, so a collision that reaches here is between PUBLIC functions
+/// (or the entry file), a genuine name clash the author must resolve.
 pub fn check_no_duplicate_functions(funcs: &[Function]) -> Result<(), String> {
     let mut seen: HashSet<&str> = HashSet::new();
     for f in funcs {
         if !seen.insert(f.name.as_str()) {
             return Err(format!(
-                "function `{}` is defined more than once. If these are private helpers in \
-                 different files, rename one: private functions are not yet file-scoped, so their \
-                 names must be unique across the whole program.",
+                "function `{}` is defined more than once (two `pub fn` of the same name across \
+                 files, or a clash with the entry file). Rename one so the program has a single \
+                 function of that name.",
                 f.name
             ));
         }
