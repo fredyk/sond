@@ -72,3 +72,85 @@ fn pg_msg_type(buf: i64) -> i64 { peek8(buf) }
 // The declared length of a backend message: the int32 after the type byte. It counts
 // itself, so the payload is (length - 4) bytes and the next message starts at 1+length.
 fn pg_msg_len(buf: i64) -> i64 { pg_get_u32be(buf + 1) }
+
+// Writes / reads a 2-byte big-endian integer (int16 counts and column attributes).
+fn pg_put_u16be(buf: i64, v: i64) { poke8(buf, (v >> 8) & 0xff); poke8(buf + 1, v & 0xff) }
+fn pg_get_u16be(buf: i64) -> i64 { (peek8(buf) << 8) | peek8(buf + 1) }
+
+// Reads a SIGNED 4-byte big-endian integer (a DataRow field length uses -1 for NULL).
+fn pg_get_i32be(buf: i64) -> i64 {
+    let v = pg_get_u32be(buf)
+    if v >= 2147483648 { v - 4294967296 } else { v }
+}
+
+// --- Backend message parsers (all operate on one framed message at `buf`) ---
+
+// Authentication ('R'): the int32 auth code in the payload. 0=OK, 3=cleartext,
+// 5=MD5 (+4 salt bytes follow), 10=SASL, 11=SASL-continue, 12=SASL-final.
+fn pg_auth_type(buf: i64) -> i64 { pg_get_u32be(buf + 5) }
+
+// RowDescription ('T'): the int16 field count.
+fn pg_rowdesc_ncols(buf: i64) -> i64 { pg_get_u16be(buf + 5) }
+
+// RowDescription: copy the `col`-th field name (NUL-terminated) into `out`, return its
+// length. Each field is a name cstr followed by an 18-byte fixed tail (OIDs, sizes).
+fn pg_rowdesc_name(buf: i64, col: i64, out: i64) -> i64 {
+    let mut p = buf + 7                             // past type, length, int16 count
+    let mut k = 0
+    for k < col {
+        for peek8(p) != 0 { p = p + 1 }             // skip the name cstr
+        p = p + 1 + 18                              // its NUL, then the fixed field tail
+        k = k + 1
+    }
+    let mut i = 0
+    for peek8(p + i) != 0 { poke8(out + i, peek8(p + i)); i = i + 1 }
+    poke8(out + i, 0)
+    i
+}
+
+// DataRow ('D'): the int16 field count.
+fn pg_datarow_nfields(buf: i64) -> i64 { pg_get_u16be(buf + 5) }
+
+// DataRow: copy the `idx`-th field value (NUL-terminated) into `out`, return its byte
+// length, or -1 if the field is SQL NULL (in which case `out` is left untouched). Each
+// field is an int32 length (-1 = NULL) followed by that many value bytes.
+fn pg_datarow_field(buf: i64, idx: i64, out: i64) -> i64 {
+    let mut p = buf + 7                             // past type, length, int16 count
+    let mut k = 0
+    for k < idx {
+        let flen = pg_get_i32be(p)
+        p = p + 4
+        if flen > 0 { p = p + flen }
+        k = k + 1
+    }
+    let flen = pg_get_i32be(p)
+    if flen < 0 { return 0 - 1 }                    // NULL
+    p = p + 4
+    let mut i = 0
+    for i < flen { poke8(out + i, peek8(p + i)); i = i + 1 }
+    poke8(out + i, 0)
+    flen
+}
+
+// CommandComplete ('C'): a pointer to the NUL-terminated command tag ("SELECT 1", etc.).
+fn pg_cmdcomplete_tag(buf: i64) -> i64 { buf + 5 }
+
+// ErrorResponse ('E'): find the field whose type byte is `code` (e.g. 'M' message,
+// 'C' SQLSTATE, 'S' severity), copy its value into `out`, return its length; -1 if the
+// field is absent. Fields are `byte type, cstr value` pairs, ended by a 0 type byte.
+fn pg_error_field(buf: i64, code: i64, out: i64) -> i64 {
+    let mut p = buf + 5
+    for peek8(p) != 0 {
+        let t = peek8(p)
+        p = p + 1
+        if t == code {
+            let mut i = 0
+            for peek8(p + i) != 0 { poke8(out + i, peek8(p + i)); i = i + 1 }
+            poke8(out + i, 0)
+            return i
+        }
+        for peek8(p) != 0 { p = p + 1 }             // skip this field's value cstr
+        p = p + 1
+    }
+    0 - 1
+}

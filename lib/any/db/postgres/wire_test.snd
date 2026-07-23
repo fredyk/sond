@@ -8,6 +8,8 @@ include "any/db/postgres/wire.snd"
 include "x86_64/linux/testing.snd"
 
 let mut w_buf[128]
+let mut w_msg[128]
+let mut w_out[64]
 
 test "pg wire: u32 big-endian round-trips" {
     pg_put_u32be(w_buf, 196608)
@@ -55,4 +57,95 @@ test "pg wire: backend message header accessors" {
     poke8(w_buf + 5, 73)                           // 'I' (idle)
     assert_eq(pg_msg_type(w_buf), 90)
     assert_eq(pg_msg_len(w_buf), 5)
+}
+
+test "pg wire: int16 round-trips and int32 sign-extends" {
+    pg_put_u16be(w_buf, 513)                        // 0x0201
+    assert_eq(peek8(w_buf), 0x02)
+    assert_eq(peek8(w_buf + 1), 0x01)
+    assert_eq(pg_get_u16be(w_buf), 513)
+    pg_put_u32be(w_buf, 0xffffffff)
+    assert_eq(pg_get_i32be(w_buf), 0 - 1)          // -1, the NULL marker
+}
+
+// Authentication 'R' with code 5 (MD5).
+test "pg wire: Authentication code" {
+    poke8(w_msg, 82)                               // 'R'
+    pg_put_u32be(w_msg + 1, 12)
+    pg_put_u32be(w_msg + 5, 5)
+    assert_eq(pg_auth_type(w_msg), 5)
+}
+
+// RowDescription 'T' with two columns "id" and "name", 18-byte tails (all zero here).
+test "pg wire: RowDescription field count and names" {
+    poke8(w_msg, 84)                               // 'T'
+    pg_put_u16be(w_msg + 5, 2)                      // field count (length field is unused here)
+    let mut p = 7
+    // "id\0" then 18 zero bytes
+    poke8(w_msg + p, 105); poke8(w_msg + p + 1, 100); poke8(w_msg + p + 2, 0)
+    p = p + 3
+    let mut z = 0
+    for z < 18 { poke8(w_msg + p + z, 0); z = z + 1 }
+    p = p + 18
+    // "name\0" then 18 zero bytes
+    poke8(w_msg + p, 110); poke8(w_msg + p + 1, 97); poke8(w_msg + p + 2, 109)
+    poke8(w_msg + p + 3, 101); poke8(w_msg + p + 4, 0)
+    p = p + 5
+    z = 0
+    for z < 18 { poke8(w_msg + p + z, 0); z = z + 1 }
+
+    assert_eq(pg_rowdesc_ncols(w_msg), 2)
+    assert_eq(pg_rowdesc_name(w_msg, 0, w_out), 2)
+    assert_eq(peek8(w_out), 105); assert_eq(peek8(w_out + 1), 100); assert_eq(peek8(w_out + 2), 0)
+    assert_eq(pg_rowdesc_name(w_msg, 1, w_out), 4)
+    assert_eq(peek8(w_out), 110); assert_eq(peek8(w_out + 3), 101); assert_eq(peek8(w_out + 4), 0)
+}
+
+// DataRow 'D' with two fields: "42" and SQL NULL.
+test "pg wire: DataRow fields including NULL" {
+    poke8(w_msg, 68)                               // 'D'
+    pg_put_u16be(w_msg + 5, 2)                      // field count
+    pg_put_u32be(w_msg + 7, 2)                      // field 0 length = 2
+    poke8(w_msg + 11, 52); poke8(w_msg + 12, 50)   // "42"
+    pg_put_u32be(w_msg + 13, 0xffffffff)           // field 1 length = -1 (NULL)
+
+    assert_eq(pg_datarow_nfields(w_msg), 2)
+    assert_eq(pg_datarow_field(w_msg, 0, w_out), 2)
+    assert_eq(peek8(w_out), 52); assert_eq(peek8(w_out + 1), 50); assert_eq(peek8(w_out + 2), 0)
+    assert_eq(pg_datarow_field(w_msg, 1, w_out), 0 - 1)   // NULL
+}
+
+// CommandComplete 'C' carries the command tag as a cstr in its payload.
+test "pg wire: CommandComplete tag" {
+    poke8(w_msg, 67)                               // 'C'
+    // tag "SELECT 1\0" at payload
+    let tag = "SELECT 1"
+    let mut i = 0
+    for i < 8 { poke8(w_msg + 5 + i, peek8(tag + i)); i = i + 1 }
+    poke8(w_msg + 13, 0)
+    let t = pg_cmdcomplete_tag(w_msg)
+    assert_eq(peek8(t), 83)                        // 'S'
+    assert_eq(peek8(t + 7), 49)                    // '1'
+    assert_eq(peek8(t + 8), 0)
+}
+
+// ErrorResponse 'E': fields 'S' severity, 'M' message, ended by a 0 type byte.
+test "pg wire: ErrorResponse field lookup" {
+    poke8(w_msg, 69)                               // 'E'
+    let mut p = 5
+    poke8(w_msg + p, 83)                           // 'S'
+    p = p + 1
+    poke8(w_msg + p, 69); poke8(w_msg + p + 1, 82); poke8(w_msg + p + 2, 82)
+    poke8(w_msg + p + 3, 79); poke8(w_msg + p + 4, 82); poke8(w_msg + p + 5, 0)   // "ERROR\0"
+    p = p + 6
+    poke8(w_msg + p, 77)                           // 'M'
+    p = p + 1
+    poke8(w_msg + p, 98); poke8(w_msg + p + 1, 111); poke8(w_msg + p + 2, 111)
+    poke8(w_msg + p + 3, 109); poke8(w_msg + p + 4, 0)   // "boom\0"
+    p = p + 5
+    poke8(w_msg + p, 0)                            // terminator
+
+    assert_eq(pg_error_field(w_msg, 77, w_out), 4) // 'M' -> "boom"
+    assert_eq(peek8(w_out), 98); assert_eq(peek8(w_out + 3), 109); assert_eq(peek8(w_out + 4), 0)
+    assert_eq(pg_error_field(w_msg, 67, w_out), 0 - 1)   // 'C' absent
 }
