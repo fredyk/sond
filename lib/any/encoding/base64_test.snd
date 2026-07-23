@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of encoding/base64.snd against the RFC 4648 §10 test vectors and a full-byte
+// round trip.
+
+include "any/encoding/base64.snd"
+include "x86_64/linux/testing.snd"
+
+let mut b_in[300]
+let mut b_out[512]
+let mut b_back[300]
+
+// 1 if out[0..strlen(want)] equals the cstr `want`.
+fn b_eq(out: i64, want: i64) -> i64 {
+    let mut i = 0
+    for peek8(want + i) != 0 {
+        if peek8(out + i) != peek8(want + i) { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+// RFC 4648 §10: ""/"f"/"fo"/"foo"/"foob"/"fooba"/"foobar".
+test "base64: RFC 4648 encode vectors (all padding cases)" {
+    assert_eq(b64_encode("foobar", 6, b_out), 8)
+    assert_eq(b_eq(b_out, "Zm9vYmFy"), 1)           // no padding
+    assert_eq(b64_encode("fooba", 5, b_out), 8)
+    assert_eq(b_eq(b_out, "Zm9vYmE="), 1)           // one pad
+    assert_eq(b64_encode("foob", 4, b_out), 8)
+    assert_eq(b_eq(b_out, "Zm9vYg=="), 1)           // two pads
+    assert_eq(b64_encode("foo", 3, b_out), 4)
+    assert_eq(b_eq(b_out, "Zm9v"), 1)
+    assert_eq(b64_encode("f", 1, b_out), 4)
+    assert_eq(b_eq(b_out, "Zg=="), 1)
+    assert_eq(b64_encode("", 0, b_out), 0)
+}
+
+test "base64: RFC 4648 decode vectors" {
+    assert_eq(b64_decode("Zm9vYmFy", 8, b_out), 6)
+    assert_eq(b_eq(b_out, "foobar"), 1)
+    assert_eq(b64_decode("Zm9vYmE=", 8, b_out), 5)  // one pad -> 5 bytes
+    assert_eq(b_eq(b_out, "fooba"), 1)
+    assert_eq(b64_decode("Zg==", 4, b_out), 1)      // two pads -> 1 byte
+    assert_eq(peek8(b_out), 102)                     // 'f'
+}
+
+// A full 0..255 round trip exercises the whole alphabet in both directions.
+test "base64: a full-byte round trip is lossless" {
+    let mut i = 0
+    for i < 256 { poke8(b_in + i, i); i = i + 1 }
+    let enc = b64_encode(b_in, 256, b_out)
+    let dec = b64_decode(b_out, enc, b_back)
+    assert_eq(dec, 256)
+    i = 0
+    for i < 256 { assert_eq(peek8(b_back + i), i); i = i + 1 }
+}
+
+test "base64: a non-alphabet character has value -1" {
+    assert_eq(b64_val(33), 0 - 1)                    // '!'
+    assert_eq(b64_val(61), 0 - 1)                    // '=' is padding, not a value
+}
