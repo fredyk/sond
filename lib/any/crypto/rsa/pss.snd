@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/crypto/rsa/pss.snd: RSA-PSS signature verification with SHA-256 (RFC 8017 §8.1.2
+// / §9.1.2, salt length = hash length = 32), reusing the 2048-bit bignum modexp from
+// pkcs1v15.snd. This is the scheme TLS 1.3 CertificateVerify uses for RSA server keys
+// (rsa_pss_rsae_sha256), where PKCS#1 v1.5 is not allowed.
+
+include "any/crypto/rsa/pkcs1v15.snd"
+include "any/crypto/hash/sha256.snd"
+
+// MGF1 with SHA-256: writes `masklen` mask bytes to `out` from `seed` (seedlen bytes).
+fn mgf1_sha256(seed: i64, seedlen: i64, out: i64, masklen: i64) {
+    let buf[64]                                     // seed (<=32) || 4-byte counter
+    let mut i = 0
+    for i < seedlen { poke8(buf + i, peek8(seed + i)); i = i + 1 }
+    let digest[32]
+    let mut counter = 0
+    let mut off = 0
+    for off < masklen {
+        poke8(buf + seedlen + 0, (counter >> 24) & 0xff)
+        poke8(buf + seedlen + 1, (counter >> 16) & 0xff)
+        poke8(buf + seedlen + 2, (counter >> 8) & 0xff)
+        poke8(buf + seedlen + 3, counter & 0xff)
+        sha256_hash(buf, seedlen + 4, digest)
+        let mut j = 0
+        for j < 32 {
+            if off + j < masklen { poke8(out + off + j, peek8(digest + j)) }
+            j = j + 1
+        }
+        off = off + 32
+        counter = counter + 1
+    }
+}
+
+// Verifies an RSA-PSS(SHA-256, salt=32) signature over `hash32` with the 2048-bit public
+// key `n_bytes` (exponent 65537). Returns 1 if valid, 0 otherwise. emLen=256, so the
+// masked DB is 223 bytes, H is 32 bytes, and the trailer is 0xbc.
+fn rsa_pss_sha256_verify(n_bytes: i64, sig_bytes: i64, hash32: i64) -> i64 {
+    let mut n[64]
+    let mut sig[64]
+    let mut m[64]
+    let mut em[260]
+    bn_from_bytes(n_bytes, n)
+    bn_from_bytes(sig_bytes, sig)
+    bn_modexp_65537(sig, n, m)
+    bn_to_bytes(m, em)
+
+    if peek8(em + 255) != 0xbc { return 0 }          // trailer field
+    if (peek8(em + 0) & 0x80) != 0 { return 0 }      // top bit (8*256 - 2047 = 1) must be 0
+
+    // dbMask = MGF1(H, 223); DB = maskedDB xor dbMask; clear DB's leftmost bit.
+    let dbmask[224]
+    mgf1_sha256(em + 223, 32, dbmask, 223)
+    let db[224]
+    let mut i = 0
+    for i < 223 { poke8(db + i, peek8(em + i) ^ peek8(dbmask + i)); i = i + 1 }
+    poke8(db + 0, peek8(db + 0) & 0x7f)
+
+    // DB must be PS(190 zeros) || 0x01 || salt(32).
+    i = 0
+    for i < 190 {
+        if peek8(db + i) != 0 { return 0 }
+        i = i + 1
+    }
+    if peek8(db + 190) != 0x01 { return 0 }
+
+    // M' = 0x00*8 || hash32 || salt ; H' = SHA-256(M') must equal H.
+    let mp[72]
+    i = 0
+    for i < 8 { poke8(mp + i, 0); i = i + 1 }
+    i = 0
+    for i < 32 { poke8(mp + 8 + i, peek8(hash32 + i)); i = i + 1 }
+    i = 0
+    for i < 32 { poke8(mp + 40 + i, peek8(db + 191 + i)); i = i + 1 }
+    let hp[32]
+    sha256_hash(mp, 72, hp)
+    i = 0
+    for i < 32 {
+        if peek8(em + 223 + i) != peek8(hp + i) { return 0 }
+        i = i + 1
+    }
+    1
+}

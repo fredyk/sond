@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of pss.snd against a real openssl-generated RSA-PSS(SHA-256) signature.
+
+include "any/crypto/rsa/pss.snd"
+include "x86_64/linux/testing.snd"
+
+let PSS_N = "c2e862369b67f2b369a6c4afcf989cebaf4072b5d21a9133f40b1e02129a9a13eff2073c750498797461a981fbed4e03e4b7467fb017b009ccf222a750e1f95c8d43903fbabf6d0de026ac38d2c7f45897c5172c1c5e594ec97e01003f5b4a3a8643ff5c4e2528d144d0029f87e984babe9870a0bb7380512d6b827726718a3d29b79042463992b3da17e40f36d21f0d607a01b17eb1b2589c0a4e0f2d8c672fd9b41e223d623059113df1d864cc65cb420b2f0844dd1cbb7915619e36c0a65273aee0e78e482efa6e582082ba4377b6fa0c0aafe0c77234ba475bb9f99e2fb11ec18cf23cf39b659a350357b925e6106512f71f29f590120025192515f4eb73"
+let PSS_SIG = "5c1c9367085ee082b0cbc07ba9313f9618d4f82accd742b74b12c25794db395cac94cc58c57e281b03c38b9ce6bf02fe84b0c81fefe11bad291fd12949aa421dd057d365186eb2f139a8c2565923291a655b9a7e0efef1510f734cc13fcd50dee30d53a3ee50620f5739c0197b9aa1f40b8282169be455d8fd4627daca0fef40a0b5b249928c9a7fd522433cb980edd4da0df7f7e33e283b9505ec0cacf8f50adaec3fa9f26709c356477644bcfa9647d21c66ab2dfd862edb572379874eefd4d4cc26d804d79b05878796b035697845c08862a6001b702e9b7e413a6c9b9a90e8ad7b1825b3aa44cd796d467842cc679580804a10f4c06864af65ae2a3f8a6a"
+let PSS_HASH = "1100e3288a110523a217e22b3d35d1f0eafd2556a1cf6d476379f9ffe0890fc4"
+let mut p_n[256]
+let mut p_sig[256]
+let mut p_hash[32]
+
+fn phex(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    c - 55
+}
+fn pload(hex: i64, dst: i64, n: i64) {
+    let mut i = 0
+    for i < n {
+        poke8(dst + i, phex(peek8(hex + i * 2)) * 16 + phex(peek8(hex + i * 2 + 1)))
+        i = i + 1
+    }
+}
+
+test "rsa-pss: a real openssl RSA-PSS SHA-256 signature verifies; tampering fails" {
+    pload(PSS_N, p_n, 256)
+    pload(PSS_SIG, p_sig, 256)
+    pload(PSS_HASH, p_hash, 32)
+    assert_eq(rsa_pss_sha256_verify(p_n, p_sig, p_hash), 1)
+    // a flipped signature byte must fail
+    poke8(p_sig + 10, peek8(p_sig + 10) ^ 1)
+    assert_eq(rsa_pss_sha256_verify(p_n, p_sig, p_hash), 0)
+    // the right signature over a different hash must fail
+    pload(PSS_SIG, p_sig, 256)
+    poke8(p_hash + 0, peek8(p_hash + 0) ^ 1)
+    assert_eq(rsa_pss_sha256_verify(p_n, p_sig, p_hash), 0)
+}
