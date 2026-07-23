@@ -5,51 +5,6 @@
 use super::Codegen;
 
 impl Codegen {
-    /// Emits the `__dbg_step(line)` runtime (RFC-0016, `--debug`): the first slice traces the
-    /// source line as each statement runs. It prints the line number in `%rdi` (via
-    /// `sond_print_int`) then a newline, preserving every register the surrounding code depends on
-    /// (the arena `%r15` and the caller-saved set the print/syscall clobber). Nine 8-byte saves
-    /// leave the stack 16-aligned for the `call`. Emitted only in a `--debug` build.
-    pub(crate) fn emit_dbg_runtime(&mut self) {
-        if !self.debug {
-            return;
-        }
-        for line in [
-            ".text",
-            "__dbg_step:",
-            "    pushq %rax",
-            "    pushq %rcx",
-            "    pushq %rdx",
-            "    pushq %rsi",
-            "    pushq %r8",
-            "    pushq %r9",
-            "    pushq %r10",
-            "    pushq %r11",
-            "    pushq %r15", // 9 pushes: rsp stays 16-aligned for the call below
-            "    call sond_print_int", // line number (still in %rdi) -> decimal on fd 1
-            "    movq $10, %rax", // newline
-            "    pushq %rax",
-            "    movq $1, %rdi", // fd 1 (stdout)
-            "    movq %rsp, %rsi", // the newline byte
-            "    movq $1, %rdx", // length 1
-            "    movq $1, %rax", // SYS_write
-            "    syscall",
-            "    addq $8, %rsp",
-            "    popq %r15",
-            "    popq %r11",
-            "    popq %r10",
-            "    popq %r9",
-            "    popq %r8",
-            "    popq %rsi",
-            "    popq %rdx",
-            "    popq %rcx",
-            "    popq %rax",
-            "    ret",
-        ] {
-            self.line(line);
-        }
-    }
-
     /// Emits the `sond_print_int` runtime helper (ELF targets): converts the
     /// non-negative integer in `%rdi` to decimal ASCII and writes it to fd 1.
     pub(crate) fn emit_print_int_helper(&mut self) {

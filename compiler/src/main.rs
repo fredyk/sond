@@ -63,16 +63,24 @@ fn main() -> ExitCode {
     // programs (a reusable library and the code that uses it) compile as one. `cov_scope`
     // is the set of functions coverage should measure (the entry's own code, not its
     // already-tested transitive dependencies).
-    let (src, cov_scope) = match sondc::resolve::resolve_includes_scoped(std::path::Path::new(input))
-    {
-        Ok(s) => s,
-        Err(e) => {
-            // `e` already names the file that failed (the entry, or the nested include that could
-            // not be resolved), so it is not re-blamed on `input` here.
-            eprintln!("sondc: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let (mut src, cov_scope) =
+        match sondc::resolve::resolve_includes_scoped(std::path::Path::new(input)) {
+            Ok(s) => s,
+            Err(e) => {
+                // `e` already names the file that failed (the entry, or the nested include that
+                // could not be resolved), so it is not re-blamed on `input` here.
+                eprintln!("sondc: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+    // RFC-0016: in a --debug build, append the debug agent, WRITTEN IN SOND. The per-statement
+    // checkpoint (emitted by codegen) calls `__dbg_step(line)`; the agent lives here, so the socket
+    // step logic (breakpoints, step-in/over, inspect) is written in Sond, not assembly. This first
+    // slice traces the source line as it runs. Appended to the source so it is one compiled program.
+    const DBG_AGENT: &str = "\npub fn __dbg_step(line: i64) { print_int(line)\n print_char(10) }\n";
+    if debug {
+        src.push_str(DBG_AGENT);
+    }
 
     // Compilation cache: keyed on the resolved source, the target, and a
     // fingerprint of the compiler itself. On a hit, copy the cached binary and

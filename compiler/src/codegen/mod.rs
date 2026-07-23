@@ -180,14 +180,10 @@ fn emit_program_maybe_debug(
     let mut cg = Codegen {
         check_contracts: true,
         debug,
-        // The trace prints via sond_print_int, so force its helper to be emitted even if the
-        // program never calls print_int itself.
-        uses_print_int: debug,
         ..Default::default()
     };
     cg.set_globals(globals);
     emit_all(&mut cg, structs, funcs, "main");
-    cg.emit_dbg_runtime();
     cg.line(".globl main");
     cg.line("main:");
     // The C runtime hands us argc in %rdi and argv in %rsi, stash them so the
@@ -873,6 +869,12 @@ impl Codegen {
         // Fresh per-function state (locals map + a unique return label).
         self.locals.clear();
         self.var_types.clear();
+        // The debug runtime itself must NOT be instrumented, or `__dbg_step` would call itself at
+        // every statement (infinite recursion). Disable the checkpoint while emitting it.
+        let saved_debug = self.debug;
+        if func.name == "__dbg_step" {
+            self.debug = false;
+        }
         // Instrument only the code under test: skip the harness, the test bodies, and the
         // testing library (measuring those is noise, and the harness must run its `__cov_ptr`
         // setup before any mark fires); and, when a coverage scope is set, only functions in
@@ -1050,6 +1052,7 @@ impl Codegen {
         } else {
             self.line("    ret");
         }
+        self.debug = saved_debug; // restore instrumentation (disabled only for __dbg_step)
     }
 
     /// Emits a check for each contract proposition: evaluate it and trap (`ud2`)
