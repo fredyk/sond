@@ -634,6 +634,11 @@ fn desugar_stmt(
                 desugar_expr(p, fields, sizes, locals, methods);
             }
         }
+        Stmt::ParLet { peers, .. } => {
+            for p in peers {
+                desugar_expr(p, fields, sizes, locals, methods);
+            }
+        }
         Stmt::For { cond, body, .. } => {
             if let Some(c) = cond {
                 desugar_expr(c, fields, sizes, locals, methods);

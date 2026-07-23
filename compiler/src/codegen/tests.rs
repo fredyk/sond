@@ -133,6 +133,23 @@ fn par_runs_every_peer_on_a_thread_and_joins_before_continuing() {
 }
 
 #[test]
+fn par_let_binds_each_peer_result_by_source_position() {
+    // `let a ~~ b ~~ c = par one() ~~ two() ~~ three()` runs the peers on threads, joins, and
+    // binds each RETURN VALUE to its name by SOURCE position: `a` is one()'s 1, `b` is two()'s 2,
+    // `c` is three()'s 3, whichever thread finished first. The positional formula a*16 + b*4 + c =
+    // 16 + 8 + 3 = 27 is 27 only if each name got its own peer's result (a swap would change it).
+    let src = "\
+        fn one() -> i64 { 1 }\n\
+        fn two() -> i64 { 2 }\n\
+        fn three() -> i64 { 3 }\n\
+        fn main() -> i64 {\n\
+            let a ~~ b ~~ c = par one() ~~ two() ~~ three()\n\
+            a * 16 + b * 4 + c\n\
+        }";
+    assert_eq!(compile_and_run(src), 27, "results bound by position: a=1, b=2, c=3");
+}
+
+#[test]
 fn compiles_and_runs_early_return_on_real_x64() {
     assert_eq!(
         compile_and_run("fn f() -> i64 { let x = 5\nreturn x + x\n }"),

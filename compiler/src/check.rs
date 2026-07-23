@@ -182,6 +182,33 @@ pub fn check_spawn_not_in_loop(funcs: &[Function]) -> Result<(), String> {
     Ok(())
 }
 
+/// Rejects a `par`-let whose name count does not match its peer count: `let a ~~ b = par f() ~~
+/// g() ~~ h()` would bind three results to two names. Each name binds exactly one peer's result by
+/// position, so a mismatch is a source error, caught here instead of silently dropping a result.
+pub fn check_par_let_arity(funcs: &[Function]) -> Result<(), String> {
+    fn walk(stmts: &[Stmt], fname: &str) -> Result<(), String> {
+        for s in stmts {
+            match s {
+                Stmt::ParLet { names, peers, .. } if names.len() != peers.len() => {
+                    return Err(format!(
+                        "function `{fname}`: this `par` binding has {} name(s) but {} peer(s); \
+                         each name binds exactly one peer's result, so the counts must match.",
+                        names.len(),
+                        peers.len()
+                    ));
+                }
+                Stmt::For { body, .. } => walk(&body.stmts, fname)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    for f in funcs {
+        walk(&f.body.stmts, &f.name)?;
+    }
+    Ok(())
+}
+
 /// Rejects the process-termination effect inside a spawned call graph (RFC-0011, footgun #3).
 /// `syscall(SYS_exit, N)` ends the calling *thread* under process-per-connection semantics but
 /// the whole *process* when it runs on a spawned OS thread, so one connection's error path would
@@ -199,6 +226,11 @@ pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> 
                     collect_calls_expr(value, out)
                 }
                 Stmt::Par(peers) => {
+                    for p in peers {
+                        collect_calls_expr(p, out);
+                    }
+                }
+                Stmt::ParLet { peers, .. } => {
                     for p in peers {
                         collect_calls_expr(p, out);
                     }
@@ -593,6 +625,12 @@ fn check_stmt(s: &Stmt, immutable: &HashMap<&str, &str>, fname: &str) -> Result<
         Stmt::Let { value, .. } => check_expr(value, immutable, fname),
         Stmt::Expr(e) | Stmt::Spawn(e) | Stmt::Return(Some(e)) => check_expr(e, immutable, fname),
         Stmt::Par(peers) => {
+            for p in peers {
+                check_expr(p, immutable, fname)?;
+            }
+            Ok(())
+        }
+        Stmt::ParLet { peers, .. } => {
             for p in peers {
                 check_expr(p, immutable, fname)?;
             }
@@ -2701,6 +2739,39 @@ mod spawn_loop_tests {
     fn accepts_spawn_outside_a_loop() {
         let ok = check("fn w() -> i64 { 0 }\nfn f() -> i64 { spawn w() spawn w() 0 }");
         assert!(ok.is_ok(), "two straight-line spawns are fine, got {ok:?}");
+    }
+}
+
+#[cfg(test)]
+mod par_let_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn check(src: &str) -> Result<(), String> {
+        let funcs = Parser::new(tokenize(src)).parse_program();
+        check_par_let_arity(&funcs)
+    }
+
+    #[test]
+    fn rejects_a_par_binding_with_mismatched_counts() {
+        // Two names, three peers: one peer's result would be silently dropped. Rejected.
+        let e = check(
+            "fn f() -> i64 { 1 }\nfn g() -> i64 { 2 }\nfn h() -> i64 { 3 }\n\
+             fn run() -> i64 { let a ~~ b = par f() ~~ g() ~~ h()\n a + b }",
+        );
+        assert!(e.is_err(), "mismatched name/peer counts must be rejected");
+        let msg = e.unwrap_err();
+        assert!(msg.contains("2 name") && msg.contains("3 peer"), "names the counts: {msg}");
+    }
+
+    #[test]
+    fn accepts_a_matched_par_binding() {
+        let ok = check(
+            "fn f() -> i64 { 1 }\nfn g() -> i64 { 2 }\n\
+             fn run() -> i64 { let a ~~ b = par f() ~~ g()\n a + b }",
+        );
+        assert!(ok.is_ok(), "equal counts are fine, got {ok:?}");
     }
 }
 

@@ -415,6 +415,14 @@ fn collect_locals(block: &Block, out: &mut Vec<String>) {
                     collect_locals_in_expr(p, out);
                 }
             }
+            Stmt::ParLet { names, peers, .. } => {
+                for p in peers {
+                    collect_locals_in_expr(p, out);
+                }
+                for n in names {
+                    out.push(n.clone());
+                }
+            }
             Stmt::Return(Some(e)) => collect_locals_in_expr(e, out),
             Stmt::Return(None) => {}
             Stmt::For { cond, body, .. } => {
@@ -455,6 +463,11 @@ fn collect_arrays(block: &Block, out: &mut Vec<(String, i64)>) {
             Stmt::Assign { value, .. } => collect_arrays_in_expr(value, out),
             Stmt::Expr(e) | Stmt::Spawn(e) => collect_arrays_in_expr(e, out),
             Stmt::Par(peers) => {
+                for p in peers {
+                    collect_arrays_in_expr(p, out);
+                }
+            }
+            Stmt::ParLet { peers, .. } => {
                 for p in peers {
                     collect_arrays_in_expr(p, out);
                 }
@@ -632,6 +645,10 @@ struct Codegen {
     spawn_ctids: Vec<String>,
     /// Every ctid cell across the whole program, emitted as `.quad 0` in `.bss`.
     all_ctids: Vec<String>,
+    /// Result cells for `par`-let peers: a spawned peer stores its return value here before it
+    /// exits, and the parent reads it after the join binds it to a name. One per `par`-let peer
+    /// site across the whole program, emitted as `.quad 0` alongside the ctid cells.
+    all_result_cells: Vec<String>,
     /// Set once any `spawn` is emitted, so the thread stack size constant is emitted.
     uses_spawn: bool,
 }
@@ -1004,6 +1021,38 @@ impl Codegen {
     }
 
     fn emit_spawn(&mut self, call: &Expr) {
+        self.emit_spawn_capturing(call, None);
+    }
+
+    /// Emits `let a ~~ b ~~ c = par f() ~~ g() ~~ h()` (RFC-0008 §5.1a, positional result
+    /// binding). Each peer is spawned with its own result cell (the child stores its return value
+    /// there before exiting), the peers are joined, and each result is loaded into its name's
+    /// frame slot BY SOURCE POSITION: `a` gets `f`'s result whichever thread finished first, so
+    /// the binding is deterministic regardless of the schedule.
+    fn emit_par_let(&mut self, names: &[String], peers: &[Expr]) {
+        let ctid_start = self.spawn_ctids.len();
+        let mut cells = Vec::with_capacity(peers.len());
+        for peer in peers {
+            let cell = format!("sond_par_result_{}", self.all_result_cells.len());
+            self.all_result_cells.push(cell.clone());
+            self.emit_spawn_capturing(peer, Some(&cell));
+            cells.push(cell);
+        }
+        let par_ctids: Vec<String> = self.spawn_ctids.split_off(ctid_start);
+        self.emit_join(&par_ctids);
+        // Bind each peer's result to its name by position, after the join guarantees it is written.
+        for (name, cell) in names.iter().zip(&cells) {
+            self.line(&format!("    movq {cell}(%rip), %rax"));
+            let off = self.slot(name);
+            self.line(&format!("    movq %rax, {off}(%rbp)"));
+        }
+    }
+
+    /// Spawns `call` on a new thread. If `result_cell` is `Some`, the child stores the call's
+    /// return value (%rax) into that cell just before it exits, so the parent can read the peer's
+    /// result after the join (the `par`-let binding). The store happens strictly before `SYS_exit`,
+    /// and the join waits on the thread's exit, so the parent never reads the cell early.
+    fn emit_spawn_capturing(&mut self, call: &Expr, result_cell: Option<&str>) {
         let Expr::Call(callee, args) = call else {
             panic!("`spawn` must be followed by a function call");
         };
@@ -1103,6 +1152,11 @@ impl Codegen {
             ));
         }
         self.line(&format!("    call {fname}"));
+        if let Some(cell) = result_cell {
+            // Store the peer's return value before exiting; the join (on the ctid cell) fires only
+            // after this thread exits, so the parent reads the result strictly after this store.
+            self.line(&format!("    movq %rax, {cell}(%rip)"));
+        }
         self.line("    xorq %rdi, %rdi"); // thread exit status 0
         self.line("    movq $60, %rax"); // SYS_exit (this thread only)
         self.line("    syscall");
@@ -1137,6 +1191,11 @@ impl Codegen {
         }
         // One clear_child_tid cell per spawn site, zeroed (no live thread yet).
         for cell in ctids {
+            self.line(&format!("{cell}: .quad 0"));
+        }
+        // One result cell per `par`-let peer site, where the peer stores its return value.
+        let result_cells = std::mem::take(&mut self.all_result_cells);
+        for cell in result_cells {
             self.line(&format!("{cell}: .quad 0"));
         }
     }
@@ -1251,6 +1310,7 @@ impl Codegen {
                 Stmt::Expr(e) => self.expr(e),
                 Stmt::Spawn(call) => self.emit_spawn(call),
                 Stmt::Par(peers) => self.emit_par(peers),
+                Stmt::ParLet { names, peers, .. } => self.emit_par_let(names, peers),
                 Stmt::Return(e) => {
                     match e {
                         Some(e) => self.expr(e),

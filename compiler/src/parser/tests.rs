@@ -515,6 +515,23 @@ fn parses_a_par_statement_as_a_flat_peer_list() {
     );
 }
 
+#[test]
+fn parses_a_positional_par_binding() {
+    // `let a ~~ b ~~ c = par f() ~~ g() ~~ h()`: N names bound to N peers, both `~~`-separated.
+    let f = parse_fn("fn run() -> i64 { let a ~~ b ~~ c = par f() ~~ g() ~~ h()\n a + b + c }");
+    let (names, peers) = f
+        .body
+        .stmts
+        .iter()
+        .find_map(|s| match s {
+            Stmt::ParLet { names, peers, .. } => Some((names, peers)),
+            _ => None,
+        })
+        .expect("the body should hold a ParLet");
+    assert_eq!(names, &["a", "b", "c"], "the three names, in source order");
+    assert_eq!(peers.len(), 3, "one peer per name");
+}
+
 // --- RFC-0014: ports (interfaces implemented per target) ---
 
 #[test]

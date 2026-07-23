@@ -241,6 +241,16 @@ pub enum Stmt {
     /// order. Each peer is a call, like `spawn`. Result binding and the independence
     /// proof are later slices; this form runs effectful peers in parallel and joins.
     Par(Vec<Expr>),
+    /// `let a ~~ b ~~ c = par f() ~~ g() ~~ h()`: the POSITIONAL result binding of
+    /// `par`. Each peer runs on its own thread; after the join, each result is bound
+    /// to its name BY SOURCE POSITION (`a` is always `f`'s result, regardless of which
+    /// thread finished first), so the binding is deterministic and the caller may then
+    /// combine the results with any operator. `names.len()` must equal `peers.len()`.
+    ParLet {
+        mutable: bool,
+        names: Vec<String>,
+        peers: Vec<Expr>,
+    },
 }
 
 /// An expression (used in bodies and in `requires`/`ensures` propositions).

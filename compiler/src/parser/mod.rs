@@ -636,6 +636,26 @@ impl Parser {
         self.expect(Token::Let);
         let mutable = self.eat(Token::Ident("mut".to_string()));
         let name = self.expect_ident();
+        // `let a ~~ b ~~ c = par f() ~~ g() ~~ h()`: the positional parallel binding. The `~~`
+        // after the first name is the tell; collect the names, then the `par` peers (also `~~`
+        // separated). Each name binds its peer's result by source position after the join.
+        if self.peek() == Some(&Token::TildeTilde) {
+            let mut names = vec![name];
+            while self.eat(Token::TildeTilde) {
+                names.push(self.expect_ident());
+            }
+            self.expect(Token::Eq);
+            self.expect(Token::Par);
+            let mut peers = vec![self.parse_expr()];
+            while self.eat(Token::TildeTilde) {
+                peers.push(self.parse_expr());
+            }
+            return Stmt::ParLet {
+                mutable,
+                names,
+                peers,
+            };
+        }
         // `let name[N]`: a fixed-size stack array of N words (N a literal).
         let array_len = if self.eat(Token::LBracket) {
             let n = match self.advance() {

@@ -534,6 +534,10 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
             // calls have no effect on the scalar state the prover tracks, and the independence
             // (confluence) proof that makes `~~` a verified claim is a separate pass (RFC-0008 §5.3).
             Stmt::Par(_) => live,
+            // `let a ~~ b = par ..` binds the peer results; for the prover the bound names are
+            // opaque call results (like any `let x = f()` whose callee it cannot summarize), so the
+            // scalar state is left unchanged. The confluence proof is the same separate pass.
+            Stmt::ParLet { .. } => live,
             // A loop is verified via its invariant (init + preservation), then continues
             // with (invariant ∧ ¬condition). Without an invariant it is unverifiable.
             Stmt::For {
