@@ -10,7 +10,8 @@
 //! alongside the backend.
 
 use sondc::codegen::{
-    emit_freestanding_g, emit_program_coverage_g, emit_program_g, emit_shared_g, emit_uefi_g,
+    emit_freestanding_g, emit_program_coverage_g, emit_program_debug_g, emit_program_g,
+    emit_shared_g, emit_uefi_g,
 };
 use sondc::lexer::tokenize_located;
 use sondc::parser::Parser;
@@ -56,6 +57,7 @@ fn main() -> ExitCode {
     // Intel HEX, the smallest target profile, an 8-bit microcontroller.
     let pic16 = args.iter().any(|a| a == "--pic16");
     let emit_header = args.iter().any(|a| a == "--emit-header");
+    let debug = args.iter().any(|a| a == "--debug");
 
     // Resolve `include "lib.snd"` directives (source-level, deduped) so multi-file
     // programs (a reusable library and the code that uses it) compile as one. `cov_scope`
@@ -81,6 +83,10 @@ fn main() -> ExitCode {
         "freestanding"
     } else if shared {
         "shared"
+    } else if debug {
+        // A --debug build has extra instrumentation, so it must not share a cache entry with the
+        // normal build of the same source (they are different binaries).
+        "host-debug"
     } else {
         "host"
     };
@@ -299,6 +305,8 @@ fn main() -> ExitCode {
             emit_shared_g(&globals, &structs, &funcs)
         } else if coverage {
             emit_program_coverage_g(&globals, &structs, &funcs, &cov_scope)
+        } else if debug {
+            emit_program_debug_g(&globals, &structs, &funcs)
         } else {
             emit_program_g(&globals, &structs, &funcs)
         }

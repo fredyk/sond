@@ -157,12 +157,32 @@ pub fn emit_program(funcs: &[Function]) -> String {
 /// Like [`emit_program`], but with module-level globals and struct definitions (the
 /// latter so a function may return a small struct/enum by value).
 pub fn emit_program_g(globals: &[Global], structs: &[StructDef], funcs: &[Function]) -> String {
+    emit_program_maybe_debug(globals, structs, funcs, false)
+}
+
+/// Like [`emit_program_g`] but with the RFC-0016 `--debug` checkpoint instrumentation (a per-
+/// statement `__dbg_step(line)` trace). A separate entry so a normal build stays byte-identical.
+pub fn emit_program_debug_g(globals: &[Global], structs: &[StructDef], funcs: &[Function]) -> String {
+    emit_program_maybe_debug(globals, structs, funcs, true)
+}
+
+fn emit_program_maybe_debug(
+    globals: &[Global],
+    structs: &[StructDef],
+    funcs: &[Function],
+    debug: bool,
+) -> String {
     let mut cg = Codegen {
         check_contracts: true,
+        debug,
+        // The trace prints via sond_print_int, so force its helper to be emitted even if the
+        // program never calls print_int itself.
+        uses_print_int: debug,
         ..Default::default()
     };
     cg.set_globals(globals);
     emit_all(&mut cg, structs, funcs, "main");
+    cg.emit_dbg_runtime();
     cg.line(".globl main");
     cg.line("main:");
     // The C runtime hands us argc in %rdi and argv in %rsi, stash them so the
@@ -814,6 +834,10 @@ struct Codegen {
     /// `%r15` with the arena TCB, or an allocation inside would fault on the host's `%r15`. Set in
     /// `emit_shared_g`; unset elsewhere (a hosted program seeds `%r15` once at its own entry).
     shared_arena_boundary: bool,
+    /// `--debug` build (RFC-0016): emit a `__dbg_step(line)` callout before each statement. This
+    /// first slice traces the source line as it executes; the socket-served step agent builds on
+    /// the same seam. Off by default (a normal build is byte-identical, like coverage).
+    debug: bool,
 }
 
 /// Functions excluded from coverage instrumentation: the synthesized `sond test` harness
@@ -1504,7 +1528,13 @@ impl Codegen {
         // gets its own mark, so this is branch-level coverage, and it captures expression-
         // bodied blocks (a tail with no statements) that per-statement marking would miss.
         self.cov_mark();
-        for stmt in &block.stmts {
+        for (i, stmt) in block.stmts.iter().enumerate() {
+            // RFC-0016 --debug checkpoint: announce the statement's source line before running it.
+            if self.debug {
+                let line = block.stmt_lines.get(i).copied().unwrap_or(0);
+                self.line(&format!("    movq ${line}, %rdi"));
+                self.line("    call __dbg_step");
+            }
             match stmt {
                 Stmt::Let {
                     name,

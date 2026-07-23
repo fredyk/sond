@@ -115,6 +115,19 @@ fn compiles_and_runs_local_variables_on_real_x64() {
 }
 
 #[test]
+fn a_debug_build_emits_a_per_statement_checkpoint_a_normal_build_does_not() {
+    let funcs = Parser::new(tokenize("fn main() -> i64 { let a = 1\nlet b = 2\na + b }")).parse_program();
+    let debug_asm = emit_program_debug_g(&[], &[], &funcs);
+    let normal_asm = emit_program_g(&[], &[], &funcs);
+    assert!(debug_asm.contains("call __dbg_step"), "the --debug build calls the checkpoint");
+    assert!(debug_asm.contains("__dbg_step:"), "and emits its runtime");
+    assert!(
+        !normal_asm.contains("__dbg_step"),
+        "a normal build carries no debug instrumentation (byte-identical to before)"
+    );
+}
+
+#[test]
 fn a_string_literal_global_is_a_pointer_to_rodata() {
     // `let MSG = "hi"` at module level: the global holds the ADDRESS of the interned bytes (a valid
     // compile-time constant), not an integer, so it works like any `.data` pointer.
