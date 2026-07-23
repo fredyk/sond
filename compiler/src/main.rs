@@ -73,13 +73,12 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-    // RFC-0016: in a --debug build, append the debug agent, WRITTEN IN SOND. The per-statement
-    // checkpoint (emitted by codegen) calls `__dbg_step(line)`; the agent lives here, so the socket
-    // step logic (breakpoints, step-in/over, inspect) is written in Sond, not assembly. This first
-    // slice traces the source line as it runs. Appended to the source so it is one compiled program.
-    const DBG_AGENT: &str = "\npub fn __dbg_step(line: i64) { print_int(line)\n print_char(10) }\n";
+    // RFC-0016: in a --debug build, append the debug agent, WRITTEN IN SOND (see `debug_agent`). The
+    // per-statement checkpoint (emitted by codegen) calls `__dbg_step(line)`; the agent is the Sond
+    // that serves the socket step protocol. Appended after include resolution, so it depends only on
+    // builtins (syscall / poke / peek).
     if debug {
-        src.push_str(DBG_AGENT);
+        src.push_str(sondc::debug_agent::SOURCE);
     }
 
     // Compilation cache: keyed on the resolved source, the target, and a

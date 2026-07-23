@@ -3,7 +3,7 @@
 | Field       | Value                                                                 |
 |-------------|-----------------------------------------------------------------------|
 | RFC         | 0016                                                                  |
-| Status      | Draft (exploratory)                                                   |
+| Status      | Partially implemented (first socket slice landed; see §3.2a)          |
 | Date        | 2026-07-23                                                           |
 | Authors     | Jhon Magdalena Vila                                                         |
 | Motivation  | Step debugging without external tooling (no ptrace, no DWARF, no gdb): the program carries its own debugger and serves it over a socket |
@@ -101,6 +101,32 @@ step-over and step-out fall out of the depth compare: step-over stops at the nex
 depth is `<= step_depth` (so it skips INTO calls, which are deeper, and stops when control returns);
 step-in uses `step_depth = MAX` (stop anywhere); step-out uses `depth - 1` (stop only after the
 current frame returns).
+
+### 3.2a Implementation status: the first socket slice
+
+The design above is the target. What is implemented today (the agent source lives in the compiler as
+`debug_agent::SOURCE`, appended to a `--debug` program after include resolution, and is itself Sond
+that the same pipeline parses, PROVES, and lowers) is the core interactive loop over a real Unix
+socket, deliberately narrower than the framed protocol so it could land end to end:
+
+- **State.** Three module `let mut` globals: `__dbg_mode` (`0` run-free, `1` single-step, `2` run-to
+  a line), `__dbg_target` (the run-to line), and `__dbg_fd`/`__dbg_started` (the connection, bound
+  once). No breakpoint SET or call-depth yet, so step-over / step-out and multi-breakpoint are not in
+  this slice, run-to-line stands in for a single breakpoint.
+- **Attach.** On the first checkpoint the agent binds `/tmp/sond.dbg.sock`, announces the path on
+  stderr, and BLOCKS on `accept` until a client connects, so `main` is caught from its first line.
+  The listener is bound exactly once; after a detach or a client disconnect the program runs free and
+  is never rebound.
+- **Wire protocol (line-oriented, not yet length-prefixed).** Each stop is reported to the client as
+  `L<line>\n`. The client replies with one-byte commands: `s` (single-step, stop at the next
+  checkpoint), `c` (continue, run free), `g<line>\n` (run until the given source line), `q` (detach
+  and run free). A client disconnect is treated as `c`.
+- **Reentrancy.** Codegen excludes the whole `__dbg_` namespace from the checkpoint, so the agent (and
+  every helper it calls to serve the socket) never re-enters itself.
+
+The framed protocol of §3.4, the breakpoint set, call-depth (step-over/out), and `Inspect`/`Backtrace`
+(which need §3.3's symbol table) are the following slices; this one proves the pause/step/resume loop
+over the socket works against a native binary.
 
 ### 3.3 The line -> locals symbol table (the compiler already knows this)
 

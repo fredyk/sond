@@ -7,6 +7,7 @@
 pub mod ast;
 pub mod check;
 pub mod codegen;
+pub mod debug_agent;
 pub mod decimal;
 pub mod desugar;
 pub mod eval;

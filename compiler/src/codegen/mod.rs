@@ -869,10 +869,11 @@ impl Codegen {
         // Fresh per-function state (locals map + a unique return label).
         self.locals.clear();
         self.var_types.clear();
-        // The debug runtime itself must NOT be instrumented, or `__dbg_step` would call itself at
-        // every statement (infinite recursion). Disable the checkpoint while emitting it.
+        // The debug agent itself must NOT be instrumented, or `__dbg_step` (and every helper it
+        // calls to serve the socket) would re-enter the checkpoint at each statement: unbounded
+        // recursion. The agent is the `__dbg_` namespace, so disable the checkpoint for all of it.
         let saved_debug = self.debug;
-        if func.name == "__dbg_step" {
+        if func.name.starts_with("__dbg_") {
             self.debug = false;
         }
         // Instrument only the code under test: skip the harness, the test bodies, and the
@@ -1052,7 +1053,7 @@ impl Codegen {
         } else {
             self.line("    ret");
         }
-        self.debug = saved_debug; // restore instrumentation (disabled only for __dbg_step)
+        self.debug = saved_debug; // restore instrumentation (disabled only for the __dbg_ agent)
     }
 
     /// Emits a check for each contract proposition: evaluate it and trap (`ud2`)
