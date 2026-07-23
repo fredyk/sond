@@ -1,9 +1,9 @@
-//! RFC-0014 port resolution: bind each `use Port` to the one provider that
+//! RFC-0014 port resolution: bind each `use Iface` to the one provider that
 //! implements it for the active target, or fail with a message that names the
 //! target lacking an implementation.
 //!
-//! Resolution is static and total. For every `use Port` the checker requires
-//! exactly one `provides Port for <active target>`; zero is a compile error (the
+//! Resolution is static and total. For every `use Iface` the checker requires
+//! exactly one `impl Port for <active target>`; zero is a compile error (the
 //! deliverable that replaces hand-stubbing a target's primitives), more than one
 //! is ambiguity, and a provider that omits a port method (or gives it the wrong
 //! arity) fails against the port rather than at some later call site. Full
@@ -12,7 +12,7 @@
 
 use crate::ast::{Function, PortDef, ProviderDef, Signature, UseDecl};
 
-/// Resolves every `use Port` against the providers for `target`, returning the
+/// Resolves every `use Iface` against the providers for `target`, returning the
 /// selected providers' methods to splice into the translation unit (so codegen
 /// sees them as ordinary functions). Fails with the first error when a use does
 /// not resolve to exactly one complete provider. A port `use`d more than once
@@ -29,7 +29,7 @@ pub fn resolve_ports(
     for pr in providers {
         if !ports.iter().any(|p| p.name == pr.port) {
             return Err(format!(
-                "`provides {} for {}`: no port named `{}` is declared.",
+                "`impl {} for {}`: no interface named `{}` is declared.",
                 pr.port, pr.target, pr.port
             ));
         }
@@ -40,7 +40,7 @@ pub fn resolve_ports(
     for u in uses {
         let Some(port) = ports.iter().find(|p| p.name == u.port) else {
             return Err(format!(
-                "`use {}`: no port named `{}` is declared.",
+                "`use {}`: no interface named `{}` is declared.",
                 u.port, u.port
             ));
         };
@@ -65,16 +65,16 @@ pub fn resolve_ports(
                     targets.join(", ")
                 };
                 return Err(format!(
-                    "no implementation of port `{port_name}` for target `{target}`. \
-                     `use {port_name}` needs a `provides {port_name} for {target} {{ ... }}`. \
-                     found providers for: {found}",
+                    "no implementation of interface `{port_name}` for target `{target}`. \
+                     `use {port_name}` needs an `impl {port_name} for {target} {{ ... }}`. \
+                     found implementations for: {found}",
                     port_name = u.port,
                 ));
             }
             [prov] => *prov,
             more => {
                 return Err(format!(
-                    "port `{}` has {} providers for target `{}`; exactly one is allowed.",
+                    "interface `{}` has {} implementations for target `{}`; exactly one is allowed.",
                     u.port,
                     more.len(),
                     target
@@ -123,13 +123,13 @@ fn check_complete(port: &PortDef, prov: &ProviderDef, target: &str) -> Result<()
     for sig in &port.methods {
         let Some(m) = prov.methods.iter().find(|m| m.name == sig.name) else {
             return Err(format!(
-                "provider `provides {} for {}` is missing method `{}` required by the port.",
+                "`impl {} for {}` is missing method `{}` required by the interface.",
                 port.name, target, sig.name
             ));
         };
         if m.params.len() != sig.params.len() {
             return Err(format!(
-                "provider `{} for {}`: method `{}` takes {} parameters but the port declares {}.",
+                "`impl {} for {}`: method `{}` takes {} parameters but the interface declares {}.",
                 port.name,
                 target,
                 sig.name,
@@ -143,16 +143,16 @@ fn check_complete(port: &PortDef, prov: &ProviderDef, target: &str) -> Result<()
         for (mp, sp) in m.params.iter().zip(&sig.params) {
             if mp.name != sp.name {
                 return Err(format!(
-                    "provider `{} for {}`: method `{}` names a parameter `{}` where the port \
-                     declares `{}`; a provider must use the port's parameter names so the \
-                     port's contract applies to it.",
+                    "`impl {} for {}`: method `{}` names a parameter `{}` where the interface \
+                     declares `{}`; an implementation must use the interface's parameter names so \
+                     the interface's contract applies to it.",
                     port.name, target, sig.name, mp.name, sp.name
                 ));
             }
             if mp.ty != sp.ty {
                 return Err(format!(
-                    "provider `{} for {}`: method `{}` gives parameter `{}` type `{}` but the \
-                     port declares type `{}`.",
+                    "`impl {} for {}`: method `{}` gives parameter `{}` type `{}` but the \
+                     interface declares type `{}`.",
                     port.name,
                     target,
                     sig.name,
@@ -164,7 +164,7 @@ fn check_complete(port: &PortDef, prov: &ProviderDef, target: &str) -> Result<()
         }
         if m.ret != sig.ret {
             return Err(format!(
-                "provider `{} for {}`: method `{}` has return type `{}` but the port declares `{}`.",
+                "`impl {} for {}`: method `{}` has return type `{}` but the interface declares `{}`.",
                 port.name,
                 target,
                 sig.name,
@@ -211,8 +211,8 @@ mod tests {
     #[test]
     fn a_use_with_a_matching_provider_resolves_and_splices_its_methods() {
         let r = resolve(
-            "port Serial { fn putc(b: i64) }\n\
-             provides Serial for pic16 { fn putc(b: i64) { } }\n\
+            "iface Serial { fn putc(b: i64) }\n\
+             impl Serial for pic16 { fn putc(b: i64) { } }\n\
              use Serial\n\
              fn main() -> i64 { 0 }",
             "pic16",
@@ -226,9 +226,9 @@ mod tests {
     fn only_the_active_targets_provider_is_spliced() {
         // Two providers exist; only the one for the build target contributes code.
         let spliced = resolve(
-            "port Serial { fn putc(b: i64) }\n\
-             provides Serial for host { fn putc(b: i64) { let h = 1 } }\n\
-             provides Serial for pic16 { fn putc(b: i64) { let p = 2 } }\n\
+            "iface Serial { fn putc(b: i64) }\n\
+             impl Serial for host { fn putc(b: i64) { let h = 1 } }\n\
+             impl Serial for pic16 { fn putc(b: i64) { let p = 2 } }\n\
              use Serial",
             "pic16",
         )
@@ -239,8 +239,8 @@ mod tests {
     #[test]
     fn a_port_used_twice_is_spliced_once() {
         let spliced = resolve(
-            "port Serial { fn putc(b: i64) }\n\
-             provides Serial for pic16 { fn putc(b: i64) { } }\n\
+            "iface Serial { fn putc(b: i64) }\n\
+             impl Serial for pic16 { fn putc(b: i64) { } }\n\
              use Serial\n\
              use Serial",
             "pic16",
@@ -254,8 +254,8 @@ mod tests {
         // The whole point: the error names the target that lacks an implementation, so a
         // missing port becomes a task instead of an "unknown function" at the call site.
         let e = resolve(
-            "port Serial { fn putc(b: i64) }\n\
-             provides Serial for host { fn putc(b: i64) { } }\n\
+            "iface Serial { fn putc(b: i64) }\n\
+             impl Serial for host { fn putc(b: i64) { } }\n\
              use Serial",
             "pic16",
         )
@@ -268,9 +268,9 @@ mod tests {
     #[test]
     fn two_providers_for_the_same_target_are_ambiguous() {
         let e = resolve(
-            "port Serial { fn putc(b: i64) }\n\
-             provides Serial for pic16 { fn putc(b: i64) { } }\n\
-             provides Serial for pic16 { fn putc(b: i64) { } }\n\
+            "iface Serial { fn putc(b: i64) }\n\
+             impl Serial for pic16 { fn putc(b: i64) { } }\n\
+             impl Serial for pic16 { fn putc(b: i64) { } }\n\
              use Serial",
             "pic16",
         )
@@ -281,8 +281,8 @@ mod tests {
     #[test]
     fn a_provider_missing_a_port_method_is_rejected() {
         let e = resolve(
-            "port Serial { fn init() fn putc(b: i64) }\n\
-             provides Serial for pic16 { fn init() { } }\n\
+            "iface Serial { fn init() fn putc(b: i64) }\n\
+             impl Serial for pic16 { fn init() { } }\n\
              use Serial",
             "pic16",
         )
@@ -294,8 +294,8 @@ mod tests {
     #[test]
     fn a_provider_method_with_the_wrong_arity_is_rejected() {
         let e = resolve(
-            "port Serial { fn putc(b: i64) }\n\
-             provides Serial for pic16 { fn putc() { } }\n\
+            "iface Serial { fn putc(b: i64) }\n\
+             impl Serial for pic16 { fn putc() { } }\n\
              use Serial",
             "pic16",
         )
@@ -309,8 +309,8 @@ mod tests {
         // The port's ensures is folded onto the provider method, so `verify` proves the body
         // meets it. This is what makes a port a verified boundary, not a bare header.
         let spliced = resolve(
-            "port Doubler { fn dbl(x: i64) -> (r: i64) ensures { r == x + x } }\n\
-             provides Doubler for host { fn dbl(x: i64) -> i64 { x + x } }\n\
+            "iface Doubler { fn dbl(x: i64) -> (r: i64) ensures { r == x + x } }\n\
+             impl Doubler for host { fn dbl(x: i64) -> i64 { x + x } }\n\
              use Doubler",
             "host",
         )
@@ -326,8 +326,8 @@ mod tests {
         // spliced method, so the general verifier holds every caller to it (verified e2e:
         // narrow(999) against requires { x <= 10 } is a call-site precondition failure).
         let spliced = resolve(
-            "port Narrow { fn narrow(x: i64) -> (r: i64) requires { x <= 10 } ensures { r == x } }\n\
-             provides Narrow for host { fn narrow(x: i64) -> i64 { x } }\n\
+            "iface Narrow { fn narrow(x: i64) -> (r: i64) requires { x <= 10 } ensures { r == x } }\n\
+             impl Narrow for host { fn narrow(x: i64) -> i64 { x } }\n\
              use Narrow",
             "host",
         )
@@ -339,8 +339,8 @@ mod tests {
     #[test]
     fn a_provider_that_renames_a_parameter_is_rejected() {
         let e = resolve(
-            "port Serial { fn putc(b: i64) }\n\
-             provides Serial for pic16 { fn putc(byte: i64) { } }\n\
+            "iface Serial { fn putc(b: i64) }\n\
+             impl Serial for pic16 { fn putc(byte: i64) { } }\n\
              use Serial",
             "pic16",
         )
@@ -354,8 +354,8 @@ mod tests {
         // Arity and names match, but the type does not: the provider does not implement the
         // port's interface, and a caller verified against the port would be lied to.
         let e = resolve(
-            "port Serial { fn putc(b: i64) }\n\
-             provides Serial for pic16 { fn putc(b: *i64) { } }\n\
+            "iface Serial { fn putc(b: i64) }\n\
+             impl Serial for pic16 { fn putc(b: *i64) { } }\n\
              use Serial",
             "pic16",
         )
@@ -367,8 +367,8 @@ mod tests {
     #[test]
     fn a_provider_with_a_mismatched_return_type_is_rejected() {
         let e = resolve(
-            "port Reader { fn get() -> i64 }\n\
-             provides Reader for host { fn get() -> *i64 { 0 } }\n\
+            "iface Reader { fn get() -> i64 }\n\
+             impl Reader for host { fn get() -> *i64 { 0 } }\n\
              use Reader",
             "host",
         )
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn using_an_undeclared_port_is_an_error() {
         let e = resolve("use Serial", "pic16").unwrap_err();
-        assert!(e.contains("no port named"), "a use of an undeclared port fails: {e}");
+        assert!(e.contains("no interface named"), "a use of an undeclared port fails: {e}");
     }
 
     #[test]
@@ -388,13 +388,13 @@ mod tests {
         // A typo in a provider's port name would otherwise leave it orphaned and silently
         // unused, and a later `use` would fail as if the provider were never written.
         let e = resolve(
-            "port Serial { fn putc(b: i64) }\n\
-             provides Serail for pic16 { fn putc(b: i64) { } }",
+            "iface Serial { fn putc(b: i64) }\n\
+             impl Serail for pic16 { fn putc(b: i64) { } }",
             "pic16",
         )
         .unwrap_err();
         assert!(e.contains("Serail"), "names the misspelled port: {e}");
-        assert!(e.contains("no port named"), "says the port is undeclared: {e}");
+        assert!(e.contains("no interface named"), "says the port is undeclared: {e}");
     }
 
     #[test]
@@ -402,10 +402,10 @@ mod tests {
         // A real program depends on several interfaces at once. Each `use` binds to its own
         // port's provider for the active target, and both providers' methods are spliced.
         let spliced = resolve(
-            "port Serial { fn putc(b: i64) }\n\
-             port Clock { fn now() -> i64 }\n\
-             provides Serial for host { fn putc(b: i64) { } }\n\
-             provides Clock for host { fn now() -> i64 { 0 } }\n\
+            "iface Serial { fn putc(b: i64) }\n\
+             iface Clock { fn now() -> i64 }\n\
+             impl Serial for host { fn putc(b: i64) { } }\n\
+             impl Clock for host { fn now() -> i64 { 0 } }\n\
              use Serial\n\
              use Clock",
             "host",
@@ -421,10 +421,10 @@ mod tests {
         // Serial resolves for host, but Clock has no host provider: the whole program is
         // rejected, not silently accepted because the first `use` happened to resolve.
         let e = resolve(
-            "port Serial { fn putc(b: i64) }\n\
-             port Clock { fn now() -> i64 }\n\
-             provides Serial for host { fn putc(b: i64) { } }\n\
-             provides Clock for pic16 { fn now() -> i64 { 0 } }\n\
+            "iface Serial { fn putc(b: i64) }\n\
+             iface Clock { fn now() -> i64 }\n\
+             impl Serial for host { fn putc(b: i64) { } }\n\
+             impl Clock for pic16 { fn now() -> i64 { 0 } }\n\
              use Serial\n\
              use Clock",
             "host",

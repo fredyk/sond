@@ -71,8 +71,7 @@ impl Parser {
                     | Token::Let
                     | Token::Struct
                     | Token::Enum
-                    | Token::Port
-                    | Token::Provides
+                    | Token::Iface
                     | Token::Use
                     | Token::Pub
                     | Token::Priv
@@ -80,12 +79,21 @@ impl Parser {
                     | Token::Test
             )
         ) {
-            // `impl Type { fn m(self, ..) { .. } }`: methods become free functions
-            // named `Type_m` with `self` typed as the struct; calls `p.m(a)` are
-            // lowered to `Type_m(p, a)` by desugar.
+            // `impl` opens one of two blocks, told apart by a `for` after the name:
+            //   `impl Iface for Target { fn .. }`  a per-target interface implementation
+            //                                      (RFC-0014, the old `provides`), collected as
+            //                                      a provider and resolved by the active target.
+            //   `impl Type { fn m(self, ..) .. }`  inherent methods: each becomes a free function
+            //                                      `Type_m` with `self` typed as the struct;
+            //                                      `p.m(a)` lowers to `Type_m(p, a)` by desugar.
             if self.peek() == Some(&Token::Impl) {
-                for method in self.parse_impl() {
-                    funcs.push(method);
+                if self.tokens.get(self.pos + 2) == Some(&Token::For) {
+                    let p = self.parse_provides();
+                    self.providers.push(p);
+                } else {
+                    for method in self.parse_impl() {
+                        funcs.push(method);
+                    }
                 }
                 self.skip_semicolons();
                 continue;
@@ -109,13 +117,9 @@ impl Parser {
                     let e = self.parse_enum();
                     self.enums.push(e);
                 }
-                Some(Token::Port) => {
-                    let p = self.parse_port();
+                Some(Token::Iface) => {
+                    let p = self.parse_iface();
                     self.ports.push(p);
-                }
-                Some(Token::Provides) => {
-                    let p = self.parse_provides();
-                    self.providers.push(p);
                 }
                 Some(Token::Use) => {
                     let u = self.parse_use();
@@ -178,17 +182,18 @@ impl Parser {
         std::mem::take(&mut self.enums)
     }
 
-    /// The top-level `port` (interface) declarations collected during `parse_program`.
+    /// The top-level `iface` (interface) declarations collected during `parse_program`.
     pub fn take_ports(&mut self) -> Vec<PortDef> {
         std::mem::take(&mut self.ports)
     }
 
-    /// The top-level `provides` (per-target implementations) collected during `parse_program`.
+    /// The top-level `impl Iface for Target` (per-target implementations) collected during
+    /// `parse_program`.
     pub fn take_providers(&mut self) -> Vec<ProviderDef> {
         std::mem::take(&mut self.providers)
     }
 
-    /// The top-level `use Port` directives collected during `parse_program`.
+    /// The top-level `use Iface` directives collected during `parse_program`.
     pub fn take_uses(&mut self) -> Vec<UseDecl> {
         std::mem::take(&mut self.uses)
     }
@@ -380,9 +385,9 @@ impl Parser {
     /// Parses `(pub)? port Name { <signatures> }`: a named interface (RFC-0014). The
     /// body is a sequence of bodyless `fn` signatures; implicit `;` between them is
     /// skipped. Providers and `use` resolution are later slices.
-    fn parse_port(&mut self) -> PortDef {
+    fn parse_iface(&mut self) -> PortDef {
         let vis = self.parse_visibility();
-        self.expect(Token::Port);
+        self.expect(Token::Iface);
         let name = self.expect_ident();
         self.expect(Token::LBrace);
         let mut methods = Vec::new();
@@ -395,12 +400,13 @@ impl Parser {
         PortDef { vis, name, methods }
     }
 
-    /// Parses `provides Port for Target { <functions> }`: one target's implementation
-    /// of a port (RFC-0014). The body is ordinary functions (with bodies); `Target` is
-    /// a target-profile identifier. Matching methods to the port and resolving `use` are
-    /// later slices; this one only parses the implementation block.
+    /// Parses `impl Iface for Target { <functions> }`: one target's implementation of an
+    /// interface (RFC-0014). The body is ordinary functions (with bodies); `Target` is a
+    /// target-profile identifier. Told apart from an inherent `impl Type { .. }` by the `for`.
+    /// Matching methods to the interface and resolving `use` happen later; this only parses
+    /// the block. (Internally still a `ProviderDef`: the concept is a port and its provider.)
     fn parse_provides(&mut self) -> ProviderDef {
-        self.expect(Token::Provides);
+        self.expect(Token::Impl);
         let port = self.expect_ident();
         self.expect(Token::For);
         let target = self.expect_ident();

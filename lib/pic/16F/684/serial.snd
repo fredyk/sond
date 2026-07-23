@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/pic/16F/684/serial.snd — the Serial port, implemented for the PIC16F684
+// lib/pic/16F/684/serial.snd — the Serial interface, implemented for the PIC16F684
 // as a bit-banged 9600 8N1 UART WRITTEN IN SOND (not a backend intrinsic).
 //
 // TX = RA0, RX = RA1. The whole physical layer is expressed with the generic
 // backend primitives — poke8/peek8 (register I/O), delay_loop (calibrated busy
 // wait), a `break`-terminated poll, and constant shifts — so it is ordinary,
-// verifiable Sond, checked against the Serial port contract. Nothing UART-shaped
+// verifiable Sond, checked against the Serial interface contract. Nothing UART-shaped
 // lives in the compiler.
 //
 // Register addresses must be literals (the backend folds only literal constants):
@@ -17,7 +17,7 @@
 
 include "any/serial.snd"
 
-provides Serial for pic16 {
+impl Serial for pic16 {
     fn serial_init() {
         poke8(0x8F, 0x70)   // OSCCON: IRCF=111 -> 8 MHz internal oscillator
         poke8(0x19, 0x07)   // CMCON0: comparators off -> RA1 is a digital input

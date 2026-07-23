@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// Tests for lib/any/serial.snd: the Serial port (RFC-0014), exercised through a
-// fake host provider. The port is the interface; here a `provides Serial for
+// Tests for lib/any/serial.snd: the Serial interface (RFC-0014), exercised through a
+// fake host provider. The port is the interface; here an `impl Serial for
 // host` fakes the line with an in-memory buffer, so `use Serial` resolves and the
 // three primitives run under the real test harness.
 
@@ -15,7 +15,7 @@ let mut rx[4]
 let mut rx_pos = 0
 let mut tx_last = 0
 
-provides Serial for host {
+impl Serial for host {
     fn serial_init() { rx_pos = 0 }
     fn serial_getc() -> u8 {
         let b = peek8(rx + rx_pos)

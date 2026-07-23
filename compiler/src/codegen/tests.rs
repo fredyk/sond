@@ -658,7 +658,7 @@ fn asm_emits_the_instruction_verbatim() {
 
 #[test]
 fn uefi_serial_writes_to_com1_port() {
-    // serial_print/serial_putc lower to COM1 (0x3F8) port I/O via a helper
+    // serial_print/serial_putc lower to COM1 (0x3F8) iface I/O via a helper
     // that polls the UART line-status register, no firmware, survives EBS.
     let asm = emit_uefi(
         &Parser::new(tokenize("fn efi_main() -> i64 { serial_print(\"hi\")\n0 }")).parse_program(),
@@ -753,8 +753,8 @@ fn a_port_program_compiles_and_runs_end_to_end() {
     // provider, splice its method, verify the body against the port's contract, codegen, run.
     // `main` calls the spliced provider method; dbl(21) = 42 is the process exit code.
     let code = compile_and_run(
-        "port Doubler { fn dbl(x: i64) -> (r: i64) ensures { r == x + x } }\n\
-         provides Doubler for host { fn dbl(x: i64) -> i64 { x + x } }\n\
+        "iface Doubler { fn dbl(x: i64) -> (r: i64) ensures { r == x + x } }\n\
+         impl Doubler for host { fn dbl(x: i64) -> i64 { x + x } }\n\
          use Doubler\n\
          fn main() -> i64 { dbl(21) }",
     );
@@ -763,12 +763,12 @@ fn a_port_program_compiles_and_runs_end_to_end() {
 
 #[test]
 fn a_port_provider_compiles_to_a_pic16_subroutine_and_is_called() {
-    // RFC-0014 on the 8-bit target: a `provides Doubler for pic16` method, once resolved and
+    // RFC-0014 on the 8-bit target: a `impl Doubler for pic16` method, once resolved and
     // spliced, compiles as a real PIC16 subroutine, and main's `use`-resolved call reaches it.
     // Locks in that ports compose with user-function codegen on --pic16.
     let mut p = Parser::new(tokenize(
-        "port Doubler { fn dbl(x: i64) -> i64 }\n\
-         provides Doubler for pic16 { fn dbl(x: i64) -> i64 { x + x } }\n\
+        "iface Doubler { fn dbl(x: i64) -> i64 }\n\
+         impl Doubler for pic16 { fn dbl(x: i64) -> i64 { x + x } }\n\
          use Doubler\n\
          fn main() { let y = dbl(5) }",
     ));
@@ -791,13 +791,13 @@ fn a_port_provider_compiles_to_a_pic16_subroutine_and_is_called() {
 
 #[test]
 fn a_pic16_serial_provider_replaces_the_backend_intrinsic() {
-    // The end of the whole arc: with a `provides Serial for pic16` defining serial_getc, the
+    // The end of the whole arc: with a `impl Serial for pic16` defining serial_getc, the
     // backend cedes its hardcoded bit-bang intrinsic and the provider's Sond body is the
     // implementation. The hidden asm dies; the firmware need no longer stub. Composition test
     // of the port mechanism (resolve + splice) with the backend's user-function cede.
     let mut p = Parser::new(tokenize(
-        "port Serial { fn serial_getc() -> i64 }\n\
-         provides Serial for pic16 { fn serial_getc() -> i64 { 7 } }\n\
+        "iface Serial { fn serial_getc() -> i64 }\n\
+         impl Serial for pic16 { fn serial_getc() -> i64 { 7 } }\n\
          use Serial\n\
          fn main() { let c = serial_getc() }",
     ));

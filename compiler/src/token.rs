@@ -40,11 +40,12 @@ pub enum Token {
     Spawn,
     /// `enum`: a sum type (closed set of variants).
     Enum,
-    /// `port`: a named interface, a set of signatures implemented per target (RFC-0014).
-    Port,
-    /// `provides Port for Target`: one target's implementation of a port (RFC-0014).
-    Provides,
-    /// `use Port`: depend on a port's interface; resolved to the active target's provider (RFC-0014).
+    /// `iface`: a named interface, a set of signatures implemented per target (RFC-0014). The
+    /// concept is a port (ports & adapters); the surface keyword is `iface` so `port` stays a
+    /// free identifier (a network port is a very common variable name).
+    Iface,
+    /// `use Iface`: depend on an interface; resolved to the active target's `impl` (RFC-0014).
+    /// A target's implementation is written `impl Iface for Target { .. }`, reusing `Impl`.
     Use,
     /// `as`: an explicit numeric conversion (`x as u8`, `n as f64`).
     As,

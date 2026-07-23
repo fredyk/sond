@@ -52,12 +52,13 @@ pub fn emit_header(
         b.push('\n');
         blocks.push(b);
     }
-    // A `port` IS an interface, so it belongs in the header verbatim (RFC-0014). Its `provides`
-    // are per-target implementation, like a function body, and never appear here.
+    // An `iface` IS an interface, so it belongs in the header verbatim (RFC-0014). Its
+    // `impl Iface for Target` blocks are per-target implementation, like a function body,
+    // and never appear here.
     for p in ports.iter().filter(|p| p.vis == Visibility::Pub) {
         let mut b = String::new();
-        emit_doc(&mut b, src, "port", &p.name);
-        b.push_str(&format!("pub port {} {{\n", p.name));
+        emit_doc(&mut b, src, "iface", &p.name);
+        b.push_str(&format!("pub iface {} {{\n", p.name));
         for m in &p.methods {
             b.push_str(&format!("    {}\n", port_method_line(m)));
         }
@@ -350,17 +351,17 @@ mod port_header_tests {
         // A `port` is the interface, so it belongs in the header (RFC-0014); a `provides`
         // is per-target implementation, like a body, and must never appear.
         let src = "// A serial line.\n\
-                   pub port Serial {\n\
+                   pub iface Serial {\n\
                      fn serial_getc() -> (b: i64) ensures { b >= -1 }\n\
                      fn serial_putc(b: i64)\n\
                    }\n\
-                   provides Serial for host { fn serial_getc() -> i64 { 0 } fn serial_putc(b: i64) { } }";
+                   impl Serial for host { fn serial_getc() -> i64 { 0 } fn serial_putc(b: i64) { } }";
         let mut p = Parser::new(tokenize(src));
         p.parse_program();
         let ports = p.take_ports();
         let h = emit_header(src, &[], &[], &[], &ports);
         assert!(h.contains("// A serial line."), "the port's doc comment is kept");
-        assert!(h.contains("pub port Serial {"), "the port is emitted");
+        assert!(h.contains("pub iface Serial {"), "the port is emitted");
         assert!(h.contains("fn serial_getc() -> (b: i64)"), "a method keeps its named return");
         assert!(h.contains("ensures { b >= -1 }"), "a method keeps its contract");
         assert!(h.contains("fn serial_putc(b: i64)"), "a bodyless method is rendered");
@@ -370,7 +371,7 @@ mod port_header_tests {
 
     #[test]
     fn a_private_port_is_omitted() {
-        let src = "port Internal { fn f() }";
+        let src = "iface Internal { fn f() }";
         let mut p = Parser::new(tokenize(src));
         p.parse_program();
         let ports = p.take_ports();

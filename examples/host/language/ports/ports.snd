@@ -3,27 +3,29 @@
 //
 // Ports (RFC-0014): one interface, one implementation chosen per target.
 //
-// A `port` is an interface: signatures with contracts, no bodies. A `provides
-// Port for <target>` implements it for one target profile, and `use Port` brings
-// the interface into scope. The compiler splices the provider that matches the
-// build target and proves its body against the port's contract, so a caller is
-// written and verified against the interface alone, never a concrete provider.
+// An `iface` is an interface: signatures with contracts, no bodies. An `impl
+// Iface for <target>` implements it for one target profile, and `use Iface`
+// brings the interface into scope. The compiler splices the implementation that
+// matches the build target and proves its body against the interface's contract,
+// so a caller is written and verified against the interface alone, never a
+// concrete implementation. (The concept is a port in ports & adapters; the
+// keyword is `iface` so `port` stays a free identifier.)
 //
 //   sondc examples/host/language/ports/ports.snd -o /tmp/ports && /tmp/ports
 //
 // Exit code = clamp(300, 0, 255) = 255.
 
-// The interface: clamp a value into [lo, hi]. The contract is part of the port,
-// so every provider must honour it and every caller may rely on it.
-port Clamp {
+// The interface: clamp a value into [lo, hi]. The contract is part of the
+// interface, so every implementation must honour it and every caller may rely on it.
+iface Clamp {
     fn clamp(x: i64, lo: i64, hi: i64) -> (r: i64)
         requires { lo <= hi }
         ensures  { r >= lo; r <= hi }
 }
 
 // One implementation, for the hosted target. Its body is verified against the
-// port's ensures: return below `lo` or above `hi` and it would not compile.
-provides Clamp for host {
+// interface's ensures: return below `lo` or above `hi` and it would not compile.
+impl Clamp for host {
     fn clamp(x: i64, lo: i64, hi: i64) -> i64 {
         if x < lo { lo } else { if x > hi { hi } else { x } }
     }

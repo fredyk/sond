@@ -498,10 +498,10 @@ fn parses_a_spawn_statement() {
 
 #[test]
 fn parses_a_port_with_bodyless_signatures() {
-    // `port Name { fn a() fn b() -> T }` is a named interface: a set of signatures
+    // `iface Name { fn a() fn b() -> T }` is a named interface: a set of signatures
     // with no bodies. It is collected like structs/enums, off the function list.
     let mut p = Parser::new(tokenize(
-        "port Serial {\n\
+        "iface Serial {\n\
            fn serial_init()\n\
            fn serial_getc() -> i64\n\
            fn serial_putc(b: i64)\n\
@@ -523,7 +523,7 @@ fn a_port_signature_keeps_its_contracts() {
     // A port method carries requires/ensures: the obligation every provider must meet
     // and the guarantee every caller may rely on.
     let mut p = Parser::new(tokenize(
-        "port Serial {\n\
+        "iface Serial {\n\
            fn serial_getc() -> (b: i64) ensures { b >= -1 }\n\
          }",
     ));
@@ -535,7 +535,7 @@ fn a_port_signature_keeps_its_contracts() {
 
 #[test]
 fn a_pub_port_is_public() {
-    let mut p = Parser::new(tokenize("pub port P { fn f() }"));
+    let mut p = Parser::new(tokenize("pub iface P { fn f() }"));
     p.parse_program();
     assert_eq!(p.take_ports()[0].vis, Visibility::Pub);
 }
@@ -544,7 +544,7 @@ fn a_pub_port_is_public() {
 fn a_program_mixes_a_port_with_ordinary_functions() {
     // A port coexists with functions in any order; the functions still land on the list.
     let mut p = Parser::new(tokenize(
-        "fn main() -> i64 { 0 }\nport P { fn f() -> i64 }",
+        "fn main() -> i64 { 0 }\niface P { fn f() -> i64 }",
     ));
     let funcs = p.parse_program();
     assert_eq!(funcs.len(), 1, "main is the only function");
@@ -554,11 +554,11 @@ fn a_program_mixes_a_port_with_ordinary_functions() {
 
 #[test]
 fn parses_a_provider_with_target_and_bodied_functions() {
-    // `provides Port for Target { fn .. { body } }` is one target's implementation.
+    // `impl Port for Target { fn .. { body } }` is one target's implementation.
     // The functions have bodies (unlike a port's signatures) and are collected off the
     // function list, like the port itself.
     let mut p = Parser::new(tokenize(
-        "provides Serial for pic16 {\n\
+        "impl Serial for pic16 {\n\
            fn serial_init() { }\n\
            fn serial_getc() -> i64 { 0 }\n\
          }",
@@ -578,9 +578,9 @@ fn a_port_and_two_providers_coexist() {
     // The whole shape of RFC-0014: one interface, two target implementations, all in one
     // program, none of them polluting the ordinary function list.
     let mut p = Parser::new(tokenize(
-        "port Serial { fn putc(b: i64) }\n\
-         provides Serial for x86_64_linux { fn putc(b: i64) { } }\n\
-         provides Serial for pic16 { fn putc(b: i64) { } }\n\
+        "iface Serial { fn putc(b: i64) }\n\
+         impl Serial for x86_64_linux { fn putc(b: i64) { } }\n\
+         impl Serial for pic16 { fn putc(b: i64) { } }\n\
          fn main() -> i64 { 0 }",
     ));
     let funcs = p.parse_program();

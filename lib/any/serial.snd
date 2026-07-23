@@ -2,7 +2,7 @@
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
 // The byte-stream serial PORT (RFC-0014): a target-agnostic interface of three
-// primitives, implemented per target by a `provides Serial for <target>`. A
+// primitives, implemented per target by a `impl Serial for <target>`. A
 // program depends on it with `use Serial`, and the compiler splices the provider
 // that matches the build (a bit-banged UART on a microcontroller, a UART
 // peripheral on other metal) and proves that provider against this contract.
@@ -22,7 +22,7 @@
 // NOTE: today the compiler treats `u8` as a name for a machine integer and does not
 // yet enforce its `0..255` range (that is RFC-0012, bounded integers). The interface
 // already speaks in `u8`; when RFC-0012 lands the range is carried by the type.
-pub port Serial {
+pub iface Serial {
     // Bring the line up (baud, framing, pin directions) before any byte moves.
     fn serial_init()
 

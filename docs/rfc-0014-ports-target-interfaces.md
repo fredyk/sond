@@ -64,7 +64,7 @@ None of these is a bug; each is a deliberate simplification. Together they leave
 Sond claims its widest reach (kernel to MCU): the target with the least stdlib is the one where you
 are most on your own.
 
-## 3. The mechanism: `port` and `provides`
+## 3. The mechanism: `iface` and `impl … for`
 
 A **port** is a named interface: a set of function signatures (with contracts and effects), no
 bodies. A **provider** is a per-target implementation of a port. The compiler selects the one
@@ -81,7 +81,7 @@ port Serial {
 
 ```
 // lib/x86_64/linux/serial.snd  --- one provider
-provides Serial for x86_64_linux {
+impl Serial for x86_64_linux {
     fn serial_init() { /* termios raw 8N1 via ioctl */ }
     fn serial_getc() -> i64 { /* read() one byte, -1 on timeout */ }
     fn serial_putc(b: i64) { /* write() one byte */ }
@@ -90,7 +90,7 @@ provides Serial for x86_64_linux {
 
 ```
 // lib/pic16/serial.snd  --- another provider, same interface
-provides Serial for pic16 {
+impl Serial for pic16 {
     fn serial_init() { /* CMCON0 = 0x07, TRIS setup, bit-bang timing */ }
     fn serial_getc() -> i64 { /* sample RX at bit centers */ }
     fn serial_putc(b: i64) { /* bit-bang 9600 8N1 */ }
@@ -123,8 +123,8 @@ Resolution is static and total:
 2. The error when none exists is the deliverable that replaces hand-stubbing:
 
    ```
-   sondc: no implementation of port `Serial` for target `pic16`.
-     `use Serial` needs a `provides Serial for pic16 { ... }`.
+   sondc: no implementation of interface `Serial` for target `pic16`.
+     `use Serial` needs an `impl Serial for pic16 { ... }`.
      found providers for: x86_64_linux
    ```
 
@@ -200,7 +200,7 @@ enforcement is free when it lands.)
 
 The remaining steps, downstream product/backend work, not language work:
 
-1. `provides Serial for pic16` with the bit-bang body **in Sond**, under `lib/pic/16F/684/serial.snd`
+1. `impl Serial for pic16` with the bit-bang body **in Sond**, under `lib/pic/16F/684/serial.snd`
    (the maintainer's placement: reusable per-target libraries live in the language repo, the product only uses
    them). This requires the pic16 backend primitives currently in flight (a read-`peek8`, a
    variable-value `poke8`, and a cycle-exact delay), because today the bit-bang is a **backend
@@ -213,7 +213,7 @@ The remaining steps, downstream product/backend work, not language work:
 
 ## 9. Honest limits and open questions
 
-- **Grammar cost.** Two new keywords (`port`, `provides`) and one binding form (`use`). Small, but
+- **Grammar cost.** One new keyword (`iface`), the reused `impl` in `impl … for`, and the `use` binding form. Small, but
   real surface; the alternative (a target-conditional `include "pic16/serial.snd"` resolved by
   profile) is *smaller* and needs no keywords, but gives no interface and no contract boundary, so it
   does not solve section 5. The port is the version worth its weight.
@@ -221,7 +221,7 @@ The remaining steps, downstream product/backend work, not language work:
   Sond model; whether the bit-bang actually meets timing is outside the type system (the same honest
   limit as any `asm`/`poke` primitive, RFC-0011 debt #4). The port bounds *what* the function
   promises, not *that the silicon obeys*.
-- **Default providers.** Should a port allow a `provides Serial for any { ... }` fallback used when no
+- **Default providers.** Should a port allow an `impl Serial for any { ... }` fallback used when no
   target-specific provider exists? Convenient, but it re-opens the silent-wrong-implementation door
   the total error in section 4 closes. Deferred; leaning against.
 - **Interaction with generated headers.** A port *is* a header that the language understands. The
@@ -229,8 +229,8 @@ The remaining steps, downstream product/backend work, not language work:
 
 ## 10. Implementation plan (TDD slices)
 
-1. **Parse `port P { sigs }`** into the AST (signatures only), red-green with a parser test.
-2. **Parse `provides P for T { fns }`** and bind it to its port and target.
+1. **Parse `iface P { sigs }`** into the AST (signatures only), red-green with a parser test.
+2. **Parse `impl P for T { fns }`** and bind it to its port and target.
 3. **Resolve `use P`** against providers filtered by the active target; the three errors of section 4
    (zero, ambiguous, signature-mismatch) each land as a failing test first.
 4. **Splice the selected provider** into the translation unit at lowering, so codegen is unchanged.
@@ -248,7 +248,7 @@ The mechanism landed in six commits, strict TDD throughout, and matches this des
 adjustment: the concrete target identifiers are the compiler's own tags (`host`, `pic16`, `uefi`,
 `freestanding`, `shared`), not the `x86_64_linux` of the examples above. What is built:
 
-- **Grammar** (`port`, `provides ... for`, `use`): parsed into `PortDef` (bodyless `Signature`s),
+- **Grammar** (`iface`, `impl ... for`, `use`): parsed into `PortDef` (bodyless `Signature`s),
   `ProviderDef` (per-target functions), and `UseDecl`, collected off the function list like structs
   and enums. The function-head parser is shared (`parse_sig_tail`) so a port method and a function
   signature are one grammar.
