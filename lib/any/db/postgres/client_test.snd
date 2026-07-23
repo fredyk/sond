@@ -1,0 +1,248 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Integration test of db/postgres/client.snd over a real 127.0.0.1 loopback socket. The
+// PARENT is the client under test (so its coverage is counted); a forked CHILD plays a
+// scripted PostgreSQL server. The listening socket is bound before the fork so the
+// client can connect into the backlog without racing the child's accept.
+
+include "any/db/postgres/client.snd"
+include "x86_64/linux/testing.snd"
+
+// --- scripted-server helpers (run in the child; not counted for coverage) ---
+
+fn srv_send_auth(fd: i64, code: i64) {
+    let b[16]
+    poke8(b, 82)                                    // 'R'
+    pg_put_u32be(b + 1, 8)
+    pg_put_u32be(b + 5, code)
+    write_buf(fd, b, 9)
+}
+
+fn srv_send_ready(fd: i64) {
+    let b[8]
+    poke8(b, 90)                                    // 'Z'
+    pg_put_u32be(b + 1, 5)
+    poke8(b + 5, 73)                                // 'I'
+    write_buf(fd, b, 6)
+}
+
+fn srv_send_cmdcomplete(fd: i64, tag: i64) {
+    let b[64]
+    poke8(b, 67)                                    // 'C'
+    let n = strlen(tag)
+    let mut i = 0
+    for i < n { poke8(b + 5 + i, peek8(tag + i)); i = i + 1 }
+    poke8(b + 5 + n, 0)
+    pg_put_u32be(b + 1, 4 + n + 1)
+    write_buf(fd, b, 1 + 4 + n + 1)
+}
+
+fn srv_put_col(b: i64, p: i64, name: i64) -> i64 {
+    let n = strlen(name)
+    let mut i = 0
+    for i < n { poke8(b + p + i, peek8(name + i)); i = i + 1 }
+    poke8(b + p + n, 0)
+    let mut z = 0
+    for z < 18 { poke8(b + p + n + 1 + z, 0); z = z + 1 }   // 18-byte fixed field tail
+    p + n + 1 + 18
+}
+
+fn srv_send_rowdesc2(fd: i64, c0: i64, c1: i64) {
+    let b[128]
+    poke8(b, 84)                                    // 'T'
+    pg_put_u16be(b + 5, 2)
+    let mut p = srv_put_col(b, 7, c0)
+    p = srv_put_col(b, p, c1)
+    pg_put_u32be(b + 1, p - 1)                       // length excludes the type byte
+    write_buf(fd, b, p)
+}
+
+fn srv_put_field(b: i64, p: i64, val: i64, vlen: i64) -> i64 {
+    if vlen < 0 {
+        pg_put_u32be(b + p, 0xffffffff)             // SQL NULL
+        return p + 4
+    }
+    pg_put_u32be(b + p, vlen)
+    let mut i = 0
+    for i < vlen { poke8(b + p + 4 + i, peek8(val + i)); i = i + 1 }
+    p + 4 + vlen
+}
+
+fn srv_send_datarow2(fd: i64, a: i64, alen: i64, c: i64, clen: i64) {
+    let b[256]
+    poke8(b, 68)                                    // 'D'
+    pg_put_u16be(b + 5, 2)
+    let mut p = srv_put_field(b, 7, a, alen)
+    p = srv_put_field(b, p, c, clen)
+    pg_put_u32be(b + 1, p - 1)
+    write_buf(fd, b, p)
+}
+
+// Reads and discards a StartupMessage (length-prefixed, no type byte).
+fn srv_drain_startup(fd: i64) {
+    let b[512]
+    pg_read_exact(fd, b, 4)
+    let len = pg_get_u32be(b)
+    if len > 4 { pg_read_exact(fd, b + 4, len - 4) }
+}
+
+// Reads and discards one typed frontend message (PasswordMessage, Query, ...).
+fn srv_drain_msg(fd: i64) {
+    let b = heap_alloc(8192)
+    pg_read_msg(fd, b, 8192)
+}
+
+fn srv_send_error(fd: i64, msg: i64) {
+    let b[128]
+    poke8(b, 69)                                    // 'E'
+    poke8(b + 5, 77)                                // 'M' message field
+    let n = strlen(msg)
+    let mut i = 0
+    for i < n { poke8(b + 6 + i, peek8(msg + i)); i = i + 1 }
+    poke8(b + 6 + n, 0)                             // value NUL
+    poke8(b + 6 + n + 1, 0)                         // fields terminator
+    let e = 6 + n + 2
+    pg_put_u32be(b + 1, e - 1)
+    write_buf(fd, b, e)
+}
+
+test "pg client: connect (cleartext), query, and read rows over loopback" {
+    let port = 54329
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        // CHILD: scripted PostgreSQL server.
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        srv_drain_startup(afd)
+        srv_send_auth(afd, 3)                       // AuthenticationCleartextPassword
+        srv_drain_msg(afd)                          // PasswordMessage
+        srv_send_auth(afd, 0)                       // AuthenticationOk
+        srv_send_ready(afd)                         // ReadyForQuery
+        srv_drain_msg(afd)                          // the Query
+        srv_send_rowdesc2(afd, "id", "name")
+        srv_send_datarow2(afd, "7", 1, "bob", 3)
+        srv_send_datarow2(afd, "8", 1, "bob", 0 - 1)   // second col is NULL
+        srv_send_cmdcomplete(afd, "SELECT 2")
+        srv_send_ready(afd)
+        close_fd(afd)
+        syscall(SYS_exit, 0)
+    }
+
+    // PARENT: the client under test.
+    let conn = pgx_connect("127.0.0.1", port, "u", "secret", "db")
+    assert_ne(conn, 0)
+    assert_eq(pgx_ok(conn), 1)
+
+    let r = pgx_query(conn, "SELECT id,name FROM t")
+    assert_eq(pgx_res_ok(r), 1)
+    assert_eq(pgx_ncols(r), 2)
+    assert_eq(pgx_nrows(r), 2)
+    assert_eq(peek8(pgx_val(r, 0, 0)), 55)          // '7'
+    assert_eq(peek8(pgx_val(r, 0, 1)), 98)          // 'b' of "bob"
+    assert_eq(peek8(pgx_val(r, 1, 0)), 56)          // '8'
+    assert_eq(pgx_val(r, 1, 1), 0)                  // SQL NULL
+    assert_eq(peek8(pgx_res_cmd(r)), 83)            // 'S' of "SELECT 2"
+
+    pgx_close(conn)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    assert_eq((st[0] >> 8) & 255, 0)
+}
+
+// A second server that offers an unsupported auth method (MD5): the client must fail
+// the connection cleanly rather than proceed unauthenticated.
+test "pg client: an unsupported auth method fails the connection" {
+    let port = 54330
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        srv_drain_startup(afd)
+        srv_send_auth(afd, 5)                       // AuthenticationMD5Password (unsupported)
+        close_fd(afd)
+        syscall(SYS_exit, 0)
+    }
+
+    let conn = pgx_connect("127.0.0.1", port, "u", "secret", "db")
+    assert_eq(conn, 0)                              // hard failure, no unauthenticated session
+
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+
+// A refused connection (nothing listening) yields a null handle, no crash.
+test "pg client: a refused connection returns a null handle" {
+    assert_eq(pgx_connect("127.0.0.1", 54331, "u", "", "db"), 0)
+}
+
+// A server that hangs up mid-startup must surface as a failed connect, not a hang.
+test "pg client: a server that hangs up during startup fails cleanly" {
+    let port = 54332
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        srv_drain_startup(afd)
+        close_fd(afd)                               // hang up before any auth message
+        syscall(SYS_exit, 0)
+    }
+
+    assert_eq(pgx_connect("127.0.0.1", port, "u", "secret", "db"), 0)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+
+// An ErrorResponse during startup (e.g. bad database) fails the connection.
+test "pg client: an ErrorResponse during startup fails the connection" {
+    let port = 54333
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        srv_drain_startup(afd)
+        srv_send_error(afd, "database \"db\" does not exist")
+        close_fd(afd)
+        syscall(SYS_exit, 0)
+    }
+
+    assert_eq(pgx_connect("127.0.0.1", port, "u", "secret", "db"), 0)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}

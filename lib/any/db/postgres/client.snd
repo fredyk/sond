@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/db/postgres/client.snd: the socket adapter of the PostgreSQL client, the
+// `pgx_*` connection API. It only does I/O and framing; the message byte layout lives in
+// wire.snd and the row/column assembly in result.snd (both socket-free and unit-tested).
+//
+// Auth supported here: trust (AuthenticationOk) and cleartext password. MD5 and
+// SCRAM-SHA-256 are follow-ups (SCRAM needs base64 + PBKDF2, not yet in crypto). The
+// host is a numeric IPv4 dotted quad (a local sidecar is 127.0.0.1); there is no DNS
+// resolver in the standard library yet.
+
+include "any/db/postgres/result.snd"
+include "x86_64/linux/net.snd"
+include "x86_64/linux/io.snd"
+include "any/strings.snd"
+
+// Parses a dotted-quad "a.b.c.d" into a big-endian-packed u32 (127.0.0.1 -> 0x7f000001).
+fn pg_parse_ipv4(s: i64) -> i64 {
+    let mut ip = 0
+    let mut octet = 0
+    let mut i = 0
+    for {
+        let c = peek8(s + i)
+        if c == 0 { break }
+        if c == 46 {                                // '.'
+            ip = (ip << 8) | octet
+            octet = 0
+        } else {
+            octet = octet * 10 + (c - 48)
+        }
+        i = i + 1
+    }
+    (ip << 8) | octet
+}
+
+// Reads exactly `n` bytes into `buf`, looping over short reads. Returns n, or <=0 on
+// EOF (0) or error (<0).
+fn pg_read_exact(fd: i64, buf: i64, n: i64) -> i64 {
+    let mut got = 0
+    for got < n {
+        let r = read_buf(fd, buf + got, n - got)
+        if r <= 0 { return r }
+        got = got + r
+    }
+    n
+}
+
+// Reads one framed backend message into `buf` (capacity `cap`): the 5-byte header
+// (type + int32 length) then the payload. Returns the total message length (1 + the
+// declared length), or -1 on EOF/error or if the message would overflow `buf`.
+fn pg_read_msg(fd: i64, buf: i64, cap: i64) -> i64 {
+    if pg_read_exact(fd, buf, 5) <= 0 { return 0 - 1 }
+    let len = pg_get_u32be(buf + 1)                 // includes its own 4 bytes
+    let payload = len - 4
+    if payload > 0 {
+        if 5 + payload > cap { return 0 - 1 }
+        if pg_read_exact(fd, buf + 5, payload) <= 0 { return 0 - 1 }
+    }
+    1 + len
+}
+
+// Sends a PasswordMessage ('p') carrying the cleartext password.
+fn pg_send_password(fd: i64, pass: i64) {
+    let buf[512]
+    poke8(buf, 112)                                 // 'p'
+    let n = strlen(pass)
+    let len = 4 + n + 1
+    pg_put_u32be(buf + 1, len)
+    let mut i = 0
+    for i < n { poke8(buf + 5 + i, peek8(pass + i)); i = i + 1 }
+    poke8(buf + 5 + n, 0)
+    write_buf(fd, buf, 1 + len)
+}
+
+// Opens a TCP connection to `host`:`port`, runs the startup + authentication exchange
+// (trust or cleartext password), and drains to ReadyForQuery. Returns a connection
+// handle ([fd, ok]) with ok=1 on success, or 0 on a hard failure.
+fn pgx_connect(host: i64, port: i64, user: i64, pass: i64, db: i64) -> i64 {
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { return 0 }
+    let sa[2]
+    sockaddr_in_build(sa, pg_parse_ipv4(host), port)
+    if connect_sock(fd, sa, 16) < 0 { close_fd(fd); return 0 }
+    let sbuf[512]
+    let slen = pg_startup(sbuf, user, db)
+    write_buf(fd, sbuf, slen)
+    let mbuf = heap_alloc(8192)
+    let mut ok = 0
+    for {
+        let mlen = pg_read_msg(fd, mbuf, 8192)
+        if mlen <= 0 { close_fd(fd); return 0 }
+        let t = pg_msg_type(mbuf)
+        if t == 82 {                                // 'R' Authentication
+            let code = pg_auth_type(mbuf)
+            if code == 0 { ok = 1 }                 // AuthenticationOk
+            if code == 3 { pg_send_password(fd, pass) }   // cleartext requested
+            if code != 0 { if code != 3 { close_fd(fd); return 0 } }   // md5/SASL unsupported
+        }
+        if t == 69 { close_fd(fd); return 0 }       // 'E' ErrorResponse during startup
+        if t == 90 { break }                        // 'Z' ReadyForQuery: startup done
+    }
+    let conn = heap_alloc(16)
+    conn[0] = fd
+    conn[1] = ok
+    conn
+}
+
+// 1 if the connection authenticated, 0 otherwise.
+fn pgx_ok(conn: i64) -> i64 { conn[1] }
+
+// Runs a Simple Query and collects the result: sends the SQL, then reads backend
+// messages into a result until ReadyForQuery. Returns the result handle.
+fn pgx_query(conn: i64, sql: i64) -> i64 {
+    let fd = conn[0]
+    let qbuf = heap_alloc(8192 + strlen(sql))
+    let qlen = pg_query(qbuf, sql)
+    write_buf(fd, qbuf, qlen)
+    let r = pg_result_new()
+    let mbuf = heap_alloc(65536)
+    for {
+        let mlen = pg_read_msg(fd, mbuf, 65536)
+        if mlen <= 0 { break }                      // connection error: return what we have
+        if pg_result_absorb(r, mbuf) == 1 { break } // ReadyForQuery ends the cycle
+    }
+    r
+}
+
+// Sends Terminate ('X') and closes the socket.
+fn pgx_close(conn: i64) {
+    let fd = conn[0]
+    let tbuf[8]
+    poke8(tbuf, 88)                                 // 'X'
+    pg_put_u32be(tbuf + 1, 4)
+    write_buf(fd, tbuf, 5)
+    close_fd(fd)
+}
