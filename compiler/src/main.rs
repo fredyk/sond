@@ -177,6 +177,10 @@ fn main() -> ExitCode {
     // Value/pointer struct rules: a value struct received as a parameter is
     // read-only (only its creator may mutate it). Reject field mutation of a
     // value-struct param before lowering, declare it `*Point` to mutate.
+    if let Err(msg) = sondc::check::check_no_duplicate_functions(&funcs) {
+        eprintln!("sondc: {msg}");
+        std::process::exit(1);
+    }
     if let Err(msg) = sondc::check::check_spawn_not_in_loop(&funcs) {
         eprintln!("sondc: {msg}");
         std::process::exit(1);

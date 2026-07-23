@@ -676,6 +676,26 @@ pub fn check_graph_acyclic(funcs: &[Function]) -> Result<(), String> {
     Ok(())
 }
 
+/// Rejects two top-level functions with the same name (after include flattening and method
+/// mangling, so methods `Type_m` never false-match). Two same-named free functions become two
+/// identical assembler labels: a `symbol already defined` link error whose cause is opaque. This
+/// catches it early and names the fix. The common case is a private helper of the same name in two
+/// different files (private functions are not yet file-scoped, so their names are program-global).
+pub fn check_no_duplicate_functions(funcs: &[Function]) -> Result<(), String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for f in funcs {
+        if !seen.insert(f.name.as_str()) {
+            return Err(format!(
+                "function `{}` is defined more than once. If these are private helpers in \
+                 different files, rename one: private functions are not yet file-scoped, so their \
+                 names must be unique across the whole program.",
+                f.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Rejects the process-termination effect inside a spawned call graph (RFC-0011, footgun #3).
 /// `syscall(SYS_exit, N)` ends the calling *thread* under process-per-connection semantics but
 /// the whole *process* when it runs on a spawned OS thread, so one connection's error path would
@@ -3369,6 +3389,28 @@ mod par_let_tests {
              fn run() -> i64 { let r = graph { node c = add(a, b)\n node a = id(1)\n node b = id(2)\n yield c }\n r }",
         );
         assert!(ok.is_ok(), "a DAG is fine even out of source order, got {ok:?}");
+    }
+
+    #[test]
+    fn rejects_two_functions_with_the_same_name() {
+        // Two same-named free functions (the flattened result of a private helper defined in two
+        // files) is a link collision, caught early with a clear message.
+        let funcs = Parser::new(tokenize(
+            "priv fn helper() -> i64 { 1 }\npriv fn helper() -> i64 { 2 }\nfn main() -> i64 { helper() }",
+        ))
+        .parse_program();
+        let e = check_no_duplicate_functions(&funcs);
+        assert!(e.is_err(), "a duplicate function name must be rejected");
+        assert!(e.unwrap_err().contains("helper"), "the error names the function");
+    }
+
+    #[test]
+    fn allows_distinct_function_names() {
+        let funcs = Parser::new(tokenize(
+            "fn a() -> i64 { 1 }\nfn b() -> i64 { 2 }\nfn main() -> i64 { a() + b() }",
+        ))
+        .parse_program();
+        assert!(check_no_duplicate_functions(&funcs).is_ok(), "distinct names are fine");
     }
 
     #[test]
