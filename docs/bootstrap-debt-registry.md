@@ -112,10 +112,31 @@ precise root of each is pinned here.
    case-split on disjunctive goals (prove the goal under each disjunct's witness), or lower small
    enumerations to a range.
 
+3. **✅ RESOLVED (2026-07-23, commit in `verify`): an immutable module-level global read as a value
+   is now folded to its constant.** Previously a body that returned a named constant from a branch:
+   ```
+   let Q0 = 0
+   let Q3 = 3
+   fn quadrant(s: i64) -> (r: i64) ensures { r >= 0; r <= 3 } { if s == 0 { Q0 } else { Q3 } }
+   ```
+   was rejected with `the body uses a construct the verifier does not support yet`: the symbolic
+   environment held only parameters and local `let` bindings, so reading a global looked up an absent
+   name and bailed the whole proof. The exact boundary (pinned by repro): a global used only in a
+   *condition* (`if s == SOME_CONST`) always verified; a *local* `let` constant returned from a branch
+   verified; only a *global returned as the value* failed, and `let a = GLOBAL; … a` failed too (the
+   global's value never reached the local). **Fix:** `verify_with_globals` seeds every IMMUTABLE scalar
+   global (`let`, not `let mut`; not an array) folded to its value into each function's environment, so a
+   global read as a value is proven exactly as if the literal were inline. A `let mut` global can change
+   and is left opaque (tested). Folding also SHARPENS the diagnostic: a global whose value violates the
+   range now yields a concrete counterexample (`postcondition '9 <= 3' is false … counterexample: s = 1`)
+   instead of a vague bail. Note this required a NAMED return `-> (r: i64)` to bind `r` in the `ensures`
+   (an unnamed `-> i64` leaves `r` a free symbol → `cannot verify a postcondition in this form`); that is
+   by design, not a debt.
+
 **Not a debt (verified, so it is not documented as one):** a multi-line `let x = if … else …`
 initializer, including deep nesting, branches with statements before the tail, and `else if` without
 braces, all parse and run. The `if`-expression-as-body is also fine on its own; only the two contract
-forms above are the real limit.
+forms above (early `return`, disjunctive postcondition) are the real limit.
 
 ## Reconciled design-doc clauses (superseded by the Prime Directive)
 
