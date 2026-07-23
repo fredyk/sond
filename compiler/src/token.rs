@@ -38,6 +38,9 @@ pub enum Token {
     /// scope joins every thread it spawned before it exits (structured concurrency), so a
     /// spawned thread can never outlive the frame that started it.
     Spawn,
+    /// `par`: the inline concurrent-peers form, `par a() ~~ b() ~~ c()` (RFC-0008 §5.1a).
+    /// Runs the peers in parallel over Layer B threads and joins them before the next statement.
+    Par,
     /// `enum`: a sum type (closed set of variants).
     Enum,
     /// `iface`: a named interface, a set of signatures implemented per target (RFC-0014). The
@@ -133,6 +136,10 @@ pub enum Token {
     PipePipe,
     /// `~`
     Tilde,
+    /// `~~`: the flat peer delimiter of a `par` block (RFC-0008 §5.1a). Its own two-character
+    /// token, so it is never bitwise-NOT (`~`), and it does not enter the expression precedence
+    /// table: it only separates peers inside `par`.
+    TildeTilde,
     /// `<<`
     Shl,
     /// `>>`

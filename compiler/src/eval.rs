@@ -93,6 +93,11 @@ pub fn eval_block(block: &Block, env: &mut Env) -> Value {
             Stmt::Expr(e) | Stmt::Spawn(e) => {
                 eval_expr(e, env);
             }
+            Stmt::Par(peers) => {
+                for p in peers {
+                    eval_expr(p, env);
+                }
+            }
             Stmt::Return(e) => {
                 return e.as_ref().map_or(Value::Unit, |e| eval_expr(e, env));
             }

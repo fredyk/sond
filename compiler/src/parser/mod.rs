@@ -595,6 +595,19 @@ impl Parser {
                     stmts.push(Stmt::Spawn(call));
                     self.skip_semicolons();
                 }
+                Some(Token::Par) => {
+                    // `par a() ~~ b() ~~ c()`: the peers, separated by the flat `~~` delimiter,
+                    // run concurrently and join before the next statement. `~~` is not an
+                    // expression operator, so `parse_expr` stops at it and we collect a flat list
+                    // (no associativity, no left-before-right). Each peer must be a call.
+                    self.advance();
+                    let mut peers = vec![self.parse_expr()];
+                    while self.eat(Token::TildeTilde) {
+                        peers.push(self.parse_expr());
+                    }
+                    stmts.push(Stmt::Par(peers));
+                    self.skip_semicolons();
+                }
                 _ => {
                     let e = self.parse_expr();
                     if self.eat(Token::Eq) {

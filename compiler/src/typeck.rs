@@ -87,6 +87,11 @@ fn check_block(block: &Block, env: &mut Env) -> Result<Ty, TypeError> {
             Stmt::Expr(e) | Stmt::Spawn(e) => {
                 infer(e, env)?;
             }
+            Stmt::Par(peers) => {
+                for p in peers {
+                    infer(p, env)?;
+                }
+            }
             Stmt::Return(Some(e)) => {
                 infer(e, env)?;
             }

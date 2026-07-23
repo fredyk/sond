@@ -530,6 +530,10 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
             // A spawned call runs concurrently; for effect analysis today it is treated like any
             // expression statement (its effect happens). Disjointness is a separate pass.
             Stmt::Spawn(_) => live,
+            // `par a() ~~ b() ~~ ..` runs its peers concurrently and joins. Like `spawn`, the peer
+            // calls have no effect on the scalar state the prover tracks, and the independence
+            // (confluence) proof that makes `~~` a verified claim is a separate pass (RFC-0008 §5.3).
+            Stmt::Par(_) => live,
             // A loop is verified via its invariant (init + preservation), then continues
             // with (invariant ∧ ¬condition). Without an invariant it is unverifiable.
             Stmt::For {

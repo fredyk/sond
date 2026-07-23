@@ -234,6 +234,13 @@ pub enum Stmt {
     /// enclosing scope joins every thread it spawned before it returns, so the
     /// inner expression is always a call, never an arbitrary expression.
     Spawn(Expr),
+    /// `par a() ~~ b() ~~ c()`: run the peers concurrently, each on its own OS
+    /// thread, and JOIN THEM ALL before the next statement (RFC-0008 §5.1a, the
+    /// inline `par` form over the RFC-0010 Layer B substrate). The `~~` is a flat,
+    /// n-ary peer delimiter, not an infix operator: horizontal position carries no
+    /// order. Each peer is a call, like `spawn`. Result binding and the independence
+    /// proof are later slices; this form runs effectful peers in parallel and joins.
+    Par(Vec<Expr>),
 }
 
 /// An expression (used in bodies and in `requires`/`ensures` propositions).

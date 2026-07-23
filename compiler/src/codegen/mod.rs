@@ -410,6 +410,11 @@ fn collect_locals(block: &Block, out: &mut Vec<String>) {
             }
             Stmt::Assign { value, .. } => collect_locals_in_expr(value, out),
             Stmt::Expr(e) | Stmt::Spawn(e) => collect_locals_in_expr(e, out),
+            Stmt::Par(peers) => {
+                for p in peers {
+                    collect_locals_in_expr(p, out);
+                }
+            }
             Stmt::Return(Some(e)) => collect_locals_in_expr(e, out),
             Stmt::Return(None) => {}
             Stmt::For { cond, body, .. } => {
@@ -449,6 +454,11 @@ fn collect_arrays(block: &Block, out: &mut Vec<(String, i64)>) {
             Stmt::Let { value, .. } => collect_arrays_in_expr(value, out),
             Stmt::Assign { value, .. } => collect_arrays_in_expr(value, out),
             Stmt::Expr(e) | Stmt::Spawn(e) => collect_arrays_in_expr(e, out),
+            Stmt::Par(peers) => {
+                for p in peers {
+                    collect_arrays_in_expr(p, out);
+                }
+            }
             Stmt::Return(Some(e)) => collect_arrays_in_expr(e, out),
             Stmt::Return(None) => {}
             Stmt::For { cond, body, .. } => {
@@ -777,24 +787,7 @@ impl Codegen {
         if !self.spawn_ctids.is_empty() {
             let ctids = std::mem::take(&mut self.spawn_ctids);
             self.line("    pushq %rax"); // preserve the return value across the joins
-            for cell in &ctids {
-                // futex-wait until the kernel clears the cell to 0 at the child's exit.
-                //   tid = [cell]; while tid != 0 { futex(cell, FUTEX_WAIT, tid, NULL); tid = [cell] }
-                let wait = self.fresh_label("join_wait");
-                let done = self.fresh_label("join_done");
-                self.line(&format!("{wait}:"));
-                self.line(&format!("    movq {cell}(%rip), %rdx")); // rdx = expected tid
-                self.line("    testq %rdx, %rdx");
-                self.line(&format!("    jz {done}"));
-                self.line(&format!("    leaq {cell}(%rip), %rdi")); // uaddr
-                self.line("    xorq %rsi, %rsi"); // FUTEX_WAIT = 0
-                // rdx already holds the expected value
-                self.line("    xorq %r10, %r10"); // timeout = NULL
-                self.line("    movq $202, %rax"); // SYS_futex
-                self.line("    syscall");
-                self.line(&format!("    jmp {wait}"));
-                self.line(&format!("{done}:"));
-            }
+            self.emit_join(&ctids);
             self.line("    popq %rax");
         }
         // Postconditions: checked at every exit, with the return value bound to
@@ -973,6 +966,43 @@ impl Codegen {
     /// tears it out from under a live thread; the symptom is corruption, not a clean error. Put the
     /// spawns in their own function and release in the caller, which only resumes once the join is
     /// done. The capability system will make the wrong version a compile error (RFC-0010 section 7).
+    /// Emits the futex-join for each clear_child_tid `cell`: wait until the kernel clears it to 0
+    /// at the child thread's exit. Does NOT preserve %rax; a caller that needs a value across the
+    /// join saves it (the scope-exit join wraps this in push/pop %rax, `par` has no value yet).
+    fn emit_join(&mut self, cells: &[String]) {
+        for cell in cells {
+            // tid = [cell]; while tid != 0 { futex(cell, FUTEX_WAIT, tid, NULL); tid = [cell] }
+            let wait = self.fresh_label("join_wait");
+            let done = self.fresh_label("join_done");
+            self.line(&format!("{wait}:"));
+            self.line(&format!("    movq {cell}(%rip), %rdx")); // rdx = expected tid
+            self.line("    testq %rdx, %rdx");
+            self.line(&format!("    jz {done}"));
+            self.line(&format!("    leaq {cell}(%rip), %rdi")); // uaddr
+            self.line("    xorq %rsi, %rsi"); // FUTEX_WAIT = 0
+            // rdx already holds the expected value
+            self.line("    xorq %r10, %r10"); // timeout = NULL
+            self.line("    movq $202, %rax"); // SYS_futex
+            self.line("    syscall");
+            self.line(&format!("    jmp {wait}"));
+            self.line(&format!("{done}:"));
+        }
+    }
+
+    /// Emits `par a() ~~ b() ~~ c()` (RFC-0008 §5.1a): spawn every peer on its own thread, then
+    /// join them ALL before the next statement. Reuses the Layer B `spawn` substrate: each peer
+    /// is spawned (which records its ctid cell), then this par's cells are split off the enclosing
+    /// scope's join set and joined here, so control does not continue until every peer has
+    /// finished, yet the scope-exit join does not wait on them again.
+    fn emit_par(&mut self, peers: &[Expr]) {
+        let start = self.spawn_ctids.len();
+        for peer in peers {
+            self.emit_spawn(peer);
+        }
+        let par_cells: Vec<String> = self.spawn_ctids.split_off(start);
+        self.emit_join(&par_cells);
+    }
+
     fn emit_spawn(&mut self, call: &Expr) {
         let Expr::Call(callee, args) = call else {
             panic!("`spawn` must be followed by a function call");
@@ -1220,6 +1250,7 @@ impl Codegen {
                 Stmt::Assign { .. } => todo!("x64 codegen: assignment to non-variable target"),
                 Stmt::Expr(e) => self.expr(e),
                 Stmt::Spawn(call) => self.emit_spawn(call),
+                Stmt::Par(peers) => self.emit_par(peers),
                 Stmt::Return(e) => {
                     match e {
                         Some(e) => self.expr(e),

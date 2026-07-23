@@ -494,6 +494,27 @@ fn parses_a_spawn_statement() {
     assert!(is_spawn_call, "the body should hold a Spawn of a call, got {:?}", f.body);
 }
 
+#[test]
+fn parses_a_par_statement_as_a_flat_peer_list() {
+    // `par a() ~~ b() ~~ c()`: the `~~` separates a FLAT list of peer calls (no
+    // associativity, no nesting). It parses into one `Stmt::Par` holding all three.
+    let f = parse_fn("fn run() -> i64 { par a() ~~ b() ~~ c() 0 }");
+    let par = f
+        .body
+        .stmts
+        .iter()
+        .find_map(|s| match s {
+            Stmt::Par(peers) => Some(peers),
+            _ => None,
+        })
+        .expect("the body should hold a Par statement");
+    assert_eq!(par.len(), 3, "three flat peers, not a nested tree: {par:?}");
+    assert!(
+        par.iter().all(|p| matches!(p, Expr::Call(_, _))),
+        "every peer is a call: {par:?}"
+    );
+}
+
 // --- RFC-0014: ports (interfaces implemented per target) ---
 
 #[test]

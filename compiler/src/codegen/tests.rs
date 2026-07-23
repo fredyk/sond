@@ -115,6 +115,24 @@ fn compiles_and_runs_local_variables_on_real_x64() {
 }
 
 #[test]
+fn par_runs_every_peer_on_a_thread_and_joins_before_continuing() {
+    // `par w(a,0) ~~ w(a,1) ~~ w(a,2)` spawns each peer on its own OS thread and joins ALL
+    // of them before the next statement. Each peer writes 1 into a distinct slot of a shared
+    // stack array (the threads share the address space, CLONE_VM); the sum read AFTER the
+    // `par` is 3 only if every peer ran AND was joined first. A missing join would let `main`
+    // read a slot before its writer finished (a flake or a low result); the deterministic 3
+    // is the join working.
+    let src = "\
+        fn w(p: i64, idx: i64) { poke64(p + idx * 8, 1) }\n\
+        fn main() -> i64 {\n\
+            let a[3]\n\
+            par w(a, 0) ~~ w(a, 1) ~~ w(a, 2)\n\
+            peek64(a) + peek64(a + 8) + peek64(a + 16)\n\
+        }";
+    assert_eq!(compile_and_run(src), 3, "all three peers ran and were joined");
+}
+
+#[test]
 fn compiles_and_runs_early_return_on_real_x64() {
     assert_eq!(
         compile_and_run("fn f() -> i64 { let x = 5\nreturn x + x\n }"),
@@ -540,8 +558,10 @@ fn compiles_and_runs_unary_operators_on_real_x64() {
     assert_eq!(compile_and_run("fn f() -> i64 { -7 + 10 }"), 3);
     // Exit codes are unsigned bytes, so keep results non-negative: ~0 is all-ones,
     // masked to 255; double complement round-trips; and (n + 7) & ~7 aligns up.
+    // NOTE: `~~` is the `par` peer delimiter (one token), so a double complement is written
+    // `~(~x)` or `~ ~x` (a space), never `~~x`.
     assert_eq!(compile_and_run("fn f() -> i64 { ~0 & 255 }"), 255);
-    assert_eq!(compile_and_run("fn f() -> i64 { ~~7 }"), 7);
+    assert_eq!(compile_and_run("fn f() -> i64 { ~(~7) }"), 7);
     assert_eq!(compile_and_run("fn f() -> i64 { (3 + 7) & ~7 }"), 8);
 }
 

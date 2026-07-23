@@ -629,6 +629,11 @@ fn desugar_stmt(
             desugar_expr(value, fields, sizes, locals, methods);
         }
         Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => desugar_expr(e, fields, sizes, locals, methods),
+        Stmt::Par(peers) => {
+            for p in peers {
+                desugar_expr(p, fields, sizes, locals, methods);
+            }
+        }
         Stmt::For { cond, body, .. } => {
             if let Some(c) = cond {
                 desugar_expr(c, fields, sizes, locals, methods);

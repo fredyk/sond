@@ -279,7 +279,16 @@ pub fn tokenize(input: &str) -> Vec<Token> {
             '*' => push1(&mut chars, &mut tokens, Token::Star),
             '%' => push1(&mut chars, &mut tokens, Token::Percent),
             '^' => push1(&mut chars, &mut tokens, Token::Caret),
-            '~' => push1(&mut chars, &mut tokens, Token::Tilde),
+            // `~` (bitwise NOT) or `~~` (the `par` peer delimiter, a distinct token).
+            '~' => {
+                chars.next();
+                if chars.peek() == Some(&'~') {
+                    chars.next();
+                    tokens.push(Token::TildeTilde);
+                } else {
+                    tokens.push(Token::Tilde);
+                }
+            }
             '(' => push1(&mut chars, &mut tokens, Token::LParen),
             ')' => push1(&mut chars, &mut tokens, Token::RParen),
             '{' => push1(&mut chars, &mut tokens, Token::LBrace),
@@ -394,6 +403,7 @@ fn keyword_or_ident(word: String) -> Token {
         "break" => Token::Break,
         "continue" => Token::Continue,
         "spawn" => Token::Spawn,
+        "par" => Token::Par,
         "and" => Token::And,
         "or" => Token::Or,
         "not" => Token::Not,

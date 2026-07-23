@@ -198,6 +198,11 @@ pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> 
                 Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Spawn(value) => {
                     collect_calls_expr(value, out)
                 }
+                Stmt::Par(peers) => {
+                    for p in peers {
+                        collect_calls_expr(p, out);
+                    }
+                }
                 Stmt::Assign { target, value } => {
                     collect_calls_expr(target, out);
                     collect_calls_expr(value, out);
@@ -291,6 +296,15 @@ pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> 
                         out.push(n);
                     }
                 }
+                Stmt::Par(peers) => {
+                    for p in peers {
+                        if let Expr::Call(callee, _) = p
+                            && let Expr::Var(n) = callee.as_ref()
+                        {
+                            out.push(n);
+                        }
+                    }
+                }
                 Stmt::For { body, .. } => spawn_targets(body, out),
                 _ => {}
             }
@@ -367,6 +381,7 @@ pub fn check_no_close_fd_after_spawn(funcs: &[Function]) -> Result<(), String> {
             // 1. A close of a moved fd anywhere in this statement's expressions is the footgun.
             let exprs: Vec<&Expr> = match s {
                 Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Spawn(value) => vec![value],
+                Stmt::Par(peers) => peers.iter().collect(),
                 Stmt::Assign { target, value } => vec![target, value],
                 Stmt::Return(Some(e)) => vec![e],
                 Stmt::For { cond, .. } => cond.iter().collect(),
@@ -389,6 +404,17 @@ pub fn check_no_close_fd_after_spawn(funcs: &[Function]) -> Result<(), String> {
                     for a in args {
                         if let Expr::Var(v) = &a.value {
                             moved.push(v);
+                        }
+                    }
+                }
+                Stmt::Par(peers) => {
+                    for p in peers {
+                        if let Expr::Call(_, args) = p {
+                            for a in args {
+                                if let Expr::Var(v) = &a.value {
+                                    moved.push(v);
+                                }
+                            }
                         }
                     }
                 }
@@ -566,6 +592,12 @@ fn check_stmt(s: &Stmt, immutable: &HashMap<&str, &str>, fname: &str) -> Result<
         }
         Stmt::Let { value, .. } => check_expr(value, immutable, fname),
         Stmt::Expr(e) | Stmt::Spawn(e) | Stmt::Return(Some(e)) => check_expr(e, immutable, fname),
+        Stmt::Par(peers) => {
+            for p in peers {
+                check_expr(p, immutable, fname)?;
+            }
+            Ok(())
+        }
         Stmt::For { body, cond, .. } => {
             if let Some(c) = cond {
                 check_expr(c, immutable, fname)?;

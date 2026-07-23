@@ -282,3 +282,26 @@ fn spawn_is_a_keyword() {
     // must not lex as an ordinary identifier.
     assert_eq!(tokenize("spawn"), vec![Token::Spawn]);
 }
+
+#[test]
+fn par_is_a_keyword() {
+    // `par a() ~~ b()` runs peers concurrently (RFC-0008 §5.1a), so `par` is a keyword.
+    assert_eq!(tokenize("par"), vec![Token::Par]);
+}
+
+#[test]
+fn double_tilde_is_one_token_distinct_from_bitwise_not() {
+    // `~~` is the `par` peer delimiter, a single two-character token, NOT two `~`. A lone
+    // `~` stays bitwise-NOT, so the two never collide.
+    assert_eq!(tokenize("~~"), vec![Token::TildeTilde]);
+    assert_eq!(tokenize("~"), vec![Token::Tilde]);
+    // Adjacent to operands: `a ~~ b` is [ident, ~~, ident], and `~a` stays a prefix `~`.
+    assert_eq!(
+        tokenize("a ~~ b"),
+        vec![
+            Token::Ident("a".to_string()),
+            Token::TildeTilde,
+            Token::Ident("b".to_string()),
+        ]
+    );
+}
