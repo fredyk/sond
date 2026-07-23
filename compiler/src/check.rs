@@ -237,6 +237,359 @@ pub fn check_par_let_arity(funcs: &[Function]) -> Result<(), String> {
     Ok(())
 }
 
+/// Per-function effect on the program's MUTABLE globals: the set it reads and the set it writes,
+/// transitively across its call graph. This is the footprint that decides whether two `par` peers
+/// can run concurrently: disjoint footprints are confluent (RFC-0008 §5.3).
+struct GlobalEffects {
+    reads: HashMap<String, HashSet<String>>,
+    writes: HashMap<String, HashSet<String>>,
+}
+
+/// The root variable an assignment writes: `G` for `G = v`, `G[i] = v`, `G.f = v`, `G[i].f = v`.
+/// A write through it is a write to `G`.
+fn lvalue_root(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::Var(n) => Some(n),
+        Expr::Index(b, _) | Expr::Field(b, _) => lvalue_root(b),
+        _ => None,
+    }
+}
+
+/// Collects, from one expression, the mutable globals it READS and WRITES (writes reach here only
+/// through statements nested in an `if`/`match` branch) and the functions it CALLS. Walks every
+/// sub-expression AND the tail of every nested block: missing one would under-report an effect and
+/// could admit a real race, so this is exhaustive over `Expr` by construction (no catch-all).
+fn expr_effects(
+    e: &Expr,
+    mut_globals: &HashSet<String>,
+    reads: &mut HashSet<String>,
+    writes: &mut HashSet<String>,
+    callees: &mut HashSet<String>,
+) {
+    match e {
+        Expr::Int(_) | Expr::Decimal(_) | Expr::Str(_) | Expr::Bool(_) => {}
+        Expr::Var(name) => {
+            if mut_globals.contains(name) {
+                reads.insert(name.clone());
+            }
+        }
+        Expr::Field(b, _) => expr_effects(b, mut_globals, reads, writes, callees),
+        Expr::Call(callee, args) => {
+            if let Expr::Var(fname) = callee.as_ref() {
+                callees.insert(fname.clone());
+            } else {
+                expr_effects(callee, mut_globals, reads, writes, callees);
+            }
+            for a in args {
+                expr_effects(&a.value, mut_globals, reads, writes, callees);
+            }
+        }
+        Expr::List(items) => {
+            for it in items {
+                expr_effects(it, mut_globals, reads, writes, callees);
+            }
+        }
+        Expr::Index(b, i) => {
+            expr_effects(b, mut_globals, reads, writes, callees);
+            expr_effects(i, mut_globals, reads, writes, callees);
+        }
+        Expr::SliceRange(b, lo, hi) => {
+            expr_effects(b, mut_globals, reads, writes, callees);
+            if let Some(l) = lo {
+                expr_effects(l, mut_globals, reads, writes, callees);
+            }
+            if let Some(h) = hi {
+                expr_effects(h, mut_globals, reads, writes, callees);
+            }
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields {
+                expr_effects(v, mut_globals, reads, writes, callees);
+            }
+        }
+        Expr::Unary(_, x) | Expr::Cast(x, _) => {
+            expr_effects(x, mut_globals, reads, writes, callees)
+        }
+        Expr::Binary(_, l, r) => {
+            expr_effects(l, mut_globals, reads, writes, callees);
+            expr_effects(r, mut_globals, reads, writes, callees);
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_effects(cond, mut_globals, reads, writes, callees);
+            block_effects(then_branch, mut_globals, reads, writes, callees);
+            if let Some(eb) = else_branch {
+                block_effects(eb, mut_globals, reads, writes, callees);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            expr_effects(scrutinee, mut_globals, reads, writes, callees);
+            for arm in arms {
+                block_effects(&arm.body, mut_globals, reads, writes, callees);
+            }
+        }
+    }
+}
+
+/// Collects reads/writes/callees over a block: its statements AND its tail expression (the block's
+/// value, which is NOT in `stmts` and would otherwise be missed).
+fn block_effects(
+    block: &Block,
+    mut_globals: &HashSet<String>,
+    reads: &mut HashSet<String>,
+    writes: &mut HashSet<String>,
+    callees: &mut HashSet<String>,
+) {
+    stmts_effects(&block.stmts, mut_globals, reads, writes, callees);
+    if let Some(t) = &block.tail {
+        expr_effects(t, mut_globals, reads, writes, callees);
+    }
+}
+
+/// Collects reads, writes and callees over a statement list.
+fn stmts_effects(
+    stmts: &[Stmt],
+    mut_globals: &HashSet<String>,
+    reads: &mut HashSet<String>,
+    writes: &mut HashSet<String>,
+    callees: &mut HashSet<String>,
+) {
+    for s in stmts {
+        match s {
+            Stmt::Let { value, .. } => expr_effects(value, mut_globals, reads, writes, callees),
+            Stmt::Assign { target, value } => {
+                // A write to a global (by name, or through its array/field) is a write to its root.
+                if let Some(root) = lvalue_root(target)
+                    && mut_globals.contains(root)
+                {
+                    writes.insert(root.to_string());
+                }
+                expr_effects(target, mut_globals, reads, writes, callees);
+                expr_effects(value, mut_globals, reads, writes, callees);
+            }
+            Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => {
+                expr_effects(e, mut_globals, reads, writes, callees)
+            }
+            Stmt::Par(peers) | Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
+                for p in peers {
+                    expr_effects(p, mut_globals, reads, writes, callees);
+                }
+            }
+            Stmt::For { cond, body, .. } => {
+                if let Some(c) = cond {
+                    expr_effects(c, mut_globals, reads, writes, callees);
+                }
+                block_effects(body, mut_globals, reads, writes, callees);
+            }
+            Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+        }
+    }
+}
+
+/// Computes each function's transitive read/write footprint over the mutable globals: the direct
+/// sets unioned with every callee's, to a fixpoint (so recursion and deep call graphs converge).
+fn compute_global_effects(funcs: &[Function], mut_globals: &HashSet<String>) -> GlobalEffects {
+    let mut reads: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut writes: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut callees: HashMap<String, HashSet<String>> = HashMap::new();
+    for f in funcs {
+        let mut r = HashSet::new();
+        let mut w = HashSet::new();
+        let mut c = HashSet::new();
+        block_effects(&f.body, mut_globals, &mut r, &mut w, &mut c);
+        reads.insert(f.name.clone(), r);
+        writes.insert(f.name.clone(), w);
+        callees.insert(f.name.clone(), c);
+    }
+    loop {
+        let mut changed = false;
+        for f in funcs {
+            let cs = callees[&f.name].clone();
+            for callee in &cs {
+                if let Some(cr) = reads.get(callee).cloned() {
+                    let r = reads.get_mut(&f.name).unwrap();
+                    for g in cr {
+                        changed |= r.insert(g);
+                    }
+                }
+                if let Some(cw) = writes.get(callee).cloned() {
+                    let w = writes.get_mut(&f.name).unwrap();
+                    for g in cw {
+                        changed |= w.insert(g);
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    GlobalEffects { reads, writes }
+}
+
+/// Rejects a `par` whose peers CONFLICT on a mutable global: two peers writing the same global, or
+/// one writing while another reads it, would race, and the result would depend on the schedule. A
+/// `~~` is a claim that its peers are independent (RFC-0008 §5.3); this proves the claim for the
+/// mutable-global dimension. Pure peers, and peers touching DISJOINT globals, are admitted.
+///
+/// LIMIT (tracked): this analyzes coupling through named mutable globals only. Coupling through raw
+/// pointers/heap (`poke64` into shared memory) is not yet tracked; the capability/effect system
+/// (RFC-0011) is what will close that. Until then a `~~` is a verified claim w.r.t. globals, and an
+/// unchecked one w.r.t. pointer aliasing.
+pub fn check_par_confluence(funcs: &[Function], globals: &[Global]) -> Result<(), String> {
+    let mut_globals: HashSet<String> = globals
+        .iter()
+        .filter(|g| g.mutable)
+        .map(|g| g.name.clone())
+        .collect();
+    if mut_globals.is_empty() {
+        return Ok(()); // no shared mutable state to race on
+    }
+    let eff = compute_global_effects(funcs, &mut_globals);
+    // The (reads, writes) footprint of one peer, an owned clone (peers are few, sets small), so
+    // there are no lifetime knots. A peer that is not a direct call has an empty footprint.
+    fn peer_footprint(peer: &Expr, eff: &GlobalEffects) -> (HashSet<String>, HashSet<String>) {
+        if let Expr::Call(callee, _) = peer
+            && let Expr::Var(fname) = callee.as_ref()
+        {
+            return (
+                eff.reads.get(fname).cloned().unwrap_or_default(),
+                eff.writes.get(fname).cloned().unwrap_or_default(),
+            );
+        }
+        (HashSet::new(), HashSet::new())
+    }
+    // Checks one `par`'s peers pairwise for a conflict on a shared mutable global.
+    fn check_peers(peers: &[Expr], fname: &str, eff: &GlobalEffects) -> Result<(), String> {
+        let fps: Vec<(HashSet<String>, HashSet<String>)> =
+            peers.iter().map(|p| peer_footprint(p, eff)).collect();
+        for i in 0..fps.len() {
+            for j in (i + 1)..fps.len() {
+                let (ri, wi) = &fps[i];
+                let (rj, wj) = &fps[j];
+                // Conflict = a write on one side meets a read or write of the same global on the
+                // other. Read-read never conflicts.
+                let clash = wi
+                    .intersection(wj)
+                    .chain(wi.intersection(rj))
+                    .chain(wj.intersection(ri))
+                    .next();
+                if let Some(g) = clash {
+                    return Err(format!(
+                        "function `{fname}`: two `par` peers race on the mutable global `{g}` \
+                         (one writes it while the other reads or writes it), so the result would \
+                         depend on which thread runs first. `~~` requires the peers to be \
+                         independent; give each its own state, or serialize them."
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    // A `par` can appear anywhere a statement can, including inside an `if`/`match` branch (which
+    // is an expression), so the walk descends through expressions into every nested block, not
+    // just the top level and `for` bodies.
+    fn walk_expr(e: &Expr, fname: &str, eff: &GlobalEffects) -> Result<(), String> {
+        match e {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                walk_expr(cond, fname, eff)?;
+                walk_block(then_branch, fname, eff)?;
+                if let Some(eb) = else_branch {
+                    walk_block(eb, fname, eff)?;
+                }
+            }
+            Expr::Match { scrutinee, arms } => {
+                walk_expr(scrutinee, fname, eff)?;
+                for arm in arms {
+                    walk_block(&arm.body, fname, eff)?;
+                }
+            }
+            Expr::Call(c, args) => {
+                walk_expr(c, fname, eff)?;
+                for a in args {
+                    walk_expr(&a.value, fname, eff)?;
+                }
+            }
+            Expr::Binary(_, l, r) => {
+                walk_expr(l, fname, eff)?;
+                walk_expr(r, fname, eff)?;
+            }
+            Expr::Index(b, i) => {
+                walk_expr(b, fname, eff)?;
+                walk_expr(i, fname, eff)?;
+            }
+            Expr::Unary(_, x) | Expr::Cast(x, _) | Expr::Field(x, _) => walk_expr(x, fname, eff)?,
+            Expr::List(items) => {
+                for it in items {
+                    walk_expr(it, fname, eff)?;
+                }
+            }
+            Expr::SliceRange(b, lo, hi) => {
+                walk_expr(b, fname, eff)?;
+                if let Some(l) = lo {
+                    walk_expr(l, fname, eff)?;
+                }
+                if let Some(h) = hi {
+                    walk_expr(h, fname, eff)?;
+                }
+            }
+            Expr::StructLit(_, fields) => {
+                for (_, v) in fields {
+                    walk_expr(v, fname, eff)?;
+                }
+            }
+            Expr::Int(_)
+            | Expr::Decimal(_)
+            | Expr::Str(_)
+            | Expr::Bool(_)
+            | Expr::Var(_) => {}
+        }
+        Ok(())
+    }
+    fn walk_block(block: &Block, fname: &str, eff: &GlobalEffects) -> Result<(), String> {
+        for s in &block.stmts {
+            match s {
+                Stmt::Par(peers) | Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
+                    check_peers(peers, fname, eff)?;
+                    for p in peers {
+                        walk_expr(p, fname, eff)?;
+                    }
+                }
+                Stmt::Let { value, .. } => walk_expr(value, fname, eff)?,
+                Stmt::Assign { target, value } => {
+                    walk_expr(target, fname, eff)?;
+                    walk_expr(value, fname, eff)?;
+                }
+                Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => {
+                    walk_expr(e, fname, eff)?
+                }
+                Stmt::For { cond, body, .. } => {
+                    if let Some(c) = cond {
+                        walk_expr(c, fname, eff)?;
+                    }
+                    walk_block(body, fname, eff)?;
+                }
+                Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
+            }
+        }
+        if let Some(t) = &block.tail {
+            walk_expr(t, fname, eff)?;
+        }
+        Ok(())
+    }
+    for f in funcs {
+        walk_block(&f.body, &f.name, &eff)?;
+    }
+    Ok(())
+}
+
 /// Rejects the process-termination effect inside a spawned call graph (RFC-0011, footgun #3).
 /// `syscall(SYS_exit, N)` ends the calling *thread* under process-per-connection semantics but
 /// the whole *process* when it runs on a spawned OS thread, so one connection's error path would
@@ -2826,6 +3179,82 @@ mod par_let_tests {
             );
             assert!(check(&src).is_ok(), "`par({op})` is a commutative monoid");
         }
+    }
+
+    fn confluence(src: &str) -> Result<(), String> {
+        let mut p = Parser::new(tokenize(src));
+        let funcs = p.parse_program();
+        let globals = p.take_globals();
+        check_par_confluence(&funcs, &globals)
+    }
+
+    #[test]
+    fn rejects_two_peers_writing_the_same_global() {
+        // Both peers write `G`: a write-write race, the result depends on which finishes last.
+        let e = confluence(
+            "let mut G = 0\n\
+             fn a() { G = 1 }\nfn b() { G = 2 }\n\
+             fn run() { par a() ~~ b() }",
+        );
+        assert!(e.is_err(), "a write-write race on a global must be rejected");
+        assert!(e.unwrap_err().contains("G"), "the error names the raced global");
+    }
+
+    #[test]
+    fn rejects_a_write_read_race() {
+        // One peer writes `G`, the other reads it: a read-write race.
+        let e = confluence(
+            "let mut G = 0\nlet mut H = 0\n\
+             fn writer() { G = 1 }\nfn reader() { H = G }\n\
+             fn run() { par writer() ~~ reader() }",
+        );
+        assert!(e.is_err(), "a write-read race must be rejected");
+    }
+
+    #[test]
+    fn accepts_peers_on_disjoint_globals() {
+        // Each peer owns its own global: no shared location, so they are confluent.
+        let ok = confluence(
+            "let mut R0 = 0\nlet mut R1 = 0\n\
+             fn a() { R0 = 1 }\nfn b() { R1 = 2 }\n\
+             fn run() { par a() ~~ b() }",
+        );
+        assert!(ok.is_ok(), "disjoint globals do not race, got {ok:?}");
+    }
+
+    #[test]
+    fn detects_a_race_through_the_call_graph() {
+        // Neither peer writes `G` directly, but both reach a helper that does: the transitive
+        // footprint catches it.
+        let e = confluence(
+            "let mut G = 0\n\
+             fn bump() { G = G + 1 }\n\
+             fn a() { bump() }\nfn b() { bump() }\n\
+             fn run() { par a() ~~ b() }",
+        );
+        assert!(e.is_err(), "a race reached transitively must still be rejected");
+    }
+
+    #[test]
+    fn accepts_pure_peers() {
+        let ok = confluence(
+            "let mut G = 0\n\
+             fn a() -> i64 { 1 }\nfn b() -> i64 { 2 }\n\
+             fn run() { par a() ~~ b() }",
+        );
+        assert!(ok.is_ok(), "peers that touch no global are confluent, got {ok:?}");
+    }
+
+    #[test]
+    fn checks_a_par_nested_inside_an_if() {
+        // A `par` in an `if` branch (an expression) is still checked: the walk descends into
+        // nested blocks, so a race there is caught, not skipped.
+        let e = confluence(
+            "let mut G = 0\n\
+             fn a() { G = 1 }\nfn b() { G = 2 }\n\
+             fn run(c: i64) { if c > 0 { par a() ~~ b() } }",
+        );
+        assert!(e.is_err(), "a race inside an `if` branch must still be rejected");
     }
 }
 
