@@ -25,7 +25,7 @@ let RSA_SHA256_DI[19] = [
 // ── Serialization ────────────────────────────────────────────────────────────
 
 // Load 256 big-endian bytes at `bytes` into 64 little-endian 32-bit limbs at `out`.
-fn bn_from_bytes(bytes: i64, out: i64) {
+fn rbn_from_bytes(bytes: i64, out: i64) {
     let mut i = 0
     for i < 64 {
         let base = 252 - 4 * i        // byte offset of limb i's most-significant byte
@@ -39,7 +39,7 @@ fn bn_from_bytes(bytes: i64, out: i64) {
 }
 
 // Store 64 little-endian limbs at `a` into 256 big-endian bytes at `bytes`.
-fn bn_to_bytes(a: i64, bytes: i64) {
+fn rbn_to_bytes(a: i64, bytes: i64) {
     let mut i = 0
     for i < 64 {
         let base = 252 - 4 * i
@@ -55,7 +55,7 @@ fn bn_to_bytes(a: i64, bytes: i64) {
 // ── Comparison / low-level arithmetic ────────────────────────────────────────
 
 // Compare two 64-limb bignums: -1 if a < b, 0 if a == b, 1 if a > b.
-fn bn_cmp(a: i64, b: i64) -> i64 {
+fn rbn_cmp(a: i64, b: i64) -> i64 {
     let mut i = 63
     for i >= 0 {
         let av = a[i] & RSA_LOWMASK
@@ -68,7 +68,7 @@ fn bn_cmp(a: i64, b: i64) -> i64 {
 }
 
 // Copy 64 limbs src -> dst.
-fn bn_copy(dst: i64, src: i64) {
+fn rbn_copy(dst: i64, src: i64) {
     let mut i = 0
     for i < 64 { dst[i] = src[i] & RSA_LOWMASK; i = i + 1 }
 }
@@ -76,7 +76,7 @@ fn bn_copy(dst: i64, src: i64) {
 // Schoolbook multiply: prod (128 limbs) = a (64 limbs) * b (64 limbs).
 // Row-by-row with a running carry; every intermediate `t` is < 2^64, so its
 // low-64-bit pattern is exact and `t >>> 32` / `t & LOWMASK` split it correctly.
-fn bn_mul(a: i64, b: i64, prod: i64) {
+fn rbn_mul(a: i64, b: i64, prod: i64) {
     let mut k = 0
     for k < 128 { prod[k] = 0; k = k + 1 }
     let mut i = 0
@@ -96,7 +96,7 @@ fn bn_mul(a: i64, b: i64, prod: i64) {
 }
 
 // Shift a 65-limb bignum left by one bit, in place.
-fn bn_shl1_65(r: i64) {
+fn rbn_shl1_65(r: i64) {
     let mut carry = 0
     let mut i = 0
     for i < 65 {
@@ -108,7 +108,7 @@ fn bn_shl1_65(r: i64) {
 }
 
 // Is the 65-limb remainder r >= the 64-limb modulus n? (n's implicit limb 64 is 0.)
-fn bn_ge_65(r: i64, n: i64) -> i64 {
+fn rbn_ge_65(r: i64, n: i64) -> i64 {
     if (r[64] & RSA_LOWMASK) != 0 { return 1 }
     let mut i = 63
     for i >= 0 {
@@ -122,7 +122,7 @@ fn bn_ge_65(r: i64, n: i64) -> i64 {
 }
 
 // r (65 limbs) -= n (64 limbs), in place, with borrow.
-fn bn_sub_65(r: i64, n: i64) {
+fn rbn_sub_65(r: i64, n: i64) {
     let mut borrow = 0
     let mut i = 0
     for i < 64 {
@@ -148,19 +148,19 @@ fn bn_sub_65(r: i64, n: i64) {
 // division: bring in one dividend bit at a time from the most significant, doubling
 // the remainder and subtracting n at most once (the remainder stays < n < 2^2048,
 // so 2*r + bit < 2n and a single conditional subtract suffices).
-fn bn_mod(prod: i64, n: i64, out: i64) {
+fn rbn_mod(prod: i64, n: i64, out: i64) {
     let mut r[65]
     let mut k = 0
     for k < 65 { r[k] = 0; k = k + 1 }
     let mut bit = 4095
     for bit >= 0 {
-        bn_shl1_65(r)
+        rbn_shl1_65(r)
         let limb = bit >>> 5          // bit / 32
         let off = bit & 31            // bit % 32
         let b = (prod[limb] >>> off) & 1
         r[0] = (r[0] & RSA_LOWMASK) | b
-        if bn_ge_65(r, n) == 1 {
-            bn_sub_65(r, n)
+        if rbn_ge_65(r, n) == 1 {
+            rbn_sub_65(r, n)
         }
         bit = bit - 1
     }
@@ -169,38 +169,38 @@ fn bn_mod(prod: i64, n: i64, out: i64) {
 }
 
 // out (64 limbs) = a * b mod n.
-fn bn_mulmod(a: i64, b: i64, n: i64, out: i64) {
+fn rbn_mulmod(a: i64, b: i64, n: i64, out: i64) {
     let mut prod[128]
-    bn_mul(a, b, prod)
-    bn_mod(prod, n, out)
+    rbn_mul(a, b, prod)
+    rbn_mod(prod, n, out)
 }
 
 // out (64 limbs) = a mod n, reducing a stand-alone 64-limb value.
-fn bn_reduce(a: i64, n: i64, out: i64) {
+fn rbn_reduce(a: i64, n: i64, out: i64) {
     let mut prod[128]
     let mut i = 0
     for i < 128 { prod[i] = 0; i = i + 1 }
     i = 0
     for i < 64 { prod[i] = a[i] & RSA_LOWMASK; i = i + 1 }
-    bn_mod(prod, n, out)
+    rbn_mod(prod, n, out)
 }
 
 // out (64 limbs) = base^65537 mod n.  65537 = 2^16 + 1, so this is
 // ((((base^2)^2)...^2) with 16 squarings) * base, all mod n.
-fn bn_modexp_65537(base: i64, n: i64, out: i64) {
+fn rbn_modexp_65537(base: i64, n: i64, out: i64) {
     let mut acc[64]
     let mut tmp[64]
     let mut b0[64]
-    bn_reduce(base, n, b0)           // b0 = base mod n
-    bn_copy(acc, b0)
+    rbn_reduce(base, n, b0)           // b0 = base mod n
+    rbn_copy(acc, b0)
     let mut i = 0
     for i < 16 {
-        bn_mulmod(acc, acc, n, tmp)  // acc = acc^2 mod n
-        bn_copy(acc, tmp)
+        rbn_mulmod(acc, acc, n, tmp)  // acc = acc^2 mod n
+        rbn_copy(acc, tmp)
         i = i + 1
     }
-    bn_mulmod(acc, b0, n, tmp)       // result = acc * base mod n, in tmp
-    bn_copy(out, tmp)
+    rbn_mulmod(acc, b0, n, tmp)       // result = acc * base mod n, in tmp
+    rbn_copy(out, tmp)
 }
 
 // ── PKCS#1 v1.5 SHA-256 verification ─────────────────────────────────────────
@@ -216,10 +216,10 @@ fn rsa_pkcs1v15_sha256_verify(n_bytes: i64, sig_bytes: i64, hash32: i64) -> i64 
     let mut sig[64]
     let mut m[64]
     let mut em[260]
-    bn_from_bytes(n_bytes, n)
-    bn_from_bytes(sig_bytes, sig)
-    bn_modexp_65537(sig, n, m)       // m = sig^65537 mod n
-    bn_to_bytes(m, em)
+    rbn_from_bytes(n_bytes, n)
+    rbn_from_bytes(sig_bytes, sig)
+    rbn_modexp_65537(sig, n, m)       // m = sig^65537 mod n
+    rbn_to_bytes(m, em)
 
     // EM = 0x00 0x01 || PS(0xFF..) || 0x00 || DigestInfo(19) || Hash(32), 256 bytes.
     if peek8(em + 0) != 0x00 { return 0 }

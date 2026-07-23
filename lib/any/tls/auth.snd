@@ -12,6 +12,7 @@
 include "any/tls/client.snd"
 include "any/tls/certmsg.snd"
 include "any/x509/verify.snd"
+include "any/crypto/rsa/pss.snd"
 include "any/crypto/hash/sha256.snd"
 
 // Walks the decrypted handshake flight in buf[0..n) and returns the byte offset of the
@@ -43,8 +44,9 @@ fn tls_flight_cert_offset(buf: i64, n: i64) -> i64 {
 // Full client handshake through server authentication: connects, exchanges hello, derives
 // the handshake keys, decrypts the server flight, and VERIFIES the server CertificateVerify
 // (RFC 8446 4.4.3) with the leaf certificate's key. Returns 1 if the server proved it holds
-// the certificate key (ecdsa_secp256r1_sha256), 0 otherwise. This is the identity check
-// that a TLS client must pass before trusting the peer.
+// the certificate key (ecdsa_secp256r1_sha256 for a P-256 leaf, rsa_pss_rsae_sha256 for an
+// RSA leaf), 0 otherwise. This is the identity check a TLS client must pass before trusting
+// the peer. Validated live against cloudflare (ECDSA) and an openssl s_server (RSA).
 fn tls_handshake_auth(host: i64, port: i64, sni: i64, snilen: i64) -> i64 {
     let fd = sock(AF_INET, SOCK_STREAM, 0)
     if fd < 0 { return 0 }
@@ -151,19 +153,28 @@ fn tls_handshake_auth(host: i64, port: i64, sni: i64, snilen: i64) -> i64 {
     let ce[32]
     sha256_hash(content, 130, ce)
 
-    // CertificateVerify body: scheme(2) | sig(uint16 len | DER SEQUENCE { r, s })
+    // CertificateVerify body: scheme(2) | sig(uint16 len | signature)
     let cvbody = flight + cvoff + 4
     let scheme = (peek8(cvbody) << 8) | peek8(cvbody + 1)
-    if scheme != 0x0403 { return 0 }                    // ecdsa_secp256r1_sha256 only here
     let sigpos = cvoff + 4 + 4                           // past scheme(2) + sig length(2)
-    let r[32]
-    let s[32]
-    let rpos = der_enter(flight, sigpos)
-    der_int_to_fixed(flight, rpos, r, 32)
-    let t3[3]
-    let spos = der_tlv(flight, rpos, t3)
-    der_int_to_fixed(flight, spos, s, 32)
-    ecdsa_verify(qx, qy, ce, r, s)
+    // ecdsa_secp256r1_sha256: the signature is a DER SEQUENCE { r, s } over the leaf P-256 key
+    if scheme == 0x0403 {
+        let r[32]
+        let s[32]
+        let rpos = der_enter(flight, sigpos)
+        der_int_to_fixed(flight, rpos, r, 32)
+        let t3[3]
+        let spos = der_tlv(flight, rpos, t3)
+        der_int_to_fixed(flight, spos, s, 32)
+        return ecdsa_verify(qx, qy, ce, r, s)
+    }
+    // rsa_pss_rsae_sha256: a raw RSA-PSS block over the leaf's RSA modulus
+    if scheme == 0x0804 {
+        let nn[256]
+        x509_rsa_pubkey(leaf, 0, nn)
+        return rsa_pss_sha256_verify(nn, flight + sigpos, ce)
+    }
+    0
 }
 
 // Returns the byte offset of the first message of type `mt` in the flight, or -1.

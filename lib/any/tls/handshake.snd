@@ -54,11 +54,14 @@ fn tls_build_client_hello(random: i64, pubkey: i64, sni: i64, snilen: i64, out: 
     hs_put_u16(body + o, 2); o = o + 2               // list length
     hs_put_u16(body + o, 0x001d); o = o + 2
 
-    // signature_algorithms (13): ecdsa_secp256r1_sha256 (0x0403), rsa_pkcs1_sha256 (0x0401).
+    // signature_algorithms (13): ecdsa_secp256r1_sha256 (0x0403), rsa_pss_rsae_sha256
+    // (0x0804, required for RSA CertificateVerify in TLS 1.3), rsa_pkcs1_sha256 (0x0401,
+    // for PKCS#1-signed certificate chains).
     hs_put_u16(body + o, 13); o = o + 2
-    hs_put_u16(body + o, 6); o = o + 2
-    hs_put_u16(body + o, 4); o = o + 2               // list length
+    hs_put_u16(body + o, 8); o = o + 2               // ext body: 2 + 3 algorithms
+    hs_put_u16(body + o, 6); o = o + 2               // list length (3 algorithms)
     hs_put_u16(body + o, 0x0403); o = o + 2
+    hs_put_u16(body + o, 0x0804); o = o + 2
     hs_put_u16(body + o, 0x0401); o = o + 2
 
     // key_share (51): one KeyShareEntry { group x25519, 32-byte key }.

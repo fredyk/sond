@@ -41,10 +41,10 @@ fn rsa_pss_sha256_verify(n_bytes: i64, sig_bytes: i64, hash32: i64) -> i64 {
     let mut sig[64]
     let mut m[64]
     let mut em[260]
-    bn_from_bytes(n_bytes, n)
-    bn_from_bytes(sig_bytes, sig)
-    bn_modexp_65537(sig, n, m)
-    bn_to_bytes(m, em)
+    rbn_from_bytes(n_bytes, n)
+    rbn_from_bytes(sig_bytes, sig)
+    rbn_modexp_65537(sig, n, m)
+    rbn_to_bytes(m, em)
 
     if peek8(em + 255) != 0xbc { return 0 }          // trailer field
     if (peek8(em + 0) & 0x80) != 0 { return 0 }      // top bit (8*256 - 2047 = 1) must be 0

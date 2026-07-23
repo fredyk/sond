@@ -117,7 +117,7 @@ test "tls client: a full handshake probe against a matching Sond server" {
         if crl <= 0 { syscall(SYS_exit, 3) }
         let cmsg = crec + 5
         let cmsglen = crl - 5
-        let cpub = cmsg + 82                          // x25519 key share, at this fixed offset
+        let cpub = cmsg + 84                          // x25519 key share, at this fixed offset
         // server keypair and shared secret
         let spriv[32]
         tls_random(spriv, 32)
