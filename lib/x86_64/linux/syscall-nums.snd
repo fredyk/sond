@@ -82,3 +82,4 @@ let SYS_unlink = 87
 let SYS_setsid = 112
 let SYS_getdents64 = 217
 let SYS_splice = 275
+let SYS_getrandom = 318

@@ -1,0 +1,151 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/tls/client.snd: the TLS 1.3 client handshake, tying together the record layer,
+// the ClientHello/ServerHello, the x25519 key exchange, and the key-schedule ladder. It
+// speaks TLS_CHACHA20_POLY1305_SHA256 with the x25519 group. This drives a real socket:
+// the crypto is verified elsewhere against known vectors; here the pieces are wired into
+// the live protocol flow.
+
+include "x86_64/linux/net.snd"
+include "x86_64/linux/io.snd"
+include "x86_64/linux/heap.snd"
+include "x86_64/linux/syscall-nums.snd"
+include "any/crypto/dh/x25519.snd"
+include "any/tls/handshake.snd"
+include "any/tls/serverhello.snd"
+include "any/tls/ladder.snd"
+include "any/tls/record.snd"
+include "any/crypto/hash/sha256.snd"
+
+// Fills `buf` with `n` random bytes from the kernel.
+fn tls_random(buf: i64, n: i64) {
+    syscall(SYS_getrandom, buf, n, 0)
+}
+
+// Reads exactly `n` bytes, looping over short reads. Returns n, or <=0 on EOF/error.
+fn tls_read_exact(fd: i64, buf: i64, n: i64) -> i64 {
+    let mut got = 0
+    for got < n {
+        let r = read_buf(fd, buf + got, n - got)
+        if r <= 0 { return r }
+        got = got + r
+    }
+    n
+}
+
+// Reads one TLS record into `buf` (its 5-byte header then the fragment). Returns the total
+// record length (5 + fragment length), or <=0 on error / oversize.
+fn tls_read_record(fd: i64, buf: i64, cap: i64) -> i64 {
+    if tls_read_exact(fd, buf, 5) <= 0 { return 0 - 1 }
+    let flen = (peek8(buf + 3) << 8) | peek8(buf + 4)
+    if 5 + flen > cap { return 0 - 1 }
+    if flen > 0 {
+        if tls_read_exact(fd, buf + 5, flen) <= 0 { return 0 - 1 }
+    }
+    5 + flen
+}
+
+// Sends `payload` as a single plaintext handshake record (content type 22).
+fn tls_send_plain_handshake(fd: i64, payload: i64, plen: i64, scratch: i64) {
+    poke8(scratch + 0, 22)                          // handshake
+    poke8(scratch + 1, 3); poke8(scratch + 2, 1)    // legacy_record_version 0x0301
+    poke8(scratch + 3, (plen >> 8) & 0xff); poke8(scratch + 4, plen & 0xff)
+    let mut i = 0
+    for i < plen { poke8(scratch + 5 + i, peek8(payload + i)); i = i + 1 }
+    write_buf(fd, scratch, 5 + plen)
+}
+
+// Drives the handshake up to the server's first encrypted flight and decrypts it. Connects
+// to `host`:`port`, sends a ClientHello, reads the ServerHello, runs x25519 + the key
+// schedule to the server handshake key, skips the legacy ChangeCipherSpec, and opens the
+// first application_data (23) record with that key. On success writes the decrypted inner
+// handshake bytes to `out` and returns their length (the first byte is the handshake type,
+// 8 = EncryptedExtensions). Returns <=0 on any failure. This proves ECDHE + the ladder +
+// the record layer against a live server.
+fn tls_handshake_probe(host: i64, port: i64, sni: i64, snilen: i64, out: i64) -> i64 {
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { return 0 - 1 }
+    let sa[2]
+    sockaddr_in_build(sa, tls_ipv4(host), port)
+    if connect_sock(fd, sa, 16) < 0 { close_fd(fd); return 0 - 1 }
+
+    // x25519 keypair
+    let cpriv[32]
+    tls_random(cpriv, 32)
+    let base9[32]
+    poke8(base9, 9)
+    let mut i = 0
+    for i < 31 { poke8(base9 + 1 + i, 0); i = i + 1 }
+    let cpub[32]
+    x25519(cpriv, base9, cpub)
+
+    // ClientHello (keep the handshake message for the transcript)
+    let random[32]
+    tls_random(random, 32)
+    let ch = heap_alloc(1024)
+    let chlen = tls_build_client_hello(random, cpub, sni, snilen, ch)
+    let scratch = heap_alloc(4096)
+    tls_send_plain_handshake(fd, ch, chlen, scratch)
+
+    // ServerHello record; its fragment is the ServerHello handshake message.
+    let rec = heap_alloc(20000)
+    let rl = tls_read_record(fd, rec, 20000)
+    if rl <= 0 { close_fd(fd); return 0 - 1 }
+    if peek8(rec) != 22 { close_fd(fd); return 0 - 1 }   // expect a handshake record
+    let sh = rec + 5
+    let shlen = rl - 5
+    let spub[32]
+    if tls_sh_key_share(sh, spub) != 0x001d { close_fd(fd); return 0 - 1 }
+
+    // transcript = ClientHello || ServerHello (handshake messages)
+    let tr = heap_alloc(2048)
+    i = 0
+    for i < chlen { poke8(tr + i, peek8(ch + i)); i = i + 1 }
+    i = 0
+    for i < shlen { poke8(tr + chlen + i, peek8(sh + i)); i = i + 1 }
+    let trlen = chlen + shlen
+
+    // key schedule to the server handshake traffic key
+    let ecdhe[32]
+    x25519(cpriv, spub, ecdhe)
+    let early[32]
+    tls_early_secret(early, 0, early)
+    let hs[32]
+    tls_derive_handshake_secret(early, ecdhe, 32, hs)
+    let s_hs[32]
+    tls_server_hs_traffic(hs, tr, trlen, s_hs)
+    let skey[32]
+    let siv[12]
+    tls_traffic_key_iv(s_hs, skey, siv)
+
+    // The server may send a legacy ChangeCipherSpec (type 20); skip it and read the first
+    // application_data (23) record, which holds the encrypted handshake flight.
+    let mut rl2 = tls_read_record(fd, rec, 20000)
+    if rl2 <= 0 { close_fd(fd); return 0 - 1 }
+    if peek8(rec) == 20 {
+        rl2 = tls_read_record(fd, rec, 20000)
+        if rl2 <= 0 { close_fd(fd); return 0 - 1 }
+    }
+    if peek8(rec) != 23 { close_fd(fd); return 0 - 1 }
+
+    // open it with the server handshake key at sequence 0 (reclen is the full record length)
+    let n = tls_open(skey, siv, 0, rec, rl2, out)
+    close_fd(fd)
+    if n < 0 { return 0 - 1 }
+    n & 0xffffffff                                   // plaintext length; type is n >> 32 (22)
+}
+
+// Parses a dotted-quad IPv4 host into a big-endian-packed u32.
+fn tls_ipv4(s: i64) -> i64 {
+    let mut ip = 0
+    let mut octet = 0
+    let mut i = 0
+    for {
+        let c = peek8(s + i)
+        if c == 0 { break }
+        if c == 46 { ip = (ip << 8) | octet; octet = 0 } else { octet = octet * 10 + (c - 48) }
+        i = i + 1
+    }
+    (ip << 8) | octet
+}
