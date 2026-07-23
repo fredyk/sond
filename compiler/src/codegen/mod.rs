@@ -1000,6 +1000,17 @@ impl Codegen {
             self.line(&format!("    movq %rax, {ptr_slot}(%rbp)"));
         }
 
+        // RFC-0016: in a --debug build, bump the call depth on entry (and drop it at the single exit
+        // label below), so the agent can offer step-over / step-out (stop only when the depth is back
+        // at or below where the step began). Emitted after the args are spilled, so the callout may
+        // clobber the caller-saved arg registers freely; rsp is 16-aligned here, so the call is ABI
+        // correct. `self.debug` is already false for the __dbg_ agent, so its helpers, and the depth
+        // functions themselves, do not perturb the depth they measure. Interrupt handlers are entered
+        // asynchronously, not called, so they stay out of the call-depth accounting.
+        if self.debug && !func.is_interrupt {
+            self.line("    call __dbg_enter");
+        }
+
         // Preconditions: checked on entry, with the parameters in scope.
         self.emit_contract_guard(&func.requires);
 
@@ -1011,6 +1022,16 @@ impl Codegen {
         }
 
         self.line(&format!("{}:", self.ret_label.clone()));
+        // RFC-0016: drop the call depth as the function exits (mirror of the entry bump). The single
+        // exit label covers early `return`s too. The body's result is in %rax and the void callout
+        // clobbers it, so it is saved across the call; the extra 8 bytes keep rsp 16-aligned.
+        if self.debug && !func.is_interrupt {
+            self.line("    pushq %rax");
+            self.line("    subq $8, %rsp");
+            self.line("    call __dbg_exit");
+            self.line("    addq $8, %rsp");
+            self.line("    popq %rax");
+        }
         // Structured join (RFC-0010): before the function returns, wait for every thread it
         // spawned. This is where a spawned thread's lifetime ends, so none can outlive the
         // frame that started it. Emitted here at the single return label, so it covers early

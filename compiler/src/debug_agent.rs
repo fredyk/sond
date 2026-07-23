@@ -28,10 +28,21 @@ let mut __dbg_fd = 0 - 1
 // checkpoint; after a detach or a client disconnect it is NOT rebound (the program just runs free),
 // so this is what gates attachment, not `__dbg_fd < 0` (which also holds once a client leaves).
 let mut __dbg_started = 0
-// Stop policy: 0 = run free, 1 = single-step (stop every statement),
-// 2 = run-to (stop only when the line equals __dbg_target).
+// Stop policy: 0 = run free, 1 = single-step, 2 = run-to (stop only when the line equals
+// __dbg_target). In step mode the stop is also gated on call depth (see __dbg_step_depth), which is
+// how step-over and step-out differ from step-in.
 let mut __dbg_mode = 1
 let mut __dbg_target = 0
+// Call depth, maintained by the __dbg_enter / __dbg_exit callouts the --debug codegen emits at every
+// function's entry and exit. A step stops only when the depth is at or below __dbg_step_depth, so:
+// step-in sets a sentinel above any real depth (stop anywhere), step-over sets the current depth
+// (skip INTO deeper calls, stop when control returns), step-out sets depth - 1 (stop only after the
+// current frame returns). It starts high so the very first checkpoint (entry) always pauses.
+let mut __dbg_depth = 0
+let mut __dbg_step_depth = 1000000000
+
+fn __dbg_enter() { __dbg_depth = __dbg_depth + 1 }
+fn __dbg_exit() { __dbg_depth = __dbg_depth - 1 }
 // Breakpoint set: source lines that always stop, whatever the mode (so `continue` runs to the next
 // one). A writable `.data` array; slot value 0 means empty (line 0 never occurs). Indexed with raw
 // peek64/poke64, so there is no array-bounds obligation on the prover.
@@ -154,7 +165,9 @@ fn __dbg_bp_del(line: i64) {
 }
 
 fn __dbg_should_stop(line: i64) -> (r: i64) {
-    if __dbg_mode == 1 { return 1 }
+    if __dbg_mode == 1 {
+        if __dbg_depth <= __dbg_step_depth { return 1 }
+    }
     if __dbg_bp_has(line) == 1 { return 1 }
     if __dbg_mode == 2 {
         if line == __dbg_target { return 1 }
@@ -178,7 +191,9 @@ fn __dbg_interact(line: i64) {
             return
         }
         let c = peek8(buf)
-        if c == 115 { __dbg_mode = 1  waiting = 0 }
+        if c == 115 { __dbg_mode = 1  __dbg_step_depth = 1000000000  waiting = 0 }
+        if c == 110 { __dbg_mode = 1  __dbg_step_depth = __dbg_depth  waiting = 0 }
+        if c == 111 { __dbg_mode = 1  __dbg_step_depth = __dbg_depth - 1  waiting = 0 }
         if c == 99  { __dbg_mode = 0  waiting = 0 }
         if c == 103 {
             __dbg_target = __dbg_parse_int(buf, 1, n)

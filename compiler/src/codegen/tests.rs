@@ -129,6 +129,22 @@ fn a_debug_build_emits_a_per_statement_checkpoint_a_normal_build_does_not() {
 }
 
 #[test]
+fn a_debug_build_tracks_call_depth_for_step_over_and_step_out() {
+    // RFC-0016: to offer step-over / step-out the agent needs the call depth, so a --debug build
+    // bumps it on entry (`call __dbg_enter`) and drops it at the single exit (`call __dbg_exit`).
+    // A normal build carries neither.
+    let funcs = Parser::new(tokenize("fn main() -> i64 { let a = 1\na }")).parse_program();
+    let debug_asm = emit_program_debug_g(&[], &[], &funcs);
+    let normal_asm = emit_program_g(&[], &[], &funcs);
+    assert!(debug_asm.contains("call __dbg_enter"), "the --debug build bumps the depth on entry");
+    assert!(debug_asm.contains("call __dbg_exit"), "the --debug build drops the depth on exit");
+    assert!(
+        !normal_asm.contains("__dbg_enter") && !normal_asm.contains("__dbg_exit"),
+        "a normal build tracks no call depth"
+    );
+}
+
+#[test]
 fn a_string_literal_global_is_a_pointer_to_rodata() {
     // `let MSG = "hi"` at module level: the global holds the ADDRESS of the interned bytes (a valid
     // compile-time constant), not an integer, so it works like any `.data` pointer.

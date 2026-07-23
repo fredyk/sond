@@ -110,28 +110,38 @@ that the same pipeline parses, PROVES, and lowers) is the core interactive loop 
 socket, deliberately narrower than the framed protocol so it could land end to end:
 
 - **State.** Module globals: `__dbg_mode` (`0` run-free, `1` single-step, `2` run-to a line),
-  `__dbg_target` (the run-to line), `__dbg_fd`/`__dbg_started` (the connection, bound once), and
-  `__dbg_bp[64]` (the breakpoint set, a writable `.data` array indexed with raw peek64/poke64). No
-  call-depth yet, so step-over / step-out are not in this slice.
+  `__dbg_target` (the run-to line), `__dbg_fd`/`__dbg_started` (the connection, bound once),
+  `__dbg_bp[64]` (the breakpoint set, a writable `.data` array indexed with raw peek64/poke64), and
+  `__dbg_depth`/`__dbg_step_depth` (the call depth and the step's target depth).
 - **Breakpoints.** A breakpoint is a source line that always stops, whatever the mode, so `continue`
   runs to the next one. Membership (`__dbg_bp_has`) is checked in `should_stop`; the set is edited
   live over the socket (see the protocol) and holds up to 64 lines.
+- **Call depth (step-over / step-out).** A `--debug` build bumps `__dbg_depth` on function entry
+  (`call __dbg_enter`, emitted after the args are spilled) and drops it at the single exit label
+  (`call __dbg_exit`, with the result preserved across the callout); the whole `__dbg_` namespace is
+  excluded, so the agent does not perturb the depth it measures. A step stops only when
+  `__dbg_depth <= __dbg_step_depth`: step-in sets a sentinel above any real depth (stop anywhere),
+  step-over sets the current depth (skip INTO deeper calls, stop when control returns), step-out sets
+  depth - 1 (stop only once the current frame returns). `__dbg_step_depth` starts high so the first
+  checkpoint always pauses at entry.
 - **Attach.** On the first checkpoint the agent binds `/tmp/sond.dbg.sock`, announces the path on
   stderr, and BLOCKS on `accept` until a client connects, so `main` is caught from its first line.
   The listener is bound exactly once; after a detach or a client disconnect the program runs free and
   is never rebound.
 - **Wire protocol (line-oriented, not yet length-prefixed).** Each stop is reported to the client as
-  `L<line>\n`. The client replies with one-byte commands: `s` (single-step, stop at the next
-  checkpoint), `c` (continue, run to the next breakpoint or to the end), `g<line>\n` (run until the
-  given source line), `b<line>\n` / `d<line>\n` (add / delete a breakpoint, acknowledged as
-  `B<line>\n` / `D<line>\n`, without resuming), `q` (detach and run free). A client disconnect is
-  treated as `c`.
+  `L<line>\n`. The client replies with one-byte commands: `s` (step-in, stop at the next checkpoint),
+  `n` (step-over, stop at the next checkpoint at this depth or shallower), `o` (step-out, stop once
+  the current frame returns), `c` (continue, run to the next breakpoint or to the end), `g<line>\n`
+  (run until the given source line), `b<line>\n` / `d<line>\n` (add / delete a breakpoint,
+  acknowledged as `B<line>\n` / `D<line>\n`, without resuming), `q` (detach and run free). A client
+  disconnect is treated as `c`.
 - **Reentrancy.** Codegen excludes the whole `__dbg_` namespace from the checkpoint, so the agent (and
   every helper it calls to serve the socket) never re-enters itself.
 
-The framed protocol of §3.4, call-depth (step-over/out), and `Inspect`/`Backtrace` (which need §3.3's
-symbol table) are the following slices; this one proves the pause/step/breakpoint/resume loop over the
-socket works against a native binary.
+The framed protocol of §3.4 and `Inspect`/`Backtrace`/`Locals` (which need §3.3's line-to-locals
+symbol table) are the following slices; this one already serves the full control surface, pause,
+step-in / over / out, breakpoints, run-to-line, continue, detach, over the socket against a native
+binary.
 
 ### 3.3 The line -> locals symbol table (the compiler already knows this)
 
