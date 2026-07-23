@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of db/postgres/wire.snd: the PostgreSQL v3 message byte layout. These are pinned
+// by construction against the documented frame format (network byte order throughout).
+
+include "any/db/postgres/wire.snd"
+include "x86_64/linux/testing.snd"
+
+let mut w_buf[128]
+
+test "pg wire: u32 big-endian round-trips" {
+    pg_put_u32be(w_buf, 196608)
+    assert_eq(peek8(w_buf + 0), 0x00)
+    assert_eq(peek8(w_buf + 1), 0x03)
+    assert_eq(peek8(w_buf + 2), 0x00)
+    assert_eq(peek8(w_buf + 3), 0x00)
+    assert_eq(pg_get_u32be(w_buf), 196608)
+}
+
+// StartupMessage for user="me", database="db":
+//   int32 len | int32 196608 | "user\0me\0database\0db\0\0"
+// payload = 5 + 3 + 9 + 3 + 1 = 21 bytes; total = 8 + 21 = 29.
+test "pg wire: StartupMessage layout (protocol 3.0, user/database params)" {
+    let total = pg_startup(w_buf, "me", "db")
+    assert_eq(total, 29)
+    assert_eq(pg_get_u32be(w_buf), 29)             // length field carries the total
+    assert_eq(pg_get_u32be(w_buf + 4), 196608)     // protocol version 3.0
+    assert_eq(peek8(w_buf + 8), 117)               // 'u' of "user"
+    assert_eq(peek8(w_buf + 12), 0)                // NUL after "user"
+    assert_eq(peek8(w_buf + 13), 109)              // 'm' of "me"
+    assert_eq(peek8(w_buf + 15), 0)                // NUL after "me"
+    assert_eq(peek8(w_buf + 16), 100)              // 'd' of "database"
+    assert_eq(peek8(w_buf + 24), 0)                // NUL after "database"
+    assert_eq(peek8(w_buf + 25), 100)              // 'd' of "db"
+    assert_eq(peek8(w_buf + 27), 0)                // NUL after "db"
+    assert_eq(peek8(w_buf + 28), 0)                // empty key ends the parameter list
+}
+
+// Query "SELECT 1": 'Q' | int32 13 | "SELECT 1\0"; length excludes the type byte.
+test "pg wire: Simple Query layout" {
+    let total = pg_query(w_buf, "SELECT 1")
+    assert_eq(total, 14)                           // 1 type byte + 13 length
+    assert_eq(peek8(w_buf + 0), 81)                // 'Q'
+    assert_eq(pg_get_u32be(w_buf + 1), 13)         // 4 + 8 sql + 1 NUL
+    assert_eq(peek8(w_buf + 5), 83)                // 'S'
+    assert_eq(peek8(w_buf + 13), 0)                // NUL terminator after the SQL
+}
+
+// Backend framing: type byte then a self-including int32 length. Build a ReadyForQuery
+// ('Z' | int32 5 | 'I') and read its header back.
+test "pg wire: backend message header accessors" {
+    poke8(w_buf, 90)                               // 'Z'
+    pg_put_u32be(w_buf + 1, 5)
+    poke8(w_buf + 5, 73)                           // 'I' (idle)
+    assert_eq(pg_msg_type(w_buf), 90)
+    assert_eq(pg_msg_len(w_buf), 5)
+}

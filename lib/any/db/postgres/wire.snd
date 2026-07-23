@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/db/postgres/wire.snd: the PostgreSQL frontend/backend wire protocol v3
+// message layer (the byte encoding, no sockets). All integers are network byte order
+// (big-endian). The socket-facing client (client.snd) frames I/O with these helpers.
+//
+// Frontend messages built here: StartupMessage (no type byte, carries the protocol
+// version 3.0 and the user/database parameters) and Query ('Q', a Simple Query).
+// Backend messages are `type(1) | length(int32, includes itself) | payload`; the two
+// accessors read the type byte and the declared length so the client can frame reads.
+
+include "any/strings.snd"
+
+let PG_PROTO_V3 = 196608        // 0x00030000, protocol major 3 minor 0
+
+// Writes `v` as a 4-byte big-endian integer at `buf`.
+fn pg_put_u32be(buf: i64, v: i64) {
+    poke8(buf + 0, (v >> 24) & 0xff)
+    poke8(buf + 1, (v >> 16) & 0xff)
+    poke8(buf + 2, (v >> 8) & 0xff)
+    poke8(buf + 3, v & 0xff)
+}
+
+// Reads the 4-byte big-endian integer at `buf`.
+fn pg_get_u32be(buf: i64) -> i64 {
+    (peek8(buf + 0) << 24) | (peek8(buf + 1) << 16) | (peek8(buf + 2) << 8) | peek8(buf + 3)
+}
+
+// Copies the C string `s` and its terminating NUL into `buf`; returns bytes written.
+fn pg_put_cstr(buf: i64, s: i64) -> i64 {
+    let n = strlen(s)
+    let mut i = 0
+    for i < n { poke8(buf + i, peek8(s + i)); i = i + 1 }
+    poke8(buf + n, 0)
+    n + 1
+}
+
+// Builds a StartupMessage in `buf` for `user`/`db` (both C strings). Layout:
+//   int32 length | int32 196608 | "user\0"<user>"\0" "database\0"<db>"\0" "\0"
+// Returns the total length written (which the length field also carries).
+fn pg_startup(buf: i64, user: i64, db: i64) -> i64 {
+    pg_put_u32be(buf + 4, PG_PROTO_V3)             // protocol version follows the length field
+    let mut p = 8
+    p = p + pg_put_cstr(buf + p, "user")
+    p = p + pg_put_cstr(buf + p, user)
+    p = p + pg_put_cstr(buf + p, "database")
+    p = p + pg_put_cstr(buf + p, db)
+    poke8(buf + p, 0)                              // empty key terminates the parameter list
+    p = p + 1
+    pg_put_u32be(buf, p)                           // length covers the whole message
+    p
+}
+
+// Builds a Simple Query ('Q') for the SQL C string `sql` in `buf`. Layout:
+//   'Q' | int32 length | <sql>"\0"   (length excludes the type byte, includes itself)
+// Returns the total bytes written (1 + length).
+fn pg_query(buf: i64, sql: i64) -> i64 {
+    poke8(buf, 81)                                 // 'Q'
+    let n = strlen(sql)
+    let len = 4 + n + 1                            // length field + sql + NUL
+    pg_put_u32be(buf + 1, len)
+    let mut i = 0
+    for i < n { poke8(buf + 5 + i, peek8(sql + i)); i = i + 1 }
+    poke8(buf + 5 + n, 0)
+    1 + len
+}
+
+// The type byte of a backend message (e.g. 'R','T','D','C','Z','E').
+fn pg_msg_type(buf: i64) -> i64 { peek8(buf) }
+
+// The declared length of a backend message: the int32 after the type byte. It counts
+// itself, so the payload is (length - 4) bytes and the next message starts at 1+length.
+fn pg_msg_len(buf: i64) -> i64 { pg_get_u32be(buf + 1) }
