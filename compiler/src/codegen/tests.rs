@@ -122,6 +122,12 @@ fn a_debug_build_emits_a_per_statement_checkpoint_a_normal_build_does_not() {
     let debug_asm = emit_program_debug_g(&[], &[], &funcs);
     let normal_asm = emit_program_g(&[], &[], &funcs);
     assert!(debug_asm.contains("call __dbg_step"), "the --debug build calls the checkpoint");
+    // The checkpoint passes the CURRENT frame base (%rbp) as the second argument, so the agent can
+    // read the debuggee's locals and walk its call stack.
+    assert!(
+        debug_asm.contains("movq %rbp, %rsi"),
+        "the checkpoint hands the agent the debuggee frame pointer"
+    );
     assert!(
         !normal_asm.contains("__dbg_step"),
         "a normal build carries no debug instrumentation (byte-identical to before)"

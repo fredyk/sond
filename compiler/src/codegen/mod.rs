@@ -1591,10 +1591,13 @@ impl Codegen {
         // bodied blocks (a tail with no statements) that per-statement marking would miss.
         self.cov_mark();
         for (i, stmt) in block.stmts.iter().enumerate() {
-            // RFC-0016 --debug checkpoint: announce the statement's source line before running it.
+            // RFC-0016 --debug checkpoint: announce the statement's source line before running it,
+            // and hand the agent this function's frame base (%rbp) so it can read the debuggee's
+            // locals (at negative offsets) and walk the saved-rbp chain for a backtrace.
             if self.debug {
                 let line = block.stmt_lines.get(i).copied().unwrap_or(0);
                 self.line(&format!("    movq ${line}, %rdi"));
+                self.line("    movq %rbp, %rsi");
                 self.line("    call __dbg_step");
             }
             match stmt {

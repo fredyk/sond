@@ -124,6 +124,13 @@ socket, deliberately narrower than the framed protocol so it could land end to e
   step-over sets the current depth (skip INTO deeper calls, stop when control returns), step-out sets
   depth - 1 (stop only once the current frame returns). `__dbg_step_depth` starts high so the first
   checkpoint always pauses at entry.
+- **Frame inspection (examine / backtrace).** The checkpoint hands the agent the debuggee's frame
+  base (`movq %rbp, %rsi`), stored in `__dbg_frame`. Two primitives read it directly, needing no
+  symbol table: `x<offset>` reads `peek64(frame + offset)` (locals sit at negative offsets), and a
+  backtrace walks the saved-rbp chain (`[frame]` is the caller frame, `[frame+8]` its return
+  address), emitting each return address. Names are not resolved yet; that needs the line-to-locals
+  table of §3.3, which is the next slice, so for now the client examines by offset and renders raw
+  return addresses.
 - **Attach.** On the first checkpoint the agent binds `/tmp/sond.dbg.sock`, announces the path on
   stderr, and BLOCKS on `accept` until a client connects, so `main` is caught from its first line.
   The listener is bound exactly once; after a detach or a client disconnect the program runs free and
@@ -133,15 +140,18 @@ socket, deliberately narrower than the framed protocol so it could land end to e
   `n` (step-over, stop at the next checkpoint at this depth or shallower), `o` (step-out, stop once
   the current frame returns), `c` (continue, run to the next breakpoint or to the end), `g<line>\n`
   (run until the given source line), `b<line>\n` / `d<line>\n` (add / delete a breakpoint,
-  acknowledged as `B<line>\n` / `D<line>\n`, without resuming), `q` (detach and run free). A client
-  disconnect is treated as `c`.
+  acknowledged as `B<line>\n` / `D<line>\n`, without resuming), `x<offset>\n` (examine, replies
+  `V<value>\n` with the signed word at `frame + offset`, without resuming), `t` (backtrace, replies a
+  `T<addr>\n` line per stack frame, without resuming), `q` (detach and run free). A client disconnect
+  is treated as `c`.
 - **Reentrancy.** Codegen excludes the whole `__dbg_` namespace from the checkpoint, so the agent (and
   every helper it calls to serve the socket) never re-enters itself.
 
-The framed protocol of §3.4 and `Inspect`/`Backtrace`/`Locals` (which need §3.3's line-to-locals
-symbol table) are the following slices; this one already serves the full control surface, pause,
-step-in / over / out, breakpoints, run-to-line, continue, detach, over the socket against a native
-binary.
+The remaining slices are NAMED inspection (mapping the raw offsets and return addresses above to
+local names, types, and source locations through the §3.3 line-to-locals table) and the framed
+protocol of §3.4. This slice already serves the full control surface, pause, step-in / over / out,
+breakpoints, run-to-line, continue, detach, plus raw state inspection (examine a frame word, walk the
+call stack), over the socket against a native binary.
 
 ### 3.3 The line -> locals symbol table (the compiler already knows this)
 

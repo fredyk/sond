@@ -40,6 +40,9 @@ let mut __dbg_target = 0
 // current frame returns). It starts high so the very first checkpoint (entry) always pauses.
 let mut __dbg_depth = 0
 let mut __dbg_step_depth = 1000000000
+// The debuggee's current frame base (%rbp), handed to the checkpoint by codegen. Locals live at
+// negative offsets from it; the saved caller frame is at [frame] and the return address at [frame+8].
+let mut __dbg_frame = 0
 
 fn __dbg_enter() { __dbg_depth = __dbg_depth + 1 }
 fn __dbg_exit() { __dbg_depth = __dbg_depth - 1 }
@@ -94,6 +97,44 @@ fn __dbg_parse_int(buf: i64, off: i64, n: i64) -> (r: i64) {
         i = i + 1
     }
     acc
+}
+
+// Parse a possibly-negative decimal integer from buf[off..n] (a leading '-' negates). Local offsets
+// are negative, so the examine command needs signed input.
+fn __dbg_parse_signed(buf: i64, off: i64, n: i64) -> (r: i64) {
+    if peek8(buf + off) == 45 { return 0 - __dbg_parse_int(buf, off + 1, n) }
+    __dbg_parse_int(buf, off, n)
+}
+
+// Write a possibly-negative integer to `fd`: a '-' then the magnitude (values can be negative).
+fn __dbg_emit_signed(fd: i64, n: i64) {
+    if n < 0 {
+        let m[1]
+        poke8(m, 45)
+        syscall(1, fd, m, 1)
+        __dbg_emit_int(fd, 0 - n)
+        return
+    }
+    __dbg_emit_int(fd, n)
+}
+
+// Walk the saved-rbp chain from the current frame, sending each return address as `T<addr>\n`, so
+// the client can render a backtrace. Bounded, and stops if the chain is not strictly ascending (the
+// stack grows downward, so each caller frame sits at a higher address than its callee).
+fn __dbg_backtrace() {
+    let mut fp = __dbg_frame
+    let mut n = 0
+    for n < 256 {
+        if fp == 0 { return }
+        let t[1]
+        poke8(t, 84)
+        syscall(1, __dbg_fd, t, 1)
+        __dbg_emit_int(__dbg_fd, peek64(fp + 8))
+        let next = peek64(fp)
+        if next <= fp { return }
+        fp = next
+        n = n + 1
+    }
 }
 
 // Fill a sockaddr_un at `addr` from the NUL-terminated path at `src`:
@@ -216,6 +257,14 @@ fn __dbg_interact(line: i64) {
             syscall(1, __dbg_fd, ack, 1)
             __dbg_emit_int(__dbg_fd, bp)
         }
+        if c == 120 {
+            let off = __dbg_parse_signed(buf, 1, n)
+            let v[1]
+            poke8(v, 86)
+            syscall(1, __dbg_fd, v, 1)
+            __dbg_emit_signed(__dbg_fd, peek64(__dbg_frame + off))
+        }
+        if c == 116 { __dbg_backtrace() }
         if c == 113 {
             syscall(3, __dbg_fd, 0, 0)
             __dbg_fd = 0 - 1
@@ -225,7 +274,8 @@ fn __dbg_interact(line: i64) {
     }
 }
 
-pub fn __dbg_step(line: i64) {
+pub fn __dbg_step(line: i64, frame: i64) {
+    __dbg_frame = frame
     __dbg_ensure_attached()
     if __dbg_should_stop(line) == 1 {
         __dbg_interact(line)
