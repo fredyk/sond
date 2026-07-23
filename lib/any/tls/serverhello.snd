@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/tls/serverhello.snd: parsing the TLS 1.3 ServerHello (RFC 8446 4.1.3). The
+// handshake message is HandshakeType(1)=2 | uint24 length | body, with the body:
+//   legacy_version(2)=0x0303 | random(32) | legacy_session_id(1-byte len + id) |
+//   cipher_suite(2) | legacy_compression_method(1)=0 | extensions(uint16 len + extensions)
+// Each extension is ext_type(2) | ext_data(uint16 len + data). In a ServerHello the
+// key_share(51) extension carries ONE KeyShareEntry (group(2) | key(uint16 len + key)) and
+// supported_versions(43) carries the single selected version(2). All integers are network
+// byte order (big-endian). These accessors read a fully received message in place.
+
+// Reads the 2-byte big-endian integer at `p`.
+fn sh_get_u16(p: i64) -> i64 { (peek8(p) << 8) | peek8(p + 1) }
+
+// The legacy_session_id length byte. The body begins at msg+4; version(2) and random(32)
+// put the length byte at body offset 34, i.e. msg+38.
+fn tls_sh_sid_len(msg: i64) -> i64 { peek8(msg + 38) }
+
+// The selected cipher suite (uint16). It follows the session_id, whose length shifts every
+// later field: msg + 4(header) + 2(version) + 32(random) + 1(sid len) + sid + then cipher.
+fn tls_sh_cipher(msg: i64) -> i64 { sh_get_u16(msg + 39 + tls_sh_sid_len(msg)) }
+
+// A pointer to the first extension (past the uint16 extensions-list length). After the
+// session_id come cipher(2) and compression(1), then the list length at msg+42+sid.
+fn tls_sh_ext_start(msg: i64) -> i64 { msg + 44 + tls_sh_sid_len(msg) }
+
+// A pointer one past the last extension byte, from the declared extensions-list length.
+fn tls_sh_ext_end(msg: i64) -> i64 {
+    let sid = tls_sh_sid_len(msg)
+    msg + 44 + sid + sh_get_u16(msg + 42 + sid)
+}
+
+// Walks the extensions list for `want`; returns a pointer to that extension's ext_data
+// (past ext_type and the uint16 length), or 0 if it is absent.
+fn tls_sh_find_ext(msg: i64, want: i64) -> i64 {
+    let mut p = tls_sh_ext_start(msg)
+    let end = tls_sh_ext_end(msg)
+    for p < end {
+        let t = sh_get_u16(p)
+        let l = sh_get_u16(p + 2)
+        if t == want { return p + 4 }
+        p = p + 4 + l
+    }
+    0
+}
+
+// The selected version from the supported_versions(43) extension, or 0x0303 if absent.
+fn tls_sh_version(msg: i64) -> i64 {
+    let d = tls_sh_find_ext(msg, 43)
+    if d == 0 { return 0x0303 }
+    sh_get_u16(d)
+}
+
+// Finds the key_share(51) extension, copies the server public key bytes into `out`, and
+// returns the named group id (e.g. 0x001d for x25519). Returns -1 if the extension is
+// absent. The ext_data is a single KeyShareEntry: group(2) | key(uint16 len + key bytes).
+fn tls_sh_key_share(msg: i64, out: i64) -> i64 {
+    let d = tls_sh_find_ext(msg, 51)
+    if d == 0 { return 0 - 1 }
+    let group = sh_get_u16(d)
+    let klen = sh_get_u16(d + 2)
+    let mut i = 0
+    for i < klen { poke8(out + i, peek8(d + 4 + i)); i = i + 1 }
+    group
+}

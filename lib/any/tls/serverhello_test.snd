@@ -1,0 +1,107 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of tls/serverhello.snd: parsing a TLS 1.3 ServerHello (RFC 8446 4.1.3). Each case
+// hand-builds a byte-exact ServerHello with a known offset map, then pins the parser
+// accessors against it. Both the empty and the non-empty legacy_session_id are covered so
+// the session_id skip is proven in either shape.
+
+include "any/tls/serverhello.snd"
+include "x86_64/linux/testing.snd"
+
+let mut sh_out[512]
+let mut sh_key[64]
+
+// Writes `v` as a 2-byte big-endian integer at `buf`.
+fn th_put_u16(buf: i64, v: i64) { poke8(buf, (v >> 8) & 0xff); poke8(buf + 1, v & 0xff) }
+
+// Hand-builds a ServerHello into `out`: version 0x0303, a 32-byte random of 0x33,
+// a legacy_session_id of `sid_len` bytes filled with `sid_fill`, cipher 0x1303,
+// null compression, and extensions supported_versions(43 -> 0x0304) and
+// key_share(51 -> group 0x001d, a 32-byte key of 0x55). Returns the total message length.
+fn th_build_sh(out: i64, sid_len: i64, sid_fill: i64) -> i64 {
+    poke8(out, 2)                                    // HandshakeType.server_hello
+    let body = out + 4
+    let mut o = 0
+    th_put_u16(body + o, 0x0303); o = o + 2          // legacy_version = TLS 1.2
+    let mut i = 0
+    for i < 32 { poke8(body + o + i, 0x33); i = i + 1 }
+    o = o + 32
+    poke8(body + o, sid_len); o = o + 1              // legacy_session_id length
+    i = 0
+    for i < sid_len { poke8(body + o + i, sid_fill); i = i + 1 }
+    o = o + sid_len
+    th_put_u16(body + o, 0x1303); o = o + 2          // cipher_suite
+    poke8(body + o, 0); o = o + 1                    // legacy_compression_method = 0
+
+    let ext_len_at = o                               // extensions: uint16 length prefix
+    o = o + 2
+    let ext_start = o
+    // supported_versions (43): the single selected version, TLS 1.3 (0x0304).
+    th_put_u16(body + o, 43); o = o + 2
+    th_put_u16(body + o, 2); o = o + 2               // ext_data length
+    th_put_u16(body + o, 0x0304); o = o + 2
+    // key_share (51): one KeyShareEntry { group x25519, 32-byte key }.
+    th_put_u16(body + o, 51); o = o + 2
+    th_put_u16(body + o, 36); o = o + 2              // ext_data: 2 group + 2 keylen + 32 key
+    th_put_u16(body + o, 0x001d); o = o + 2          // group
+    th_put_u16(body + o, 32); o = o + 2              // key length
+    i = 0
+    for i < 32 { poke8(body + o + i, 0x55); i = i + 1 }
+    o = o + 32
+
+    th_put_u16(body + ext_len_at, o - ext_start)     // back-patch extensions length
+    poke8(out + 1, (o >> 16) & 0xff)                 // back-patch uint24 body length
+    poke8(out + 2, (o >> 8) & 0xff)
+    poke8(out + 3, o & 0xff)
+    4 + o
+}
+
+test "serverhello: empty session_id, cipher/version/key_share parsed" {
+    let n = th_build_sh(sh_out, 0, 0)
+    assert_eq(peek8(sh_out + 0), 2)                  // HandshakeType.server_hello
+
+    assert_eq(tls_sh_cipher(sh_out), 0x1303)
+    assert_eq(tls_sh_version(sh_out), 0x0304)
+
+    let mut j = 0
+    for j < 64 { poke8(sh_key + j, 0); j = j + 1 }   // clear before the copy
+    let group = tls_sh_key_share(sh_out, sh_key)
+    assert_eq(group, 0x001d)
+    assert_eq(peek8(sh_key + 0), 0x55)               // first key byte
+    assert_eq(peek8(sh_key + 31), 0x55)              // last key byte
+    assert_eq(peek8(sh_key + 32), 0)                 // exactly 32 bytes copied
+}
+
+test "serverhello: 32-byte session_id, skip is correct" {
+    let n = th_build_sh(sh_out, 32, 0xAB)
+    // session_id length byte reads 32 and its first byte is the fill.
+    assert_eq(peek8(sh_out + 38), 32)
+    assert_eq(peek8(sh_out + 39), 0xAB)
+
+    assert_eq(tls_sh_cipher(sh_out), 0x1303)
+    assert_eq(tls_sh_version(sh_out), 0x0304)
+
+    let group = tls_sh_key_share(sh_out, sh_key)
+    assert_eq(group, 0x001d)
+    assert_eq(peek8(sh_key + 0), 0x55)
+    assert_eq(peek8(sh_key + 31), 0x55)
+}
+
+test "serverhello: no extensions -> default version and absent key_share" {
+    // Minimal ServerHello with an empty extensions block.
+    poke8(sh_out, 2)
+    let body = sh_out + 4
+    th_put_u16(body + 0, 0x0303)
+    let mut i = 0
+    for i < 32 { poke8(body + 2 + i, 0x33); i = i + 1 }
+    poke8(body + 34, 0)                              // empty session_id
+    th_put_u16(body + 35, 0x1301)                    // cipher
+    poke8(body + 37, 0)                              // compression
+    th_put_u16(body + 38, 0)                         // extensions length = 0
+    poke8(sh_out + 1, 0); poke8(sh_out + 2, 0); poke8(sh_out + 3, 40)
+
+    assert_eq(tls_sh_cipher(sh_out), 0x1301)
+    assert_eq(tls_sh_version(sh_out), 0x0303)        // absent -> default TLS 1.2 marker
+    assert_eq(tls_sh_key_share(sh_out, sh_key), 0 - 1)
+}
