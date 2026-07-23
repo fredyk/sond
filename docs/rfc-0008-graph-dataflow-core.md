@@ -244,6 +244,13 @@ compute-bound peers (a 2.8x speedup over the same work in series):
   (§5.3 applied to the reduction). This is the streaming-reduce case where §5.3 bites; the positional
   bind above buffers by source and so needs no such restriction.
 
+The `graph { node .. yield e }` block (§5.1) is IMPLEMENTED, including its parallelism: nodes are
+grouped into topological levels, and a level's independent CALL nodes run concurrently on the Layer
+B thread substrate, joined before the next level (verified at ~290% CPU on a level of three
+independent nodes). The author writes only the data dependencies; the compiler extracts the
+concurrency. A dependency cycle is a compile error. Still ahead for the graph: effect edges between
+nodes (§5.2), the confluence proof extended to nodes (as below for `par`), and `effects` clauses.
+
 The independence/confluence PROOF (§5.3) has begun: `par` peers are verified confluent over the
 module's MUTABLE GLOBALS. A per-function read/write footprint over the mutable globals is computed
 transitively across the call graph, and a `par` whose peers write the same global (or one writes
