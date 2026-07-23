@@ -192,8 +192,16 @@ mod tests {
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    // One counter for the WHOLE test module, so every fixture path is unique across all tests,
+    // which run in parallel. A per-test counter (each starting at 0) made two different tests build
+    // the same temp path and race on it, a flaky failure.
+    static UID: AtomicUsize = AtomicUsize::new(0);
+    fn uid() -> usize {
+        UID.fetch_add(1, Ordering::Relaxed)
+    }
+
     fn tmp(name: &str, body: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(name);
+        let p = std::env::temp_dir().join(format!("{}_{}", uid(), name));
         writeln!(std::fs::File::create(&p).unwrap(), "{body}").unwrap();
         p
     }
@@ -201,8 +209,8 @@ mod tests {
     // A fresh temp directory that is a `lib/` root: `root/lib/<subpath>` plus a `root/main.snd`
     // entry that includes `include_line`. Returns the entry path. Used to exercise include
     // resolution against a walk-up `lib/` root without touching the real ~/.local/lib/sond.
-    fn lib_fixture(k: usize, subpath: &str, body: &str, include_line: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("sond_res_{}_{k}", std::process::id()));
+    fn lib_fixture(subpath: &str, body: &str, include_line: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("sond_res_{}_{}", std::process::id(), uid()));
         let lib_file = root.join("lib").join(subpath);
         std::fs::create_dir_all(lib_file.parent().unwrap()).unwrap();
         std::fs::write(&lib_file, body).unwrap();
@@ -215,18 +223,14 @@ mod tests {
     fn a_bare_name_resolves_under_any_with_the_snd_extension_added() {
         // `include "serial"` must reach `any/serial.snd`: the extension is optional and the
         // `any/` prefix is tried when the exact path is not found (JMV's alias request).
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let k = N.fetch_add(1, Ordering::Relaxed);
-        let entry = lib_fixture(k, "any/serial.snd", "fn serial_getc() -> i64 { 7 }", "include \"serial\"");
+        let entry = lib_fixture("any/serial.snd", "fn serial_getc() -> i64 { 7 }", "include \"serial\"");
         let combined = resolve_includes(&entry).unwrap();
         assert!(combined.contains("fn serial_getc"), "`include \"serial\"` pulled in any/serial.snd");
     }
 
     #[test]
     fn the_snd_extension_is_optional_on_an_explicit_any_path() {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let k = N.fetch_add(1, Ordering::Relaxed);
-        let entry = lib_fixture(k, "any/frame.snd", "fn frame_encode() -> i64 { 1 }", "include \"any/frame\"");
+        let entry = lib_fixture("any/frame.snd", "fn frame_encode() -> i64 { 1 }", "include \"any/frame\"");
         let combined = resolve_includes(&entry).unwrap();
         assert!(combined.contains("fn frame_encode"), "`any/frame` resolved to any/frame.snd");
     }
@@ -235,9 +239,7 @@ mod tests {
     fn an_explicit_full_path_still_resolves_exactly() {
         // The alias must not change behaviour for the canonical, extension-carrying paths the
         // whole stdlib already uses.
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let k = N.fetch_add(1, Ordering::Relaxed);
-        let entry = lib_fixture(k, "x86_64/linux/io.snd", "fn close_fd(fd: i64) -> i64 { 0 }", "include \"x86_64/linux/io.snd\"");
+        let entry = lib_fixture("x86_64/linux/io.snd", "fn close_fd(fd: i64) -> i64 { 0 }", "include \"x86_64/linux/io.snd\"");
         let combined = resolve_includes(&entry).unwrap();
         assert!(combined.contains("fn close_fd"), "explicit path unchanged");
     }
@@ -246,9 +248,7 @@ mod tests {
     fn a_bare_and_a_full_include_of_the_same_file_are_deduped() {
         // `include "serial"` and `include "any/serial.snd"` name the same file; it must appear
         // once, not twice (which would be duplicate definitions).
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let k = N.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("sond_resd_{}_{k}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("sond_resd_{}_{}", std::process::id(), uid()));
         let lib_file = root.join("lib").join("any").join("serial.snd");
         std::fs::create_dir_all(lib_file.parent().unwrap()).unwrap();
         std::fs::write(&lib_file, "fn serial_putc(b: i64) { }").unwrap();
@@ -263,10 +263,8 @@ mod tests {
         // When an include cannot be resolved on any root, the error must name the file that was
         // not found, NOT the entry file. Before this, every read failure was blamed on the entry,
         // so a missing `any/json.snd` read as "cannot read main.snd", which is deeply misleading.
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let k = N.fetch_add(1, Ordering::Relaxed);
         let main = tmp(
-            &format!("sond_missinginc_{k}.snd"),
+            &format!("sond_missinginc.snd"),
             "include \"any/does_not_exist_xyz.snd\"\nfn main() -> i64 { 0 }",
         );
         let err = resolve_includes(&main).unwrap_err().to_string();
@@ -282,13 +280,11 @@ mod tests {
 
     #[test]
     fn inlines_an_included_file_once() {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let k = N.fetch_add(1, Ordering::Relaxed);
-        let lib = tmp(&format!("sond_lib_{k}.snd"), "fn helper() -> i64 { 42 }");
+        let lib = tmp(&format!("sond_lib.snd"), "fn helper() -> i64 { 42 }");
         let libname = lib.file_name().unwrap().to_str().unwrap();
         // main includes the lib TWICE; it must appear only once.
         let main = tmp(
-            &format!("sond_main_{k}.snd"),
+            &format!("sond_main.snd"),
             &format!(
                 "include \"{libname}\"\ninclude \"{libname}\"\nfn main() -> i64 {{ helper() }}"
             ),
@@ -304,15 +300,13 @@ mod tests {
         // worth anything if it measures the code under test. A `_test.snd` file that happens
         // to define a helper of its own must not shrink the denominator to that helper: that
         // turns "1 of 5 library functions covered" into a green "1 of 1".
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let k = N.fetch_add(1, Ordering::Relaxed);
         let lib = tmp(
-            &format!("sond_covlib_{k}.snd"),
+            &format!("sond_covlib.snd"),
             "fn a1() -> i64 { 1 }\nfn a2() -> i64 { 2 }\nfn a3() -> i64 { 3 }",
         );
         let libname = lib.file_name().unwrap().to_str().unwrap();
         let entry = tmp(
-            &format!("sond_covscope_{k}_test.snd"),
+            &format!("sond_covscope_test.snd"),
             &format!("include \"{libname}\"\nfn helper() -> i64 {{ 7 }}\ntest \"t\" {{ }}"),
         );
         let (_, scope) = resolve_includes_scoped(&entry).unwrap();
@@ -328,12 +322,10 @@ mod tests {
     fn a_program_is_still_measured_on_its_own_functions() {
         // The counterpart: a program that includes the standard library is not on the hook
         // for covering the standard library.
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let k = N.fetch_add(1, Ordering::Relaxed);
-        let lib = tmp(&format!("sond_progdep_{k}.snd"), "fn dep() -> i64 { 1 }");
+        let lib = tmp(&format!("sond_progdep.snd"), "fn dep() -> i64 { 1 }");
         let libname = lib.file_name().unwrap().to_str().unwrap();
         let entry = tmp(
-            &format!("sond_prog_{k}.snd"),
+            &format!("sond_prog.snd"),
             &format!("include \"{libname}\"\nfn mine() -> i64 {{ dep() }}\ntest \"t\" {{ }}"),
         );
         let (_, scope) = resolve_includes_scoped(&entry).unwrap();
