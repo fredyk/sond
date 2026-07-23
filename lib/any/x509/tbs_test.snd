@@ -1,0 +1,123 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of x509/tbs.snd: walking INTO tbsCertificate to reach the validity dates and the
+// SubjectPublicKeyInfo (algorithm OID and key bits). The DER is a minimal, byte-exact
+// tbsCertificate-shaped encoding built by hand here, covering BOTH the version-present
+// (leading EXPLICIT [0], tag 0xA0) and the version-absent forms, so the OPTIONAL-version
+// branch is pinned without a real certificate.
+
+include "any/x509/tbs.snd"
+include "x86_64/linux/testing.snd"
+
+let mut t_buf[128]
+let mut t_out[3]
+
+// Certificate = SEQUENCE { tbsCertificate } (only the first child matters for entering).
+// tbsCertificate content, version PRESENT:
+//   [0] version   A0 03 02 01 02          (EXPLICIT [0] wrapping INTEGER 2)
+//   serialNumber  02 01 01
+//   signature     30 02 05 00             (SEQUENCE { NULL })
+//   issuer        30 00                    (SEQUENCE {})
+//   validity      30 06 17 01 41 17 01 42  (SEQUENCE { UTCTime "A", UTCTime "B" })
+//   subject       30 00                    (SEQUENCE {})
+//   SPKI          30 0C 30 04 06 02 2A 03  03 04 00 AA BB CC
+//                   algorithm SEQUENCE { OID 2A 03 }, subjectPublicKey BIT STRING
+test "x509 tbs: version PRESENT, walk to SPKI, alg OID, key bits and validity" {
+    // Certificate header
+    poke8(t_buf + 0, 0x30); poke8(t_buf + 1, 0x28)          // SEQUENCE, 40 content bytes
+    // tbsCertificate header
+    poke8(t_buf + 2, 0x30); poke8(t_buf + 3, 0x26)          // SEQUENCE, 38 content bytes
+    // version [0] EXPLICIT { INTEGER 2 }
+    poke8(t_buf + 4, 0xa0); poke8(t_buf + 5, 0x03)
+    poke8(t_buf + 6, 0x02); poke8(t_buf + 7, 0x01); poke8(t_buf + 8, 0x02)
+    // serialNumber INTEGER 1
+    poke8(t_buf + 9, 0x02); poke8(t_buf + 10, 0x01); poke8(t_buf + 11, 0x01)
+    // signature SEQUENCE { NULL }
+    poke8(t_buf + 12, 0x30); poke8(t_buf + 13, 0x02); poke8(t_buf + 14, 0x05); poke8(t_buf + 15, 0x00)
+    // issuer SEQUENCE {}
+    poke8(t_buf + 16, 0x30); poke8(t_buf + 17, 0x00)
+    // validity SEQUENCE { UTCTime "A", UTCTime "B" }
+    poke8(t_buf + 18, 0x30); poke8(t_buf + 19, 0x06)
+    poke8(t_buf + 20, 0x17); poke8(t_buf + 21, 0x01); poke8(t_buf + 22, 0x41)
+    poke8(t_buf + 23, 0x17); poke8(t_buf + 24, 0x01); poke8(t_buf + 25, 0x42)
+    // subject SEQUENCE {}
+    poke8(t_buf + 26, 0x30); poke8(t_buf + 27, 0x00)
+    // SPKI SEQUENCE { algorithm SEQUENCE { OID }, BIT STRING }
+    poke8(t_buf + 28, 0x30); poke8(t_buf + 29, 0x0c)
+    poke8(t_buf + 30, 0x30); poke8(t_buf + 31, 0x04)
+    poke8(t_buf + 32, 0x06); poke8(t_buf + 33, 0x02); poke8(t_buf + 34, 0x2a); poke8(t_buf + 35, 0x03)
+    poke8(t_buf + 36, 0x03); poke8(t_buf + 37, 0x04); poke8(t_buf + 38, 0x00)
+    poke8(t_buf + 39, 0xaa); poke8(t_buf + 40, 0xbb); poke8(t_buf + 41, 0xcc)
+
+    // SPKI position
+    x509_tbs_spki(t_buf, 0, t_out)
+    assert_eq(t_out[0], 28)
+    assert_eq(der_tag(t_buf, t_out[0]), DER_SEQUENCE)
+
+    // algorithm OID position inside SPKI
+    x509_spki_alg_oid(t_buf, 28, t_out)
+    assert_eq(t_out[0], 32)
+    assert_eq(der_tag(t_buf, t_out[0]), DER_OID)
+
+    // subjectPublicKey bits (unused-bits octet skipped)
+    x509_spki_key(t_buf, 28, t_out)
+    assert_eq(t_out[0], 39)
+    assert_eq(t_out[1], 3)
+    assert_eq(peek8(t_buf + t_out[0]), 0xaa)
+    assert_eq(peek8(t_buf + t_out[0] + 1), 0xbb)
+    assert_eq(peek8(t_buf + t_out[0] + 2), 0xcc)
+
+    // validity: the two Time children
+    x509_validity(t_buf, 0, t_out)
+    assert_eq(t_out[0], 20)                                  // notBefore TLV
+    assert_eq(t_out[1], 23)                                  // notAfter TLV
+    assert_eq(der_tag(t_buf, t_out[0]), 0x17)
+    assert_eq(der_tag(t_buf, t_out[1]), 0x17)
+}
+
+// Same shape, version ABSENT: the first tbs child is serialNumber (no leading 0xA0).
+test "x509 tbs: version ABSENT, first child is serialNumber" {
+    // Certificate header
+    poke8(t_buf + 0, 0x30); poke8(t_buf + 1, 0x23)          // SEQUENCE, 35 content bytes
+    // tbsCertificate header
+    poke8(t_buf + 2, 0x30); poke8(t_buf + 3, 0x21)          // SEQUENCE, 33 content bytes
+    // serialNumber INTEGER 1
+    poke8(t_buf + 4, 0x02); poke8(t_buf + 5, 0x01); poke8(t_buf + 6, 0x01)
+    // signature SEQUENCE { NULL }
+    poke8(t_buf + 7, 0x30); poke8(t_buf + 8, 0x02); poke8(t_buf + 9, 0x05); poke8(t_buf + 10, 0x00)
+    // issuer SEQUENCE {}
+    poke8(t_buf + 11, 0x30); poke8(t_buf + 12, 0x00)
+    // validity SEQUENCE { UTCTime "A", UTCTime "B" }
+    poke8(t_buf + 13, 0x30); poke8(t_buf + 14, 0x06)
+    poke8(t_buf + 15, 0x17); poke8(t_buf + 16, 0x01); poke8(t_buf + 17, 0x41)
+    poke8(t_buf + 18, 0x17); poke8(t_buf + 19, 0x01); poke8(t_buf + 20, 0x42)
+    // subject SEQUENCE {}
+    poke8(t_buf + 21, 0x30); poke8(t_buf + 22, 0x00)
+    // SPKI
+    poke8(t_buf + 23, 0x30); poke8(t_buf + 24, 0x0c)
+    poke8(t_buf + 25, 0x30); poke8(t_buf + 26, 0x04)
+    poke8(t_buf + 27, 0x06); poke8(t_buf + 28, 0x02); poke8(t_buf + 29, 0x2a); poke8(t_buf + 30, 0x03)
+    poke8(t_buf + 31, 0x03); poke8(t_buf + 32, 0x04); poke8(t_buf + 33, 0x00)
+    poke8(t_buf + 34, 0xaa); poke8(t_buf + 35, 0xbb); poke8(t_buf + 36, 0xcc)
+
+    x509_tbs_spki(t_buf, 0, t_out)
+    assert_eq(t_out[0], 23)
+    assert_eq(der_tag(t_buf, t_out[0]), DER_SEQUENCE)
+
+    x509_spki_alg_oid(t_buf, 23, t_out)
+    assert_eq(t_out[0], 27)
+    assert_eq(der_tag(t_buf, t_out[0]), DER_OID)
+
+    x509_spki_key(t_buf, 23, t_out)
+    assert_eq(t_out[0], 34)
+    assert_eq(t_out[1], 3)
+    assert_eq(peek8(t_buf + t_out[0]), 0xaa)
+    assert_eq(peek8(t_buf + t_out[0] + 2), 0xcc)
+
+    x509_validity(t_buf, 0, t_out)
+    assert_eq(t_out[0], 15)                                  // notBefore TLV
+    assert_eq(t_out[1], 18)                                  // notAfter TLV
+    assert_eq(der_tag(t_buf, t_out[0]), 0x17)
+    assert_eq(der_tag(t_buf, t_out[1]), 0x17)
+}

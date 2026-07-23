@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/x509/tbs.snd: walking INTO tbsCertificate (RFC 5280), on top of the DER reader
+// and the outer Certificate split in cert.snd. A TLS client needs, from inside the signed
+// body, the validity window and the SubjectPublicKeyInfo (which algorithm and which key):
+//
+//   TBSCertificate ::= SEQUENCE {
+//     [0] EXPLICIT version OPTIONAL (tag 0xA0),  serialNumber INTEGER,
+//     signature AlgorithmIdentifier,  issuer Name,  validity Validity,
+//     subject Name,  subjectPublicKeyInfo SubjectPublicKeyInfo,  ... optional fields ... }
+//
+// The one subtlety is the OPTIONAL EXPLICIT [0] version: when present it is the first child
+// and carries the context tag 0xA0; when absent the first child is serialNumber directly.
+// Every helper here detects that by tag and skips forward the right number of siblings.
+
+include "any/asn1/der.snd"
+
+// The context-specific constructed tag [0] that wraps the EXPLICIT version.
+let DER_CONTEXT0 = 0xa0
+
+// Position of the first child of tbsCertificate: enter the Certificate SEQUENCE to reach
+// the tbsCertificate TLV, then enter that to reach its first field.
+fn x509_tbs_first(buf: i64, certpos: i64) -> i64 {
+    let tbs = der_enter(buf, certpos)                // tbsCertificate TLV
+    der_enter(buf, tbs)                              // its first child
+}
+
+// Position of the serialNumber TLV: the first child, skipping the EXPLICIT [0] version if
+// it is present.
+fn x509_tbs_serial(buf: i64, certpos: i64) -> i64 {
+    let mut p = x509_tbs_first(buf, certpos)
+    if der_tag(buf, p) == DER_CONTEXT0 {             // version present, step past it
+        let t[3]
+        p = der_tlv(buf, p, t)
+    }
+    p
+}
+
+// The SubjectPublicKeyInfo TLV position. From serialNumber, walk forward past serialNumber,
+// signature, issuer, validity and subject (five siblings); the next TLV is the SPKI.
+// out[0] = SPKI position.
+fn x509_tbs_spki(buf: i64, certpos: i64, out: i64) {
+    let mut p = x509_tbs_serial(buf, certpos)
+    let t[3]
+    let mut i = 0
+    for i < 5 {
+        p = der_tlv(buf, p, t)
+        i = i + 1
+    }
+    out[0] = p
+}
+
+// The algorithm OID inside a SubjectPublicKeyInfo:
+//   SPKI ::= SEQUENCE { algorithm SEQUENCE { OID, params }, subjectPublicKey BIT STRING }
+// Enter the SPKI, enter the algorithm SEQUENCE; its first child is the OID.
+// out[0] = OID TLV position (out[1] is unused).
+fn x509_spki_alg_oid(buf: i64, spkipos: i64, out: i64) {
+    let alg = der_enter(buf, spkipos)                // algorithm SEQUENCE
+    out[0] = der_enter(buf, alg)                     // its first child: the OID
+}
+
+// The subjectPublicKey bits of a SubjectPublicKeyInfo: enter the SPKI, step past the
+// algorithm SEQUENCE to reach the BIT STRING, then skip its leading unused-bits octet.
+// out[0] = key start position, out[1] = key length.
+fn x509_spki_key(buf: i64, spkipos: i64, out: i64) {
+    let alg = der_enter(buf, spkipos)                // algorithm SEQUENCE
+    let t[3]
+    let bitstr = der_tlv(buf, alg, t)               // position of the BIT STRING
+    der_tlv(buf, bitstr, t)                          // t[1]=content start, t[2]=length
+    out[0] = t[1] + 1                                // skip the unused-bits octet
+    out[1] = t[2] - 1
+}
+
+// The two Time children of the validity SEQUENCE. From serialNumber, walk past serialNumber,
+// signature and issuer (three siblings) to reach validity, then enter it.
+// out[0] = notBefore TLV position, out[1] = notAfter TLV position.
+fn x509_validity(buf: i64, certpos: i64, out: i64) {
+    let mut p = x509_tbs_serial(buf, certpos)
+    let t[3]
+    let mut i = 0
+    for i < 3 {
+        p = der_tlv(buf, p, t)
+        i = i + 1
+    }
+    let nb = der_enter(buf, p)                        // notBefore, first child of validity
+    out[0] = nb
+    out[1] = der_tlv(buf, nb, t)                      // notAfter, the next sibling
+}
