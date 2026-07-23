@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of tls/ladder.snd: the TLS 1.3 key-schedule ladder (RFC 8446 section 7.1).
+//
+// The primitives this builds on (hkdf_extract, hkdf_expand_label, derive_secret) are each
+// verified against their own RFC vectors in their own suites. What the ladder adds is only
+// the wiring of section 7.1: which Extract salt/IKM, which Derive-Secret label, and where
+// the transcript goes. So every test here reproduces the expected primitive call BY HAND
+// and asserts byte-for-byte, rather than pinning a borrowed RFC 8448 trace.
+
+include "any/tls/ladder.snd"
+include "x86_64/linux/testing.snd"
+
+let mut lz[32]          // 32 zero bytes
+let mut lpsk[32]        // a stand-in PSK
+let mut learly[32]      // a stand-in early secret
+let mut lecdhe[32]      // a stand-in (EC)DHE shared secret
+let mut lhs[32]         // a stand-in handshake secret
+let mut ltr[32]         // a stand-in transcript
+let mut lsec[32]        // a stand-in traffic secret
+let mut lderived[32]    // by-hand Derive-Secret(., "derived", "")
+let mut lempty[1]       // a valid pointer for the empty transcript / empty context
+let mut la[32]          // result under test
+let mut lb[32]          // by-hand expected
+let mut lc[32]          // second by-hand expected / server side
+let mut lkey[32]        // traffic key under test
+let mut liv[16]         // traffic iv under test (12 used)
+
+fn fill(buf: i64, n: i64, val: i64) {
+    let mut i = 0
+    for i < n { poke8(buf + i, val); i = i + 1 }
+}
+
+// Early-Secret = HKDF-Extract(salt = 0^32, IKM = 0^32) when there is no PSK.
+test "tls ladder: early secret with empty PSK is Extract(0^32, 0^32)" {
+    fill(lz, 32, 0)
+    tls_early_secret(lz, 0, la)
+    hkdf_extract(lz, 32, lz, 32, lb)
+    let mut i = 0
+    for i < 32 { assert_eq(peek8(la + i), peek8(lb + i)); i = i + 1 }
+}
+
+// With a PSK: Early-Secret = HKDF-Extract(salt = 0^32, IKM = psk).
+test "tls ladder: early secret with a PSK is Extract(0^32, psk)" {
+    fill(lz, 32, 0)
+    fill(lpsk, 16, 0xab)
+    tls_early_secret(lpsk, 16, la)
+    hkdf_extract(lz, 32, lpsk, 16, lb)
+    let mut i = 0
+    for i < 32 { assert_eq(peek8(la + i), peek8(lb + i)); i = i + 1 }
+}
+
+// Handshake-Secret = HKDF-Extract(Derive-Secret(early, "derived", ""), (EC)DHE).
+test "tls ladder: handshake secret = Extract(Derive(early,'derived'), ecdhe)" {
+    fill(learly, 32, 0x11)
+    fill(lecdhe, 32, 0x22)
+    derive_secret(learly, "derived", 7, lempty, 0, lderived)
+    hkdf_extract(lderived, 32, lecdhe, 32, lb)
+    tls_derive_handshake_secret(learly, lecdhe, 32, la)
+    let mut i = 0
+    for i < 32 { assert_eq(peek8(la + i), peek8(lb + i)); i = i + 1 }
+}
+
+// Master-Secret = HKDF-Extract(Derive-Secret(handshake, "derived", ""), 0^32).
+test "tls ladder: master secret = Extract(Derive(hs,'derived'), 0^32)" {
+    fill(lhs, 32, 0x33)
+    fill(lz, 32, 0)
+    derive_secret(lhs, "derived", 7, lempty, 0, lderived)
+    hkdf_extract(lderived, 32, lz, 32, lb)
+    tls_derive_master_secret(lhs, la)
+    let mut i = 0
+    for i < 32 { assert_eq(peek8(la + i), peek8(lb + i)); i = i + 1 }
+}
+
+// client_handshake_traffic_secret = Derive-Secret(handshake, "c hs traffic", transcript);
+// and it must differ from the server side, which uses the "s hs traffic" label.
+test "tls ladder: client hs traffic matches Derive-Secret and differs from server" {
+    fill(lhs, 32, 0x44)
+    // transcript = "hello"
+    poke8(ltr + 0, 104); poke8(ltr + 1, 101); poke8(ltr + 2, 108)
+    poke8(ltr + 3, 108); poke8(ltr + 4, 111)
+    derive_secret(lhs, "c hs traffic", 12, ltr, 5, lb)
+    tls_client_hs_traffic(lhs, ltr, 5, la)
+    let mut i = 0
+    for i < 32 { assert_eq(peek8(la + i), peek8(lb + i)); i = i + 1 }
+    // server side matches its own label, and differs from the client side.
+    derive_secret(lhs, "s hs traffic", 12, ltr, 5, lc)
+    tls_server_hs_traffic(lhs, ltr, 5, la)
+    i = 0
+    for i < 32 { assert_eq(peek8(la + i), peek8(lc + i)); i = i + 1 }
+    let mut diff = 0
+    i = 0
+    for i < 32 { if peek8(lb + i) != peek8(lc + i) { diff = 1 }; i = i + 1 }
+    assert_eq(diff, 1)
+}
+
+// Per-record key/iv = HKDF-Expand-Label(secret, "key"/"iv", "", 32/12).
+test "tls ladder: traffic key and iv are Expand-Label('key'/'iv')" {
+    fill(lsec, 32, 0x55)
+    hkdf_expand_label(lsec, "key", 3, lempty, 0, lb, 32)
+    hkdf_expand_label(lsec, "iv", 2, lempty, 0, lc, 12)
+    tls_traffic_key_iv(lsec, lkey, liv)
+    let mut i = 0
+    for i < 32 { assert_eq(peek8(lkey + i), peek8(lb + i)); i = i + 1 }
+    i = 0
+    for i < 12 { assert_eq(peek8(liv + i), peek8(lc + i)); i = i + 1 }
+}

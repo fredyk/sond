@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/tls/ladder.snd: the TLS 1.3 key-schedule ladder (RFC 8446 section 7.1) over
+// HKDF-SHA-256 and SHA-256. Every secret is 32 bytes (the SHA-256 output length).
+//
+// The ladder chains three Extract stages, each preceded by a Derive-Secret "derived"
+// step, and then peels traffic secrets and per-record key/iv off with Expand-Label:
+//
+//   0 -> HKDF-Extract(0, PSK)           = Early-Secret
+//        Derive-Secret(., "derived", "")
+//   (EC)DHE -> HKDF-Extract(., (EC)DHE) = Handshake-Secret
+//        Derive-Secret(., "c hs traffic"/"s hs traffic", transcript) = traffic secrets
+//        Derive-Secret(., "derived", "")
+//   0 -> HKDF-Extract(., 0)             = Master-Secret
+//
+// Labels are passed WITHOUT the "tls13 " prefix; hkdf_expand_label adds it. The empty
+// transcript / empty context is a valid pointer with length 0.
+
+include "any/tls/keyschedule.snd"
+
+// Early-Secret = HKDF-Extract(salt = 0^32, IKM = PSK). With no PSK (psklen == 0) the IKM
+// is 0^32, per RFC 8446 section 7.1.
+fn tls_early_secret(psk: i64, psklen: i64, out: i64) {
+    let zeros[32]
+    let mut i = 0
+    for i < 32 { poke8(zeros + i, 0); i = i + 1 }
+    if psklen == 0 {
+        hkdf_extract(zeros, 32, zeros, 32, out)
+    } else {
+        hkdf_extract(zeros, 32, psk, psklen, out)
+    }
+}
+
+// Handshake-Secret = HKDF-Extract(salt = Derive-Secret(Early, "derived", ""), IKM = (EC)DHE).
+fn tls_derive_handshake_secret(early: i64, ecdhe: i64, ecdhelen: i64, out: i64) {
+    let derived[32]
+    let empty[1]
+    derive_secret(early, "derived", 7, empty, 0, derived)
+    hkdf_extract(derived, 32, ecdhe, ecdhelen, out)
+}
+
+// Master-Secret = HKDF-Extract(salt = Derive-Secret(Handshake, "derived", ""), IKM = 0^32).
+fn tls_derive_master_secret(handshake: i64, out: i64) {
+    let derived[32]
+    let zeros[32]
+    let empty[1]
+    let mut i = 0
+    for i < 32 { poke8(zeros + i, 0); i = i + 1 }
+    derive_secret(handshake, "derived", 7, empty, 0, derived)
+    hkdf_extract(derived, 32, zeros, 32, out)
+}
+
+// client_handshake_traffic_secret = Derive-Secret(Handshake, "c hs traffic", transcript).
+fn tls_client_hs_traffic(handshake: i64, transcript: i64, tlen: i64, out: i64) {
+    derive_secret(handshake, "c hs traffic", 12, transcript, tlen, out)
+}
+
+// server_handshake_traffic_secret = Derive-Secret(Handshake, "s hs traffic", transcript).
+fn tls_server_hs_traffic(handshake: i64, transcript: i64, tlen: i64, out: i64) {
+    derive_secret(handshake, "s hs traffic", 12, transcript, tlen, out)
+}
+
+// Per-record key and iv for a traffic secret: HKDF-Expand-Label(secret, "key", "", 32)
+// and HKDF-Expand-Label(secret, "iv", "", 12). The 32-byte key feeds ChaCha20 and the
+// 12-byte iv is the ChaCha20-Poly1305 nonce base.
+fn tls_traffic_key_iv(secret: i64, key_out: i64, iv_out: i64) {
+    let empty[1]
+    hkdf_expand_label(secret, "key", 3, empty, 0, key_out, 32)
+    hkdf_expand_label(secret, "iv", 2, empty, 0, iv_out, 12)
+}
