@@ -18,9 +18,15 @@ include "any/tls/ladder.snd"
 include "any/tls/record.snd"
 include "any/crypto/hash/sha256.snd"
 
-// Fills `buf` with `n` random bytes from the kernel.
+// Fills `buf` with `n` random bytes from the kernel. getrandom can return short (a signal
+// can interrupt it), so loop until the whole buffer is filled: a partially-filled ephemeral
+// key would silently derive the wrong session keys.
 fn tls_random(buf: i64, n: i64) {
-    syscall(SYS_getrandom, buf, n, 0)
+    let mut got = 0
+    for got < n {
+        let r = syscall(SYS_getrandom, buf + got, n - got, 0)
+        if r > 0 { got = got + r }
+    }
 }
 
 // Reads exactly `n` bytes, looping over short reads. Returns n, or <=0 on EOF/error.

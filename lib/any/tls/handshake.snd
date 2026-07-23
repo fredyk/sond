@@ -81,6 +81,16 @@ fn tls_build_client_hello(random: i64, pubkey: i64, sni: i64, snilen: i64, out: 
     for i < snilen { poke8(body + o + i, peek8(sni + i)); i = i + 1 }
     o = o + snilen
 
+    // application_layer_protocol_negotiation (16): offer http/1.1 (kept last so the earlier
+    // extension offsets do not shift).
+    hs_put_u16(body + o, 16); o = o + 2
+    hs_put_u16(body + o, 11); o = o + 2              // ext body: 2 list-length + 1 + 8
+    hs_put_u16(body + o, 9); o = o + 2               // ALPN protocol_name_list length
+    poke8(body + o, 8); o = o + 1                    // protocol name length
+    poke8(body + o + 0, 104); poke8(body + o + 1, 116); poke8(body + o + 2, 116); poke8(body + o + 3, 112)
+    poke8(body + o + 4, 47); poke8(body + o + 5, 49); poke8(body + o + 6, 46); poke8(body + o + 7, 49)
+    o = o + 8
+
     hs_put_u16(body + ext_len_at, o - ext_start)     // back-patch extensions length
     hs_put_u24(out + 1, o)                           // back-patch handshake body length
     4 + o
