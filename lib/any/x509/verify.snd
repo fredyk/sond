@@ -1,0 +1,125 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/x509/verify.snd: verify that a certificate was signed by a given issuer. This
+// is the bridge from the X.509 structure walk to the signature verifiers: it hashes the
+// tbsCertificate, reads the issuer's public key from its SubjectPublicKeyInfo, and checks
+// the signature with the algorithm named in signatureAlgorithm. Supported now:
+//   ecdsa-with-SHA256 (P-256)      OID 1.2.840.10045.4.3.2
+//   sha256WithRSAEncryption        OID 1.2.840.113549.1.1.11
+// These cover the common leaf and intermediate signatures. SHA-384/512 and RSA-PSS are
+// follow-ups (RSA-PSS matters for the TLS 1.3 CertificateVerify, not for cert signatures).
+
+include "any/asn1/der.snd"
+include "any/x509/cert.snd"
+include "any/x509/tbs.snd"
+include "any/crypto/ec/p256.snd"
+include "any/crypto/rsa/pkcs1v15.snd"
+include "any/crypto/hash/sha256.snd"
+
+// Normalizes the DER INTEGER at `intpos` into `flen` big-endian bytes in `out`: drops a
+// leading 0x00 sign octet and left-pads a shorter value with zeros.
+fn der_int_to_fixed(buf: i64, intpos: i64, out: i64, flen: i64) {
+    let t[3]
+    der_tlv(buf, intpos, t)
+    let mut cs = t[1]
+    let mut cl = t[2]
+    if cl > flen {
+        if peek8(buf + cs) == 0 { cs = cs + 1; cl = cl - 1 }
+    }
+    let pad = flen - cl
+    let mut i = 0
+    for i < pad { poke8(out + i, 0); i = i + 1 }
+    i = 0
+    for i < cl { poke8(out + pad + i, peek8(buf + cs + i)); i = i + 1 }
+}
+
+// The signatureAlgorithm OID position of a certificate (its second top-level child).
+fn x509_sigalg_oid(cert: i64, certpos: i64, out: i64) {
+    let parts[3]
+    x509_cert_parts(cert, certpos, parts)
+    out[0] = der_enter(cert, parts[1])
+}
+
+// Reads the ECDSA signature (r, s: 32 bytes each) from a certificate's signatureValue,
+// which wraps a DER SEQUENCE { r INTEGER, s INTEGER }.
+fn x509_ecdsa_rs(cert: i64, certpos: i64, r_out: i64, s_out: i64) {
+    let sig[2]
+    x509_signature(cert, certpos, sig)
+    let rpos = der_enter(cert, sig[0])
+    der_int_to_fixed(cert, rpos, r_out, 32)
+    let t[3]
+    let spos = der_tlv(cert, rpos, t)
+    der_int_to_fixed(cert, spos, s_out, 32)
+}
+
+// Reads the issuer's P-256 public key (Qx, Qy, 32 bytes each) from its SPKI, whose key is
+// an uncompressed point 0x04 || X || Y.
+fn x509_p256_pubkey(issuer: i64, issuerpos: i64, qx: i64, qy: i64) {
+    let spki[1]
+    x509_tbs_spki(issuer, issuerpos, spki)
+    let key[2]
+    x509_spki_key(issuer, spki[0], key)
+    let mut i = 0
+    for i < 32 { poke8(qx + i, peek8(issuer + key[0] + 1 + i)); i = i + 1 }
+    i = 0
+    for i < 32 { poke8(qy + i, peek8(issuer + key[0] + 33 + i)); i = i + 1 }
+}
+
+// Reads the issuer's RSA modulus (256 bytes) into `n_out` and returns the public exponent.
+// The SPKI key is a DER SEQUENCE { modulus INTEGER, publicExponent INTEGER }.
+fn x509_rsa_pubkey(issuer: i64, issuerpos: i64, n_out: i64) -> i64 {
+    let spki[1]
+    x509_tbs_spki(issuer, issuerpos, spki)
+    let key[2]
+    x509_spki_key(issuer, spki[0], key)
+    let npos = der_enter(issuer, key[0])
+    der_int_to_fixed(issuer, npos, n_out, 256)
+    let t[3]
+    let epos = der_tlv(issuer, npos, t)
+    der_tlv(issuer, epos, t)
+    let mut e = 0
+    let mut i = 0
+    for i < t[2] { e = (e << 8) | peek8(issuer + t[1] + i); i = i + 1 }
+    e
+}
+
+// Verifies that `cert` (at certpos) is signed by `issuer` (at issuerpos). Returns 1 if the
+// signature is valid, 0 otherwise (including an unsupported signature algorithm).
+fn x509_verify(cert: i64, certpos: i64, issuer: i64, issuerpos: i64) -> i64 {
+    let oidp[1]
+    x509_sigalg_oid(cert, certpos, oidp)
+    let tbs[2]
+    x509_tbs_span(cert, certpos, tbs)
+    let h[32]
+    sha256_hash(cert + tbs[0], tbs[1], h)
+
+    // ecdsa-with-SHA256: OID 1.2.840.10045.4.3.2
+    let ec[8]
+    poke8(ec + 0, 0x2a); poke8(ec + 1, 0x86); poke8(ec + 2, 0x48); poke8(ec + 3, 0xce)
+    poke8(ec + 4, 0x3d); poke8(ec + 5, 0x04); poke8(ec + 6, 0x03); poke8(ec + 7, 0x02)
+    if der_oid_eq(cert, oidp[0], ec, 8) == 1 {
+        let r[32]
+        let s[32]
+        x509_ecdsa_rs(cert, certpos, r, s)
+        let qx[32]
+        let qy[32]
+        x509_p256_pubkey(issuer, issuerpos, qx, qy)
+        return ecdsa_verify(qx, qy, h, r, s)
+    }
+
+    // sha256WithRSAEncryption: OID 1.2.840.113549.1.1.11
+    let rsoid[9]
+    poke8(rsoid + 0, 0x2a); poke8(rsoid + 1, 0x86); poke8(rsoid + 2, 0x48); poke8(rsoid + 3, 0x86)
+    poke8(rsoid + 4, 0xf7); poke8(rsoid + 5, 0x0d); poke8(rsoid + 6, 0x01); poke8(rsoid + 7, 0x01)
+    poke8(rsoid + 8, 0x0b)
+    if der_oid_eq(cert, oidp[0], rsoid, 9) == 1 {
+        let n[256]
+        let e = x509_rsa_pubkey(issuer, issuerpos, n)
+        if e != 65537 { return 0 }
+        let sig[2]
+        x509_signature(cert, certpos, sig)
+        return rsa_pkcs1v15_sha256_verify(n, cert + sig[0], h)
+    }
+    0
+}
