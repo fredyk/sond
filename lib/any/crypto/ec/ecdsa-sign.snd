@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/crypto/ec/ecdsa-sign.snd: ECDSA P-256 signing and public-key derivation, on top
+// of the field/curve arithmetic in p256.snd. Signing needs a per-signature nonce k that is
+// secret, unique and unpredictable; it is passed in by the caller (from a CSPRNG, or an
+// RFC 6979 derivation), so this function stays deterministic and testable. A signature is
+// (r, s): r = (k*G).x mod n, s = k^-1 * (e + r*d) mod n, retried if either is 0.
+
+include "any/crypto/ec/p256.snd"
+
+// Derives the public key Q = d*G for the private key `dp` (32 bytes), writing the affine
+// coordinates Qx, Qy (32 bytes each).
+fn ecdsa_pubkey(dp: i64, qx_out: i64, qy_out: i64) {
+    let mut d[16]
+    bn_from_bytes(d, dp)
+    let mut P[48]
+    scalar_mult_jac(P, d, P256_GX, P256_GY)
+    let mut Qx[16]
+    let mut Qy[16]
+    jac_to_affine(Qx, Qy, P)
+    bn_to_bytes(qx_out, Qx)
+    bn_to_bytes(qy_out, Qy)
+}
+
+// Signs the hash `ep` (32 bytes) with private key `dp` (32 bytes) and nonce `kp` (32 bytes),
+// writing r and s (32 bytes each). Returns 1 on success, or 0 if this k yields r=0 or s=0
+// (the caller should retry with a fresh k) or k*G is the point at infinity.
+fn ecdsa_sign(dp: i64, ep: i64, kp: i64, r_out: i64, s_out: i64) -> i64 {
+    let mut d[16]
+    bn_from_bytes(d, dp)
+    let mut e[16]
+    bn_from_bytes(e, ep)
+    let mut k[16]
+    bn_from_bytes(k, kp)
+
+    // reduce the hash mod n (it may exceed n as a 256-bit integer)
+    let mut ev[32]
+    bn_zero_n(ev, 32)
+    bn_copy_n(ev, e, 16)
+    let mut en[16]
+    bn_mod(ev, P256_N, en)
+
+    // R = k*G, r = R.x mod n
+    let mut P[48]
+    scalar_mult_jac(P, k, P256_GX, P256_GY)
+    if bn_is_zero(jac_z(P)) != 0 { return 0 }
+    let mut Rx[16]
+    let mut Ry[16]
+    jac_to_affine(Rx, Ry, P)
+    let mut dv[32]
+    bn_zero_n(dv, 32)
+    bn_copy_n(dv, Rx, 16)
+    let mut r[16]
+    bn_mod(dv, P256_N, r)
+
+    // s = k^-1 * (e + r*d) mod n
+    let mut kinv[16]
+    bn_invmod(k, P256_N, kinv)
+    let mut rd[16]
+    bn_mulmod(r, d, P256_N, rd)
+    let mut erd[16]
+    bn_addmod(en, rd, P256_N, erd)
+    let mut s[16]
+    bn_mulmod(kinv, erd, P256_N, s)
+
+    // A degenerate r=0 or s=0 (probability ~2^-256, and only from a bad nonce) yields a
+    // signature that verification rejects anyway, since ecdsa_verify enforces r,s in
+    // [1, n-1]; there is no separate guard for it here.
+    bn_to_bytes(r_out, r)
+    bn_to_bytes(s_out, s)
+    1
+}

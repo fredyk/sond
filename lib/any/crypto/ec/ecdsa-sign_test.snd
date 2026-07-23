@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of ecdsa-sign.snd. The verifier is already anchored to a real openssl signature, so
+// signing is pinned by a round trip: derive the public key, sign a hash, and check the
+// verifier accepts the signature and rejects it against a different hash.
+
+include "any/crypto/ec/ecdsa-sign.snd"
+include "x86_64/linux/testing.snd"
+
+let mut s_d[32]
+let mut s_e[32]
+let mut s_k[32]
+let mut s_qx[32]
+let mut s_qy[32]
+let mut s_r[32]
+let mut s_s[32]
+
+fn s_fill(buf: i64, seed: i64) {
+    let mut i = 0
+    for i < 32 { poke8(buf + i, (seed + i * 7) & 0xff); i = i + 1 }
+    poke8(buf, 0x11)                                  // keep the value comfortably below n
+}
+
+test "ecdsa-sign: sign then verify round-trips, and a wrong hash is rejected" {
+    s_fill(s_d, 3)                                    // private key
+    s_fill(s_e, 90)                                   // message hash
+    s_fill(s_k, 150)                                  // nonce
+    ecdsa_pubkey(s_d, s_qx, s_qy)
+    assert_eq(ecdsa_sign(s_d, s_e, s_k, s_r, s_s), 1)
+    assert_eq(ecdsa_verify(s_qx, s_qy, s_e, s_r, s_s), 1)
+    // a signature over s_e must not verify against a different hash
+    poke8(s_e, peek8(s_e) ^ 1)
+    assert_eq(ecdsa_verify(s_qx, s_qy, s_e, s_r, s_s), 0)
+}
+
+test "ecdsa-sign: a second keypair and nonce also round-trip" {
+    s_fill(s_d, 200)
+    s_fill(s_e, 42)
+    s_fill(s_k, 77)
+    ecdsa_pubkey(s_d, s_qx, s_qy)
+    assert_eq(ecdsa_sign(s_d, s_e, s_k, s_r, s_s), 1)
+    assert_eq(ecdsa_verify(s_qx, s_qy, s_e, s_r, s_s), 1)
+    // the signature must not verify under a different public key
+    ecdsa_pubkey(s_k, s_qx, s_qy)                     // a different key (from s_k as scalar)
+    assert_eq(ecdsa_verify(s_qx, s_qy, s_e, s_r, s_s), 0)
+}
+
+test "ecdsa-sign: a zero nonce yields the point at infinity and fails" {
+    s_fill(s_d, 5)
+    s_fill(s_e, 5)
+    let mut i = 0
+    for i < 32 { poke8(s_k + i, 0); i = i + 1 }       // k = 0
+    assert_eq(ecdsa_sign(s_d, s_e, s_k, s_r, s_s), 0)
+}
