@@ -108,31 +108,66 @@ fn extract_fn_name(line: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Resolves an include path, in order: relative to the including file, then a `lib/`
-/// root found by walking up the tree, then the system library `~/.local/lib/sond/`.
-/// The system root lets an isolated program (e.g. a sandboxed AI worker) pull in the
-/// shared libraries by their canonical path (`include "any/crypto/cipher/xor.snd"`),
-/// while seeing only the `.snd` libraries, never the compiler's own source.
+/// Resolves an include path, trying a short list of CANDIDATES in order until one
+/// exists, so a program may write the short `include "serial"` and reach
+/// `any/serial.snd`. For a given `rel` the candidates are: the path as written, the
+/// same with `.snd` appended (so the extension is optional), then both again under
+/// the `any/` prefix (the target-agnostic library root, tried only when the exact
+/// path is not found). Each candidate is searched through the roots below.
 fn resolve_target(dir: &Path, rel: &str) -> PathBuf {
+    for cand in include_candidates(rel) {
+        if let Some(found) = find_in_roots(dir, &cand) {
+            return found;
+        }
+    }
+    dir.join(rel) // fall back to the path as written (error surfaces on read)
+}
+
+/// The ordered candidate paths for an include of `rel`: exact first (so an explicit
+/// `any/serial.snd` resolves immediately and unchanged), then `.snd`-appended, then
+/// the same two under `any/`. The `any/` prefix makes `"serial"` an alias of
+/// `"any/serial"` when the exact path is not found.
+fn include_candidates(rel: &str) -> Vec<String> {
+    let has_ext = rel.ends_with(".snd");
+    let mut cands = vec![rel.to_string()];
+    if !has_ext {
+        cands.push(format!("{rel}.snd"));
+    }
+    // Only alias into `any/` when the path is not already an `any/` path.
+    if !rel.starts_with("any/") {
+        cands.push(format!("any/{rel}"));
+        if !has_ext {
+            cands.push(format!("any/{rel}.snd"));
+        }
+    }
+    cands
+}
+
+/// Searches for one candidate path through the roots, in order: relative to the
+/// including file, then a `lib/` root found by walking up the tree, then the system
+/// library `~/.local/lib/sond/`. The system root lets an isolated program (e.g. a
+/// sandboxed AI worker) pull in the shared libraries by their canonical path, while
+/// seeing only the `.snd` libraries, never the compiler's own source.
+fn find_in_roots(dir: &Path, rel: &str) -> Option<PathBuf> {
     let direct = dir.join(rel);
     if direct.exists() {
-        return direct;
+        return Some(direct);
     }
     let mut cur = Some(dir);
     while let Some(d) = cur {
         let candidate = d.join("lib").join(rel);
         if candidate.exists() {
-            return candidate;
+            return Some(candidate);
         }
         cur = d.parent();
     }
     if let Some(home) = std::env::var_os("HOME") {
         let sys = Path::new(&home).join(".local/lib/sond").join(rel);
         if sys.exists() {
-            return sys;
+            return Some(sys);
         }
     }
-    direct // fall back to the relative path (error surfaces on read)
+    None
 }
 
 /// If `line` is a top-level `include "..."` directive, returns the quoted path.
@@ -153,6 +188,66 @@ mod tests {
         let p = std::env::temp_dir().join(name);
         writeln!(std::fs::File::create(&p).unwrap(), "{body}").unwrap();
         p
+    }
+
+    // A fresh temp directory that is a `lib/` root: `root/lib/<subpath>` plus a `root/main.snd`
+    // entry that includes `include_line`. Returns the entry path. Used to exercise include
+    // resolution against a walk-up `lib/` root without touching the real ~/.local/lib/sond.
+    fn lib_fixture(k: usize, subpath: &str, body: &str, include_line: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("sond_res_{}_{k}", std::process::id()));
+        let lib_file = root.join("lib").join(subpath);
+        std::fs::create_dir_all(lib_file.parent().unwrap()).unwrap();
+        std::fs::write(&lib_file, body).unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(&entry, format!("{include_line}\nfn main() -> i64 {{ 0 }}")).unwrap();
+        entry
+    }
+
+    #[test]
+    fn a_bare_name_resolves_under_any_with_the_snd_extension_added() {
+        // `include "serial"` must reach `any/serial.snd`: the extension is optional and the
+        // `any/` prefix is tried when the exact path is not found (JMV's alias request).
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let k = N.fetch_add(1, Ordering::Relaxed);
+        let entry = lib_fixture(k, "any/serial.snd", "fn serial_getc() -> i64 { 7 }", "include \"serial\"");
+        let combined = resolve_includes(&entry).unwrap();
+        assert!(combined.contains("fn serial_getc"), "`include \"serial\"` pulled in any/serial.snd");
+    }
+
+    #[test]
+    fn the_snd_extension_is_optional_on_an_explicit_any_path() {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let k = N.fetch_add(1, Ordering::Relaxed);
+        let entry = lib_fixture(k, "any/frame.snd", "fn frame_encode() -> i64 { 1 }", "include \"any/frame\"");
+        let combined = resolve_includes(&entry).unwrap();
+        assert!(combined.contains("fn frame_encode"), "`any/frame` resolved to any/frame.snd");
+    }
+
+    #[test]
+    fn an_explicit_full_path_still_resolves_exactly() {
+        // The alias must not change behaviour for the canonical, extension-carrying paths the
+        // whole stdlib already uses.
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let k = N.fetch_add(1, Ordering::Relaxed);
+        let entry = lib_fixture(k, "x86_64/linux/io.snd", "fn close_fd(fd: i64) -> i64 { 0 }", "include \"x86_64/linux/io.snd\"");
+        let combined = resolve_includes(&entry).unwrap();
+        assert!(combined.contains("fn close_fd"), "explicit path unchanged");
+    }
+
+    #[test]
+    fn a_bare_and_a_full_include_of_the_same_file_are_deduped() {
+        // `include "serial"` and `include "any/serial.snd"` name the same file; it must appear
+        // once, not twice (which would be duplicate definitions).
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let k = N.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("sond_resd_{}_{k}", std::process::id()));
+        let lib_file = root.join("lib").join("any").join("serial.snd");
+        std::fs::create_dir_all(lib_file.parent().unwrap()).unwrap();
+        std::fs::write(&lib_file, "fn serial_putc(b: i64) { }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(&entry, "include \"serial\"\ninclude \"any/serial.snd\"\nfn main() -> i64 { 0 }").unwrap();
+        let combined = resolve_includes(&entry).unwrap();
+        assert_eq!(combined.matches("fn serial_putc").count(), 1, "included once despite two spellings");
     }
 
     #[test]
