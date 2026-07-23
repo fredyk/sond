@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/tls/certmsg.snd: parsing the TLS 1.3 Certificate handshake message (RFC 8446
+// 4.4.2). The message is HandshakeType(1)=11 | uint24 length | body, where the body is
+//   certificate_request_context : opaque<0..255>  (1-byte length + that many bytes)
+//   certificate_list            : uint24 length + a sequence of CertificateEntry
+// and each CertificateEntry is
+//   cert_data  : uint24 length + that many DER bytes (one X.509 certificate)
+//   extensions : uint16 length + that many bytes
+// This reader is a pure cursor walker over a caller-provided buffer: it locates each
+// certificate's DER span so the caller can hand (position, length) straight to the X.509
+// parser (x509_cert_parts). Positions are byte offsets relative to the message base,
+// matching the offset convention of the ASN.1 DER reader. All integers are big-endian.
+
+// Reads the 3-byte big-endian unsigned integer at `buf + pos` (a TLS uint24).
+fn tls_read_u24(buf: i64, pos: i64) -> i64 {
+    (peek8(buf + pos) << 16) | (peek8(buf + pos + 1) << 8) | peek8(buf + pos + 2)
+}
+
+// Reads the 2-byte big-endian unsigned integer at `buf + pos` (a TLS uint16).
+fn tls_read_u16(buf: i64, pos: i64) -> i64 {
+    (peek8(buf + pos) << 8) | peek8(buf + pos + 1)
+}
+
+// The offset of the first CertificateEntry (the start of the certificate_list contents).
+// The body begins at offset 4 (past the 1-byte type and uint24 length); skip the
+// certificate_request_context (1-byte length + its bytes) and the uint24 list length.
+fn tls_certlist_pos(msg: i64) -> i64 {
+    let ctx_len = peek8(msg + 4)
+    4 + 1 + ctx_len + 3
+}
+
+// The declared length (in bytes) of the certificate_list contents.
+fn tls_certlist_len(msg: i64) -> i64 {
+    let ctx_len = peek8(msg + 4)
+    tls_read_u24(msg, 4 + 1 + ctx_len)
+}
+
+// The number of CertificateEntry in the certificate_list. Walks the list from its start:
+// read cert_data length (uint24) and skip it, read extensions length (uint16) and skip it,
+// counting one entry each step until the whole certificate_list length is consumed.
+fn tls_cert_count(msg: i64) -> i64 {
+    let start = tls_certlist_pos(msg)
+    let end = start + tls_certlist_len(msg)
+    let mut p = start
+    let mut count = 0
+    for p < end {
+        let clen = tls_read_u24(msg, p)
+        p = p + 3 + clen
+        let extlen = tls_read_u16(msg, p)
+        p = p + 2 + extlen
+        count = count + 1
+    }
+    count
+}
+
+// Locates the `idx`-th certificate's DER bytes: writes out[0] = its byte offset (relative
+// to the message base) and out[1] = its length (the cert_data uint24). The caller passes
+// (msg, out[0]) to the X.509 parser. Walks past the preceding entries first.
+fn tls_cert_entry(msg: i64, idx: i64, out: i64) {
+    let mut p = tls_certlist_pos(msg)
+    let mut k = 0
+    for k < idx {
+        let clen = tls_read_u24(msg, p)
+        p = p + 3 + clen
+        let extlen = tls_read_u16(msg, p)
+        p = p + 2 + extlen
+        k = k + 1
+    }
+    out[0] = p + 3
+    out[1] = tls_read_u24(msg, p)
+}

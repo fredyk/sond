@@ -1,0 +1,109 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of tls/certmsg.snd: parsing the TLS 1.3 Certificate handshake message (RFC 8446
+// 4.4.2) against hand-built, byte-exact messages whose uint24/uint16 lengths are
+// back-patched by a tiny builder, so the walk is pinned deterministically.
+
+include "any/tls/certmsg.snd"
+include "x86_64/linux/testing.snd"
+
+let mut cm_msg[64]
+let mut cm_ctxmsg[64]
+let mut cm_out[2]
+
+// Big-endian writers used only to build the test fixtures.
+fn t_put_u24(buf: i64, pos: i64, v: i64) {
+    poke8(buf + pos + 0, (v >> 16) & 0xff)
+    poke8(buf + pos + 1, (v >> 8) & 0xff)
+    poke8(buf + pos + 2, v & 0xff)
+}
+fn t_put_u16(buf: i64, pos: i64, v: i64) {
+    poke8(buf + pos + 0, (v >> 8) & 0xff)
+    poke8(buf + pos + 1, v & 0xff)
+}
+
+// Builds a server Certificate message with an EMPTY certificate_request_context and two
+// entries: entry 0 = DER {AA BB CC} (len 3), entry 1 = DER {DD EE} (len 2), each with
+// empty extensions. The uint24 body length, the uint24 certificate_list length and each
+// entry's uint24 cert_data length are back-patched to their real values. Returns the
+// total message length.
+fn cm_build_two(buf: i64) -> i64 {
+    poke8(buf + 0, 11)                               // HandshakeType.certificate
+    poke8(buf + 4, 0)                                // certificate_request_context length = 0
+    // certificate_list length (uint24) at 5..7, contents start at offset 8.
+    let list_start = 8
+    let mut p = list_start
+    // entry 0: cert_data len 3, {AA BB CC}, extensions len 0.
+    t_put_u24(buf, p, 3); p = p + 3
+    poke8(buf + p, 0xAA); poke8(buf + p + 1, 0xBB); poke8(buf + p + 2, 0xCC); p = p + 3
+    t_put_u16(buf, p, 0); p = p + 2
+    // entry 1: cert_data len 2, {DD EE}, extensions len 0.
+    t_put_u24(buf, p, 2); p = p + 3
+    poke8(buf + p, 0xDD); poke8(buf + p + 1, 0xEE); p = p + 2
+    t_put_u16(buf, p, 0); p = p + 2
+    t_put_u24(buf, 5, p - list_start)                // back-patch certificate_list length
+    t_put_u24(buf, 1, p - 4)                         // back-patch handshake body length
+    p
+}
+
+// Builds a Certificate message with a NON-EMPTY certificate_request_context (2 bytes) and
+// a single entry DER {AA BB CC}, to prove the context is skipped before the list. Returns
+// the total message length.
+fn cm_build_ctx(buf: i64) -> i64 {
+    poke8(buf + 0, 11)
+    poke8(buf + 4, 2)                                // certificate_request_context length = 2
+    poke8(buf + 5, 0x99); poke8(buf + 6, 0x88)       // context bytes (skipped)
+    // certificate_list length (uint24) at 7..9, contents start at offset 10.
+    let list_start = 10
+    let mut p = list_start
+    t_put_u24(buf, p, 3); p = p + 3
+    poke8(buf + p, 0xAA); poke8(buf + p + 1, 0xBB); poke8(buf + p + 2, 0xCC); p = p + 3
+    t_put_u16(buf, p, 0); p = p + 2
+    t_put_u24(buf, 7, p - list_start)                // back-patch certificate_list length
+    t_put_u24(buf, 1, p - 4)                         // back-patch handshake body length
+    p
+}
+
+test "certmsg: uint24 and uint16 big-endian readers" {
+    poke8(cm_msg + 0, 0x12); poke8(cm_msg + 1, 0x34); poke8(cm_msg + 2, 0x56)
+    poke8(cm_msg + 3, 0xAB); poke8(cm_msg + 4, 0xCD)
+    assert_eq(tls_read_u24(cm_msg, 0), 0x123456)
+    assert_eq(tls_read_u16(cm_msg, 3), 0xABCD)
+}
+
+test "certmsg: two-entry list, count and each entry's DER span" {
+    let n = cm_build_two(cm_msg)
+    assert_eq(n, 23)                                 // 4 header + 1 ctx + 3 listlen + 15 list
+    assert_eq(peek8(cm_msg + 0), 11)                 // HandshakeType.certificate
+    assert_eq(tls_read_u24(cm_msg, 1), 19)           // handshake body length
+    assert_eq(tls_certlist_pos(cm_msg), 8)           // first entry at offset 8
+    assert_eq(tls_certlist_len(cm_msg), 15)          // certificate_list contents length
+
+    assert_eq(tls_cert_count(cm_msg), 2)
+
+    tls_cert_entry(cm_msg, 0, cm_out)
+    assert_eq(cm_out[0], 11)                          // entry 0 DER offset
+    assert_eq(cm_out[1], 3)                           // entry 0 DER length
+    assert_eq(peek8(cm_msg + cm_out[0]), 0xAA)        // points at the first DER byte
+    assert_eq(peek8(cm_msg + cm_out[0] + 2), 0xCC)    // last DER byte of entry 0
+
+    tls_cert_entry(cm_msg, 1, cm_out)
+    assert_eq(cm_out[0], 19)                          // entry 1 DER offset
+    assert_eq(cm_out[1], 2)                           // entry 1 DER length
+    assert_eq(peek8(cm_msg + cm_out[0]), 0xDD)        // points at entry 1's first DER byte
+    assert_eq(peek8(cm_msg + cm_out[0] + 1), 0xEE)
+}
+
+test "certmsg: non-empty request_context is skipped before the list" {
+    let n = cm_build_ctx(cm_ctxmsg)
+    assert_eq(n, 18)                                 // 4 header + 1 ctx len + 2 ctx + 3 listlen + 8 list
+    assert_eq(tls_certlist_pos(cm_ctxmsg), 10)       // list starts past the 2 context bytes
+    assert_eq(tls_certlist_len(cm_ctxmsg), 8)
+    assert_eq(tls_cert_count(cm_ctxmsg), 1)
+
+    tls_cert_entry(cm_ctxmsg, 0, cm_out)
+    assert_eq(cm_out[0], 13)                          // DER offset (10 + uint24 length field)
+    assert_eq(cm_out[1], 3)
+    assert_eq(peek8(cm_ctxmsg + cm_out[0]), 0xAA)
+}
