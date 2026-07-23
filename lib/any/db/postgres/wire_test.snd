@@ -157,3 +157,44 @@ test "pg wire: ErrorResponse field lookup" {
     assert_eq(peek8(pg_error_field_ptr(w_msg, 77)), 98)  // 'M' value starts at 'b'
     assert_eq(pg_error_field_ptr(w_msg, 67), 0)          // 'C' absent
 }
+
+// SASLInitialResponse ('p'): mechanism cstr, then an int32 length and the initial
+// response bytes. For mech "SCRAM-SHA-256" (13) and a 2-byte response "xy":
+//   'p' | int32 len | "SCRAM-SHA-256\0" | int32 2 | "xy"
+//   len = 4(self) + 14(mech cstr) + 4(resp len) + 2 = 24; total = 1 + 24 = 25.
+test "pg wire: SASLInitialResponse layout (mechanism + initial response)" {
+    let total = pg_sasl_initial(w_buf, "SCRAM-SHA-256", "xy", 2)
+    assert_eq(total, 25)
+    assert_eq(peek8(w_buf + 0), 112)               // 'p'
+    assert_eq(pg_get_u32be(w_buf + 1), 24)         // length carries everything after the type byte
+    assert_eq(peek8(w_buf + 5), 83)                // 'S' of the mechanism name
+    assert_eq(peek8(w_buf + 18), 0)                // NUL after the 13-char mechanism
+    assert_eq(pg_get_u32be(w_buf + 19), 2)         // initial-response length
+    assert_eq(peek8(w_buf + 23), 120)              // 'x' of the response
+    assert_eq(peek8(w_buf + 24), 121)              // 'y'
+}
+
+// SASLResponse ('p'): just the client-final message bytes, no mechanism, no inner length.
+//   'p' | int32 len | data ; len = 4(self) + datalen.
+test "pg wire: SASLResponse layout (client-final message)" {
+    let total = pg_sasl_response(w_buf, "abc", 3)
+    assert_eq(total, 8)                            // 1 type + 7 length
+    assert_eq(peek8(w_buf + 0), 112)               // 'p'
+    assert_eq(pg_get_u32be(w_buf + 1), 7)          // 4 + 3
+    assert_eq(peek8(w_buf + 5), 97)                // 'a'
+    assert_eq(peek8(w_buf + 7), 99)                // 'c'
+}
+
+// SASL data accessors on an Authentication 'R' message whose payload is int32 code + bytes
+// (used for SASLContinue/SASLFinal, where the bytes are the server-first / server-final).
+//   'R' | int32 len | int32 code | data ; data starts at +9, length = len - 8.
+test "pg wire: SASL continue/final data pointer and length" {
+    poke8(w_msg, 82)                               // 'R'
+    pg_put_u32be(w_msg + 1, 13)                    // 4(self) + 4(code) + 5(data)
+    pg_put_u32be(w_msg + 5, 11)                    // AuthenticationSASLContinue
+    poke8(w_msg + 9, 114); poke8(w_msg + 10, 61)   // "r="
+    poke8(w_msg + 11, 102); poke8(w_msg + 12, 111); poke8(w_msg + 13, 111)   // "foo"
+    assert_eq(pg_sasl_data_len(w_msg), 5)          // 13 - 8
+    assert_eq(pg_sasl_data_ptr(w_msg) - w_msg, 9)  // past type, length, code
+    assert_eq(peek8(pg_sasl_data_ptr(w_msg)), 114) // 'r'
+}

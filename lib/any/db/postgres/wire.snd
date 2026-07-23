@@ -66,6 +66,41 @@ fn pg_query(buf: i64, sql: i64) -> i64 {
     1 + len
 }
 
+// Builds a SASLInitialResponse ('p') carrying the SASL `mech` name and the `resplen`-byte
+// initial response `resp` (the client-first-message). Layout:
+//   'p' | int32 length | mechanism-cstr | int32 initial-response-length | initial-response
+// The length field covers everything after the type byte. Returns the total bytes written.
+fn pg_sasl_initial(buf: i64, mech: i64, resp: i64, resplen: i64) -> i64 {
+    poke8(buf, 112)                                 // 'p'
+    let mut p = 5                                    // past type + length field
+    p = p + pg_put_cstr(buf + p, mech)              // mechanism name and its NUL
+    pg_put_u32be(buf + p, resplen)
+    p = p + 4
+    let mut i = 0
+    for i < resplen { poke8(buf + p + i, peek8(resp + i)); i = i + 1 }
+    p = p + resplen
+    pg_put_u32be(buf + 1, p - 1)                     // length excludes the type byte
+    p
+}
+
+// Builds a SASLResponse ('p') carrying the `datalen`-byte client-final message `data`.
+// Layout: 'p' | int32 length | data. Returns the total bytes written.
+fn pg_sasl_response(buf: i64, data: i64, datalen: i64) -> i64 {
+    poke8(buf, 112)                                 // 'p'
+    let len = 4 + datalen
+    pg_put_u32be(buf + 1, len)
+    let mut i = 0
+    for i < datalen { poke8(buf + 5 + i, peek8(data + i)); i = i + 1 }
+    1 + len
+}
+
+// For an Authentication ('R') SASLContinue/SASLFinal message, whose payload is the int32
+// auth code followed by the SASL bytes (server-first / server-final): a pointer to those
+// bytes and their length. The bytes sit past type(1) + length(4) + code(4); their length
+// is the declared length minus the 4-byte length field and the 4-byte code.
+fn pg_sasl_data_ptr(buf: i64) -> i64 { buf + 9 }
+fn pg_sasl_data_len(buf: i64) -> i64 { pg_get_u32be(buf + 1) - 8 }
+
 // The type byte of a backend message (e.g. 'R','T','D','C','Z','E').
 fn pg_msg_type(buf: i64) -> i64 { peek8(buf) }
 
