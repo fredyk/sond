@@ -5,7 +5,7 @@
 | RFC         | 0008                                                                  |
 | Status      | Draft (exploratory)                                                   |
 | Date        | 2026-07-18                                                            |
-| Authors     | JMV + agents                                                         |
+| Authors     | Jhon Magdalena Vila                                                         |
 | Motivation  | Sequential source text is a HUMAN constraint; an AI can author the graph directly |
 | Related     | RFC-0000 (vision: local reasoning, effects, contracts), RFC-0001 (grammar), RFC-0003 (profiles) |
 
@@ -101,6 +101,57 @@ Sequential code is the **degenerate case**: a chain `node b = f(a); node c = g(b
 that happens to be a single path. So the graph core *subsumes* the linear surface rather than
 replacing it: existing linear functions are graphs of one path and keep working unchanged.
 
+### 5.1a The inline `par` form: horizontal peers
+
+A text file is a 2D medium (rows and columns), but conventional syntax spends the whole
+horizontal axis on token spelling and pours *all* meaning (sequence) into the vertical one. The
+graph core reclaims the horizontal axis: **going down asserts a dependency, going across asserts
+concurrency.** For a small fan-out, a full `graph { node .. }` block is heavier than the idea
+deserves; the same set of independent nodes is written inline with `par` and the flat peer
+delimiter `~~`:
+
+```
+let a ~~ b ~~ c = par loadUser(id) ~~ loadCart(id) ~~ loadPrices()
+render(a, b, c)
+```
+
+`~~` is **not an infix operator**: it is a FLAT, n-ary delimiter of the `par` construct, so
+`a ~~ b ~~ c` is a set of three peers, never the tree `((a ~~ b) ~~ c)`. There is no
+associativity, hence no left-before-right: **the horizontal position of a peer is pure layout, it
+does not order execution** (the horizontal analogue of §5.1's "reordering the `node` lines changes
+nothing"). The binding `a ~~ b ~~ c` names each result positionally, a naming convenience that
+likewise implies no order.
+
+The two axes now carry exactly one meaning each, and the compiler checks both:
+
+- **A newline (going down) asserts a dependency** on what is above. Assuming a dependency is
+  always sound (at worst it serializes needlessly), so this is the conservative default.
+- **`~~` (going across) asserts independence**: run these in any order. This assertion must be
+  PROVEN (disjoint effects or purity, §5.3). If two peers conflict on an effect, `f() ~~ g()` is
+  a COMPILE ERROR naming the shared resource, not a race to discover at runtime. `~~` is a
+  *verified claim*, not a scheduling hint (unlike `go f()` / `async`, which say "trust me").
+
+This also repairs the original sin §1 names: today a newline is nearly free, so you
+over-serialize `a; b; c` by default without meaning to. Here, piling everything vertically
+becomes a visible, honest statement ("I declare this a chain of dependencies"), usually false,
+and the reader now *sees* the false serialization.
+
+So `~~` = same layer (concurrent); a newline = the next layer (may depend). The inline form is
+the linear projection of the layered layout: `par` fans out one row, the next line joins it.
+`par` is the proven descendant of Occam's `PAR` (CSP): the parallel composition Occam could
+express but not verify, Sond both expresses and proves.
+
+**Why `~~` and not `~`.** A single `~` is already prefix bitwise-NOT. A parser can tell prefix
+`~a` from an infix `a ~ b` by position (as it does for unary vs binary `-`), so this is not a
+grammar ambiguity; the problem is human. Overloading one glyph across a *tight* bitwise unary and
+a *loose* scheduling delimiter, at opposite ends of the precedence spectrum, reads badly (the
+lesson `port`-as-a-keyword taught the same week: reuse that steals a common meaning is paid for
+forever). Two further points settle it: (1) as a flat delimiter of `par`, `~~` never enters the
+expression precedence table at all, so any residual ambiguity is localized to the `par` context;
+(2) `~~` is its own two-character token, never bitwise-NOT, and its weight reads as structural,
+like `&&` or `||`. (`||`, the canonical CSP parallel-composition symbol, is already the
+contract disjunction, so it is taken.)
+
 ### 5.2 Effects impose the only other edges
 
 Pure nodes are ordered solely by data. **Effectful** nodes carry their effect set (RFC-0000
@@ -165,12 +216,36 @@ runs when its in-edges are satisfied. Targets:
 Expr    ::= ... | GraphExpr
 GraphExpr ::= "graph" "{" { NodeDecl } "yield" Expr "}"
 NodeDecl  ::= "node" Ident "=" Expr [ "effects" "[" IdentList "]" ]
+
+Stmt    ::= ... | ParStmt | ParLet | ParReduce
+ParStmt  ::= "par" Call { "~~" Call }
+ParLet   ::= "let" Ident { "~~" Ident } "=" "par" Call { "~~" Call }
+ParReduce ::= "let" Ident "=" "par" "(" CommOp ")" Call { "~~" Call }
+CommOp   ::= "+" | "*" | "&" | "|" | "^"
 ```
 
-`node` and `graph` are new keywords. A `NodeDecl` binds an SSA-style value (single
-assignment; it fits immutability-by-default with zero new aliasing rules). Dependency edges
-are the free variables of each node's `Expr` that are other nodes; effect edges are computed
-from the `effects` clauses and the capability set in scope.
+`node`, `graph`, `yield` and `par` are new keywords. `~~` is the flat peer delimiter (its own
+two-character token, not an infix operator; it does not enter the expression precedence table).
+A `NodeDecl` binds an SSA-style value; dependency edges are the free variables of each node's
+`Expr` that are other nodes; effect edges are computed from the `effects` clauses.
+
+### 6a. `par` status: IMPLEMENTED (the inline form)
+
+The three inline `par` forms are implemented over the RFC-0010 Layer B thread substrate
+(`clone` + `futex`, thread-local arena), verified with real profiling at ~290% CPU on three
+compute-bound peers (a 2.8x speedup over the same work in series):
+
+- **`par f() ~~ g() ~~ h()`** (statement): run the peers concurrently, join before the next line.
+- **`let a ~~ b ~~ c = par f() ~~ g() ~~ h()`**: bind each result BY SOURCE POSITION (deterministic
+  regardless of finish order), so the caller may combine them with any operator.
+- **`let s = par(+) f() ~~ g() ~~ h()`**: fold the results with a COMMUTATIVE-ASSOCIATIVE operator
+  (`+ * & | ^`) into one value. A non-commutative reducer is a compile error, because the peers
+  finish in an unspecified order and only a commutative monoid keeps the result schedule-independent
+  (§5.3 applied to the reduction). This is the streaming-reduce case where §5.3 bites; the positional
+  bind above buffers by source and so needs no such restriction.
+
+Still ahead: the full `graph { node .. }` block, the effect-conflict edges (§5.2), and the
+independence/confluence PROOF that turns `~~` from "run these" into a verified claim (§5.3).
 
 ## 7. Worked example: a fiscal batch, honestly parallel
 
