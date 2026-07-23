@@ -113,6 +113,12 @@ test "pg wire: DataRow fields including NULL" {
     assert_eq(pg_datarow_field(w_msg, 0, w_out), 2)
     assert_eq(peek8(w_out), 52); assert_eq(peek8(w_out + 1), 50); assert_eq(peek8(w_out + 2), 0)
     assert_eq(pg_datarow_field(w_msg, 1, w_out), 0 - 1)   // NULL
+    // the split accessors the result builder uses:
+    assert_eq(pg_datarow_field_len(w_msg, 0), 2)
+    assert_eq(pg_datarow_field_len(w_msg, 1), 0 - 1)
+    assert_eq(peek8(pg_datarow_field_ptr(w_msg, 0)), 52)  // points at '4'
+    // field 1's value pointer sits 6 bytes after field 0's (4 len + 2 value), walking the loop
+    assert_eq(pg_datarow_field_ptr(w_msg, 1) - pg_datarow_field_ptr(w_msg, 0), 6)
 }
 
 // CommandComplete 'C' carries the command tag as a cstr in its payload.
@@ -148,4 +154,6 @@ test "pg wire: ErrorResponse field lookup" {
     assert_eq(pg_error_field(w_msg, 77, w_out), 4) // 'M' -> "boom"
     assert_eq(peek8(w_out), 98); assert_eq(peek8(w_out + 3), 109); assert_eq(peek8(w_out + 4), 0)
     assert_eq(pg_error_field(w_msg, 67, w_out), 0 - 1)   // 'C' absent
+    assert_eq(peek8(pg_error_field_ptr(w_msg, 77)), 98)  // 'M' value starts at 'b'
+    assert_eq(pg_error_field_ptr(w_msg, 67), 0)          // 'C' absent
 }

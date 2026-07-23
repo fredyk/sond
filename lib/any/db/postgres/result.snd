@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/db/postgres/result.snd: assembling a query result from backend messages.
+//
+// This is the socket-free core of the client: `pg_result_absorb` folds one already-read
+// backend message (RowDescription, DataRow, CommandComplete, ErrorResponse, ReadyForQuery)
+// into a result value, and the `pgx_*` accessors read it out. The socket adapter
+// (client.snd) only has to read framed messages and feed them here, which keeps this
+// logic unit-testable without a network.
+//
+// Result layout (a 5-word heap header):
+//   [0] status: 1 = ok, 0 = the server sent an ErrorResponse
+//   [1] ncols:  column count from RowDescription
+//   [2] cmd:    CommandComplete tag cstr (0 if none yet)
+//   [3] err:    ErrorResponse message cstr (0 if none)
+//   [4] cells:  a vec of value cstr pointers, row-major (0 for a SQL NULL cell)
+
+include "any/db/postgres/wire.snd"
+include "x86_64/linux/heap.snd"
+include "x86_64/linux/vec.snd"
+include "any/strings.snd"
+
+// Duplicates `len` bytes from `src` into a fresh NUL-terminated heap string.
+fn pg_dup(src: i64, len: i64) -> i64 {
+    let d = heap_alloc(len + 1)
+    let mut i = 0
+    for i < len { poke8(d + i, peek8(src + i)); i = i + 1 }
+    poke8(d + len, 0)
+    d
+}
+
+// A fresh, empty result (ok until an ErrorResponse arrives).
+fn pg_result_new() -> i64 {
+    let r = heap_alloc(40)
+    r[0] = 1
+    r[1] = 0
+    r[2] = 0
+    r[3] = 0
+    r[4] = vec_new()
+    r
+}
+
+// Folds one framed backend message into `r`. Returns 1 if the message ends the query
+// cycle (ReadyForQuery), so the caller stops reading; 0 otherwise.
+fn pg_result_absorb(r: i64, msg: i64) -> i64 {
+    let t = pg_msg_type(msg)
+    if t == 84 {                                    // 'T' RowDescription
+        r[1] = pg_rowdesc_ncols(msg)
+    }
+    if t == 68 {                                    // 'D' DataRow
+        let n = pg_datarow_nfields(msg)
+        let mut i = 0
+        for i < n {
+            let flen = pg_datarow_field_len(msg, i)
+            if flen < 0 {
+                vec_push(r[4], 0)                   // SQL NULL
+            } else {
+                vec_push(r[4], pg_dup(pg_datarow_field_ptr(msg, i), flen))
+            }
+            i = i + 1
+        }
+    }
+    if t == 67 {                                    // 'C' CommandComplete
+        let tag = pg_cmdcomplete_tag(msg)
+        r[2] = pg_dup(tag, strlen(tag))
+    }
+    if t == 69 {                                    // 'E' ErrorResponse
+        r[0] = 0
+        let mp = pg_error_field_ptr(msg, 77)        // 'M' human-readable message
+        if mp != 0 { r[3] = pg_dup(mp, strlen(mp)) }
+    }
+    if t == 90 { return 1 }                         // 'Z' ReadyForQuery ends the cycle
+    0
+}
+
+// --- pgx result accessors ---
+
+fn pgx_res_ok(r: i64) -> i64 { r[0] }
+fn pgx_ncols(r: i64) -> i64 { r[1] }
+
+// Row count = cells / columns (0 when there was no RowDescription, e.g. an INSERT).
+fn pgx_nrows(r: i64) -> i64 {
+    if r[1] <= 0 { return 0 }
+    vec_len(r[4]) / r[1]
+}
+
+fn pgx_res_cmd(r: i64) -> i64 { r[2] }             // CommandComplete tag cstr (or 0)
+fn pgx_res_error(r: i64) -> i64 { r[3] }           // ErrorResponse message cstr (or 0)
+
+// The value at (row, col) as a cstr, or 0 for a SQL NULL / out-of-range cell.
+fn pgx_val(r: i64, row: i64, col: i64) -> i64 {
+    if r[1] <= 0 { return 0 }
+    let idx = row * r[1] + col
+    if idx < 0 { return 0 }
+    if idx >= vec_len(r[4]) { return 0 }
+    vec_get(r[4], idx)
+}

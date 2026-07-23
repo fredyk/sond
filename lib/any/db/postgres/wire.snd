@@ -111,10 +111,9 @@ fn pg_rowdesc_name(buf: i64, col: i64, out: i64) -> i64 {
 // DataRow ('D'): the int16 field count.
 fn pg_datarow_nfields(buf: i64) -> i64 { pg_get_u16be(buf + 5) }
 
-// DataRow: copy the `idx`-th field value (NUL-terminated) into `out`, return its byte
-// length, or -1 if the field is SQL NULL (in which case `out` is left untouched). Each
-// field is an int32 length (-1 = NULL) followed by that many value bytes.
-fn pg_datarow_field(buf: i64, idx: i64, out: i64) -> i64 {
+// DataRow: the byte cursor just past the `idx`-th field's int32 length header, i.e. a
+// pointer to that field's value bytes (meaningful only when its length is >= 0).
+fn pg_datarow_field_ptr(buf: i64, idx: i64) -> i64 {
     let mut p = buf + 7                             // past type, length, int16 count
     let mut k = 0
     for k < idx {
@@ -123,9 +122,28 @@ fn pg_datarow_field(buf: i64, idx: i64, out: i64) -> i64 {
         if flen > 0 { p = p + flen }
         k = k + 1
     }
-    let flen = pg_get_i32be(p)
-    if flen < 0 { return 0 - 1 }                    // NULL
-    p = p + 4
+    p + 4
+}
+
+// DataRow: the `idx`-th field's declared length, or -1 for SQL NULL.
+fn pg_datarow_field_len(buf: i64, idx: i64) -> i64 {
+    let mut p = buf + 7
+    let mut k = 0
+    for k < idx {
+        let flen = pg_get_i32be(p)
+        p = p + 4
+        if flen > 0 { p = p + flen }
+        k = k + 1
+    }
+    pg_get_i32be(p)
+}
+
+// DataRow: copy the `idx`-th field value (NUL-terminated) into `out`, return its byte
+// length, or -1 if the field is SQL NULL (in which case `out` is left untouched).
+fn pg_datarow_field(buf: i64, idx: i64, out: i64) -> i64 {
+    let flen = pg_datarow_field_len(buf, idx)
+    if flen < 0 { return 0 - 1 }
+    let p = pg_datarow_field_ptr(buf, idx)
     let mut i = 0
     for i < flen { poke8(out + i, peek8(p + i)); i = i + 1 }
     poke8(out + i, 0)
@@ -135,22 +153,27 @@ fn pg_datarow_field(buf: i64, idx: i64, out: i64) -> i64 {
 // CommandComplete ('C'): a pointer to the NUL-terminated command tag ("SELECT 1", etc.).
 fn pg_cmdcomplete_tag(buf: i64) -> i64 { buf + 5 }
 
-// ErrorResponse ('E'): find the field whose type byte is `code` (e.g. 'M' message,
-// 'C' SQLSTATE, 'S' severity), copy its value into `out`, return its length; -1 if the
-// field is absent. Fields are `byte type, cstr value` pairs, ended by a 0 type byte.
-fn pg_error_field(buf: i64, code: i64, out: i64) -> i64 {
+// ErrorResponse ('E'): a pointer to the NUL-terminated value of the field whose type
+// byte is `code` (e.g. 'M' message, 'C' SQLSTATE, 'S' severity), or 0 if absent. Fields
+// are `byte type, cstr value` pairs, ended by a 0 type byte.
+fn pg_error_field_ptr(buf: i64, code: i64) -> i64 {
     let mut p = buf + 5
     for peek8(p) != 0 {
         let t = peek8(p)
         p = p + 1
-        if t == code {
-            let mut i = 0
-            for peek8(p + i) != 0 { poke8(out + i, peek8(p + i)); i = i + 1 }
-            poke8(out + i, 0)
-            return i
-        }
+        if t == code { return p }
         for peek8(p) != 0 { p = p + 1 }             // skip this field's value cstr
         p = p + 1
     }
-    0 - 1
+    0
+}
+
+// ErrorResponse: copy the `code` field's value into `out`, return its length; -1 if absent.
+fn pg_error_field(buf: i64, code: i64, out: i64) -> i64 {
+    let p = pg_error_field_ptr(buf, code)
+    if p == 0 { return 0 - 1 }
+    let mut i = 0
+    for peek8(p + i) != 0 { poke8(out + i, peek8(p + i)); i = i + 1 }
+    poke8(out + i, 0)
+    i
 }

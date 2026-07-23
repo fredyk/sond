@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of db/postgres/result.snd: assembling a query result from backend messages,
+// driven with hand-built messages (no socket). Covers the row/column model, SQL NULL,
+// the command tag, the ReadyForQuery end signal, and the ErrorResponse path.
+
+include "any/db/postgres/result.snd"
+include "x86_64/linux/testing.snd"
+
+let mut m_rd[64]
+let mut m_r1[64]
+let mut m_r2[64]
+let mut m_cc[64]
+let mut m_rfq[16]
+let mut m_err[64]
+
+// Writes one DataRow field at offset p; vlen < 0 encodes SQL NULL. Returns the next offset.
+fn put_field(buf: i64, p: i64, val: i64, vlen: i64) -> i64 {
+    if vlen < 0 {
+        pg_put_u32be(buf + p, 0xffffffff)
+        return p + 4
+    }
+    pg_put_u32be(buf + p, vlen)
+    let mut i = 0
+    for i < vlen { poke8(buf + p + 4 + i, peek8(val + i)); i = i + 1 }
+    p + 4 + vlen
+}
+
+fn mk_datarow2(buf: i64, a: i64, alen: i64, b: i64, blen: i64) {
+    poke8(buf, 68)                                  // 'D'
+    pg_put_u16be(buf + 5, 2)
+    let mut p = 7
+    p = put_field(buf, p, a, alen)
+    p = put_field(buf, p, b, blen)
+}
+
+test "pg result: rows, columns, NULL, tag and end signal" {
+    // RowDescription with 2 columns (only the count matters to the result model).
+    poke8(m_rd, 84); pg_put_u16be(m_rd + 5, 2)
+    // two data rows: ("1","alice") and ("2", NULL)
+    mk_datarow2(m_r1, "1", 1, "alice", 5)
+    mk_datarow2(m_r2, "2", 1, "alice", 0 - 1)
+    // CommandComplete "SELECT 2"
+    poke8(m_cc, 67)
+    let tag = "SELECT 2"
+    let mut i = 0
+    for i < 8 { poke8(m_cc + 5 + i, peek8(tag + i)); i = i + 1 }
+    poke8(m_cc + 13, 0)
+    // ReadyForQuery
+    poke8(m_rfq, 90); pg_put_u32be(m_rfq + 1, 5); poke8(m_rfq + 5, 73)
+
+    let r = pg_result_new()
+    assert_eq(pg_result_absorb(r, m_rd), 0)
+    assert_eq(pg_result_absorb(r, m_r1), 0)
+    assert_eq(pg_result_absorb(r, m_r2), 0)
+    assert_eq(pg_result_absorb(r, m_cc), 0)
+    assert_eq(pg_result_absorb(r, m_rfq), 1)        // ReadyForQuery ends the cycle
+
+    assert_eq(pgx_res_ok(r), 1)
+    assert_eq(pgx_ncols(r), 2)
+    assert_eq(pgx_nrows(r), 2)
+    // (0,0) = "1", (0,1) = "alice"
+    assert_eq(peek8(pgx_val(r, 0, 0)), 49)
+    assert_eq(peek8(pgx_val(r, 0, 1)), 97)          // 'a'
+    assert_eq(peek8(pgx_val(r, 0, 1) + 5), 0)       // "alice" NUL-terminated
+    // (1,0) = "2", (1,1) = NULL
+    assert_eq(peek8(pgx_val(r, 1, 0)), 50)
+    assert_eq(pgx_val(r, 1, 1), 0)                  // SQL NULL
+    // out-of-range cells (too high, and a negative index) read as 0
+    assert_eq(pgx_val(r, 5, 0), 0)
+    assert_eq(pgx_val(r, 0 - 1, 0), 0)
+    // command tag
+    assert_eq(peek8(pgx_res_cmd(r)), 83)            // 'S'
+    assert_eq(peek8(pgx_res_cmd(r) + 7), 50)        // '2'
+}
+
+test "pg result: an ErrorResponse marks the result failed and captures the message" {
+    poke8(m_err, 69)                                // 'E'
+    poke8(m_err + 5, 77)                            // 'M'
+    let msg = "boom"
+    let mut i = 0
+    for i < 4 { poke8(m_err + 6 + i, peek8(msg + i)); i = i + 1 }
+    poke8(m_err + 10, 0)                            // value NUL
+    poke8(m_err + 11, 0)                            // fields terminator
+
+    let r = pg_result_new()
+    pg_result_absorb(r, m_err)
+    assert_eq(pgx_res_ok(r), 0)
+    assert_eq(peek8(pgx_res_error(r)), 98)          // 'b'
+    assert_eq(peek8(pgx_res_error(r) + 3), 109)     // 'm'
+}
+
+test "pg result: an empty result reads as zero rows and NULL cells" {
+    let r = pg_result_new()
+    assert_eq(pgx_nrows(r), 0)                       // ncols 0 -> no rows
+    assert_eq(pgx_val(r, 0, 0), 0)
+}
