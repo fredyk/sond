@@ -17,6 +17,7 @@ include "any/x509/tbs.snd"
 include "any/crypto/ec/p256.snd"
 include "any/crypto/ec/p384.snd"
 include "any/crypto/rsa/pkcs1v15.snd"
+include "any/crypto/rsa/rsa4096.snd"
 include "any/crypto/hash/sha256.snd"
 include "any/crypto/hash/sha512.snd"
 
@@ -82,15 +83,30 @@ fn x509_p384_pubkey(issuer: i64, issuerpos: i64, qx: i64, qy: i64) {
     for i < 48 { poke8(qy + i, peek8(issuer + key[0] + 49 + i)); i = i + 1 }
 }
 
-// Reads the issuer's RSA modulus (256 bytes) into `n_out` and returns the public exponent.
-// The SPKI key is a DER SEQUENCE { modulus INTEGER, publicExponent INTEGER }.
-fn x509_rsa_pubkey(issuer: i64, issuerpos: i64, n_out: i64) -> i64 {
+// The issuer's RSA modulus size in bytes (excluding a leading 0x00 sign octet): 256 for a
+// 2048-bit key, 512 for a 4096-bit key. Lets the caller pick the matching verifier.
+fn x509_rsa_modbytes(issuer: i64, issuerpos: i64) -> i64 {
     let spki[1]
     x509_tbs_spki(issuer, issuerpos, spki)
     let key[2]
     x509_spki_key(issuer, spki[0], key)
     let npos = der_enter(issuer, key[0])
-    der_int_to_fixed(issuer, npos, n_out, 256)
+    let t[3]
+    der_tlv(issuer, npos, t)                          // the modulus INTEGER
+    let mut len = t[2]
+    if peek8(issuer + t[1]) == 0 { len = len - 1 }    // strip the DER sign octet
+    len
+}
+
+// Reads the issuer's RSA modulus into `n_out` as `nlen` big-endian bytes (256 or 512) and
+// returns the public exponent. The SPKI key is a DER SEQUENCE { modulus, publicExponent }.
+fn x509_rsa_pubkey_len(issuer: i64, issuerpos: i64, n_out: i64, nlen: i64) -> i64 {
+    let spki[1]
+    x509_tbs_spki(issuer, issuerpos, spki)
+    let key[2]
+    x509_spki_key(issuer, spki[0], key)
+    let npos = der_enter(issuer, key[0])
+    der_int_to_fixed(issuer, npos, n_out, nlen)
     let t[3]
     let epos = der_tlv(issuer, npos, t)
     der_tlv(issuer, epos, t)
@@ -98,6 +114,12 @@ fn x509_rsa_pubkey(issuer: i64, issuerpos: i64, n_out: i64) -> i64 {
     let mut i = 0
     for i < t[2] { e = (e << 8) | peek8(issuer + t[1] + i); i = i + 1 }
     e
+}
+
+// Reads the issuer's 2048-bit RSA modulus (256 bytes) and returns the public exponent. Kept
+// for the RSA-PSS CertificateVerify path, which is 2048-bit.
+fn x509_rsa_pubkey(issuer: i64, issuerpos: i64, n_out: i64) -> i64 {
+    x509_rsa_pubkey_len(issuer, issuerpos, n_out, 256)
 }
 
 // Verifies that `cert` (at certpos) is signed by `issuer` (at issuerpos). Returns 1 if the
@@ -152,12 +174,24 @@ fn x509_verify(cert: i64, certpos: i64, issuer: i64, issuerpos: i64) -> i64 {
     poke8(rsoid + 4, 0xf7); poke8(rsoid + 5, 0x0d); poke8(rsoid + 6, 0x01); poke8(rsoid + 7, 0x01)
     poke8(rsoid + 8, 0x0b)
     if der_oid_eq(cert, oidp[0], rsoid, 9) == 1 {
-        let n[256]
-        let e = x509_rsa_pubkey(issuer, issuerpos, n)
-        if e != 65537 { return 0 }
         let sig[2]
         x509_signature(cert, certpos, sig)
-        return rsa_pkcs1v15_sha256_verify(n, cert + sig[0], h)
+        let modlen = x509_rsa_modbytes(issuer, issuerpos)
+        // 2048-bit issuer key
+        if modlen == 256 {
+            let n[256]
+            let e = x509_rsa_pubkey_len(issuer, issuerpos, n, 256)
+            if e != 65537 { return 0 }
+            return rsa_pkcs1v15_sha256_verify(n, cert + sig[0], h)
+        }
+        // 4096-bit issuer key (e.g. ISRG Root X1, GTS Root R1)
+        if modlen == 512 {
+            let n[512]
+            let e = x509_rsa_pubkey_len(issuer, issuerpos, n, 512)
+            if e != 65537 { return 0 }
+            return rsa_pkcs1v15_sha256_verify_4096(n, cert + sig[0], h)
+        }
+        return 0
     }
     0
 }
