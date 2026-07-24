@@ -183,6 +183,40 @@ fn x509_eku_serverauth_ok(cert: i64, certpos: i64) -> i64 {
     1                                                // EKU extension absent: unrestricted
 }
 
+// 1 if the certificate's keyUsage (OID 2.5.29.15) allows the usage(s) in `mask`, else 0.
+// keyUsage is a DER BIT STRING; its first flags byte holds, MSB first, bit 0 digitalSignature
+// (0x80) .. bit 5 keyCertSign (0x04) .. bit 6 cRLSign (0x02). Absent keyUsage is unrestricted
+// (RFC 5280), so 1; present requires every bit of `mask` to be set.
+fn x509_keyusage_allows(cert: i64, certpos: i64, mask: i64) -> i64 {
+    let seq = x509_extensions(cert, certpos)
+    if seq < 0 { return 1 }                        // no extensions: unrestricted
+    let st[3]
+    der_tlv(cert, seq, st)
+    let endp = st[1] + st[2]
+    let mut p = st[1]
+    let kuoid[3]
+    poke8(kuoid + 0, 0x55); poke8(kuoid + 1, 0x1d); poke8(kuoid + 2, 0x0f)   // 2.5.29.15
+    for p < endp {
+        let ext[3]
+        let nextext = der_tlv(cert, p, ext)
+        let oidpos = ext[1]
+        if der_oid_eq(cert, oidpos, kuoid, 3) == 1 {
+            let t[3]
+            let mut q = der_tlv(cert, oidpos, t)    // position after the OID
+            if der_tag(cert, q) == 1 { q = der_tlv(cert, q, t) }   // skip optional critical BOOLEAN
+            der_tlv(cert, q, t)                      // extnValue OCTET STRING
+            let bs[3]
+            der_tlv(cert, t[1], bs)                  // the BIT STRING: [unused-bit count][flags...]
+            if bs[2] < 2 { return 0 }                // no flags byte: nothing allowed
+            let flags = peek8(cert + bs[1] + 1)
+            if (flags & mask) == mask { return 1 }
+            return 0
+        }
+        p = nextext
+    }
+    1                                                // keyUsage absent: unrestricted
+}
+
 // Reads a certificate Time (UTCTime or GeneralizedTime) into 14 digits YYYYMMDDHHMMSS.
 fn x509_time14(cert: i64, timepos: i64, out14: i64) {
     let t[3]

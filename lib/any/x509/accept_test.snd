@@ -103,3 +103,16 @@ test "x509 accept: extendedKeyUsage requires serverAuth when present" {
     assert_eq(x509_eku_serverauth_ok(cert, 0), 1)
     assert_eq(x509_eku_serverauth_ok(conly, 0), 0)
 }
+
+test "x509 accept: keyUsage bits (digitalSignature on leaf, keyCertSign on CA, absent is open)" {
+    aload_into(LEAF_HEX, cert)
+    aload_into(WE1_HEX, we1)
+    aload_into(CLIENTONLY_HEX, conly)
+    // the leaf allows digitalSignature (0x80) but not keyCertSign (0x04)
+    assert_eq(x509_keyusage_allows(cert, 0, 0x80), 1)
+    assert_eq(x509_keyusage_allows(cert, 0, 0x04), 0)
+    // WE1 (a CA) allows keyCertSign
+    assert_eq(x509_keyusage_allows(we1, 0, 0x04), 1)
+    // a certificate with no keyUsage extension is unrestricted
+    assert_eq(x509_keyusage_allows(conly, 0, 0x04), 1)
+}
