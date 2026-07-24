@@ -104,6 +104,43 @@ fn x509_hostname_matches(cert: i64, certpos: i64, host: i64, hostlen: i64) -> i6
     0
 }
 
+// 1 if the certificate is a CA per its basicConstraints extension (OID 2.5.29.19, cA TRUE),
+// 0 otherwise (extension absent, or cA absent/FALSE, its default). An issuer in a chain must
+// be a CA; a leaf that is not a CA must never be trusted to sign another certificate.
+fn x509_is_ca(cert: i64, certpos: i64) -> i64 {
+    let seq = x509_extensions(cert, certpos)
+    if seq < 0 { return 0 }
+    let st[3]
+    der_tlv(cert, seq, st)
+    let endp = st[1] + st[2]
+    let mut p = st[1]
+    let bcoid[3]
+    poke8(bcoid + 0, 0x55); poke8(bcoid + 1, 0x1d); poke8(bcoid + 2, 0x13)   // 2.5.29.19
+    for p < endp {
+        let ext[3]
+        let nextext = der_tlv(cert, p, ext)
+        let oidpos = ext[1]
+        if der_oid_eq(cert, oidpos, bcoid, 3) == 1 {
+            let t[3]
+            let mut q = der_tlv(cert, oidpos, t)      // position after the OID
+            if der_tag(cert, q) == 1 { q = der_tlv(cert, q, t) }   // skip optional critical BOOLEAN
+            der_tlv(cert, q, t)                        // extnValue OCTET STRING
+            let sq[3]
+            der_tlv(cert, t[1], sq)                    // the BasicConstraints SEQUENCE inside it
+            if sq[2] == 0 { return 0 }                 // empty SEQUENCE: cA defaults to FALSE
+            let inner = sq[1]                          // first element (cA BOOLEAN if present)
+            if der_tag(cert, inner) == 1 {
+                let bt[3]
+                der_tlv(cert, inner, bt)
+                if peek8(cert + bt[1]) != 0 { return 1 }   // BOOLEAN TRUE (0xFF)
+            }
+            return 0
+        }
+        p = nextext
+    }
+    0
+}
+
 // Reads a certificate Time (UTCTime or GeneralizedTime) into 14 digits YYYYMMDDHHMMSS.
 fn x509_time14(cert: i64, timepos: i64, out14: i64) {
     let t[3]

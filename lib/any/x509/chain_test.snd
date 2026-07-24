@@ -11,9 +11,13 @@ let WE1_HEX = "3082029f30820225a00302010202107ff31977972c224a76155d13b6d685e3300
 // GTS Root R4 (Google Trust Services, P-384), the self-signed root that signs WE1. Real cert
 // from the system trust store, so the chain leaf <- WE1 <- GTS Root R4 is a genuine one.
 let GTSR4_HEX = "308202093082018ea003020102020d0203e5c068ef631a9c72905052300a06082a8648ce3d0403033047310b300906035504061302555331223020060355040a1319476f6f676c65205472757374205365727669636573204c4c43311430120603550403130b47545320526f6f74205234301e170d3136303632323030303030305a170d3336303632323030303030305a3047310b300906035504061302555331223020060355040a1319476f6f676c65205472757374205365727669636573204c4c43311430120603550403130b47545320526f6f742052343076301006072a8648ce3d020106052b8104002203620004f37473a7688b60ae43b835c581307b4b499dfbc161cee6de46bd6bd5611835ae40dd73f78991305aeb3cee857ca240763ba9c6b847d82ae792916a73e9b172399f299fa298d35f5e5886650fa1846506d1dc8bc9c773c88c6a2fe5c4abd11d8aa3423040300e0603551d0f0101ff040403020186300f0603551d130101ff040530030101ff301d0603551d0e04160414804cd6eb74ff4936a3d5d8fcb53ec56af0941d8c300a06082a8648ce3d0403030369003066023100e840ff83de03f49fae1d7aa72eb9af4ff6831d0e2d85011dd1d96aec0fc2afc75e565e5cd51c5822280bf730b62fb17c023100f0613ca7f4a082e321d5841d73869c2dafca349bf19fb92336e2bc60039d80b39a56c8e1e2bb1479cacd21d494b54943"
+// A self-signed P-256 certificate for nonca.test with basicConstraints CA:FALSE: an
+// end-entity, NOT a CA. Used to check that a non-CA is refused as a trust anchor / issuer.
+let NONCA_HEX = "3082019330820139a00302010202143550f3f36faf4283b56d5e7ed7647849798070cb300a06082a8648ce3d04030230153113301106035504030c0a6e6f6e63612e74657374301e170d3236303732343031303231345a170d3336303732313031303231345a30153113301106035504030c0a6e6f6e63612e746573743059301306072a8648ce3d020106082a8648ce3d030107034200049e2870e5cb9c263eb2d0ea673564494f23dec6ec9c514afb207e30a281ce26a3505464aedbb3252d31f2728ff32318887f49fa8771fd3dd08f4b0f36267952b8a3673065301d0603551d0e04160414cea573e6c8cf3eaaacf75248dd12927f7c985379301f0603551d23041830168014cea573e6c8cf3eaaacf75248dd12927f7c98537930150603551d11040e300c820a6e6f6e63612e74657374300c0603551d130101ff04023000300a06082a8648ce3d0403020348003045022100c917e6186b7c943ee9bb1c9df3a60893784c20f485873dee02f239b227e2f1b402203bdc5b5c6900f2ad003ca364d5643fc8818e7cff4aa27aba5693a1f85f3628b1"
 let mut c_leaf[1100]
 let mut c_we1[1100]
 let mut c_gtsr4[1100]
+let mut c_nonca[1100]
 let mut c_chain[4]
 let mut c_roots[4]
 let mut c_host[64]
@@ -70,4 +74,21 @@ test "x509 chain: verify the real cloudflare chain up to the GTS Root R4 trust a
     assert_eq(x509_verify_chain(c_chain, 2, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 0)
     // an empty chain is rejected
     assert_eq(x509_verify_chain(c_chain, 0, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 0)
+}
+
+test "x509 chain: basicConstraints is enforced (issuers and anchors must be CAs)" {
+    cload(LEAF_HEX, c_leaf)
+    cload(WE1_HEX, c_we1)
+    cload(GTSR4_HEX, c_gtsr4)
+    cload(NONCA_HEX, c_nonca)
+    // the intermediate and root are CAs; the leaf is an end-entity
+    assert_eq(x509_is_ca(c_we1, 0), 1)
+    assert_eq(x509_is_ca(c_gtsr4, 0), 1)
+    assert_eq(x509_is_ca(c_leaf, 0), 0)
+    assert_eq(x509_is_ca(c_nonca, 0), 0)
+    // a self-signed non-CA certificate names its host and its signature verifies, but it must
+    // NOT be accepted as a trust anchor: a non-CA cannot vouch for a chain.
+    c_chain[0] = c_nonca
+    c_roots[0] = c_nonca
+    assert_eq(x509_verify_chain(c_chain, 1, c_roots, 1, c_host, cseth("nonca.test"), "20270101000000"), 0)
 }
