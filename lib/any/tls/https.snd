@@ -7,6 +7,7 @@
 // each has its own scope.
 
 include "any/tls/auth.snd"
+include "any/tls/chain.snd"
 
 // Returns the byte offset of the first message of type `mt` in the flight, or -1.
 fn tls_flight_msg(buf: i64, n: i64, mt: i64) -> i64 {
@@ -26,13 +27,17 @@ fn tls_flight_msg(buf: i64, n: i64, mt: i64) -> i64 {
 // failure. No certificate chain policy is enforced here beyond CertificateVerify, so the
 // caller should validate the leaf with x509_verify / x509_hostname_matches on the flight.
 //
+// The server's certificate chain is validated to a trusted root: after the flight, the chain
+// is checked with tls_verify_server_chain against `roots` (nroots DER pointers, e.g. from
+// x509_load_default_roots), requiring the leaf to name `sni`, every certificate to be valid at
+// `now14` ("YYYYMMDDHHMMSS"), and the chain to anchor to a trusted root. If it does not, the
+// GET is aborted with -4 before any request is sent, so an untrusted server never receives one.
+//
 // STATUS: proven end to end by a deterministic, network-free test (https_test.snd, a full
-// Sond TLS server), and it fetches complete HTTP responses from an openssl s_server. Note:
-// cloudflare's edge closes the application-data phase after our client Finished + GET, for a
-// server-policy reason (likely the ALPN/HTTP version it expects, or edge filtering of a
-// minimal client), not a crypto fault. For the audited identity check use tls_handshake_auth;
-// for a plain HTTP/1.1 server over TLS use this GET.
-fn tls_get(host: i64, port: i64, sni: i64, snilen: i64, path: i64, pathlen: i64, out: i64, cap: i64) -> i64 {
+// Sond TLS server presenting a certificate that chains to a test root). For the audited
+// handshake identity check alone (no chain) use tls_handshake_auth.
+fn tls_get(host: i64, port: i64, sni: i64, snilen: i64, path: i64, pathlen: i64, out: i64, cap: i64,
+           roots: i64, nroots: i64, now14: i64) -> i64 {
     let fd = sock(AF_INET, SOCK_STREAM, 0)
     if fd < 0 { return 0 - 1 }
     let sa[2]
@@ -120,6 +125,13 @@ fn tls_get(host: i64, port: i64, sni: i64, snilen: i64, path: i64, pathlen: i64,
     for i < 32 {
         if peek8(sfin + i) != peek8(flight + finoff + 4 + i) { close_fd(fd); return 0 - 1 }
         i = i + 1
+    }
+
+    // validate the server's certificate chain to a trusted root before sending anything more:
+    // the leaf must name the host (sni), every certificate must be valid at now14, and the chain
+    // must anchor to a root in the trust store. An untrusted server gets no request.
+    if tls_verify_server_chain(flight, flen, roots, nroots, sni, snilen, now14) != 1 {
+        close_fd(fd); return 0 - 4
     }
 
     // transcript through the server Finished (for the client Finished and the app keys)
