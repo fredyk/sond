@@ -12,6 +12,10 @@
 // on stack). For larger payloads, fragment into records.
 
 include "any/crypto/cipher/chacha20.snd"
+
+// Poly1305 MAC scratch, reused per call; sized for a full TLS record (2^14 plaintext plus
+// AAD and length-block padding). Single-threaded per connection (each forked worker owns one).
+let mut aead_md[16640]
 include "any/crypto/mac/poly1305.snd"
 
 fn aead_put_u64le(dst: i64, v: i64) {
@@ -71,18 +75,16 @@ fn aead_seal(key: i64, nonce: i64, aad: i64, alen: i64, pt: i64, n: i64, ct: i64
     aead_poly_key(key, nonce, pk)
     // ciphertext = ChaCha20(counter=1)
     chacha20_xor(key, nonce, 1, pt, ct, n)
-    let md[4160]
-    let mlen = aead_build_mac(md, aad, alen, ct, n)
-    poly1305_mac(md, mlen, pk, tag)
+    let mlen = aead_build_mac(aead_md, aad, alen, ct, n)
+    poly1305_mac(aead_md, mlen, pk, tag)
 }
 
 fn aead_open(key: i64, nonce: i64, aad: i64, alen: i64, ct: i64, n: i64, tag: i64, pt: i64) -> i64 {
     let pk[32]
     aead_poly_key(key, nonce, pk)
-    let md[4160]
-    let mlen = aead_build_mac(md, aad, alen, ct, n)
+    let mlen = aead_build_mac(aead_md, aad, alen, ct, n)
     let calc[16]
-    poly1305_mac(md, mlen, pk, calc)
+    poly1305_mac(aead_md, mlen, pk, calc)
     // constant-time comparison (OR of differences, no early-return)
     let mut d = 0
     let mut i = 0

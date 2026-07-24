@@ -19,7 +19,7 @@ let mut r_nonce[12]
 let mut r_content[64]
 let mut r_record[256]
 let mut r_plain[256]
-let mut r_big[4090]      // content over the per-record cap, to exercise the seal size guard
+let mut r_big[16640]     // content over the per-record cap (2^14), to exercise the seal size guard
 let mut r_over[4110]     // a record whose declared inner exceeds the open scratch guard
 
 // iv[i]=0x40+i, seq=0x0001020304050607; the low 8 iv bytes xor the big-endian seq,
@@ -111,7 +111,7 @@ test "tls record: a declared-length mismatch is rejected" {
 
 // Sealing more than the per-record cap is refused rather than overrunning the scratch.
 test "tls record: sealing over the per-record cap is refused" {
-    assert_eq(tls_seal(r_key, r_iv, 0, 22, r_big, 4085, r_record), 0 - 1)
+    assert_eq(tls_seal(r_key, r_iv, 0, 22, r_big, 16385, r_record), 0 - 1)
 }
 
 // A record whose declared inner length exceeds the open scratch is refused before the AEAD.

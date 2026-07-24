@@ -18,10 +18,13 @@
 
 include "any/crypto/aead/chacha20poly1305.snd"
 
+// TLSInnerPlaintext scratch, reused per record; sized for a full 2^14-byte record.
+let mut tls_inner[16640]
+
 // The largest inner plaintext (content + type + padding) a single record carries in
 // this v1, bounded by the AEAD's one-call scratch. TLS caps records at 2^14, but the
 // ChaCha20-Poly1305 helper works one buffer at a time, so records stay well under it.
-let TLS_INNER_MAX = 4080
+let TLS_INNER_MAX = 16384
 
 // Writes the 12-byte per-record nonce into `out`: iv, with `seq` XORed big-endian
 // into the last 8 bytes (the first 4 bytes are the iv unchanged).
@@ -42,10 +45,10 @@ fn tls_nonce(iv: i64, seq: i64, out: i64) {
 fn tls_seal(key: i64, iv: i64, seq: i64, ctype: i64, content: i64, n: i64, out: i64) -> i64 {
     if n + 1 > TLS_INNER_MAX { return 0 - 1 }
     // inner (TLSInnerPlaintext) = content || real content type; no zero padding in v1.
-    let inner[4080]
+    
     let mut i = 0
-    for i < n { poke8(inner + i, peek8(content + i)); i = i + 1 }
-    poke8(inner + n, ctype)
+    for i < n { poke8(tls_inner + i, peek8(content + i)); i = i + 1 }
+    poke8(tls_inner + n, ctype)
     let ilen = n + 1
     let clen = ilen + 16                   // encrypted_record = ciphertext + 16-byte tag
     // 5-byte record header, also the AEAD associated data.
@@ -57,7 +60,7 @@ fn tls_seal(key: i64, iv: i64, seq: i64, ctype: i64, content: i64, n: i64, out: 
     let nonce[12]
     tls_nonce(iv, seq, nonce)
     // ct -> out+5, tag -> out+5+ilen; the header (out..out+5) is the aad.
-    aead_seal(key, nonce, out, 5, inner, ilen, out + 5, out + 5 + ilen)
+    aead_seal(key, nonce, out, 5, tls_inner, ilen, out + 5, out + 5 + ilen)
     5 + clen
 }
 
@@ -72,21 +75,21 @@ fn tls_open(key: i64, iv: i64, seq: i64, rec: i64, reclen: i64, out: i64) -> i64
     if ilen > TLS_INNER_MAX { return 0 - 1 }        // guards the fixed-size inner scratch below
     let nonce[12]
     tls_nonce(iv, seq, nonce)
-    let inner[4080]
+    
     let ct = rec + 5
     let tag = rec + 5 + ilen
-    if aead_open(key, nonce, rec, 5, ct, ilen, tag, inner) != 0 { return 0 - 1 }
+    if aead_open(key, nonce, rec, 5, ct, ilen, tag, tls_inner) != 0 { return 0 - 1 }
     // TLSInnerPlaintext = content || content_type || zeros*; the content type is the
     // last non-zero octet (RFC 8446 §5.2). Scan back over any zero padding.
     let mut p = ilen - 1
     for p >= 0 {
-        if peek8(inner + p) != 0 { break }
+        if peek8(tls_inner + p) != 0 { break }
         p = p - 1
     }
     if p < 0 { return 0 - 1 }                       // all zeros: no content type present
-    let ctype = peek8(inner + p)
+    let ctype = peek8(tls_inner + p)
     let plen = p                                     // content occupies inner[0..p]
     let mut i = 0
-    for i < plen { poke8(out + i, peek8(inner + i)); i = i + 1 }
+    for i < plen { poke8(out + i, peek8(tls_inner + i)); i = i + 1 }
     (ctype << 32) | plen
 }
