@@ -230,6 +230,12 @@ fn h_serve(afd: i64, certlen: i64) {
     let hs2[128]
     let hsl = tls_seal(sakey, saiv, 1, 23, hbuf, 39, hs2)
     write_buf(afd, hs2, hsl)
+    // a close_notify alert (inner type 21) at the next server sequence, as a real server sends
+    let alert[2]
+    poke8(alert + 0, 1); poke8(alert + 1, 0)         // warning, close_notify
+    let an[64]
+    let anl = tls_seal(sakey, saiv, 2, 21, alert, 2, an)
+    write_buf(afd, an, anl)
 }
 
 test "tls https: a full verified GET against a minimal Sond TLS server returns the response" {
