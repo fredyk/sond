@@ -44,7 +44,7 @@ fn rseth(s: i64) -> i64 {
 
 test "x509 roots: every built-in root is self-signed and verifies under its own key" {
     let n = x509_root_count()
-    assert_eq(n, 4)
+    assert_eq(n, 5)
     let mut i = 0
     for i < n {
         let len = x509_root_der(i, r_one)
@@ -59,7 +59,7 @@ test "x509 roots: the real cloudflare chain anchors to the built-in trust store"
     rload(WE1_HEX, r_we1)
     let stride = x509_root_max_len() + 8
     let nr = x509_load_default_roots(r_store, stride, r_ptrs)
-    assert_eq(nr, 4)
+    assert_eq(nr, 5)
     r_chain[0] = r_leaf
     r_chain[1] = r_we1
     // GTS Root R4 is one of the built-in roots, so the cloudflare chain is trusted.

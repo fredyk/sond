@@ -170,7 +170,7 @@ fn tls_handshake_auth(host: i64, port: i64, sni: i64, snilen: i64) -> i64 {
     // rsa_pss_rsae_sha256: a raw RSA-PSS block over the leaf's RSA modulus
     if scheme == 0x0804 {
         let nn[256]
-        x509_rsa_pubkey(leaf, 0, nn)
+        x509_rsa_pubkey_len(leaf, 0, nn, 256)
         return rsa_pss_sha256_verify(nn, flight + sigpos, ce)
     }
     0

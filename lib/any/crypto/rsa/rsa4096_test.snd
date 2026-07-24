@@ -173,3 +173,25 @@ test "rsa pkcs1v15 sha256 4096: a second independent real vector verifies to 1" 
     hexdecode(SIG_HEX, t_sig)
     assert_eq(rsa_pkcs1v15_sha256_verify_4096(t_n, t_sig, t_hash), 0)
 }
+
+// A SHA-384 signature over the SAME key (N_HEX): exercises rsa_pkcs1v15_sha384_verify_4096.
+let SIG384_HEX = "803e3e76132d5ee11e471e7908d0dfbbc2dc2df807b132753d76153e944711f3836718ac640ca6eac3d21b26d07b39baf408204a265f34e14e37da971a63af8eae7bdcf74923a9321b27df8a3fdca096ded36365b6cfc11af78227f5f40d992b0bd5a73bf6a062e3f5f0f111bd864813863910b8fe455e8ad4c35c699520c21f57a3b624957d3d5006d64e58bc9419240e416bd8b78d995f3e5da71af48d70e7b17522229e84048687945830f8d2614519ae415e09368095af1dc023ebb94a9a330bc62dc19409bd1f0dac300fbc56e8992080683b78e8f4a3a38af7459ff5c5cd7457cb8d17724abf07cd39e6d9713c85d7d8bcbb19bfd7baa8bded85db68c99b7747c5433a4d44e84b86cc4a87156cf8139dc643bbf5ebdf83088104181a8cbc847135b5e6fc00d013ba132ccb19001aafd710a6e4b2078a2768055e8850ef9853dd949f5ed5cfcbafad4018b2acccfdca7e0a30aa0c79c5f460736be2c1f0b5f40e2885b0f2ee3d562f4c6b22d440847bc402f3e458a6433e3253b2ae01b663bfdf26a3f1ac2123651eaea03c9d8ef377dae53646539910cb3e54b86043c015b8daff5f596d8ecfe7eb9dd16e7cfa7c4d87f548f6e67ea518f3dad2ef6c0fe1bbd1f99384b77fbef0395e43ebfe020e44570d375ff5c8431b56aa0cc595ac52c59b5ef97259c1b17cfb1ff835ccc827a377890058cbc0c916656594aea104"
+let HASH384_HEX = "899429f0d3e4c4e4104ad0b63873b286ab550ae4db0f1909e49b0b09de3cb236aefe7abcf55fc595a7627081c026266d"
+
+test "rsa pkcs1v15 sha384 4096: real vector verifies to 1, tampered to 0" {
+    assert_eq(hexdecode(N_HEX, t_n), 512)
+    assert_eq(hexdecode(SIG384_HEX, t_sig), 512)
+    assert_eq(hexdecode(HASH384_HEX, t_hash), 48)
+    assert_eq(rsa_pkcs1v15_sha384_verify_4096(t_n, t_sig, t_hash), 1)
+    poke8(t_sig + 200, peek8(t_sig + 200) ^ 0x01)
+    assert_eq(rsa_pkcs1v15_sha384_verify_4096(t_n, t_sig, t_hash), 0)
+    // the SHA-256 signature must NOT verify as SHA-384 (different DigestInfo/hash length)
+    hexdecode(SIG_HEX, t_sig)
+    hexdecode(HASH_HEX, t_hash)
+    assert_eq(rsa_pkcs1v15_sha384_verify_4096(t_n, t_sig, t_hash), 0)
+    // a well-formed signature but the wrong expected digest fails at the hash comparison
+    hexdecode(SIG384_HEX, t_sig)
+    hexdecode(HASH384_HEX, t_hash)
+    poke8(t_hash + 47, peek8(t_hash + 47) ^ 0x01)
+    assert_eq(rsa_pkcs1v15_sha384_verify_4096(t_n, t_sig, t_hash), 0)
+}

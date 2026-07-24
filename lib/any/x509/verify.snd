@@ -116,11 +116,6 @@ fn x509_rsa_pubkey_len(issuer: i64, issuerpos: i64, n_out: i64, nlen: i64) -> i6
     e
 }
 
-// Reads the issuer's 2048-bit RSA modulus (256 bytes) and returns the public exponent. Kept
-// for the RSA-PSS CertificateVerify path, which is 2048-bit.
-fn x509_rsa_pubkey(issuer: i64, issuerpos: i64, n_out: i64) -> i64 {
-    x509_rsa_pubkey_len(issuer, issuerpos, n_out, 256)
-}
 
 // Verifies that `cert` (at certpos) is signed by `issuer` (at issuerpos). Returns 1 if the
 // signature is valid, 0 otherwise (including an unsupported signature algorithm).
@@ -184,7 +179,7 @@ fn x509_verify(cert: i64, certpos: i64, issuer: i64, issuerpos: i64) -> i64 {
             if e != 65537 { return 0 }
             return rsa_pkcs1v15_sha256_verify(n, cert + sig[0], h)
         }
-        // 4096-bit issuer key (e.g. ISRG Root X1, GTS Root R1)
+        // 4096-bit issuer key (e.g. ISRG Root X1)
         if modlen == 512 {
             let n[512]
             let e = x509_rsa_pubkey_len(issuer, issuerpos, n, 512)
@@ -192,6 +187,23 @@ fn x509_verify(cert: i64, certpos: i64, issuer: i64, issuerpos: i64) -> i64 {
             return rsa_pkcs1v15_sha256_verify_4096(n, cert + sig[0], h)
         }
         return 0
+    }
+
+    // sha384WithRSAEncryption: OID 1.2.840.113549.1.1.12 (4096-bit RSA roots like GTS Root R1)
+    let rs384[9]
+    poke8(rs384 + 0, 0x2a); poke8(rs384 + 1, 0x86); poke8(rs384 + 2, 0x48); poke8(rs384 + 3, 0x86)
+    poke8(rs384 + 4, 0xf7); poke8(rs384 + 5, 0x0d); poke8(rs384 + 6, 0x01); poke8(rs384 + 7, 0x01)
+    poke8(rs384 + 8, 0x0c)
+    if der_oid_eq(cert, oidp[0], rs384, 9) == 1 {
+        if x509_rsa_modbytes(issuer, issuerpos) != 512 { return 0 }
+        let h384[48]
+        sha384_hash(cert + tbs[0], tbs[1], h384)
+        let sig[2]
+        x509_signature(cert, certpos, sig)
+        let n[512]
+        let e = x509_rsa_pubkey_len(issuer, issuerpos, n, 512)
+        if e != 65537 { return 0 }
+        return rsa_pkcs1v15_sha384_verify_4096(n, cert + sig[0], h384)
     }
     0
 }
