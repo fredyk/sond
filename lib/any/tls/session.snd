@@ -25,13 +25,20 @@ fn tls_sess_siv(s: i64) -> i64 { s + 100 }
 // certificate chain against `roots` (nroots) at `now14`, and returns a session handle ready
 // for tls_write/tls_read. Returns 0 on any failure (connection, handshake, or an untrusted
 // chain). The peer receives no application data unless its chain validated.
-fn tls_connect(host: i64, port: i64, sni: i64, snilen: i64, roots: i64, nroots: i64, now14: i64) -> i64 {
+fn tls_connect(host: i64, port: i64, sni: i64, snilen: i64, alpn: i64, alpnlen: i64, roots: i64, nroots: i64, now14: i64) -> i64 {
     let fd = sock(AF_INET, SOCK_STREAM, 0)
     if fd < 0 { return 0 }
     let sa[2]
     sockaddr_in_build(sa, tls_ipv4(host), port)
     if connect_sock(fd, sa, 16) < 0 { close_fd(fd); return 0 }
+    tls_connect_fd(fd, sni, snilen, alpn, alpnlen, roots, nroots, now14)
+}
 
+// Like tls_connect, but performs the handshake over an ALREADY-CONNECTED socket `fd` (the
+// caller owns the TCP connect). This is what a STARTTLS-style upgrade needs, e.g. a PostgreSQL
+// SSLRequest where the plaintext negotiation happens before TLS on the same socket. Returns a
+// session handle, or 0 (closing `fd`) on handshake failure or an untrusted chain.
+fn tls_connect_fd(fd: i64, sni: i64, snilen: i64, alpn: i64, alpnlen: i64, roots: i64, nroots: i64, now14: i64) -> i64 {
     let cpriv[32]
     tls_random(cpriv, 32)
     let base9[32]
@@ -43,7 +50,7 @@ fn tls_connect(host: i64, port: i64, sni: i64, snilen: i64, roots: i64, nroots: 
     let random[32]
     tls_random(random, 32)
     let ch = heap_alloc(1024)
-    let chlen = tls_build_client_hello(random, cpub, sni, snilen, ch)
+    let chlen = tls_build_client_hello(random, cpub, sni, snilen, alpn, alpnlen, ch)
     let scratch = heap_alloc(4096)
     tls_send_plain_handshake(fd, ch, chlen, scratch)
 

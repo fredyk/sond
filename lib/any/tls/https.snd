@@ -20,7 +20,7 @@ include "any/tls/session.snd"
 // identity check alone use tls_handshake_auth.
 fn tls_get(host: i64, port: i64, sni: i64, snilen: i64, path: i64, pathlen: i64, out: i64, cap: i64,
            roots: i64, nroots: i64, now14: i64) -> i64 {
-    let sess = tls_connect(host, port, sni, snilen, roots, nroots, now14)
+    let sess = tls_connect(host, port, sni, snilen, "http/1.1", 8, roots, nroots, now14)
     if sess == 0 { return 0 - 1 }
     let req = heap_alloc(2048)
     let rq = tls_http_req(sni, snilen, path, pathlen, req)

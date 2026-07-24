@@ -18,7 +18,7 @@ test "tls handshake: ClientHello layout with the expected extensions" {
     i = 0
     for i < 32 { poke8(h_pub + i, 0x22); i = i + 1 }
 
-    let n = tls_build_client_hello(h_random, h_pub, "a.com", 5, h_out)
+    let n = tls_build_client_hello(h_random, h_pub, "a.com", 5, "http/1.1", 8, h_out)
     assert_eq(n, 145)
     assert_eq(peek8(h_out + 0), 1)                   // HandshakeType.client_hello
     // uint24 body length = 124

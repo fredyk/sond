@@ -17,9 +17,11 @@ fn hs_put_u24(buf: i64, v: i64) {
 }
 
 // Builds a ClientHello handshake message into `out` for `sni`/`snilen`, using the caller's
-// 32-byte ClientHello `random` and 32-byte x25519 public key `pub`. Returns the total
-// message length (including the 4-byte handshake header).
-fn tls_build_client_hello(random: i64, pubkey: i64, sni: i64, snilen: i64, out: i64) -> i64 {
+// 32-byte ClientHello `random` and 32-byte x25519 public key `pub`, offering the single ALPN
+// protocol `alpn`/`alpnlen` (e.g. "http/1.1" for HTTPS, "postgresql" for PostgreSQL direct
+// TLS). Returns the total message length (including the 4-byte handshake header).
+fn tls_build_client_hello(random: i64, pubkey: i64, sni: i64, snilen: i64,
+                          alpn: i64, alpnlen: i64, out: i64) -> i64 {
     // out[0] = handshake type 1 (ClientHello); out[1..4] = uint24 body length (patched last).
     poke8(out, 1)
     let body = out + 4
@@ -84,15 +86,15 @@ fn tls_build_client_hello(random: i64, pubkey: i64, sni: i64, snilen: i64, out: 
     for i < snilen { poke8(body + o + i, peek8(sni + i)); i = i + 1 }
     o = o + snilen
 
-    // application_layer_protocol_negotiation (16): offer http/1.1 (kept last so the earlier
-    // extension offsets do not shift).
+    // application_layer_protocol_negotiation (16): offer the single protocol alpn/alpnlen
+    // (kept last so the earlier extension offsets do not shift).
     hs_put_u16(body + o, 16); o = o + 2
-    hs_put_u16(body + o, 11); o = o + 2              // ext body: 2 list-length + 1 + 8
-    hs_put_u16(body + o, 9); o = o + 2               // ALPN protocol_name_list length
-    poke8(body + o, 8); o = o + 1                    // protocol name length
-    poke8(body + o + 0, 104); poke8(body + o + 1, 116); poke8(body + o + 2, 116); poke8(body + o + 3, 112)
-    poke8(body + o + 4, 47); poke8(body + o + 5, 49); poke8(body + o + 6, 46); poke8(body + o + 7, 49)
-    o = o + 8
+    hs_put_u16(body + o, alpnlen + 3); o = o + 2     // ext body: 2 list-length + 1 + alpnlen
+    hs_put_u16(body + o, alpnlen + 1); o = o + 2     // ALPN protocol_name_list length
+    poke8(body + o, alpnlen); o = o + 1              // protocol name length
+    let mut ai = 0
+    for ai < alpnlen { poke8(body + o + ai, peek8(alpn + ai)); ai = ai + 1 }
+    o = o + alpnlen
 
     hs_put_u16(body + ext_len_at, o - ext_start)     // back-patch extensions length
     hs_put_u24(out + 1, o)                           // back-patch handshake body length
