@@ -1,0 +1,254 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// RSA-4096 PKCS#1 v1.5 (SHA-256) signature VERIFICATION.
+//
+// A 4096-bit number is 128 limbs of 32 bits, stored as i64 words, least-significant
+// limb first (little-endian limbs). Each limb holds a value in [0, 2^32) so a
+// 32x32 partial product stays inside the low 64 bits of an i64: two's-complement
+// multiplication of two non-negative 32-bit values yields the exact 64-bit product
+// pattern, and carries are always extracted with the LOGICAL shift `>>>`, never the
+// arithmetic `>>`, so a top-bit-set intermediate is handled by its bit pattern and
+// never misread as negative.
+//
+// This is the 128-limb sibling of pkcs1v15.snd (64 limbs). The public entry is
+// uniquely named `rsa_pkcs1v15_sha256_verify_4096` so both moduli can coexist; the
+// private bn_* helpers and the RSA_LOWMASK / RSA_SHA256_DI globals keep their names,
+// which the compiler file-scopes by include closure.
+//
+// Public exponent is fixed at e = 65537 = 2^16 + 1, so modexp is 16 squarings
+// followed by one multiply.
+
+let RSA_LOWMASK = 0xFFFFFFFF
+
+// SHA-256 EMSA-PKCS1-v1.5 DigestInfo prefix (19 bytes), one byte per word.
+let RSA_SHA256_DI[19] = [
+    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+    0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20
+]
+
+// ── Serialization ────────────────────────────────────────────────────────────
+
+// Load 512 big-endian bytes at `bytes` into 128 little-endian 32-bit limbs at `out`.
+fn bn_from_bytes(bytes: i64, out: i64) {
+    let mut i = 0
+    for i < 128 {
+        let base = 508 - 4 * i        // byte offset of limb i's most-significant byte
+        let b0 = peek8(bytes + base)
+        let b1 = peek8(bytes + base + 1)
+        let b2 = peek8(bytes + base + 2)
+        let b3 = peek8(bytes + base + 3)
+        out[i] = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & RSA_LOWMASK
+        i = i + 1
+    }
+}
+
+// Store 128 little-endian limbs at `a` into 512 big-endian bytes at `bytes`.
+fn bn_to_bytes(a: i64, bytes: i64) {
+    let mut i = 0
+    for i < 128 {
+        let base = 508 - 4 * i
+        let v = a[i] & RSA_LOWMASK
+        poke8(bytes + base, (v >>> 24) & 0xFF)
+        poke8(bytes + base + 1, (v >>> 16) & 0xFF)
+        poke8(bytes + base + 2, (v >>> 8) & 0xFF)
+        poke8(bytes + base + 3, v & 0xFF)
+        i = i + 1
+    }
+}
+
+// ── Comparison / low-level arithmetic ────────────────────────────────────────
+
+// Compare two 128-limb bignums: -1 if a < b, 0 if a == b, 1 if a > b.
+fn bn_cmp(a: i64, b: i64) -> i64 {
+    let mut i = 127
+    for i >= 0 {
+        let av = a[i] & RSA_LOWMASK
+        let bv = b[i] & RSA_LOWMASK
+        if av < bv { return 0 - 1 }
+        if av > bv { return 1 }
+        i = i - 1
+    }
+    0
+}
+
+// Copy 128 limbs src -> dst.
+fn bn_copy(dst: i64, src: i64) {
+    let mut i = 0
+    for i < 128 { dst[i] = src[i] & RSA_LOWMASK; i = i + 1 }
+}
+
+// Schoolbook multiply: prod (256 limbs) = a (128 limbs) * b (128 limbs).
+// Row-by-row with a running carry; every intermediate `t` is < 2^64, so its
+// low-64-bit pattern is exact and `t >>> 32` / `t & LOWMASK` split it correctly.
+fn bn_mul(a: i64, b: i64, prod: i64) {
+    let mut k = 0
+    for k < 256 { prod[k] = 0; k = k + 1 }
+    let mut i = 0
+    for i < 128 {
+        let ai = a[i] & RSA_LOWMASK
+        let mut carry = 0
+        let mut j = 0
+        for j < 128 {
+            let t = (prod[i + j] & RSA_LOWMASK) + ai * (b[j] & RSA_LOWMASK) + carry
+            prod[i + j] = t & RSA_LOWMASK
+            carry = t >>> 32
+            j = j + 1
+        }
+        prod[i + 128] = (prod[i + 128] & RSA_LOWMASK) + carry
+        i = i + 1
+    }
+}
+
+// Shift a 129-limb bignum left by one bit, in place.
+fn bn_shl1_65(r: i64) {
+    let mut carry = 0
+    let mut i = 0
+    for i < 129 {
+        let v = r[i] & RSA_LOWMASK
+        r[i] = ((v << 1) | carry) & RSA_LOWMASK
+        carry = (v >>> 31) & 1
+        i = i + 1
+    }
+}
+
+// Is the 129-limb remainder r >= the 128-limb modulus n? (n's implicit limb 128 is 0.)
+fn bn_ge_65(r: i64, n: i64) -> i64 {
+    if (r[128] & RSA_LOWMASK) != 0 { return 1 }
+    let mut i = 127
+    for i >= 0 {
+        let rv = r[i] & RSA_LOWMASK
+        let nv = n[i] & RSA_LOWMASK
+        if rv > nv { return 1 }
+        if rv < nv { return 0 }
+        i = i - 1
+    }
+    1
+}
+
+// r (129 limbs) -= n (128 limbs), in place, with borrow.
+fn bn_sub_65(r: i64, n: i64) {
+    let mut borrow = 0
+    let mut i = 0
+    for i < 128 {
+        let d = (r[i] & RSA_LOWMASK) - (n[i] & RSA_LOWMASK) - borrow
+        if d < 0 {
+            r[i] = (d + 0x100000000) & RSA_LOWMASK
+            borrow = 1
+        } else {
+            r[i] = d & RSA_LOWMASK
+            borrow = 0
+        }
+        i = i + 1
+    }
+    let d = (r[128] & RSA_LOWMASK) - borrow
+    if d < 0 {
+        r[128] = (d + 0x100000000) & RSA_LOWMASK
+    } else {
+        r[128] = d & RSA_LOWMASK
+    }
+}
+
+// out (128 limbs) = prod (256 limbs, 8192 bits) mod n (128 limbs), by binary long
+// division: bring in one dividend bit at a time from the most significant, doubling
+// the remainder and subtracting n at most once (the remainder stays < n < 2^4096,
+// so 2*r + bit < 2n and a single conditional subtract suffices).
+fn bn_mod(prod: i64, n: i64, out: i64) {
+    let mut r[129]
+    let mut k = 0
+    for k < 129 { r[k] = 0; k = k + 1 }
+    let mut bit = 8191
+    for bit >= 0 {
+        bn_shl1_65(r)
+        let limb = bit >>> 5          // bit / 32
+        let off = bit & 31            // bit % 32
+        let b = (prod[limb] >>> off) & 1
+        r[0] = (r[0] & RSA_LOWMASK) | b
+        if bn_ge_65(r, n) == 1 {
+            bn_sub_65(r, n)
+        }
+        bit = bit - 1
+    }
+    k = 0
+    for k < 128 { out[k] = r[k] & RSA_LOWMASK; k = k + 1 }
+}
+
+// out (128 limbs) = a * b mod n.
+fn bn_mulmod(a: i64, b: i64, n: i64, out: i64) {
+    let mut prod[256]
+    bn_mul(a, b, prod)
+    bn_mod(prod, n, out)
+}
+
+// out (128 limbs) = a mod n, reducing a stand-alone 128-limb value.
+fn bn_reduce(a: i64, n: i64, out: i64) {
+    let mut prod[256]
+    let mut i = 0
+    for i < 256 { prod[i] = 0; i = i + 1 }
+    i = 0
+    for i < 128 { prod[i] = a[i] & RSA_LOWMASK; i = i + 1 }
+    bn_mod(prod, n, out)
+}
+
+// out (128 limbs) = base^65537 mod n.  65537 = 2^16 + 1, so this is
+// ((((base^2)^2)...^2) with 16 squarings) * base, all mod n.
+fn bn_modexp_65537(base: i64, n: i64, out: i64) {
+    let mut acc[128]
+    let mut tmp[128]
+    let mut b0[128]
+    bn_reduce(base, n, b0)           // b0 = base mod n
+    bn_copy(acc, b0)
+    let mut i = 0
+    for i < 16 {
+        bn_mulmod(acc, acc, n, tmp)  // acc = acc^2 mod n
+        bn_copy(acc, tmp)
+        i = i + 1
+    }
+    bn_mulmod(acc, b0, n, tmp)       // result = acc * base mod n, in tmp
+    bn_copy(out, tmp)
+}
+
+// ── PKCS#1 v1.5 SHA-256 verification ─────────────────────────────────────────
+
+// Verify an RSA-4096 PKCS#1 v1.5 signature over a SHA-256 hash.
+//   n_bytes:   512-byte big-endian modulus
+//   sig_bytes: 512-byte big-endian signature
+//   hash32:    32-byte SHA-256 digest of the signed message
+// Returns 1 iff the recovered EMSA-PKCS1-v1.5 encoding is well formed AND its
+// trailing 32 bytes equal hash32; otherwise 0.
+fn rsa_pkcs1v15_sha256_verify_4096(n_bytes: i64, sig_bytes: i64, hash32: i64) -> i64 {
+    let mut n[128]
+    let mut sig[128]
+    let mut m[128]
+    let mut em[520]
+    bn_from_bytes(n_bytes, n)
+    bn_from_bytes(sig_bytes, sig)
+    bn_modexp_65537(sig, n, m)       // m = sig^65537 mod n
+    bn_to_bytes(m, em)
+
+    // EM = 0x00 0x01 || PS(0xFF..) || 0x00 || DigestInfo(19) || Hash(32), 512 bytes.
+    if peek8(em + 0) != 0x00 { return 0 }
+    if peek8(em + 1) != 0x01 { return 0 }
+    // padding string: one or more 0xFF, terminated by a 0x00
+    let mut i = 2
+    for i < 512 && peek8(em + i) == 0xFF { i = i + 1 }
+    if i >= 512 { return 0 }
+    if peek8(em + i) != 0x00 { return 0 }
+    if i - 2 < 8 { return 0 }         // PKCS#1 requires at least 8 padding bytes
+    let sep = i                        // index of the 0x00 separator
+    // exactly 19 (DigestInfo) + 32 (hash) bytes must follow the separator
+    if sep + 1 + 19 + 32 != 512 { return 0 }
+    let di = sep + 1
+    let mut k = 0
+    for k < 19 {
+        if peek8(em + di + k) != RSA_SHA256_DI[k] { return 0 }
+        k = k + 1
+    }
+    let h = di + 19
+    let mut j = 0
+    for j < 32 {
+        if peek8(em + h + j) != peek8(hash32 + j) { return 0 }
+        j = j + 1
+    }
+    1
+}

@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for rsa/rsa4096.snd: the 128-limb bignum primitives in isolation and an
+// end-to-end RSA-4096 PKCS#1 v1.5 (SHA-256) signature verification against a real
+// vector generated with openssl. Run:
+//   sond test lib/any/crypto/rsa/rsa4096_test.snd
+
+include "any/crypto/rsa/rsa4096.snd"
+include "x86_64/linux/testing.snd"
+
+// Byte buffers for the 512-byte (4096-bit) modulus, signature and the decoded hash.
+let mut t_n[520]
+let mut t_sig[520]
+let mut t_hash[40]
+
+// Bignum scratch (128 limbs of 32 bits each).
+let mut ba[128]
+let mut bb[128]
+let mut bn[128]
+let mut bout[128]
+
+// The numeric value of one hex digit, or -1 if not a hex digit.
+fn hexval(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }       // 0-9
+    if c >= 97 && c <= 102 { return c - 87 }      // a-f
+    if c >= 65 && c <= 70 { return c - 55 }       // A-F
+    0 - 1
+}
+
+// Decode a NUL-terminated hex string into `out`; returns the number of bytes written.
+fn hexdecode(hexstr: i64, out: i64) -> i64 {
+    let mut i = 0
+    let mut o = 0
+    for peek8(hexstr + i) != 0 {
+        let hi = hexval(peek8(hexstr + i))
+        let lo = hexval(peek8(hexstr + i + 1))
+        poke8(out + o, (hi << 4) | lo)
+        i = i + 2
+        o = o + 1
+    }
+    o
+}
+
+// Zero a 128-limb bignum.
+fn bn_zero(a: i64) {
+    let mut i = 0
+    for i < 128 { a[i] = 0; i = i + 1 }
+}
+
+test "hexdecode: parses a byte string" {
+    let n = hexdecode("00010aff", t_hash)
+    assert_eq(n, 4)
+    assert_eq(peek8(t_hash + 0), 0x00)
+    assert_eq(peek8(t_hash + 1), 0x01)
+    assert_eq(peek8(t_hash + 2), 0x0a)
+    assert_eq(peek8(t_hash + 3), 0xff)
+}
+
+test "bn_from_bytes / bn_to_bytes: big-endian round trip" {
+    // 512 bytes: 0x01 at the most-significant byte, 0xAB at the least-significant.
+    let mut i = 0
+    for i < 512 { poke8(t_n + i, 0); i = i + 1 }
+    poke8(t_n + 0, 0x01)      // most-significant byte
+    poke8(t_n + 511, 0xAB)    // least-significant byte
+    bn_from_bytes(t_n, ba)
+    assert_eq(ba[0], 0xAB)              // least significant limb
+    assert_eq(ba[127], 0x01000000)     // most significant limb
+    // round trip back to bytes
+    bn_to_bytes(ba, t_sig)
+    assert_eq(peek8(t_sig + 0), 0x01)
+    assert_eq(peek8(t_sig + 511), 0xAB)
+    i = 1
+    for i < 511 { assert_eq(peek8(t_sig + i), 0); i = i + 1 }
+}
+
+test "bn_cmp: orders bignums by magnitude" {
+    bn_zero(ba); bn_zero(bb)
+    ba[0] = 5; bb[0] = 7
+    assert_eq(bn_cmp(ba, bb), 0 - 1)
+    assert_eq(bn_cmp(bb, ba), 1)
+    assert_eq(bn_cmp(ba, ba), 0)
+    // high limb dominates
+    bb[0] = 0; bb[5] = 1
+    assert_eq(bn_cmp(ba, bb), 0 - 1)
+}
+
+test "bn_mulmod: 7 * 6 mod 10 == 2" {
+    bn_zero(ba); bn_zero(bb); bn_zero(bn); bn_zero(bout)
+    ba[0] = 7; bb[0] = 6; bn[0] = 10
+    bn_mulmod(ba, bb, bn, bout)
+    assert_eq(bout[0], 2)
+    let mut i = 1
+    for i < 128 { assert_eq(bout[i], 0); i = i + 1 }
+}
+
+test "bn_mulmod: multi-limb (2^40+123)*(2^40+456) mod (2^64+7)" {
+    bn_zero(ba); bn_zero(bb); bn_zero(bn); bn_zero(bout)
+    ba[0] = 123; ba[1] = 256      // 2^40 + 123
+    bb[0] = 456; bb[1] = 256      // 2^40 + 456
+    bn[0] = 7; bn[2] = 1          // 2^64 + 7
+    bn_mulmod(ba, bb, bn, bout)
+    assert_eq(bout[0], 4294564632)
+    assert_eq(bout[1], 148223)
+    assert_eq(bout[2], 0)
+}
+
+test "bn_modexp_65537: 4^65537 mod 1000000007 == 502620676" {
+    bn_zero(ba); bn_zero(bn); bn_zero(bout)
+    ba[0] = 4; bn[0] = 1000000007
+    bn_modexp_65537(ba, bn, bout)
+    assert_eq(bout[0], 502620676)
+    let mut i = 1
+    for i < 128 { assert_eq(bout[i], 0); i = i + 1 }
+}
+
+test "bn_modexp_65537: 123456^65537 mod 4294967311 == 227596699" {
+    bn_zero(ba); bn_zero(bn); bn_zero(bout)
+    ba[0] = 123456
+    bn[0] = 15; bn[1] = 1         // 4294967311 = 2^32 + 15
+    bn_modexp_65537(ba, bn, bout)
+    assert_eq(bout[0], 227596699)
+    assert_eq(bout[1], 0)
+}
+
+// ── End-to-end: a real RSA-4096 PKCS#1 v1.5 (SHA-256) signature ──
+// n, sig and the SHA-256 hash generated with openssl; verify must be 1, and
+// flipping a single signature or hash byte must make it 0.
+
+let N_HEX = "a925e9c3563bf2dc859e47d07ff1c95d21bc90fe8966a214e4f46b57b81ed90a174c5e16281838bff048bdb48d66cd82d072ca3feb6eca734068c8b989b5d4670ec7fb8ccc7dbedee5e41cbf2ba92914ea0a728f9e60d53cd664a1b7afd9b377eb98c77d0c20a90c2a92bd5b3b437ce57e36cc4cc9cae08509791000f36978e3223240ab1b6e9b1c3175797358abf69f946a8646519d6ff8e807b786499d377491f5195cd0b49d8260f766e53c21d17fe6fbee316fcba4ea5d75f30dbae16c89e24e90c233289cf705372791561bfdbeb0e7b78726e6afb0729a1d3d5f097dd26257e3c2ca2d8f4a329a57b86c0f7a21699ed299cac6bf4a9abd54ae5289b27b5c8b6c05894ac5626d94e8d8716037e63f38b9c70a66b3cdba279f666996c1fd893e8d8a5a9db0603b68b78f5e50344e38e8bbf63a831b26586f4ee33288669d5fb6093e3b6adc3dbc93323559cadba73df07d997f58974354dfaf24128f1df747fcef1e8e0e9c407ec009d05ecb0c93f1e42fdd599682714fc63b66a9b3a75d247ae8ac4d54ead00232064772726b52bfd49e6afd2314c188d66bf1b1d75268cb0f54925ccb41d16104c3da0358082e0e3edc55ec3f0073f780cc7b19dbf56b648cfe517e66652abef7b591fac52a1871c500fc30131bf8f31fbfad2ac1b3e15a610c02088f49abd5e68cd9caab173e718f2ff552422499a4103b41e308995f"
+
+let SIG_HEX = "2d8cb50e352cbe6019fc5b16d2b201a72fc0615a164287ae6b5b199b4a5577019316b620a9df39be9f07435f196a1561b3da4c817affbbeeeb068a1136d53d4f903fc81d35d9f4606b89ff737f46d7204ccdc8117665fc6f29ad6aa412a17f9b3c7e7a32604ce18c4aec5b632cad7cdb59b2453dc8d063317d7b83849575a1309e8e05fd919464768365e9b5ba6e779499945cdc09645fe81141edac668083cda6f16f7a0d68e5af59ca5fd5fb8b8191ad9a7f71c40fc82101895ee01e89d5bdcec213ec2348ddb5d7900604636a56bc49dbd74ef3e9a8422d34f9fa7768807eee1417166a897f34566aed680e84183972a6c26380e5fb91295ffd51fb4a150f9e6dd84d3482fbc7fc8f1be0841b85e514d3f0d28d976093ad839f1d0c6553da42d89aae4cbd740751416f5d7fb3efef2fc1210e9822ad2d0135246b00cdd0560d89d4383adfd604bac75db487e234c514444c3f8e5334bbcca5707fb676768bde7f6b988b1deb079236ba4832078143bcd24797d12298f83ec260915b404e9d0ca2f8c52f07ec55212f22dc860b90b74e9cc8f5de8594c4ea2fee99914a98ca3e6b02ea60036d5763d1dd10437f9bf1bbbe6b08e1b038016bdcae54f25ab92db7a3215caed1de0c5e2c49260166787f264278900a72c076d073ce1f62b87e4c8a2c5b523ea6f4623206ae6854de453fa31f86f660be424170aff9387c3b4458"
+
+let HASH_HEX = "84d7529dd62accf7fe71badaefc5ef2ad5df824d7e81df59d1848c9e7402fc06"
+
+test "rsa pkcs1v15 sha256 4096: real vector verifies to 1" {
+    assert_eq(hexdecode(N_HEX, t_n), 512)
+    assert_eq(hexdecode(SIG_HEX, t_sig), 512)
+    assert_eq(hexdecode(HASH_HEX, t_hash), 32)
+    assert_eq(rsa_pkcs1v15_sha256_verify_4096(t_n, t_sig, t_hash), 1)
+}
+
+test "rsa pkcs1v15 sha256 4096: a tampered signature verifies to 0" {
+    hexdecode(N_HEX, t_n)
+    hexdecode(SIG_HEX, t_sig)
+    hexdecode(HASH_HEX, t_hash)
+    // flip one byte of the signature
+    poke8(t_sig + 100, peek8(t_sig + 100) ^ 0x01)
+    assert_eq(rsa_pkcs1v15_sha256_verify_4096(t_n, t_sig, t_hash), 0)
+}
+
+test "rsa pkcs1v15 sha256 4096: a wrong hash verifies to 0" {
+    hexdecode(N_HEX, t_n)
+    hexdecode(SIG_HEX, t_sig)
+    hexdecode(HASH_HEX, t_hash)
+    // corrupt the expected hash
+    poke8(t_hash + 0, peek8(t_hash + 0) ^ 0x80)
+    assert_eq(rsa_pkcs1v15_sha256_verify_4096(t_n, t_sig, t_hash), 0)
+}
+
+// A second independent openssl vector (different key and message), so a subtle bignum bug
+// cannot pass both.
+let N2_HEX = "b475d1a4e99bab5bf3f2e7b83497ef9c74b736c095568b7cc4cb0651ecee05d7d98495436a4b6dcd92e8feaf48d23c6f4adac842859f386dbb3f1f2b9c27e38c30cd87e4544dc5934cf0355bbf60e1f8dc64571aeee878877a029288dfcfb3733c8122763039b958477b315606cfd12d468f7eae1c6bcd261aeb51788d96a6da294815097e7628f07b1e209e8c58a936fce3a336dbfee50933a5759f31d34fe8e9cd3acc76ff970db3820cfbd94d0a75e468a7ee1424a8ed73f90b7425bba847629ddfcdd6058596f27a4e8d4463711630fab9e08463440bc4bbb7c59b7dd327e538f2de54fda5ecd7e800fd5ab7a60daba93aa179b50b4d0983c25ccc34a878362f993e85e78203eae04db3a51b67b6037c5e4e85d0603722c464e6d9d13cc2e537a8602a70b77da9efbedfec26f299f52e21e0d06e64c97858afc7dafbc7bc35317cc890ea84b5c679d88e1066c8541d93b862354724d9a5d5e52062a3a21cf14789606686820e45e8e744bafd558600ba31d87008891d8f7cf43a8bfdb1591c2d46b911b61a4db8bfb0aa8f4950a69d51110b0340e72b765adf91a2118196b657a02d067c71562f743a4e325f19b5198df4fa6e19618dcc7aa15bf397e24eee38125eb11810d7a0fc9255a872b34a677991e64f9b77eabd8e697ed760eb7c7c8c26f2fa725590b1630cd54990d30b22a6852d97913603790e9a23fdfa7b1b"
+let SIG2_HEX = "a9047a2a6e29fc9e7650d06ae9dc84ff14325c53e9778a8c192c00a89f46eedfb85df2f130b9c296b1dc7d1f214b413dfbd650ad17a4da76d18cfbf7826c592db2d503bf6cb3ac86ed90f2a2aba6982c58530cb949ff25723943964ef9f1dec1b22c0fd42253c0bbf38838a5133ccca5caec203a8348619d5cf3b20a10193de21c56f9af01cbaa05f6edd4013886d0e742a87a24b1fc1d9b6d86293893f6eff389c194f02f2493b50f342f2061a47c2681487f05148b6c397079265a855e4705e542dbb52875da0852f1c4dd94f3039b0fd768968afcac94b4654b53f2d2851ae01569b03b0b7dd6f9345ff5e36927e6dca23daaf6f1396501531dd2ab005d9ee12de468fa02295f20089a3ea52d2ab5de10d90e9462ff79bc33e4760f71151d8e53e4b38aecd72e9c50f26d67906f913a133cbdb5b6dafe25a422fb6070b6d5b2f7cec9ef9f3c55fa8de2451f2821100f53e850d5bb09fc392f7003dd5eb13863cd914cb4a39f0d8e3dc5c6bb4887fd8562936770e9d3a951dec7addf7b474432ee53b2baa25a663df1a0b483af7af68b892e78c71437bba7fb523de1585c1b11a6e00d999906b919ac19fb85832f66ec43fdf9871a6178d40f51a2806c107cc3da431ee4cd562ab4eca9eccffc5b4ee15e3d76a586148feb0dd225b2dfb8781ba200f0557eff65ce97605d6eb0104b77ec22bf77eef5c3b0aa905ddd6f0b17"
+let HASH2_HEX = "f2348c008d36598eb7686a38abca0f399cfa03cc4c50405ca0ce59e1db6d4d7b"
+
+test "rsa pkcs1v15 sha256 4096: a second independent real vector verifies to 1" {
+    assert_eq(hexdecode(N2_HEX, t_n), 512)
+    assert_eq(hexdecode(SIG2_HEX, t_sig), 512)
+    assert_eq(hexdecode(HASH2_HEX, t_hash), 32)
+    assert_eq(rsa_pkcs1v15_sha256_verify_4096(t_n, t_sig, t_hash), 1)
+    // the first vector's signature must NOT verify under this key
+    hexdecode(SIG_HEX, t_sig)
+    assert_eq(rsa_pkcs1v15_sha256_verify_4096(t_n, t_sig, t_hash), 0)
+}
