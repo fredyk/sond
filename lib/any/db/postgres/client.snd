@@ -1,17 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// lib/any/db/postgres/client.snd: the socket adapter of the PostgreSQL client, the
-// `pgx_*` connection API. It only does I/O and framing; the message byte layout lives in
-// wire.snd and the row/column assembly in result.snd (both socket-free and unit-tested).
+// lib/any/db/postgres/client.snd: the socket adapter of the PostgreSQL client, the `pgx_*`
+// connection API. It does I/O and framing; the message byte layout lives in wire.snd and the
+// row/column assembly in result.snd (both socket-free and unit-tested).
 //
-// Auth supported here: trust (AuthenticationOk), cleartext password, and SASL
-// SCRAM-SHA-256 (RFC 5802 / 7677), the default on modern PostgreSQL. MD5 is still a
-// follow-up. The host is a numeric IPv4 dotted quad (a local sidecar is 127.0.0.1);
-// there is no DNS resolver in the standard library yet.
+// A connection can run over a plain TCP socket OR over TLS negotiated with a PostgreSQL
+// SSLRequest (pgx_connect_ssl), so the same protocol code (startup, SCRAM-SHA-256 auth, Simple
+// Query) drives both. Every byte goes through pg_send / pg_recv_exact, which dispatch on the
+// connection kind; over TLS, reads are buffered because a TLS record does not align with a
+// PostgreSQL message. The host is a numeric IPv4 dotted quad; there is no DNS resolver yet.
+//
+// A connection handle (pgconn) is a heap block of i64 slots:
+//   [0] fd   [1] ok   [2] kind (0 plain, 1 tls)   [3] tls session
+//   [4] read buffer   [5] read buffer length   [6] read buffer offset
 
 include "any/db/postgres/result.snd"
 include "any/crypto/scram/scram-flow.snd"
+include "any/tls/session.snd"
 include "x86_64/linux/net.snd"
 include "x86_64/linux/io.snd"
 include "any/strings.snd"
@@ -35,34 +41,61 @@ fn pg_parse_ipv4(s: i64) -> i64 {
     (ip << 8) | octet
 }
 
-// Reads exactly `n` bytes into `buf`, looping over short reads. Returns n, or <=0 on
-// EOF (0) or error (<0).
-fn pg_read_exact(fd: i64, buf: i64, n: i64) -> i64 {
+// Sends `n` bytes over the connection: a plain socket write, or a sealed TLS record. Returns
+// n on success, or a negative value on failure.
+fn pg_send(conn: i64, buf: i64, n: i64) -> i64 {
+    if conn[2] == 0 { return write_buf(conn[0], buf, n) }
+    tls_write(conn[3], buf, n)
+}
+
+// Reads exactly `n` bytes into `out`. Over a plain socket this loops over short reads; over
+// TLS it serves from a record buffer, refilling with tls_read (which yields one record's
+// application data at a time). Returns n, or <=0 on EOF/error.
+fn pg_recv_exact(conn: i64, out: i64, n: i64) -> i64 {
+    if conn[2] == 0 {
+        let mut got = 0
+        for got < n {
+            let r = read_buf(conn[0], out + got, n - got)
+            if r <= 0 { return r }
+            got = got + r
+        }
+        return n
+    }
     let mut got = 0
     for got < n {
-        let r = read_buf(fd, buf + got, n - got)
-        if r <= 0 { return r }
-        got = got + r
+        if conn[6] >= conn[5] {                     // buffer drained: refill from the next record
+            let r = tls_read(conn[3], conn[4], 20000)
+            if r <= 0 { return r }
+            conn[5] = r
+            conn[6] = 0
+        }
+        let mut take = n - got
+        let avail = conn[5] - conn[6]
+        if take > avail { take = avail }
+        let mut i = 0
+        for i < take { poke8(out + got + i, peek8(conn[4] + conn[6] + i)); i = i + 1 }
+        conn[6] = conn[6] + take
+        got = got + take
     }
     n
 }
 
-// Reads one framed backend message into `buf` (capacity `cap`): the 5-byte header
-// (type + int32 length) then the payload. Returns the total message length (1 + the
-// declared length), or -1 on EOF/error or if the message would overflow `buf`.
-fn pg_read_msg(fd: i64, buf: i64, cap: i64) -> i64 {
-    if pg_read_exact(fd, buf, 5) <= 0 { return 0 - 1 }
+// Reads one framed backend message into `buf` (capacity `cap`): the 5-byte header (type +
+// int32 length) then the payload. Returns the total message length (1 + the declared length),
+// or -1 on EOF/error or if the message would overflow `buf`.
+fn pg_read_msg(conn: i64, buf: i64, cap: i64) -> i64 {
+    if pg_recv_exact(conn, buf, 5) <= 0 { return 0 - 1 }
     let len = pg_get_u32be(buf + 1)                 // includes its own 4 bytes
     let payload = len - 4
     if payload > 0 {
         if 5 + payload > cap { return 0 - 1 }
-        if pg_read_exact(fd, buf + 5, payload) <= 0 { return 0 - 1 }
+        if pg_recv_exact(conn, buf + 5, payload) <= 0 { return 0 - 1 }
     }
     1 + len
 }
 
 // Sends a PasswordMessage ('p') carrying the cleartext password.
-fn pg_send_password(fd: i64, pass: i64) {
+fn pg_send_password(conn: i64, pass: i64) {
     let buf[512]
     poke8(buf, 112)                                 // 'p'
     let n = strlen(pass)
@@ -71,11 +104,10 @@ fn pg_send_password(fd: i64, pass: i64) {
     let mut i = 0
     for i < n { poke8(buf + 5 + i, peek8(pass + i)); i = i + 1 }
     poke8(buf + 5 + n, 0)
-    write_buf(fd, buf, 1 + len)
+    pg_send(conn, buf, 1 + len)
 }
 
-// Fills `buf` with `n` random bytes from the kernel, looping over short reads (a signal can
-// interrupt getrandom): a partial nonce would weaken the SCRAM exchange.
+// Fills `buf` with `n` random bytes from the kernel, looping over short reads.
 fn pg_random(buf: i64, n: i64) {
     let mut got = 0
     for got < n {
@@ -84,18 +116,15 @@ fn pg_random(buf: i64, n: i64) {
     }
 }
 
-// Runs the client side of a SASL SCRAM-SHA-256 exchange (RFC 5802) on `fd`, after the server
-// asked for it (AuthenticationSASL). Sends the client-first, reads the server-first, sends
-// the client-final carrying the ClientProof, and verifies the server-final ServerSignature.
-// Returns 1 if the server proved knowledge of the password, 0 on any failure. The caller's
-// loop then reads AuthenticationOk and ReadyForQuery as usual.
-fn pg_sasl_scram(fd: i64, user: i64, pass: i64) -> i64 {
-    // client nonce: base64 of 18 random bytes (24 printable chars, none of them a comma).
+// Runs the client side of a SASL SCRAM-SHA-256 exchange (RFC 5802) after the server asked for
+// it. Sends the client-first, reads the server-first, sends the client-final carrying the
+// ClientProof, and verifies the server-final ServerSignature. Returns 1 if the server proved
+// knowledge of the password, 0 otherwise. Runs over whatever transport the connection uses.
+fn pg_sasl_scram(conn: i64, user: i64, pass: i64) -> i64 {
     let rnd[18]
     pg_random(rnd, 18)
     let nonce[32]
     let noncelen = b64_encode(rnd, 18, nonce)
-    // client-first-message-bare, then the initial response with the GS2 header "n,,".
     let cfbare[256]
     let cfbarelen = scram_client_first_bare(user, strlen(user), nonce, noncelen, cfbare)
     let ir[300]
@@ -105,26 +134,23 @@ fn pg_sasl_scram(fd: i64, user: i64, pass: i64) -> i64 {
     let irlen = 3 + cfbarelen
     let ib = heap_alloc(512)
     let iblen = pg_sasl_initial(ib, "SCRAM-SHA-256", ir, irlen)
-    write_buf(fd, ib, iblen)
+    pg_send(conn, ib, iblen)
 
-    // AuthenticationSASLContinue (code 11): the server-first-message.
     let m = heap_alloc(4096)
-    if pg_read_msg(fd, m, 4096) <= 0 { return 0 }
+    if pg_read_msg(conn, m, 4096) <= 0 { return 0 }
     if pg_msg_type(m) != 82 { return 0 }            // 'R'
     if pg_auth_type(m) != 11 { return 0 }
     let sf = pg_sasl_data_ptr(m)
     let sflen = pg_sasl_data_len(m)
 
-    // client-final carrying the ClientProof; keep the ServerSignature to check the reply.
     let cf = heap_alloc(512)
     let srvsig[32]
     let cflen = scram_client_final(pass, strlen(pass), cfbare, cfbarelen, sf, sflen, cf, srvsig)
     let rb = heap_alloc(512)
     let rblen = pg_sasl_response(rb, cf, cflen)
-    write_buf(fd, rb, rblen)
+    pg_send(conn, rb, rblen)
 
-    // AuthenticationSASLFinal (code 12): verify the server-final "v=<ServerSignature>".
-    if pg_read_msg(fd, m, 4096) <= 0 { return 0 }
+    if pg_read_msg(conn, m, 4096) <= 0 { return 0 }
     if pg_auth_type(m) != 12 { return 0 }
     let vb64[64]
     let vb64len = scram_attr(pg_sasl_data_ptr(m), pg_sasl_data_len(m), 118, vb64)   // v=
@@ -139,69 +165,143 @@ fn pg_sasl_scram(fd: i64, user: i64, pass: i64) -> i64 {
     1
 }
 
-// Opens a TCP connection to `host`:`port`, runs the startup + authentication exchange
-// (trust, cleartext password, or SASL SCRAM-SHA-256), and drains to ReadyForQuery. Returns
-// a connection handle ([fd, ok]) with ok=1 on success, or 0 on a hard failure.
+// Runs the startup + authentication exchange on an already-transport-ready `conn` (plain or
+// TLS): sends StartupMessage, then handles trust / cleartext / SASL SCRAM-SHA-256 until
+// ReadyForQuery. Sets conn[1]=1 on success. Returns conn, or 0 (after closing) on failure.
+fn pg_do_startup(conn: i64, user: i64, pass: i64, db: i64) -> i64 {
+    let sbuf[512]
+    let slen = pg_startup(sbuf, user, db)
+    pg_send(conn, sbuf, slen)
+    let mbuf = heap_alloc(8192)
+    let mut ok = 0
+    for {
+        let mlen = pg_read_msg(conn, mbuf, 8192)
+        if mlen <= 0 { pg_conn_drop(conn); return 0 }
+        let t = pg_msg_type(mbuf)
+        if t == 82 {                                // 'R' Authentication
+            let code = pg_auth_type(mbuf)
+            if code == 0 { ok = 1 }                 // AuthenticationOk
+            if code == 3 { pg_send_password(conn, pass) }   // cleartext requested
+            if code == 10 {                         // SASL: run SCRAM-SHA-256
+                if pg_sasl_scram(conn, user, pass) != 1 { pg_conn_drop(conn); return 0 }
+            }
+            if code != 0 { if code != 3 { if code != 10 { pg_conn_drop(conn); return 0 } } }
+        }
+        if t == 69 { pg_conn_drop(conn); return 0 }    // 'E' ErrorResponse during startup
+        if t == 90 { break }                        // 'Z' ReadyForQuery: startup done
+    }
+    conn[1] = ok
+    conn
+}
+
+// Closes the transport WITHOUT sending Terminate (for failure paths, where the peer may be
+// gone and a write would raise SIGPIPE). pgx_close is the graceful counterpart.
+fn pg_conn_drop(conn: i64) {
+    if conn[2] == 1 { tls_close(conn[3]) } else { close_fd(conn[0]) }
+}
+
+// Allocates a plain-transport connection handle around socket `fd`.
+fn pg_conn_plain(fd: i64) -> i64 {
+    let conn = heap_alloc(64)
+    conn[0] = fd; conn[1] = 0; conn[2] = 0
+    conn[3] = 0; conn[4] = 0; conn[5] = 0; conn[6] = 0
+    conn
+}
+
+// Opens a plain TCP connection to `host`:`port` and runs startup + authentication (trust,
+// cleartext, or SCRAM-SHA-256). Returns a connection handle with pgx_ok()=1 on success, else 0.
 fn pgx_connect(host: i64, port: i64, user: i64, pass: i64, db: i64) -> i64 {
     let fd = sock(AF_INET, SOCK_STREAM, 0)
     if fd < 0 { return 0 }
     let sa[2]
     sockaddr_in_build(sa, pg_parse_ipv4(host), port)
     if connect_sock(fd, sa, 16) < 0 { close_fd(fd); return 0 }
-    let sbuf[512]
-    let slen = pg_startup(sbuf, user, db)
-    write_buf(fd, sbuf, slen)
-    let mbuf = heap_alloc(8192)
-    let mut ok = 0
-    for {
-        let mlen = pg_read_msg(fd, mbuf, 8192)
-        if mlen <= 0 { close_fd(fd); return 0 }
-        let t = pg_msg_type(mbuf)
-        if t == 82 {                                // 'R' Authentication
-            let code = pg_auth_type(mbuf)
-            if code == 0 { ok = 1 }                 // AuthenticationOk
-            if code == 3 { pg_send_password(fd, pass) }   // cleartext requested
-            if code == 10 {                         // SASL: run SCRAM-SHA-256
-                if pg_sasl_scram(fd, user, pass) != 1 { close_fd(fd); return 0 }
-            }
-            // reject anything else (MD5 = 5, etc.): never proceed unauthenticated
-            if code != 0 { if code != 3 { if code != 10 { close_fd(fd); return 0 } } }
-        }
-        if t == 69 { close_fd(fd); return 0 }       // 'E' ErrorResponse during startup
-        if t == 90 { break }                        // 'Z' ReadyForQuery: startup done
+    pg_do_startup(pg_conn_plain(fd), user, pass, db)
+}
+
+// Opens a TLS connection to `host`:`port` via the PostgreSQL SSL negotiation, then runs
+// startup + authentication (SCRAM-SHA-256) inside TLS. The 8-byte SSLRequest is sent in the
+// clear; if the server answers 'S' the TLS 1.3 handshake runs on the same socket, validating
+// the certificate chain against `roots`/`nroots` at `now14` with the leaf required to name
+// `sni`. Returns a connection handle with pgx_ok()=1 on success, or 0 if SSL is refused, the
+// chain is untrusted, or authentication fails.
+fn pgx_connect_ssl(host: i64, port: i64, user: i64, pass: i64, db: i64,
+                   sni: i64, snilen: i64, roots: i64, nroots: i64, now14: i64) -> i64 {
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { return 0 }
+    let sa[2]
+    sockaddr_in_build(sa, pg_parse_ipv4(host), port)
+    if connect_sock(fd, sa, 16) < 0 { close_fd(fd); return 0 }
+    // SSLRequest: int32 length = 8, int32 code = 80877103 (0x04D2162F)
+    let req[8]
+    pg_put_u32be(req, 8)
+    pg_put_u32be(req + 4, 80877103)
+    write_buf(fd, req, 8)
+    let resp[1]
+    if pg_read_exact_fd(fd, resp, 1) <= 0 { close_fd(fd); return 0 }
+    if peek8(resp) != 83 { close_fd(fd); return 0 }   // 'S' = SSL supported; anything else: refuse
+    let sess = tls_connect_fd(fd, sni, snilen, "postgresql", 10, roots, nroots, now14)
+    if sess == 0 { return 0 }                          // tls_connect_fd closed fd on failure
+    let conn = heap_alloc(64)
+    conn[0] = fd; conn[1] = 0; conn[2] = 1
+    conn[3] = sess; conn[4] = heap_alloc(20000); conn[5] = 0; conn[6] = 0
+    pg_do_startup(conn, user, pass, db)
+}
+
+// Opens a DIRECT-TLS connection to `host`:`port` (PostgreSQL sslnegotiation=direct, postgres
+// 17+): the TLS 1.3 handshake runs immediately on connect, with no SSLRequest preamble, as a
+// server behind a TLS gateway on 443 expects. The chain is validated against `roots`/`nroots`
+// at `now14` with the leaf required to name `sni`; then startup + SCRAM-SHA-256 run inside TLS.
+// Returns a connection handle with pgx_ok()=1 on success, or 0 on failure.
+fn pgx_connect_direct(host: i64, port: i64, user: i64, pass: i64, db: i64,
+                      sni: i64, snilen: i64, roots: i64, nroots: i64, now14: i64) -> i64 {
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { return 0 }
+    let sa[2]
+    sockaddr_in_build(sa, pg_parse_ipv4(host), port)
+    if connect_sock(fd, sa, 16) < 0 { close_fd(fd); return 0 }
+    let sess = tls_connect_fd(fd, sni, snilen, "postgresql", 10, roots, nroots, now14)
+    if sess == 0 { return 0 }                          // tls_connect_fd closed fd on failure
+    let conn = heap_alloc(64)
+    conn[0] = fd; conn[1] = 0; conn[2] = 1
+    conn[3] = sess; conn[4] = heap_alloc(20000); conn[5] = 0; conn[6] = 0
+    pg_do_startup(conn, user, pass, db)
+}
+
+// Reads exactly `n` bytes from a raw fd (used before TLS is up, for the 1-byte SSL reply).
+fn pg_read_exact_fd(fd: i64, buf: i64, n: i64) -> i64 {
+    let mut got = 0
+    for got < n {
+        let r = read_buf(fd, buf + got, n - got)
+        if r <= 0 { return r }
+        got = got + r
     }
-    let conn = heap_alloc(16)
-    conn[0] = fd
-    conn[1] = ok
-    conn
+    n
 }
 
 // 1 if the connection authenticated, 0 otherwise.
 fn pgx_ok(conn: i64) -> i64 { conn[1] }
 
-// Runs a Simple Query and collects the result: sends the SQL, then reads backend
-// messages into a result until ReadyForQuery. Returns the result handle.
+// Runs a Simple Query and collects the result until ReadyForQuery. Returns the result handle.
 fn pgx_query(conn: i64, sql: i64) -> i64 {
-    let fd = conn[0]
     let qbuf = heap_alloc(8192 + strlen(sql))
     let qlen = pg_query(qbuf, sql)
-    write_buf(fd, qbuf, qlen)
+    pg_send(conn, qbuf, qlen)
     let r = pg_result_new()
     let mbuf = heap_alloc(65536)
     for {
-        let mlen = pg_read_msg(fd, mbuf, 65536)
+        let mlen = pg_read_msg(conn, mbuf, 65536)
         if mlen <= 0 { break }                      // connection error: return what we have
         if pg_result_absorb(r, mbuf) == 1 { break } // ReadyForQuery ends the cycle
     }
     r
 }
 
-// Sends Terminate ('X') and closes the socket.
+// Sends Terminate ('X') and closes the transport.
 fn pgx_close(conn: i64) {
-    let fd = conn[0]
     let tbuf[8]
     poke8(tbuf, 88)                                 // 'X'
     pg_put_u32be(tbuf + 1, 4)
-    write_buf(fd, tbuf, 5)
-    close_fd(fd)
+    pg_send(conn, tbuf, 5)
+    if conn[2] == 1 { tls_close(conn[3]) } else { close_fd(conn[0]) }
 }
