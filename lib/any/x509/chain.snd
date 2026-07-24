@@ -33,8 +33,9 @@ fn x509_accept_leaf(leaf: i64, leafpos: i64, issuer: i64, issuerpos: i64,
 fn x509_verify_chain(certs: i64, count: i64, roots: i64, nroots: i64,
                      host: i64, hostlen: i64, now14: i64) -> i64 {
     if count < 1 { return 0 }
-    // the leaf must be issued for the host we meant to reach
+    // the leaf must be issued for the host we meant to reach, and be usable for server auth
     if x509_hostname_matches(certs[0], 0, host, hostlen) != 1 { return 0 }
+    if x509_eku_serverauth_ok(certs[0], 0) != 1 { return 0 }
     // every presented certificate must be inside its validity window
     let mut i = 0
     for i < count {

@@ -141,6 +141,48 @@ fn x509_is_ca(cert: i64, certpos: i64) -> i64 {
     0
 }
 
+// 1 if the certificate may be used for TLS server authentication per its extendedKeyUsage
+// (OID 2.5.29.37): if the EKU extension is ABSENT, there is no restriction (RFC 5280), so 1;
+// if PRESENT, its OID list must contain serverAuth (1.3.6.1.5.5.7.3.1). A leaf whose EKU is,
+// say, clientAuth only must not be trusted to authenticate a server.
+fn x509_eku_serverauth_ok(cert: i64, certpos: i64) -> i64 {
+    let seq = x509_extensions(cert, certpos)
+    if seq < 0 { return 1 }                        // no extensions at all: unrestricted
+    let st[3]
+    der_tlv(cert, seq, st)
+    let endp = st[1] + st[2]
+    let mut p = st[1]
+    let ekuoid[3]
+    poke8(ekuoid + 0, 0x55); poke8(ekuoid + 1, 0x1d); poke8(ekuoid + 2, 0x25)   // 2.5.29.37
+    let saoid[8]                                    // serverAuth: 1.3.6.1.5.5.7.3.1
+    poke8(saoid + 0, 0x2b); poke8(saoid + 1, 0x06); poke8(saoid + 2, 0x01); poke8(saoid + 3, 0x05)
+    poke8(saoid + 4, 0x05); poke8(saoid + 5, 0x07); poke8(saoid + 6, 0x03); poke8(saoid + 7, 0x01)
+    for p < endp {
+        let ext[3]
+        let nextext = der_tlv(cert, p, ext)
+        let oidpos = ext[1]
+        if der_oid_eq(cert, oidpos, ekuoid, 3) == 1 {
+            let t[3]
+            let mut q = der_tlv(cert, oidpos, t)    // position after the OID
+            if der_tag(cert, q) == 1 { q = der_tlv(cert, q, t) }   // skip optional critical BOOLEAN
+            der_tlv(cert, q, t)                      // extnValue OCTET STRING
+            let sq[3]
+            der_tlv(cert, t[1], sq)                  // the SEQUENCE OF KeyPurposeId (OIDs)
+            let listend = sq[1] + sq[2]
+            let mut r = sq[1]
+            for r < listend {
+                let ot[3]
+                let nexto = der_tlv(cert, r, ot)
+                if der_oid_eq(cert, r, saoid, 8) == 1 { return 1 }   // serverAuth present
+                r = nexto
+            }
+            return 0                                 // EKU present but no serverAuth
+        }
+        p = nextext
+    }
+    1                                                // EKU extension absent: unrestricted
+}
+
 // Reads a certificate Time (UTCTime or GeneralizedTime) into 14 digits YYYYMMDDHHMMSS.
 fn x509_time14(cert: i64, timepos: i64, out14: i64) {
     let t[3]
