@@ -2,8 +2,9 @@
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
 // lib/any/x509/roots.snd: a small built-in trust store of widely-used, self-signed root
-// certificates this stdlib can verify: three ECDSA P-384 roots (ecdsa-with-SHA384) and one
-// RSA-4096 root (sha256WithRSAEncryption). A caller decodes them into its own buffers with
+// certificates this stdlib can verify: three ECDSA P-384 roots (ecdsa-with-SHA384) and two
+// RSA-4096 roots (ISRG Root X1 with sha256WithRSA, GTS Root R1 with sha384WithRSA). A caller
+// decodes them into its own buffers with
 // x509_load_default_roots and passes the pointer array to x509_verify_chain /
 // tls_verify_server_chain. This is a starter set, not the full Mozilla program. Each root's
 // DER is embedded as hex, taken verbatim from the system trust store.
