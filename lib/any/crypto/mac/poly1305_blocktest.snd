@@ -28,6 +28,40 @@ fn eq_hex(buf: i64, n: i64, hexstr: i64) -> i64 {
     1
 }
 
+// Decode `n` bytes from a hex string into buf.
+fn load_hex(buf: i64, n: i64, hexstr: i64) {
+    let mut i = 0
+    for i < n {
+        poke8(buf + i, hexval(peek8(hexstr + i * 2)) * 16 + hexval(peek8(hexstr + i * 2 + 1)))
+        i = i + 1
+    }
+}
+
+// Known-answer test: RFC 8439 §2.5.2 official vector, exact tag.
+// key || "Cryptographic Forum Research Group" (34 bytes) -> a8061dc1305136c6c22b8baf0c0127a9.
+fn run_rfc_kat() -> i64 {
+    let key[32]
+    load_hex(key, 32, "85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b")
+    let msg = "Cryptographic Forum Research Group"
+    let tag[16]
+    poly1305_mac(msg, 34, key, tag)
+    eq_hex(tag, 16, "a8061dc1305136c6c22b8baf0c0127a9")
+}
+
+// Known-answer test that exercises the final reduction (freeze) mod 2^130-5: for this
+// key/message the accumulator lands in [p, 2^130) after the block loop, so an implementation
+// that skips the final freeze emits a tag that is exactly +5 in the low byte. The reference
+// tag is from a conformant Poly1305.
+fn run_freeze_kat() -> i64 {
+    let key[32]
+    load_hex(key, 32, "0d6ecf3091f253b41576d73899fa5bbc1d7edf40a10263c42586e748a90a6bcc")
+    let msg[16]
+    load_hex(msg, 16, "030a11181f262d343b424950575e656c")
+    let tag[16]
+    poly1305_mac(msg, 16, key, tag)
+    eq_hex(tag, 16, "9ba66393bb0090762cbbf08a0fa3728b")
+}
+
 // Test RFC 8439 §2.5.2 Poly1305 vector (32-byte key, empty message).
 // Key is bytes 101-132 (0x65-0x84), empty message.
 fn run_rfc_vector() -> i64 {
@@ -176,4 +210,12 @@ test "two-block message produces valid tag" {
 
 test "single byte message produces valid tag" {
     assert_eq(run_single_byte(), 0)
+}
+
+test "rfc8439 §2.5.2 official known-answer tag" {
+    assert_eq(run_rfc_kat(), 1)
+}
+
+test "final reduction (freeze) mod 2^130-5 known-answer tag" {
+    assert_eq(run_freeze_kat(), 1)
 }

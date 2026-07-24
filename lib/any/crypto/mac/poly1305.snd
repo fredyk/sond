@@ -151,9 +151,6 @@ fn poly1305_mac(msg_ptr: i64, len: i64, key_ptr: i64, tag_ptr: i64) {
     let r_limbs[5]
     load_key_limbs(r_limbs, r_bytes)
 
-    let s_limbs[5]
-    load_key_limbs(s_limbs, key_ptr + 16)
-
     // Accumulator = 0
     let acc[5]; poke64(acc, 0); poke64(acc + 8, 0); poke64(acc + 16, 0); poke64(acc + 24, 0); poke64(acc + 32, 0)
     let block[5]
@@ -168,12 +165,28 @@ fn poly1305_mac(msg_ptr: i64, len: i64, key_ptr: i64, tag_ptr: i64) {
         offset = offset + n
     }
 
-    // Add s to accumulator
-    add_limbs(acc, s_limbs)
+    // Final reduction (freeze) mod 2^130-5. The block loop leaves acc only partially reduced,
+    // in [0, 2^130): add_limbs/mul_mod_p fold the carry once but do not guarantee acc < p. Bring
+    // it fully into [0, p) with one conditional subtraction of p, or the tag is wrong (exactly +5
+    // in the low byte) whenever acc landed in [p, 2^130). Constant-time: select via a mask, not a
+    // branch on the secret accumulator.
+    let h0 = peek64(acc); let h1 = peek64(acc + 8); let h2 = peek64(acc + 16)
+    let h3 = peek64(acc + 24); let h4 = peek64(acc + 32)
+    let mut g0 = h0 + 5; let mut cc = g0 >> 26; g0 = g0 & 0x3FFFFFF
+    let mut g1 = h1 + cc; cc = g1 >> 26; g1 = g1 & 0x3FFFFFF
+    let mut g2 = h2 + cc; cc = g2 >> 26; g2 = g2 & 0x3FFFFFF
+    let mut g3 = h3 + cc; cc = g3 >> 26; g3 = g3 & 0x3FFFFFF
+    let g4 = h4 + cc - 0x4000000                 // + 5 then - 2^130 == acc - p, spread over limbs
+    // g4 is negative (arithmetic shift -> all ones) exactly when acc < p: keep h; else use g.
+    let keeph = g4 >> 63
+    let useg = keeph ^ (0 - 1)
+    let a0 = (h0 & keeph) | (g0 & useg)
+    let a1 = (h1 & keeph) | (g1 & useg)
+    let a2 = (h2 & keeph) | (g2 & useg)
+    let a3 = (h3 & keeph) | (g3 & useg)
+    let a4 = (h4 & keeph) | ((g4 & 0x3FFFFFF) & useg)
 
-    // Serialize accumulator (little-endian) into tag
-    let a0 = peek64(acc); let a1 = peek64(acc + 8); let a2 = peek64(acc + 16)
-    let a3 = peek64(acc + 24); let a4 = peek64(acc + 32)
+    // Serialize the low 128 bits of (acc mod p) little-endian into tag.
     poke8(tag_ptr, a0 & 0xFF)
     poke8(tag_ptr + 1, (a0 >> 8) & 0xFF)
     poke8(tag_ptr + 2, (a0 >> 16) & 0xFF)
@@ -190,6 +203,17 @@ fn poly1305_mac(msg_ptr: i64, len: i64, key_ptr: i64, tag_ptr: i64) {
     poke8(tag_ptr + 13, a4 & 0xFF)
     poke8(tag_ptr + 14, (a4 >> 8) & 0xFF)
     poke8(tag_ptr + 15, (a4 >> 16) & 0xFF)
+
+    // tag = (that value + s) mod 2^128, where s is the second half of the key (bytes 16..32).
+    // A plain 128-bit add: the RFC adds s AFTER the mod-p reduction, so this must not fold mod p.
+    let mut carry = 0
+    let mut k = 0
+    for k < 16 {
+        let v = peek8(tag_ptr + k) + peek8(key_ptr + 16 + k) + carry
+        poke8(tag_ptr + k, v & 0xFF)
+        carry = v >> 8
+        k = k + 1
+    }
 }
 
 // ---------------------------------------------------------------------------
