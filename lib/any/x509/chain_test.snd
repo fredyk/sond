@@ -20,6 +20,13 @@ let CLIENTONLY_HEX = "308201bb30820162a00302010202145431bde47993cfcf26d33adf3669
 // nocertsign.test: self-signed CA:TRUE with keyUsage digitalSignature only (NO keyCertSign),
 // SAN and EKU serverAuth, so it fails only the keyCertSign requirement as a trust anchor.
 let NOCERTSIGN_HEX = "308201cc30820172a00302010202146f483cf9e4c90b7ccfaba9819027a481f1c5e1ee300a06082a8648ce3d040302301a3118301606035504030c0f6e6f636572747369676e2e74657374301e170d3236303732343031313835345a170d3336303732313031313835345a301a3118301606035504030c0f6e6f636572747369676e2e746573743059301306072a8648ce3d020106082a8648ce3d0301070342000465e64be65af5cf54d75df32b0eda88607295a1427ee1e5638bfe5e1db9b0bdc71d2d8d8f667a5d0fae657c21441490c32947c23476878902ab00cc08125e300ba38195308192301d0603551d0e041604144c77d72a4b89e1927b752a9ab5e71529310adc2b301f0603551d230418301680144c77d72a4b89e1927b752a9ab5e71529310adc2b301a0603551d1104133011820f6e6f636572747369676e2e74657374300f0603551d130101ff040530030101ff300e0603551d0f0101ff04040302078030130603551d25040c300a06082b06010505070301300a06082a8648ce3d0403020348003045022100aa8500d15f341145a74ddaeb66029c12d900a1af2d4284b689b3338297a2f1ca02204a436315a5d195bc67c957c72a16494572d09362fbfd8640aeddfe26bdddc14b"
+// GTS Root R4 CROSS-SIGNED by GlobalSign Root CA. Same subject and same key as the self-signed
+// GTS Root R4 above, but issued by an older root, and this is the certificate real servers send
+// as the LAST link so that clients whose store predates GTS still build a path. Captured from a
+// live Cloudflare-fronted host. GlobalSign Root CA is deliberately NOT in the store here: the
+// point is that a client must anchor at WE1 and never look at this certificate at all.
+let CROSSR4_HEX = "3082037a30820262a00302010202107fe530bf331343bedd821610493d8a1b300d06092a864886f70d01010b05003057310b300906035504061302424531193017060355040a1310476c6f62616c5369676e206e762d73613110300e060355040b1307526f6f74204341311b301906035504031312476c6f62616c5369676e20526f6f74204341301e170d3233313131353033343332315a170d3238303132383030303034325a3047310b300906035504061302555331223020060355040a1319476f6f676c65205472757374205365727669636573204c4c43311430120603550403130b47545320526f6f742052343076301006072a8648ce3d020106052b8104002203620004f37473a7688b60ae43b835c581307b4b499dfbc161cee6de46bd6bd5611835ae40dd73f78991305aeb3cee857ca240763ba9c6b847d82ae792916a73e9b172399f299fa298d35f5e5886650fa1846506d1dc8bc9c773c88c6a2fe5c4abd11d8aa381ff3081fc300e0603551d0f0101ff040403020186301d0603551d250416301406082b0601050507030106082b06010505070302300f0603551d130101ff040530030101ff301d0603551d0e04160414804cd6eb74ff4936a3d5d8fcb53ec56af0941d8c301f0603551d23041830168014607b661a450d97ca89502f7d04cd34a8fffcfd4b303606082b06010505070101042a3028302606082b06010505073002861a687474703a2f2f692e706b692e676f6f672f677372312e637274302d0603551d1f042630243022a020a01e861c687474703a2f2f632e706b692e676f6f672f722f677372312e63726c30130603551d20040c300a3008060667810c010201300d06092a864886f70d01010b050003820101001842bb0f06d6038796e33f63810f09a4a168480c3922739ef8cb4e2d7f31e99fe709a1d2360f84ac79eb10e9b0eb6ab67b0b7d1d74b89b65ab682a2c2cdd42fdc6710bcf872df76bc80f6e057d56e2235858f925ba16854790d79620fd0609b68ce02eae55d17975352c315b3f65bccd9c8742a791b19b1e5e8ef11abbca2d47f0ac90637e86bfd6e46bd3d6d3018e058a6758b8fff7a6840d491b505b3f3a0b250bf2128b5cd379578d3682ceff2611b7a9f11a99edad823ec8116eebd33c1c1c38c0419ae15e53cf3e152057ebeee23f48a5f1be19d1016a230c0c1dfb3f2fa2b5bdea6ea31b46ce2e0267af332698aad54bd2a936c5263b5b0f8b1e88c1e5"
+let mut c_crossr4[1400]
 let mut c_leaf[1100]
 let mut c_we1[1100]
 let mut c_gtsr4[1100]
@@ -77,9 +84,18 @@ test "x509 chain: verify the real cloudflare chain up to the GTS Root R4 trust a
     assert_eq(x509_verify_chain(c_chain, 2, c_roots, 1, c_host, cseth("cloudflare.com"), "20261101000000"), 0)
     // an empty trust store: the top of the chain is anchored to nothing trusted
     assert_eq(x509_verify_chain(c_chain, 2, c_roots, 0, c_host, cseth("cloudflare.com"), "20260901000000"), 0)
-    // a trust store that does not include the real root (WE1 is not self-signed) is rejected
+    // Trusting the INTERMEDIATE directly is legitimate and must work: a trust anchor is a name
+    // and a key (RFC 5280 6.1.1), not necessarily a self-signed certificate, and putting WE1 in
+    // the store is an explicit statement that WE1 is trusted. This assertion used to expect 0,
+    // which was not a security property but an accident of requiring the TOP of the chain to be
+    // signed by a root: WE1 does not sign itself, so it could never anchor its own leaf.
     c_roots[0] = c_we1
-    assert_eq(x509_verify_chain(c_chain, 2, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 0)
+    assert_eq(x509_verify_chain(c_chain, 2, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 1)
+    // But an unrelated CA in the store anchors nothing, which is the property that assertion was
+    // reaching for: GTS Root R4 signs WE1, it does not sign the leaf, so a chain of just the leaf
+    // has no path to it.
+    c_roots[0] = c_gtsr4
+    assert_eq(x509_verify_chain(c_chain, 1, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 0)
     // an empty chain is rejected
     assert_eq(x509_verify_chain(c_chain, 0, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 0)
 }
@@ -117,4 +133,44 @@ test "x509 chain: a CA anchor without keyCertSign is rejected" {
     c_chain[0] = c_ncs
     c_roots[0] = c_ncs
     assert_eq(x509_verify_chain(c_chain, 1, c_roots, 1, c_host, cseth("nocertsign.test"), "20270101000000"), 0)
+}
+
+// A server may append certificates ABOVE the trust anchor. Every public CA does it: the last
+// link is the anchor cross-signed by an older root, so that a client whose store predates the
+// new root can still build a path. A client that insists the TOP of the presented chain be
+// signed by a trusted root rejects those servers outright, even though the anchor is sitting
+// right there in the middle of the chain and every link below it verifies.
+//
+// This is not a corner case. It is what three real servers did (Cloudflare-fronted hosts and
+// an API sandbox) while every one of them passed the handshake and the identity check, and it
+// is the same shape as the AddTrust expiry that broke a large part of the web in 2020: the
+// certificate past the anchor was expired, and only the clients that kept reading it failed.
+test "x509 chain: a certificate above the trust anchor is ignored" {
+    cload(LEAF_HEX, c_leaf)
+    cload(WE1_HEX, c_we1)
+    cload(GTSR4_HEX, c_gtsr4)
+    cload(CROSSR4_HEX, c_crossr4)
+    c_chain[0] = c_leaf
+    c_chain[1] = c_we1
+    c_chain[2] = c_crossr4           // GTS Root R4 as issued by GlobalSign, which we do NOT trust
+    c_roots[0] = c_gtsr4             // we trust GTS Root R4 itself, and it signs WE1
+    assert_eq(x509_verify_chain(c_chain, 3, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 1)
+    // and the anchor still has to be reached through verified links: break the host and it fails
+    assert_eq(x509_verify_chain(c_chain, 3, c_roots, 1, c_host, cseth("evil.example"), "20260901000000"), 0)
+    // with nothing trusted, three certificates are no better than two
+    assert_eq(x509_verify_chain(c_chain, 3, c_roots, 0, c_host, cseth("cloudflare.com"), "20260901000000"), 0)
+}
+
+// The anchor may also be the LAST certificate presented, which is what a server sends when it
+// includes its own self-signed root. Reaching it must still work, and must still be a real
+// verification rather than "it is the last one, trust it".
+test "x509 chain: the trust anchor may be the last certificate presented" {
+    cload(LEAF_HEX, c_leaf)
+    cload(WE1_HEX, c_we1)
+    cload(GTSR4_HEX, c_gtsr4)
+    c_chain[0] = c_leaf
+    c_chain[1] = c_we1
+    c_chain[2] = c_gtsr4
+    c_roots[0] = c_gtsr4
+    assert_eq(x509_verify_chain(c_chain, 3, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 1)
 }

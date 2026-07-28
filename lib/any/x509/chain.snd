@@ -38,34 +38,44 @@ fn x509_verify_chain(certs: i64, count: i64, roots: i64, nroots: i64,
     if x509_hostname_matches(certs[0], 0, host, hostlen) != 1 { return 0 }
     if x509_eku_serverauth_ok(certs[0], 0) != 1 { return 0 }
     if x509_keyusage_allows(certs[0], 0, 0x80) != 1 { return 0 }
-    // every presented certificate must be inside its validity window
+    // Walk UP from the leaf and stop at the first certificate a trusted root signs. Everything
+    // above that point is ignored, which is not laxness, it is what path validation means: the
+    // anchor ends the path (RFC 5280 6.1), and the certificates a server appends past it are a
+    // compatibility courtesy for clients whose store predates the current root.
+    //
+    // Requiring the TOP of the presented chain to be signed by a root instead rejects most of
+    // the public web, because nearly every CA appends its root cross-signed by an older one, and
+    // that older root is precisely what a modern store no longer carries. It is also how the
+    // AddTrust expiry took down a large part of the internet in 2020: the certificate past the
+    // anchor had expired, and only the clients that insisted on reading it broke.
     let mut i = 0
     for i < count {
+        // Validity is checked as the path is walked, so an expired certificate ABOVE the anchor
+        // is never looked at, exactly like its signature.
         if x509_valid_at(certs[i], 0, now14) != 1 { return 0 }
-        i = i + 1
-    }
-    // each link must be signed by the next certificate up the chain, and that issuer must be a
-    // CA (basicConstraints cA TRUE): a non-CA certificate must never be trusted to sign another.
-    i = 0
-    for i + 1 < count {
+
+        // Anchored here? The root must be a currently-valid CA whose keyUsage (if present)
+        // permits keyCertSign, and it must actually have signed this certificate.
+        let mut j = 0
+        for j < nroots {
+            if x509_is_ca(roots[j], 0) == 1 {
+                if x509_keyusage_allows(roots[j], 0, 0x04) == 1 {
+                    if x509_valid_at(roots[j], 0, now14) == 1 {
+                        if x509_verify(certs[i], 0, roots[j], 0) == 1 { return 1 }
+                    }
+                }
+            }
+            j = j + 1
+        }
+
+        // Not anchored: the next certificate up must be a CA (basicConstraints cA TRUE, since a
+        // non-CA must never be trusted to sign another) that permits keyCertSign and signs this
+        // one. If there is no next certificate, the path reaches nothing trusted.
+        if i + 1 >= count { return 0 }
         if x509_is_ca(certs[i + 1], 0) != 1 { return 0 }
         if x509_keyusage_allows(certs[i + 1], 0, 0x04) != 1 { return 0 }   // keyCertSign
         if x509_verify(certs[i], 0, certs[i + 1], 0) != 1 { return 0 }
         i = i + 1
-    }
-    // the top of the chain must be signed by a trusted root that is a currently-valid CA whose
-    // keyUsage (if present) permits keyCertSign.
-    let top = certs[count - 1]
-    let mut j = 0
-    for j < nroots {
-        if x509_is_ca(roots[j], 0) == 1 {
-            if x509_keyusage_allows(roots[j], 0, 0x04) == 1 {
-                if x509_valid_at(roots[j], 0, now14) == 1 {
-                    if x509_verify(top, 0, roots[j], 0) == 1 { return 1 }
-                }
-            }
-        }
-        j = j + 1
     }
     0
 }
