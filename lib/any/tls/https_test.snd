@@ -660,3 +660,124 @@ test "http request: the body is NOT checked, because a body may hold anything" {
     let n = tls_req_end(r_buf, tls_req_start(r_buf, "POST", "/", "h"), "a\r\nb", 4)
     assert_eq(r_is(r_buf, n, "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\nConnection: close\r\n\r\na\r\nb"), 1)
 }
+
+test "chunked: a body split across chunks is joined back exactly" {
+    // "Wiki" + "pedia" in two chunks, then the zero chunk that ends the body.
+    let n = tls_put_str(r_buf, 0, "4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n")
+    let len = tls_dechunk(r_buf, 0, n)
+    assert_eq(len, 9)
+    assert_eq(r_is(r_buf, len, "Wikipedia"), 1)
+}
+
+test "chunked: the size is hexadecimal, not decimal" {
+    // 0x10 is sixteen bytes; reading it as ten would truncate the body.
+    let n = tls_put_str(r_buf, 0, "10\r\n0123456789abcdef\r\n0\r\n\r\n")
+    assert_eq(tls_dechunk(r_buf, 0, n), 16)
+    assert_eq(r_is(r_buf, 16, "0123456789abcdef"), 1)
+}
+
+test "chunked: a chunk may carry arbitrary bytes, NUL included" {
+    poke8(r_body + 0, 65)
+    poke8(r_body + 1, 0)
+    poke8(r_body + 2, 66)
+    let mut o = tls_put_str(r_buf, 0, "3\r\n")
+    o = o + 0
+    poke8(r_buf + o, 65)
+    poke8(r_buf + o + 1, 0)
+    poke8(r_buf + o + 2, 66)
+    let n = tls_put_str(r_buf, o + 3, "\r\n0\r\n\r\n")
+    assert_eq(tls_dechunk(r_buf, 0, n), 3)
+    assert_eq(peek8(r_buf + 0), 65)
+    assert_eq(peek8(r_buf + 1), 0)
+    assert_eq(peek8(r_buf + 2), 66)
+}
+
+test "chunked: chunk extensions after the size are ignored" {
+    let n = tls_put_str(r_buf, 0, "4;name=value\r\nWiki\r\n0\r\n\r\n")
+    assert_eq(tls_dechunk(r_buf, 0, n), 4)
+    assert_eq(r_is(r_buf, 4, "Wiki"), 1)
+}
+
+test "chunked: decoding starts where the caller says, leaving the headers alone" {
+    let head = tls_put_str(r_buf, 0, "HTTP/1.1 200 OK\r\n\r\n")
+    let n = tls_put_str(r_buf, head, "4\r\nWiki\r\n0\r\n\r\n")
+    let len = tls_dechunk(r_buf, head, n)
+    assert_eq(len, 4)
+    assert_eq(r_is(r_buf, head, "HTTP/1.1 200 OK\r\n\r\n"), 1)   // cabeceras intactas
+    assert_eq(peek8(r_buf + head), 87)                           // 'W'
+}
+
+test "chunked: a truncated body yields what actually arrived, not past the end" {
+    // The peer announced eight bytes and sent four before dying.
+    let n = tls_put_str(r_buf, 0, "8\r\nWiki")
+    assert_eq(tls_dechunk(r_buf, 0, n), 4)
+}
+
+test "chunked: an empty body decodes to nothing" {
+    let n = tls_put_str(r_buf, 0, "0\r\n\r\n")
+    assert_eq(tls_dechunk(r_buf, 0, n), 0)
+}
+
+test "chunked: a chunked body is recognised from the headers, a plain one is not" {
+    let h1 = tls_put_str(r_buf, 0, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, h1), 1)
+    let h2 = tls_put_str(r_buf, 0, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, h2), 0)
+}
+
+test "chunked: an upper-case hex size is read the same as a lower-case one" {
+    let n = tls_put_str(r_buf, 0, "A\r\n0123456789\r\n0\r\n\r\n")
+    assert_eq(tls_dechunk(r_buf, 0, n), 10)
+    assert_eq(r_is(r_buf, 10, "0123456789"), 1)
+}
+
+test "chunked: a body with no size line at all decodes to nothing" {
+    let n = tls_put_str(r_buf, 0, "\r\nWiki")
+    assert_eq(tls_dechunk(r_buf, 0, n), 0)
+}
+
+test "chunked: a filename that merely contains the word is NOT a chunked body" {
+    // An API delivering a document sends Content-Disposition with a filename, and reading
+    // "chunked" there would decode a body that was never chunked: tls_dechunk returns 0 on
+    // it, so the caller writes an EMPTY file and nothing complains.
+    let h = tls_put_str(r_buf, 0,
+        "HTTP/1.1 200 OK\r\nContent-Disposition: attachment; filename=informe-chunked.pdf\r\nContent-Length: 9\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, h), 0)
+}
+
+test "chunked: the header name is matched without regard to case, anywhere in the block" {
+    let h = tls_put_str(r_buf, 0,
+        "HTTP/1.1 200 OK\r\nServer: x\r\nTrAnSfEr-EnCoDiNg: Chunked\r\nDate: today\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, h), 1)
+}
+
+test "chunked: a list of encodings ending in chunked still counts" {
+    let h = tls_put_str(r_buf, 0, "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, h), 1)
+}
+
+test "chunked: the search stops at the end of the Transfer-Encoding line" {
+    // The word sits in a LATER header, so a search that runs past the end of the line it
+    // belongs to would find it and decode a body that is not chunked.
+    let h = tls_put_str(r_buf, 0,
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\nX-Note: chunked\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, h), 0)
+    // ...and the reverse order too: the word before the header must not count either.
+    let h2 = tls_put_str(r_buf, 0,
+        "HTTP/1.1 200 OK\r\nX-Note: chunked\r\nTransfer-Encoding: identity\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, h2), 0)
+}
+
+test "chunked: nothing is read past the end of the header block" {
+    // hdrend falls INSIDE the word "chunked": what comes after it is the next response in
+    // the buffer, not this one's headers, and comparing into it would answer with somebody
+    // else's data.
+    let full = tls_put_str(r_buf, 0, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, full), 1)
+    assert_eq(tls_is_chunked(r_buf, 40), 0)          // corta a mitad de "chunked"
+}
+
+test "chunked: an upper-case hex letter is a digit too" {
+    let n = tls_put_str(r_buf, 0, "F\r\n123456789012345\r\n0\r\n\r\n")
+    assert_eq(tls_dechunk(r_buf, 0, n), 15)
+}
