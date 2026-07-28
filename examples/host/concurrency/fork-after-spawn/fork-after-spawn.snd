@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// A process that forks while a spawned thread is still running. The child of a
+// fork gets a copy of the address space but only ONE thread, the one that called
+// fork -- so every join cell it inherits names a thread that does not exist in
+// it. The structured join must notice that and skip, or the child blocks in
+// futex_wait forever and the program leaks one stuck process per fork, which is
+// exactly the shape a relay that forks per connection would take.
+//
+// The worker burns enough CPU to still be alive at the fork, so the child
+// reliably inherits a join cell with the sentinel still set. The parent reaps the
+// child with WNOHANG on a bounded retry: a child that never exits is the failure,
+// and reporting it beats hanging the example.
+
+let SYS_write_fas = 1
+let SYS_fork_fas = 57
+let SYS_exit_fas = 60
+let SYS_wait4_fas = 61
+let SYS_nanosleep_fas = 35
+let WNOHANG_fas = 1
+
+fn burn(flag: i64) -> i64 {
+    let mut acc = 0
+    let mut i = 0
+    for i < 40000000 { acc = acc + i; i = i + 1 }
+    poke64(flag, acc)
+    0
+}
+
+// Spawns a thread and forks while it runs. Both processes return through this
+// function's epilogue, which is where the structured join happens.
+fn spawn_then_fork(flag: i64) -> i64 {
+    spawn burn(flag)
+    syscall(SYS_fork_fas)
+}
+
+// Sleeps for 20 ms.
+fn nap() {
+    let ts[2]
+    poke64(ts, 0)
+    poke64(ts + 8, 20000000)
+    syscall(SYS_nanosleep_fas, ts, 0)
+}
+
+fn main() -> i64 {
+    let f[1]
+    poke64(f, 0)
+
+    let pid = spawn_then_fork(f)
+    if pid == 0 {
+        // The child got here, so its join did not block on a thread it does not
+        // have. Report that through the exit status the parent reads.
+        syscall(SYS_exit_fas, 7)
+    }
+
+    // Parent: the child does almost no work, so a second of retries is generous.
+    let st[1]
+    let mut tries = 0
+    let mut reaped = 0
+    for tries < 50 {
+        poke64(st, 0)
+        if syscall(SYS_wait4_fas, pid, st, WNOHANG_fas, 0) == pid { reaped = 1; break }
+        nap()
+        tries = tries + 1
+    }
+
+    if reaped == 0 {
+        write(1, "FAIL the forked child never exited (stuck in the inherited join)\n")
+        return 1
+    }
+    if (peek64(st) >>> 8) & 0xff != 7 {
+        write(1, "FAIL the forked child exited with the wrong status\n")
+        return 1
+    }
+    write(1, "OK fork after spawn does not hang the child\n")
+    0
+}

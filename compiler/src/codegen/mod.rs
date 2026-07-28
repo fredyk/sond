@@ -889,6 +889,11 @@ struct Codegen {
     spawn_ctids: Vec<String>,
     /// Every ctid cell across the whole program, emitted as `.quad 0` in `.bss`.
     all_ctids: Vec<String>,
+    /// One owner-pid cell per spawn site: the pid of the process that started that thread,
+    /// stored just before the clone. `fork` copies the address space, so a forked child inherits
+    /// every join cell of its parent while inheriting none of the threads; comparing this against
+    /// the joining process's own pid is what tells the two apart. See `owner_cell`.
+    all_owner_cells: Vec<String>,
     /// Result cells for `par`-let peers: a spawned peer stores its return value here before it
     /// exits, and the parent reads it after the join binds it to a name. One per `par`-let peer
     /// site across the whole program, emitted as `.quad 0` alongside the ctid cells.
@@ -1278,6 +1283,13 @@ impl Codegen {
     /// tears it out from under a live thread; the symptom is corruption, not a clean error. Put the
     /// spawns in their own function and release in the caller, which only resumes once the join is
     /// done. The capability system will make the wrong version a compile error (RFC-0010 section 7).
+    /// The owner-pid cell paired with a spawn site's ctid cell. Derived from the name rather than
+    /// carried alongside it because the two are allocated together and never separately, and the
+    /// join receives only the ctid names.
+    fn owner_cell(ctid: &str) -> String {
+        ctid.replace("sond_ctid_", "sond_owner_")
+    }
+
     /// Emits the futex-join for each clear_child_tid `cell`: wait until the kernel clears it to 0
     /// at the child thread's exit. Does NOT preserve %rax; a caller that needs a value across the
     /// join saves it (the scope-exit join wraps this in push/pop %rax, `par` has no value yet).
@@ -1286,6 +1298,13 @@ impl Codegen {
             // tid = [cell]; while tid != 0 { futex(cell, FUTEX_WAIT, tid, NULL); tid = [cell] }
             let wait = self.fresh_label("join_wait");
             let done = self.fresh_label("join_done");
+            // First: is this even our thread to wait for? A forked child inherited the cell but
+            // not the thread, so joining would block forever on a wake that cannot come. Checked
+            // once, outside the retry loop: the pid cannot change under us.
+            self.line("    movq $39, %rax"); // SYS_getpid
+            self.line("    syscall");
+            self.line(&format!("    cmpq {}(%rip), %rax", Self::owner_cell(cell)));
+            self.line(&format!("    jne {done}"));
             self.line(&format!("{wait}:"));
             self.line(&format!("    movq {cell}(%rip), %rdx")); // rdx = expected tid
             self.line("    testq %rdx, %rdx");
@@ -1483,6 +1502,7 @@ impl Codegen {
         let argspace = (n as i64 * 8 + 15) & !15;
         self.uses_spawn = true;
         let cell = format!("sond_ctid_{}", self.all_ctids.len());
+        self.all_owner_cells.push(Self::owner_cell(&cell));
         self.all_ctids.push(cell.clone());
         self.spawn_ctids.push(cell.clone());
 
@@ -1526,6 +1546,18 @@ impl Codegen {
         // read 0 and skip the wait entirely. A sentinel written before the clone is reliably 1 (set
         // by the parent) or 0 (cleared by the kernel), and depends on neither ordering.
         self.line(&format!("    movq $1, {cell}(%rip)"));
+
+        // Record WHICH PROCESS owns this thread, for the join to check. `fork` copies the address
+        // space but only the calling thread, so a forked child inherits this cell with the
+        // sentinel still set while the thread it names does not exist in it: without the owner
+        // check the child's join would futex-wait on something the kernel will never wake, and a
+        // program that forks per connection would leak one stuck process per connection. getpid
+        // returns the thread group id, identical in every thread of a process and different in a
+        // forked child, which is exactly the distinction needed. Clobbers %rax/%rcx/%r11, all dead
+        // here; %rsi (the child stack) is untouched.
+        self.line("    movq $39, %rax"); // SYS_getpid
+        self.line("    syscall");
+        self.line(&format!("    movq %rax, {}(%rip)", Self::owner_cell(&cell)));
 
         // clone(flags, child_stack, ptid=0, ctid=&cell, tls=0).
         // CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|CHILD_CLEARTID.
@@ -1605,6 +1637,12 @@ impl Codegen {
         }
         // One clear_child_tid cell per spawn site, zeroed (no live thread yet).
         for cell in ctids {
+            self.line(&format!("{cell}: .quad 0"));
+        }
+        // The pid that started each of those threads. Zero until the spawn runs, which no real
+        // pid ever is, so a join over a site that never executed skips instead of waiting.
+        let owners = std::mem::take(&mut self.all_owner_cells);
+        for cell in owners {
             self.line(&format!("{cell}: .quad 0"));
         }
         // One result cell per `par`-let peer site, where the peer stores its return value.
