@@ -469,3 +469,50 @@ test "tls https: the GET request is a complete, terminated HTTP request" {
     assert_eq(peek8(hr_buf + n - 2), 13)
     assert_eq(peek8(hr_buf + n - 1), 10)
 }
+
+// `tls_read` returning 0 says "no more data", which is true both when the peer finishes politely
+// and when it refuses. Those mean opposite things to a caller: one is a completed response, the
+// other is a rejection to report. The session now records the alert it saw, so the two can be
+// told apart; the loopback server ends with a close_notify, exactly as a real one does.
+test "tls https: a close_notify is distinguishable from a bare end of data" {
+    let certlen = hload(CERT_HEX, h_cert)
+    hload(D_HEX, h_d)
+    h_roots[0] = h_cert
+    let mut i = 0
+    for i < 32 { poke8(h_k + i, 0x33 + i); i = i + 1 }
+
+    let port = 55499
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        h_serve(afd, certlen)
+        close_fd(afd)
+        syscall(SYS_exit, 0)
+    }
+
+    let sess = tls_connect("127.0.0.1", port, "sond.test", 9, "http/1.1", 8, h_roots, 1, "20270101000000")
+    assert_eq(sess != 0, 1)
+    assert_eq(tls_sess_alert(sess), 0 - 1)            // nothing has gone wrong yet
+    let req[512]
+    let rq = tls_http_req("sond.test", 9, "/", 1, req)
+    tls_write(sess, req, rq)
+    let rbuf[4096]
+    let mut n = tls_read(sess, rbuf, 20000)
+    for n > 0 { n = tls_read(sess, rbuf, 20000) }
+    // The read ended at 0, and the session says WHY: the server's close_notify, level 1
+    // (warning), description 0. A fatal alert would read level 2 here, and a peer that simply
+    // vanished would leave -1.
+    assert_eq(tls_sess_alert(sess), 256)
+    tls_close(sess)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
