@@ -516,3 +516,105 @@ test "tls https: a close_notify is distinguishable from a bare end of data" {
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
 }
+
+// ── HTTP/1.1 request builder ─────────────────────────────────────────────────────────────
+// Every assertion below compares the BYTES of the request that was built, never its length
+// alone: a correct length over the wrong string passes a length check and still puts a
+// broken request on the wire, which is the class of bug that once sent a request without
+// its final blank line.
+
+let mut r_buf[2048]
+let mut r_body[64]
+
+// 1 if buf[0..n] is byte for byte the cstr `want`, INCLUDING its length: a request that
+// merely starts with the expected text is not the expected request.
+fn r_is(buf: i64, n: i64, want: i64) -> i64 {
+    let mut i = 0
+    for i < n {
+        if peek8(want + i) == 0 { return 0 }        // want ran out first: buf is longer
+        if peek8(buf + i) != peek8(want + i) { return 0 }
+        i = i + 1
+    }
+    if peek8(want + n) != 0 { return 0 }            // want is longer than buf
+    1
+}
+
+test "http request: a GET carries the request line, Host and the terminating blank line" {
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, "GET", "/alive", "example.test"), 0, 0)
+    assert_eq(r_is(r_buf, n,
+        "GET /alive HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"), 1)
+}
+
+test "http request: the header block ends with a blank line, not with one CRLF" {
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, "GET", "/", "h"), 0, 0)
+    assert_eq(peek8(r_buf + n - 4), 13)
+    assert_eq(peek8(r_buf + n - 3), 10)
+    assert_eq(peek8(r_buf + n - 2), 13)
+    assert_eq(peek8(r_buf + n - 1), 10)
+}
+
+test "http request: headers are appended in order, each on its own line" {
+    let mut o = tls_req_start(r_buf, "GET", "/x", "api.test")
+    o = tls_req_header(r_buf, o, "Accept", "application/json")
+    o = tls_req_header(r_buf, o, "Authorization", "Basic dXNlcjpwYXNz")
+    let n = tls_req_end(r_buf, o, 0, 0)
+    assert_eq(r_is(r_buf, n,
+        "GET /x HTTP/1.1\r\nHost: api.test\r\nAccept: application/json\r\nAuthorization: Basic dXNlcjpwYXNz\r\nConnection: close\r\n\r\n"), 1)
+}
+
+test "http request: a body gets a computed Content-Length, never one the caller supplies" {
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, "POST", "/set", "api.test"), "{\"a\":1}", 7)
+    assert_eq(r_is(r_buf, n,
+        "POST /set HTTP/1.1\r\nHost: api.test\r\nContent-Length: 7\r\nConnection: close\r\n\r\n{\"a\":1}"), 1)
+}
+
+test "http request: Content-Length counts the bytes given, not the text of the body" {
+    // 128 bytes of body would be three digits; the length must follow bodylen, not a guess.
+    let mut i = 0
+    for i < 40 { poke8(r_body + i, 65); i = i + 1 }
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, "PUT", "/f", "h"), r_body, 40)
+    assert_eq(r_is(r_buf, n,
+        "PUT /f HTTP/1.1\r\nHost: h\r\nContent-Length: 40\r\nConnection: close\r\n\r\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 1)
+}
+
+test "http request: the body may hold arbitrary bytes, NUL included" {
+    // A PDF upload is binary: a NUL is data, and stopping there would truncate the body.
+    poke8(r_body + 0, 37)                            // '%'
+    poke8(r_body + 1, 0)                             // NUL in the middle
+    poke8(r_body + 2, 80)                            // 'P'
+    let start = tls_req_start(r_buf, "PUT", "/u", "h")
+    let n = tls_req_end(r_buf, start, r_body, 3)
+    assert_eq(peek8(r_buf + n - 3), 37)
+    assert_eq(peek8(r_buf + n - 2), 0)
+    assert_eq(peek8(r_buf + n - 1), 80)
+    // ...and the length announced is the one that was passed, so the peer reads all three.
+    assert_eq(r_is(r_buf, n - 3, "PUT /u HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nConnection: close\r\n\r\n"), 1)
+}
+
+test "http request: an empty body carries no Content-Length at all" {
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, "GET", "/", "h"), r_body, 0)
+    assert_eq(r_is(r_buf, n, "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"), 1)
+}
+
+test "http request: a long body announces every digit of its length" {
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, "POST", "/", "h"), r_body, 1024)
+    // Only the header block is checked here; the body bytes come from r_body's 64 bytes.
+    let mut i = 0
+    let want = "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n"
+    for peek8(want + i) != 0 {
+        assert_eq(peek8(r_buf + i), peek8(want + i))
+        i = i + 1
+    }
+    assert_eq(n, i + 1024)
+}
+
+test "http request: the decimal writer handles zero and a many-digit value" {
+    // Content-Length never asks for zero (an empty body carries no header at all), but the
+    // helper is reachable on its own and zero is the case a digit loop silently drops.
+    let n0 = tls_put_uint(r_buf, 0, 0)
+    assert_eq(n0, 1)
+    assert_eq(peek8(r_buf), 48)
+    let n1 = tls_put_uint(r_buf, 0, 1048576)
+    assert_eq(n1, 7)
+    assert_eq(r_is(r_buf, n1, "1048576"), 1)
+}
