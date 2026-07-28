@@ -735,3 +735,49 @@ test "chunked: a body with no size line at all decodes to nothing" {
     let n = tls_put_str(r_buf, 0, "\r\nWiki")
     assert_eq(tls_dechunk(r_buf, 0, n), 0)
 }
+
+test "chunked: a filename that merely contains the word is NOT a chunked body" {
+    // An API delivering a document sends Content-Disposition with a filename, and reading
+    // "chunked" there would decode a body that was never chunked: tls_dechunk returns 0 on
+    // it, so the caller writes an EMPTY file and nothing complains.
+    let h = tls_put_str(r_buf, 0,
+        "HTTP/1.1 200 OK\r\nContent-Disposition: attachment; filename=informe-chunked.pdf\r\nContent-Length: 9\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, h), 0)
+}
+
+test "chunked: the header name is matched without regard to case, anywhere in the block" {
+    let h = tls_put_str(r_buf, 0,
+        "HTTP/1.1 200 OK\r\nServer: x\r\nTrAnSfEr-EnCoDiNg: Chunked\r\nDate: today\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, h), 1)
+}
+
+test "chunked: a list of encodings ending in chunked still counts" {
+    let h = tls_put_str(r_buf, 0, "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, h), 1)
+}
+
+test "chunked: the search stops at the end of the Transfer-Encoding line" {
+    // The word sits in a LATER header, so a search that runs past the end of the line it
+    // belongs to would find it and decode a body that is not chunked.
+    let h = tls_put_str(r_buf, 0,
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\nX-Note: chunked\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, h), 0)
+    // ...and the reverse order too: the word before the header must not count either.
+    let h2 = tls_put_str(r_buf, 0,
+        "HTTP/1.1 200 OK\r\nX-Note: chunked\r\nTransfer-Encoding: identity\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, h2), 0)
+}
+
+test "chunked: nothing is read past the end of the header block" {
+    // hdrend falls INSIDE the word "chunked": what comes after it is the next response in
+    // the buffer, not this one's headers, and comparing into it would answer with somebody
+    // else's data.
+    let full = tls_put_str(r_buf, 0, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+    assert_eq(tls_is_chunked(r_buf, full), 1)
+    assert_eq(tls_is_chunked(r_buf, 40), 0)          // corta a mitad de "chunked"
+}
+
+test "chunked: an upper-case hex letter is a digit too" {
+    let n = tls_put_str(r_buf, 0, "F\r\n123456789012345\r\n0\r\n\r\n")
+    assert_eq(tls_dechunk(r_buf, 0, n), 15)
+}

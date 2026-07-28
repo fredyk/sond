@@ -112,19 +112,48 @@ fn tls_dechunk(buf: i64, start: i64, n: i64) -> i64 {
     w - start
 }
 
-// 1 if the response headers ending at `hdrend` announce a chunked body. The word can only
-// appear in the header block: the body starts after it.
+// `c` folded to lower case, for the comparisons where case carries no meaning: header names
+// do not distinguish it, and neither do the transfer codings.
+fn tls_lower(c: i64) -> i64 {
+    if c >= 65 && c <= 90 { return c + 32 }
+    c
+}
+
+// 1 if the NUL-terminated `word` sits at `buf + pos`, compared without regard to case and
+// without running past `end`.
+fn tls_word_at(buf: i64, pos: i64, end: i64, word: i64) -> i64 {
+    let mut j = 0
+    for peek8(word + j) != 0 {
+        if pos + j >= end { return 0 }
+        if tls_lower(peek8(buf + pos + j)) != tls_lower(peek8(word + j)) { return 0 }
+        j = j + 1
+    }
+    1
+}
+
+// 1 if the response headers ending at `hdrend` announce a chunked body.
+//
+// The word is looked for in the VALUE of Transfer-Encoding, never anywhere in the block: an
+// API delivering a document sends Content-Disposition with a filename, and a file called
+// informe-chunked.pdf would otherwise be read as a chunked response. That mistake is not a
+// wrong download, it is an EMPTY one — decoding a body that was never chunked yields zero
+// bytes, so the caller writes an empty file and nothing reports a thing.
 fn tls_is_chunked(buf: i64, hdrend: i64) -> i64 {
     let mut i = 0
-    for i + 7 < hdrend {
-        if peek8(buf + i) == 99 {                   // 'c'
-            let mut j = 0
-            let word = "chunked"
-            for peek8(word + j) != 0 {
-                if peek8(buf + i + j) != peek8(word + j) { break }
-                j = j + 1
+    for i < hdrend {
+        // A header line starts at the beginning of the block or right after a CRLF; the
+        // status line is skipped by the same rule.
+        let at_line = if i == 0 { 0 } else { peek8(buf + i - 1) == 10 }
+        if at_line == 1 {
+            if tls_word_at(buf, i, hdrend, "transfer-encoding:") == 1 {
+                let mut p = i + 18                  // past the colon
+                for p < hdrend {                    // ...to the end of THIS line only
+                    if peek8(buf + p) == 13 { return 0 }
+                    if tls_word_at(buf, p, hdrend, "chunked") == 1 { return 1 }
+                    p = p + 1
+                }
+                return 0
             }
-            if peek8(word + j) == 0 { return 1 }
         }
         i = i + 1
     }
