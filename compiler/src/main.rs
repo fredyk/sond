@@ -233,6 +233,10 @@ fn main() -> ExitCode {
         eprintln!("sondc: {msg}");
         std::process::exit(1);
     }
+    if let Err(msg) = sondc::check::check_syscall_retry_has_an_exit(&funcs) {
+        eprintln!("sondc: {msg}");
+        std::process::exit(1);
+    }
     if let Err(msg) = sondc::check::check_receiver_kinds(&funcs) {
         eprintln!("sondc: {msg}");
         return ExitCode::FAILURE;

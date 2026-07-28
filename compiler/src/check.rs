@@ -214,6 +214,20 @@ fn nested_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
     }
 }
 
+/// Every block nested inside a BLOCK: through its statements, and through its TAIL expression.
+///
+/// The tail is the block's value (`{ let r = ..\n if r > 0 { .. } }` parses the `if` as the tail,
+/// not as a statement), so a walk over `stmts` alone silently skips whatever the author wrote
+/// last, which for a loop body or a function body is very often the interesting part.
+fn nested_blocks_of_block<'a>(b: &'a Block, out: &mut Vec<&'a Block>) {
+    for s in &b.stmts {
+        nested_blocks_of_stmt(s, out);
+    }
+    if let Some(t) = &b.tail {
+        nested_blocks(t, out);
+    }
+}
+
 /// Every block reachable from a statement's own expressions (its `for` body is separate: a caller
 /// that tracks loop nesting needs to treat that one differently).
 fn nested_blocks_of_stmt<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
@@ -250,14 +264,184 @@ fn nested_blocks_of_stmt<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
     }
 }
 
+/// Rejects a retry loop that never looks at WHY its syscall failed.
+///
+/// The shape: a loop whose only way out is a counter that ONLY advances when the syscall
+/// succeeded, with no `break` and no `return` anywhere in the body. A short read is real and
+/// retrying it is right, but a syscall that FAILS returns immediately instead of blocking, so the
+/// loop stops being a wait and becomes a spin at syscall speed. It is silent by nature: no error,
+/// no hang, no crash, just a core at 100% and a program that never finishes what it was doing.
+///
+/// This family cost a full day of production across six separate instances in one week: two fill
+/// loops over `getrandom` (`tls_random`, `pg_random`), and a futex retry that burned 743% of CPU
+/// on machines at rest. Every one of them was written by someone who knew better; the shape is
+/// just very easy to write and impossible to see. That is what makes it a compiler's job.
+///
+/// Deliberately narrow, so a diagnostic never fires on correct code: it needs a DIRECT `syscall`
+/// binding in the body, every update to the loop counter guarded by a condition on that result,
+/// and no `break` or `return` at all. Any of those absent means the author has an exit and this
+/// says nothing.
+pub fn check_syscall_retry_has_an_exit(funcs: &[Function]) -> Result<(), String> {
+    // Does this expression name `v` anywhere?
+    fn mentions(e: &Expr, v: &str) -> bool {
+        match e {
+            Expr::Var(n) => n == v,
+            Expr::Field(b, _) | Expr::Unary(_, b) | Expr::Cast(b, _) => mentions(b, v),
+            Expr::Binary(_, a, b) | Expr::Index(a, b) => mentions(a, v) || mentions(b, v),
+            Expr::Call(c, args) => mentions(c, v) || args.iter().any(|a| mentions(&a.value, v)),
+            Expr::List(xs) => xs.iter().any(|x| mentions(x, v)),
+            Expr::If { cond, .. } => mentions(cond, v),
+            _ => false,
+        }
+    }
+    fn is_syscall(e: &Expr) -> bool {
+        matches!(e, Expr::Call(c, _) if matches!(c.as_ref(), Expr::Var(n) if n == "syscall"))
+    }
+    // Any `break` or `return` in the body (at any depth) means there is a way out that does not
+    // depend on the counter, so this check stays quiet.
+    fn has_an_exit(b: &Block) -> bool {
+        let in_stmts = b.stmts.iter().any(|s| match s {
+            Stmt::Break | Stmt::Return(_) => true,
+            Stmt::For { body, .. } => has_an_exit(body),
+            _ => {
+                let mut inner = Vec::new();
+                nested_blocks_of_stmt(s, &mut inner);
+                inner.iter().any(|blk| has_an_exit(blk))
+            }
+        });
+        if in_stmts {
+            return true;
+        }
+        let mut inner = Vec::new();
+        if let Some(t) = &b.tail {
+            nested_blocks(t, &mut inner);
+        }
+        inner.iter().any(|blk| has_an_exit(blk))
+    }
+    // Every assignment to `counter` in this block, paired with whether it sits under a condition
+    // that mentions the syscall result.
+    fn assignments_to(b: &Block, counter: &str, result: &str, guarded: bool, out: &mut Vec<bool>) {
+        for s in &b.stmts {
+            if let Stmt::Assign { target, .. } = s
+                && let Expr::Var(n) = target
+                && n == counter
+            {
+                out.push(guarded);
+            }
+            if let Stmt::Expr(Expr::If { cond, then_branch, else_branch }) = s {
+                let g = guarded || mentions(cond, result);
+                assignments_to(then_branch, counter, result, g, out);
+                if let Some(eb) = else_branch {
+                    assignments_to(eb, counter, result, g, out);
+                }
+                continue;
+            }
+            let mut inner = Vec::new();
+            nested_blocks_of_stmt(s, &mut inner);
+            for blk in inner {
+                assignments_to(blk, counter, result, guarded, out);
+            }
+        }
+        // The tail: `for got < n { let r = ..\n if r > 0 { got = got + r } }` puts the guarded
+        // update HERE, not in stmts, which is exactly the shape being looked for.
+        if let Some(t) = &b.tail
+            && let Expr::If { cond, then_branch, else_branch } = t.as_ref()
+        {
+            let g = guarded || mentions(cond, result);
+            assignments_to(then_branch, counter, result, g, out);
+            if let Some(eb) = else_branch {
+                assignments_to(eb, counter, result, g, out);
+            }
+        }
+    }
+    fn walk(stmts: &[Stmt], fname: &str) -> Result<(), String> {
+        for s in stmts {
+            if let Stmt::For { cond: Some(cond), body, .. } = s {
+                // The loop's own exit variable, and the name bound to a direct syscall result.
+                let mut result: Option<&str> = None;
+                for bs in &body.stmts {
+                    if let Stmt::Let { name, value, .. } = bs
+                        && is_syscall(value)
+                    {
+                        result = Some(name);
+                    }
+                }
+                if let Some(result) = result
+                    && !has_an_exit(body)
+                {
+                    // Which variable does the loop condition turn on? Take every name in it.
+                    let mut counters = Vec::new();
+                    collect_expr_vars_local(cond, &mut counters);
+                    for c in counters {
+                        let mut updates = Vec::new();
+                        assignments_to(body, &c, result, false, &mut updates);
+                        if !updates.is_empty() && updates.iter().all(|g| *g) {
+                            return Err(format!(
+                                "function `{fname}`: this loop retries `syscall` forever without \
+                                 looking at WHY it failed. `{c}` only advances when `{result}` \
+                                 succeeded, and there is no `break` or `return`, so a syscall that \
+                                 FAILS (rather than returning short) spins here at syscall speed: \
+                                 no error, no hang, just a core at 100%. Branch on the failure: \
+                                 retry only what is transient (`-EINTR` is -4) and return the rest."
+                            ));
+                        }
+                    }
+                }
+            }
+            if let Stmt::For { body, .. } = s {
+                walk(&body.stmts, fname)?;
+            }
+            let mut inner = Vec::new();
+            nested_blocks_of_stmt(s, &mut inner);
+            for b in inner {
+                walk(&b.stmts, fname)?;
+            }
+        }
+        Ok(())
+    }
+    for f in funcs {
+        let mut blocks = vec![&f.body];
+        let mut seen = 0;
+        while seen < blocks.len() {
+            let b = blocks[seen];
+            seen += 1;
+            walk(&b.stmts, &f.name)?;
+            let mut inner = Vec::new();
+            nested_blocks_of_block(b, &mut inner);
+            blocks.extend(inner);
+        }
+    }
+    Ok(())
+}
+
+/// Every variable named in an expression (local helper: the module's other collector walks
+/// statements, this one only needs the names inside a loop condition).
+fn collect_expr_vars_local(e: &Expr, out: &mut Vec<String>) {
+    match e {
+        Expr::Var(n) => out.push(n.clone()),
+        Expr::Field(b, _) | Expr::Unary(_, b) | Expr::Cast(b, _) => collect_expr_vars_local(b, out),
+        Expr::Binary(_, a, b) | Expr::Index(a, b) => {
+            collect_expr_vars_local(a, out);
+            collect_expr_vars_local(b, out);
+        }
+        Expr::Call(c, args) => {
+            collect_expr_vars_local(c, out);
+            for a in args {
+                collect_expr_vars_local(&a.value, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Rejects a `spawn` inside a loop (RFC-0010 Layer B). Each spawn site owns one static join
 /// cell that holds the child TID until the structured join at function exit clears it. Spawning
 /// in a loop would overwrite that cell on the next iteration, so the earlier thread would never
 /// be joined: a silent thread leak. Per-iteration join state (a growable set of live threads)
 /// is a later increment; until then this is a compile error, not a footgun.
 pub fn check_spawn_not_in_loop(funcs: &[Function]) -> Result<(), String> {
-    fn walk(stmts: &[Stmt], in_loop: bool, fname: &str) -> Result<(), String> {
-        for s in stmts {
+    fn walk(b: &Block, in_loop: bool, fname: &str) -> Result<(), String> {
+        for s in &b.stmts {
             match s {
                 Stmt::Spawn(_) if in_loop => {
                     return Err(format!(
@@ -267,21 +451,29 @@ pub fn check_spawn_not_in_loop(funcs: &[Function]) -> Result<(), String> {
                          fixed set of threads outside the loop for now."
                     ));
                 }
-                Stmt::For { body, .. } => walk(&body.stmts, true, fname)?,
+                Stmt::For { body, .. } => walk(body, true, fname)?,
                 _ => {}
             }
             // Conditionals and match arms carry the loop nesting into their own blocks; without
             // this the guard is bypassed by the one line every accept loop is written with.
             let mut inner = Vec::new();
             nested_blocks_of_stmt(s, &mut inner);
-            for b in inner {
-                walk(&b.stmts, in_loop, fname)?;
+            for blk in inner {
+                walk(blk, in_loop, fname)?;
+            }
+        }
+        // And the block's TAIL, which is where a conditional written last actually lives.
+        if let Some(t) = &b.tail {
+            let mut inner = Vec::new();
+            nested_blocks(t, &mut inner);
+            for blk in inner {
+                walk(blk, in_loop, fname)?;
             }
         }
         Ok(())
     }
     for f in funcs {
-        walk(&f.body.stmts, false, &f.name)?;
+        walk(&f.body, false, &f.name)?;
     }
     Ok(())
 }
@@ -994,6 +1186,13 @@ pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> 
             // silently does not apply to a conditionally spawned worker.
             let mut inner = Vec::new();
             nested_blocks_of_stmt(s, &mut inner);
+            for blk in inner {
+                spawn_targets(blk, out);
+            }
+        }
+        if let Some(t) = &b.tail {
+            let mut inner = Vec::new();
+            nested_blocks(t, &mut inner);
             for blk in inner {
                 spawn_targets(blk, out);
             }
@@ -3380,6 +3579,74 @@ mod tests {
 }
 
 #[cfg(test)]
+mod syscall_retry_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn check(src: &str) -> Result<(), String> {
+        let funcs = Parser::new(tokenize(src)).parse_program();
+        check_syscall_retry_has_an_exit(&funcs)
+    }
+
+    #[test]
+    fn rejects_a_fill_loop_that_never_looks_at_the_error() {
+        // The exact shape that shipped twice: `got` only advances on success, nothing breaks or
+        // returns, so a syscall that FAILS (not short) spins at syscall speed. Verified in the
+        // real thing before it was fixed: a null buffer made getrandom fail every call and the
+        // test binary hung there burning a core.
+        let e = check(
+            "let SYS_getrandom = 318\n\
+             fn fill(buf: i64, n: i64) { let mut got = 0\n\
+             for got < n { let r = syscall(SYS_getrandom, buf + got, n - got, 0)\n\
+             if r > 0 { got = got + r } } }",
+        );
+        assert!(e.is_err(), "a retry loop with no error branch must be rejected");
+        let msg = e.unwrap_err();
+        assert!(msg.contains("got") && msg.contains("r"), "name the counter and the result: {msg}");
+        assert!(msg.contains("EINTR"), "the error should say what the fix is: {msg}");
+    }
+
+    #[test]
+    fn accepts_a_fill_loop_that_returns_on_a_fatal_error() {
+        // The fixed shape: retry the transient one, report the rest.
+        let ok = check(
+            "let SYS_getrandom = 318\n\
+             fn fill(buf: i64, n: i64) -> i64 { let mut got = 0\n\
+             for got < n { let r = syscall(SYS_getrandom, buf + got, n - got, 0)\n\
+             if r > 0 { got = got + r } else { if r != 0 - 4 { return 0 } } }\n\
+             1 }",
+        );
+        assert!(ok.is_ok(), "a loop that reports the failure is correct, got {ok:?}");
+    }
+
+    #[test]
+    fn accepts_a_fill_loop_that_breaks_on_a_fatal_error() {
+        let ok = check(
+            "let SYS_read = 0\n\
+             fn fill(fd: i64, buf: i64, n: i64) { let mut got = 0\n\
+             for got < n { let r = syscall(SYS_read, fd, buf + got, n - got)\n\
+             if r <= 0 { break }\n\
+             got = got + r } }",
+        );
+        assert!(ok.is_ok(), "a loop that breaks out is correct, got {ok:?}");
+    }
+
+    #[test]
+    fn says_nothing_about_a_counted_loop_that_ignores_the_result() {
+        // `i` advances unconditionally, so this terminates whatever the syscall does. Retrying
+        // is not what makes a loop dangerous; retrying WITHOUT A WAY OUT is.
+        let ok = check(
+            "let SYS_write = 1\n\
+             fn shout(fd: i64, buf: i64) { let mut i = 0\n\
+             for i < 3 { let r = syscall(SYS_write, fd, buf, 1)\n\
+             i = i + 1 } }",
+        );
+        assert!(ok.is_ok(), "a bounded loop is fine, got {ok:?}");
+    }
+}
+
+#[cfg(test)]
 mod spawn_loop_tests {
     use super::*;
     use crate::lexer::tokenize;
@@ -3418,6 +3685,15 @@ mod spawn_loop_tests {
              fn f() -> i64 { for i in 0..3 { if i > 0 { i } else { spawn w() 0 } } 0 }",
         );
         assert!(e.is_err(), "spawn inside an else inside a loop must be rejected");
+    }
+
+    #[test]
+    fn rejects_a_spawn_in_the_tail_conditional_of_a_loop() {
+        // The `if` written LAST in a block is its tail expression, not a statement, so a walk over
+        // `stmts` alone skips it. That is the ordinary way to write an accept loop: the spawn is
+        // the last thing in the body, so the guard was still being bypassed after the first fix.
+        let e = check("fn w() -> i64 { 0 }\nfn f() -> i64 { for i in 0..3 { if i > 0 { spawn w() } } 0 }");
+        assert!(e.is_err(), "a spawn in a loop body's tail conditional must be rejected");
     }
 
     #[test]
@@ -3732,6 +4008,19 @@ mod exit_in_spawn_tests {
              fn f() -> i64 { let a ~~ b = par worker() ~~ other()\na + b }",
         );
         assert!(e.is_err(), "a par-let peer runs on a thread, so exit must be rejected there too");
+    }
+
+    #[test]
+    fn rejects_exit_in_a_body_spawned_from_a_tail_conditional() {
+        // Same blind spot on the effect check: a spawn written as the last thing in a function
+        // lives in the block's tail, so the seed walk never saw it and the worker was treated as
+        // if it never ran on a thread.
+        let e = check(
+            "let SYS_exit = 60\n\
+             fn worker() -> i64 { syscall(SYS_exit, 2) 0 }\n\
+             fn f(c: i64) -> i64 { if c > 0 { spawn worker() } }",
+        );
+        assert!(e.is_err(), "a spawn in a tail conditional must still carry the effect check");
     }
 
     #[test]
