@@ -144,6 +144,9 @@ fn tls_req_header(buf: i64, o: i64, name: i64, value: i64) -> i64 {
 // LF: inside a body those are data, and only header lines are structure.
 fn tls_req_end(buf: i64, o: i64, body: i64, bodylen: i64) -> i64 {
     if o < 0 { return 0 - 1 }
+    // A length that came out negative is a caller's arithmetic gone wrong, typically from a
+    // file size. Sending a request that looks correct and carries no body would hide that.
+    if bodylen < 0 { return 0 - 1 }
     let mut p = o
     if bodylen > 0 {
         p = tls_put_str(buf, p, "Content-Length: ")
