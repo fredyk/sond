@@ -618,3 +618,36 @@ test "http request: the decimal writer handles zero and a many-digit value" {
     assert_eq(n1, 7)
     assert_eq(r_is(r_buf, n1, "1048576"), 1)
 }
+
+test "http request: a CRLF in a header value is refused, not smuggled through" {
+    // The value of Authorization is computed at run time from a config file, so a stray
+    // newline in that file would otherwise decide which headers go out on the wire.
+    let o = tls_req_start(r_buf, "GET", "/", "h")
+    assert_eq(tls_req_header(r_buf, o, "X", "a\r\nX-Injected: yes") < 0, true)
+}
+
+test "http request: a lone CR is refused too, since some servers split on it" {
+    let o = tls_req_start(r_buf, "GET", "/", "h")
+    assert_eq(tls_req_header(r_buf, o, "X", "a\rb") < 0, true)
+    assert_eq(tls_req_header(r_buf, o, "X\nY", "ok") < 0, true)
+}
+
+test "http request: the method and the host are checked too, not only the path" {
+    assert_eq(tls_req_start(r_buf, "GET\r\nX: y", "/", "h") < 0, true)
+    assert_eq(tls_req_start(r_buf, "GET", "/", "h\r\nX: y") < 0, true)
+    assert_eq(tls_req_start(r_buf, "GET", "/", "h") > 0, true)
+}
+
+test "http request: a refusal is refused all the way out, and writes nothing" {
+    poke8(r_buf + 0, 90)                             // a sentinel where the request starts
+    assert_eq(tls_req_start(r_buf, "GET", "/bad\r\n", "h") < 0, true)
+    assert_eq(peek8(r_buf), 90)                      // the buffer was left untouched
+    assert_eq(tls_req_end(r_buf, 0 - 1, 0, 0), 0 - 1)
+    assert_eq(tls_req_header(r_buf, 0 - 1, "Accept", "text/plain"), 0 - 1)
+}
+
+test "http request: the body is NOT checked, because a body may hold anything" {
+    // CRLF is data inside a body; only header lines are structure.
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, "POST", "/", "h"), "a\r\nb", 4)
+    assert_eq(r_is(r_buf, n, "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\nConnection: close\r\n\r\na\r\nb"), 1)
+}

@@ -86,12 +86,33 @@ fn tls_put_uint(buf: i64, o: i64, v: i64) -> i64 {
     p
 }
 
+// 1 if the NUL-terminated string `s` carries no CR (13) and no LF (10). Those two bytes are
+// what SEPARATES header lines, so a value holding either can append headers the caller never
+// wrote: with a value computed at run time (a credential read from a config file, a path
+// taken from user input) that turns someone else's data into our request. Checked, never
+// stripped: silently altering the caller's data is worse than refusing it, because the
+// caller then believes it sent something it did not.
+fn tls_hdr_safe(s: i64) -> i64 {
+    let mut i = 0
+    for peek8(s + i) != 0 {
+        let c = peek8(s + i)
+        if c == 13 { return 0 }
+        if c == 10 { return 0 }
+        i = i + 1
+    }
+    1
+}
+
 // Starts an HTTP/1.1 request in `buf`: the request line and the mandatory Host header,
 // leaving the header block OPEN so headers can still be appended. `method`, `path` and `host`
 // are NUL-terminated strings, copied to their terminator: a client that has to be told how
 // long its own literals are is one typo away from a request nobody answers. Returns the
-// offset to carry into tls_req_header / tls_req_end.
+// offset to carry into tls_req_header / tls_req_end, or -1 WITHOUT writing anything if any
+// argument holds a CR or an LF.
 fn tls_req_start(buf: i64, method: i64, path: i64, host: i64) -> i64 {
+    if tls_hdr_safe(method) == 0 { return 0 - 1 }
+    if tls_hdr_safe(path) == 0 { return 0 - 1 }
+    if tls_hdr_safe(host) == 0 { return 0 - 1 }
     let mut o = tls_put_str(buf, 0, method)
     o = tls_put_str(buf, o, " ")
     o = tls_put_str(buf, o, path)
@@ -100,8 +121,13 @@ fn tls_req_start(buf: i64, method: i64, path: i64, host: i64) -> i64 {
     tls_put_str(buf, o, "\r\n")
 }
 
-// Appends one "Name: value" header line at `o`. Returns the new offset.
+// Appends one "Name: value" header line at `o`. Returns the new offset, or -1 without writing
+// if `name` or `value` holds a CR or an LF, or if `o` is already a refusal: a rejection has to
+// survive to the end of the chain, or the caller sends a request it never composed.
 fn tls_req_header(buf: i64, o: i64, name: i64, value: i64) -> i64 {
+    if o < 0 { return 0 - 1 }
+    if tls_hdr_safe(name) == 0 { return 0 - 1 }
+    if tls_hdr_safe(value) == 0 { return 0 - 1 }
     let mut p = tls_put_str(buf, o, name)
     p = tls_put_str(buf, p, ": ")
     p = tls_put_str(buf, p, value)
@@ -113,8 +139,11 @@ fn tls_req_header(buf: i64, o: i64, name: i64, value: i64) -> i64 {
 // nothing here stops at a terminator. Content-Length is COMPUTED from bodylen and never
 // taken from the caller, which is the only way the announced length cannot disagree with
 // what is actually sent. The blank line that ends the header block is what makes the
-// request complete; without it a server is right to sit and wait. Returns the total length.
+// request complete; without it a server is right to sit and wait. Returns the total length,
+// or -1 if `o` is a refusal from an earlier step. The body itself is NOT checked for CR or
+// LF: inside a body those are data, and only header lines are structure.
 fn tls_req_end(buf: i64, o: i64, body: i64, bodylen: i64) -> i64 {
+    if o < 0 { return 0 - 1 }
     let mut p = o
     if bodylen > 0 {
         p = tls_put_str(buf, p, "Content-Length: ")
