@@ -649,6 +649,17 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
             let v = state.env.get(name)?.clone();
             Some(vec![(state, v)])
         }
+        // `-x` is `0 - x`. Without this case a negated value reaches the catch-all and bails, and
+        // a bail while evaluating a CALL ARGUMENT takes the callee's whole precondition with it:
+        // `f(0 - 5)` was rejected against `requires { x > 0 }` while `f(-5)` compiled clean. The
+        // contract did not weaken, it disappeared, which is the worst way for one to fail.
+        Expr::Unary(UnOp::Neg, inner) => {
+            let mut out = Vec::new();
+            for (s, v) in eval_expr_paths(inner, state, ctx)? {
+                out.push((s, simplify(Sym::Sub(Box::new(Sym::Const(0)), Box::new(v)))));
+            }
+            Some(out)
+        }
         Expr::Binary(op, l, r) if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) => {
             let mk = match op {
                 BinOp::Add => Sym::Add as fn(Box<Sym>, Box<Sym>) -> Sym,
@@ -1319,6 +1330,13 @@ fn eval_expr(e: &Expr, env: &HashMap<String, Sym>) -> Option<Sym> {
     match e {
         Expr::Int(n) => Some(Sym::Const(*n)),
         Expr::Var(name) => env.get(name).cloned(),
+        // `-x` is `0 - x`. Without this a negated literal has no symbolic value, and an argument
+        // with no value takes its whole obligation down with it: `f(0 - 5)` was rejected against
+        // `requires { x > 0 }` while `f(-5)` compiled clean. The contract did not weaken, it
+        // disappeared, which is the worst way for one to fail.
+        Expr::Unary(UnOp::Neg, inner) => {
+            Some(simplify(Sym::Sub(Box::new(Sym::Const(0)), Box::new(eval_expr(inner, env)?))))
+        }
         Expr::Binary(op, l, r) => {
             let a = eval_expr(l, env)?;
             let b = eval_expr(r, env)?;
@@ -2246,6 +2264,35 @@ mod tests {
         let mut p = Parser::new(tokenize(src));
         let funcs = p.parse_program();
         (funcs, p.take_globals())
+    }
+
+    #[test]
+    fn a_negated_literal_argument_still_has_to_satisfy_the_precondition() {
+        // `f(0 - 5)` was rejected and `f(-5)` was accepted, for the same value. The prover could
+        // not turn a unary minus into a symbolic value, and an argument it cannot represent takes
+        // the whole obligation down with it: the precondition was not weakened, it VANISHED. A
+        // contract that disappears when the caller writes a negative literal is worse than no
+        // contract, because the source still reads as if it were checked.
+        let funcs = parse(
+            "fn ident_pos(x: i64) -> (r: i64) requires { x > 0 } ensures { r > 0 } { x }\n\
+             fn main() -> i64 { ident_pos(-5) }",
+        );
+        let err = verify(&funcs).expect_err("-5 cannot satisfy `x > 0`");
+        assert!(
+            err.message.contains("precondition"),
+            "the error should name the precondition, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_negated_literal_that_satisfies_the_precondition_is_accepted() {
+        // The other half: the fix must not reject a negative argument that is actually fine.
+        let funcs = parse(
+            "fn below_zero(x: i64) -> (r: i64) requires { x < 0 } ensures { r < 0 } { x }\n\
+             fn main() -> i64 { below_zero(-5) }",
+        );
+        assert!(verify(&funcs).is_ok(), "-5 does satisfy `x < 0`");
     }
 
     #[test]
