@@ -204,9 +204,11 @@ fn emit_program_maybe_debug(
     cg.emit_globals();
     cg.emit_rodata();
     cg.line(".data");
+    cg.line(".p2align 3");
     cg.line("sond_argc: .quad 0");
     cg.line("sond_argv: .quad 0");
     cg.line("sond_envp: .quad 0");
+    cg.emit_gnu_stack_note();
     cg.out
 }
 
@@ -269,6 +271,7 @@ pub fn emit_program_coverage_g(
     for (label, len, start, count) in table {
         cg.line(&format!("    .quad {label}, {len}, {start}, {count}"));
     }
+    cg.emit_gnu_stack_note();
     cg.out
 }
 
@@ -309,9 +312,11 @@ pub fn emit_shared_g(globals: &[Global], structs: &[StructDef], funcs: &[Functio
     cg.emit_globals();
     cg.emit_rodata();
     cg.line(".data");
+    cg.line(".p2align 3");
     cg.line("sond_argc: .quad 0");
     cg.line("sond_argv: .quad 0");
     cg.line("sond_envp: .quad 0");
+    cg.emit_gnu_stack_note();
     cg.out
 }
 
@@ -353,9 +358,11 @@ pub fn emit_freestanding_g(globals: &[Global], structs: &[StructDef], funcs: &[F
     cg.emit_globals();
     cg.emit_rodata();
     cg.line(".data");
+    cg.line(".p2align 3");
     cg.line("sond_argc: .quad 0");
     cg.line("sond_argv: .quad 0");
     cg.line("sond_envp: .quad 0");
+    cg.emit_gnu_stack_note();
     cg.out
 }
 
@@ -1625,6 +1632,14 @@ impl Codegen {
         self.line("    movq $60, %rax"); // SYS_exit (this thread only)
         self.line("    syscall");
         self.line(&format!("{after}:"));
+    }
+
+    /// Marks the stack NON-EXECUTABLE. A GNU-format object that carries no `.note.GNU-stack`
+    /// section makes the linker assume the worst and mark the whole program's stack executable,
+    /// which is a live W^X hole in every binary and a hard error on newer linkers. Sond never
+    /// executes from the stack, so the note is empty: it just states the fact.
+    fn emit_gnu_stack_note(&mut self) {
+        self.line(".section .note.GNU-stack,\"\",@progbits");
     }
 
     /// Emits the module-level globals into `.data`.

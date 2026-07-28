@@ -22,7 +22,7 @@ use std::process::{Command, ExitCode};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: sondc <input.snd> [-o <output>] [--freestanding | --uefi | --shared]");
+        eprintln!("usage: sondc <input.snd> [-o <output>] [--freestanding | --uefi | --shared | --object]");
         return ExitCode::from(2);
     }
 
@@ -46,13 +46,18 @@ fn main() -> ExitCode {
         break;
     }
     let Some(input) = input else {
-        eprintln!("usage: sondc <input.snd> [-o <output>] [--test | --freestanding | --uefi | --shared]");
+        eprintln!("usage: sondc <input.snd> [-o <output>] [--test | --freestanding | --uefi | --shared | --object]");
         return ExitCode::from(2);
     };
     let output = parse_output_flag(&args).unwrap_or_else(|| default_output(input));
     let freestanding = args.iter().any(|a| a == "--freestanding");
     let uefi = args.iter().any(|a| a == "--uefi");
     let shared = args.iter().any(|a| a == "--shared");
+    // A RELOCATABLE OBJECT with the same C ABI as `--shared`, for hosts that cannot load a shared
+    // object at all: a Go binary for a distroless/static image has no dynamic loader, so the only
+    // way to call Sond from it is to link the code in at build time. Same emitted code, stopped
+    // one step earlier.
+    let object = args.iter().any(|a| a == "--object");
     // The PIC16 target (16F684): emit MPASM/gpasm assembly and assemble it into a flashable
     // Intel HEX, the smallest target profile, an 8-bit microcontroller.
     let pic16 = args.iter().any(|a| a == "--pic16");
@@ -88,6 +93,8 @@ fn main() -> ExitCode {
         "uefi"
     } else if freestanding {
         "freestanding"
+    } else if object {
+        "object"
     } else if shared {
         "shared"
     } else if debug {
@@ -315,7 +322,7 @@ fn main() -> ExitCode {
             emit_uefi_g(&globals, &structs, &funcs)
         } else if freestanding {
             emit_freestanding_g(&globals, &structs, &funcs)
-        } else if shared {
+        } else if shared || object {
             emit_shared_g(&globals, &structs, &funcs)
         } else if coverage {
             emit_program_coverage_g(&globals, &structs, &funcs, &cov_scope)
@@ -383,6 +390,16 @@ fn main() -> ExitCode {
             // refuses to hand off. Disable dynamic base + high-entropy VA so the
             // image is honestly load-at-ImageBase and boots on both.
             .args(["-Wl,--disable-dynamicbase", "-Wl,--disable-high-entropy-va"])
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&output)
+            .status()
+    } else if object {
+        // Assemble only. The result is an ordinary ELF relocatable that any toolchain can link
+        // in: `cc prog.o main.c`, `ar rcs libX.a prog.o`, or cgo's LDFLAGS. Nothing from a C
+        // runtime is needed, since Sond emits none.
+        Command::new("cc")
+            .arg("-c")
             .arg(&asm_path)
             .arg("-o")
             .arg(&output)

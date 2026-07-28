@@ -1070,3 +1070,73 @@ fn the_join_does_not_retry_a_failed_futex_at_full_speed() {
         "an unexpected futex error must sleep (nanosleep) before retrying, not spin:\n{asm}"
     );
 }
+
+#[test]
+fn shared_abi_code_assembles_into_a_relocatable_object_and_links_statically() {
+    // A `.so` is not the only way to call Sond from another language, and for some targets it is
+    // not a usable one: a Go binary built for a distroless/static image has no dynamic loader, so
+    // a shared object cannot be loaded at all. The same C-ABI code must therefore also work as a
+    // RELOCATABLE OBJECT, linked into the host binary at build time. This pins that the emitted
+    // assembly is complete on its own (no C runtime, no hidden startup) by assembling it to a `.o`
+    // and linking that into a C program with -static: it runs, and its answer comes from Sond.
+    let mut p = Parser::new(tokenize("pub fn sond_add(a: i64, b: i64) -> i64 { a + b }"));
+    let funcs = p.parse_program();
+    let globals = p.take_globals();
+    let structs = p.take_structs();
+    let asm = emit_shared_g(&globals, &structs, &funcs);
+
+    let dir = std::env::temp_dir();
+    let stem = format!("sondc_obj_{}", std::process::id());
+    let asm_path = dir.join(format!("{stem}.s"));
+    let obj_path = dir.join(format!("{stem}.o"));
+    let c_path = dir.join(format!("{stem}.c"));
+    let bin_path = dir.join(&stem);
+    std::fs::write(&asm_path, asm).unwrap();
+    std::fs::write(
+        &c_path,
+        "long sond_add(long, long);\nint main(void){ return (int)sond_add(19, 23); }\n",
+    )
+    .unwrap();
+
+    let asm_ok = Command::new("cc")
+        .args(["-c"])
+        .arg(&asm_path)
+        .arg("-o")
+        .arg(&obj_path)
+        .status()
+        .expect("cc should be available");
+    assert!(asm_ok.success(), "the shared-ABI assembly must assemble to a .o");
+
+    let link = Command::new("cc")
+        .arg("-static")
+        .arg(&c_path)
+        .arg(&obj_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .status()
+        .unwrap();
+    assert!(link.success(), "the object must link statically into a C program");
+
+    let code = Command::new(&bin_path).status().unwrap().code().unwrap();
+    assert_eq!(code, 42, "the statically linked Sond function must run and return 19 + 23");
+
+    for p in [&asm_path, &obj_path, &c_path, &bin_path] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+#[test]
+fn the_emitted_object_marks_the_stack_non_executable() {
+    // Without a `.note.GNU-stack` section the linker assumes the worst and marks the program's
+    // stack EXECUTABLE: a W^X hole in every binary Sond produces, announced only as a warning
+    // that scrolls past, and a hard error on newer linkers. Sond never executes from the stack.
+    for asm in [
+        emit_program(&[parse_function("fn main() -> i64 { 0 }")]),
+        emit_freestanding(&[parse_function("fn main() -> i64 { 0 }")]),
+    ] {
+        assert!(
+            asm.contains(".section .note.GNU-stack,\"\",@progbits"),
+            "every ELF target must state that its stack is not executable:\n{asm}"
+        );
+    }
+}
