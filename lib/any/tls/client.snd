@@ -18,15 +18,27 @@ include "any/tls/ladder.snd"
 include "any/tls/record.snd"
 include "any/crypto/hash/sha256.snd"
 
-// Fills `buf` with `n` random bytes from the kernel. getrandom can return short (a signal
-// can interrupt it), so loop until the whole buffer is filled: a partially-filled ephemeral
-// key would silently derive the wrong session keys.
-fn tls_random(buf: i64, n: i64) {
+// Fills `buf` with `n` random bytes from the kernel. Returns 1 when the whole buffer is filled,
+// 0 when it could not be.
+//
+// getrandom can return SHORT (a signal can interrupt it), so the fill loops: a partially-filled
+// ephemeral key would silently derive the wrong session keys. But it can also FAIL, and retrying
+// without looking at WHY is a spin waiting to happen, since a failed syscall returns immediately
+// instead of blocking: a permanent error (EFAULT on a bad buffer, ENOSYS on an old kernel) burned
+// a core forever and said nothing. Only EINTR is retried, because only EINTR is transient.
+// Everything else is reported, and every caller must treat it as fatal: there is no safe way to
+// continue a handshake with a buffer that is not random.
+fn tls_random(buf: i64, n: i64) -> i64 {
     let mut got = 0
     for got < n {
         let r = syscall(SYS_getrandom, buf + got, n - got, 0)
-        if r > 0 { got = got + r }
+        if r > 0 {
+            got = got + r
+        } else {
+            if r != 0 - 4 { return 0 }        // -EINTR is the only retryable one
+        }
     }
+    1
 }
 
 // Reads exactly `n` bytes, looping over short reads. Returns n, or <=0 on EOF/error.
@@ -78,7 +90,7 @@ fn tls_handshake_probe(host: i64, port: i64, sni: i64, snilen: i64, out: i64) ->
 
     // x25519 keypair
     let cpriv[32]
-    tls_random(cpriv, 32)
+    if tls_random(cpriv, 32) == 0 { close_fd(fd); return 0 - 1 }
     let base9[32]
     poke8(base9, 9)
     let mut i = 0
@@ -88,7 +100,7 @@ fn tls_handshake_probe(host: i64, port: i64, sni: i64, snilen: i64, out: i64) ->
 
     // ClientHello (keep the handshake message for the transcript)
     let random[32]
-    tls_random(random, 32)
+    if tls_random(random, 32) == 0 { close_fd(fd); return 0 - 1 }
     let ch = heap_alloc(1024)
     let chlen = tls_build_client_hello(random, cpub, sni, snilen, "http/1.1", 8, ch)
     let scratch = heap_alloc(4096)

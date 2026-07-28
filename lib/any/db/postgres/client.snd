@@ -107,13 +107,24 @@ fn pg_send_password(conn: i64, pass: i64) {
     pg_send(conn, buf, 1 + len)
 }
 
-// Fills `buf` with `n` random bytes from the kernel, looping over short reads.
-fn pg_random(buf: i64, n: i64) {
+// Fills `buf` with `n` random bytes from the kernel, looping over short reads. Returns 1 when the
+// whole buffer is filled, 0 when it could not be.
+//
+// Same shape as tls_random, and the same reason for looking at the return: getrandom returning
+// short (EINTR) is transient and retried, but an error returns IMMEDIATELY, so retrying it blindly
+// spins a core forever instead of reporting. The SCRAM nonce must be unpredictable, so a caller
+// that cannot get one has to stop rather than authenticate with a guessable one.
+fn pg_random(buf: i64, n: i64) -> i64 {
     let mut got = 0
     for got < n {
         let r = syscall(SYS_getrandom, buf + got, n - got, 0)
-        if r > 0 { got = got + r }
+        if r > 0 {
+            got = got + r
+        } else {
+            if r != 0 - 4 { return 0 }        // -EINTR is the only retryable one
+        }
     }
+    1
 }
 
 // Runs the client side of a SASL SCRAM-SHA-256 exchange (RFC 5802) after the server asked for
@@ -122,7 +133,7 @@ fn pg_random(buf: i64, n: i64) {
 // knowledge of the password, 0 otherwise. Runs over whatever transport the connection uses.
 fn pg_sasl_scram(conn: i64, user: i64, pass: i64) -> i64 {
     let rnd[18]
-    pg_random(rnd, 18)
+    if pg_random(rnd, 18) == 0 { return 0 }
     let nonce[32]
     let noncelen = b64_encode(rnd, 18, nonce)
     let cfbare[256]

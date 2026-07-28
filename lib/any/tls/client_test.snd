@@ -217,3 +217,24 @@ test "tls client: a corrupt encrypted record fails the open" {
     assert_eq(tls_handshake_probe("127.0.0.1", 55455, "h", 1, ebuf), 0 - 1)
     close_fd(sfd); let st[1]; syscall(SYS_wait4, pid, st, 0, 0)
 }
+
+// A fill loop that retries a syscall without looking at WHY it failed is a spin waiting to
+// happen: getrandom returns short when a signal interrupts it (retry, correct) but it also
+// returns errors, and the old loop treated both the same, so a permanent failure (EFAULT on a
+// bad buffer) burned a core forever instead of reporting. A null buffer is the cheapest way to
+// make the kernel fail it every time: the call must come back, and come back saying no.
+test "tls_random reports a permanent failure instead of spinning" {
+    assert_eq(tls_random(0, 32), 0)
+}
+
+test "tls_random fills the buffer and reports success" {
+    let buf[4]
+    let mut i = 0
+    for i < 32 { poke8(buf + i, 0); i = i + 1 }
+    assert_eq(tls_random(buf, 32), 1)
+    // 32 random bytes are all zero with probability 2^-256, so this reads as "it wrote".
+    let mut any = 0
+    i = 0
+    for i < 32 { any = any | peek8(buf + i); i = i + 1 }
+    assert_eq(any != 0, 1)
+}

@@ -975,3 +975,23 @@ test "pg client: SSLRequest with no reply (server hangs up) fails the connection
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
 }
+
+// The SCRAM nonce must be unpredictable, so a failure to get randomness has to STOP the exchange,
+// not be retried forever: a fill loop that retries a syscall without looking at why it failed
+// spins a core instead of reporting (a failed syscall returns immediately instead of blocking).
+// A null buffer makes the kernel fail it every time.
+test "pg_random reports a permanent failure instead of spinning" {
+    assert_eq(pg_random(0, 18), 0)
+}
+
+test "pg_random fills the buffer and reports success" {
+    let buf[3]
+    let mut i = 0
+    for i < 18 { poke8(buf + i, 0); i = i + 1 }
+    assert_eq(pg_random(buf, 18), 1)
+    // 18 random bytes all zero has probability 2^-144, so this reads as "it wrote".
+    let mut any = 0
+    i = 0
+    for i < 18 { any = any | peek8(buf + i); i = i + 1 }
+    assert_eq(any != 0, 1)
+}

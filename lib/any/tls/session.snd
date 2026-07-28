@@ -40,7 +40,7 @@ fn tls_connect(host: i64, port: i64, sni: i64, snilen: i64, alpn: i64, alpnlen: 
 // session handle, or 0 (closing `fd`) on handshake failure or an untrusted chain.
 fn tls_connect_fd(fd: i64, sni: i64, snilen: i64, alpn: i64, alpnlen: i64, roots: i64, nroots: i64, now14: i64) -> i64 {
     let cpriv[32]
-    tls_random(cpriv, 32)
+    if tls_random(cpriv, 32) == 0 { close_fd(fd); return 0 }
     let base9[32]
     poke8(base9, 9)
     let mut i = 0
@@ -48,7 +48,7 @@ fn tls_connect_fd(fd: i64, sni: i64, snilen: i64, alpn: i64, alpnlen: i64, roots
     let cpub[32]
     x25519(cpriv, base9, cpub)
     let random[32]
-    tls_random(random, 32)
+    if tls_random(random, 32) == 0 { close_fd(fd); return 0 }
     let ch = heap_alloc(1024)
     let chlen = tls_build_client_hello(random, cpub, sni, snilen, alpn, alpnlen, ch)
     let scratch = heap_alloc(4096)

@@ -340,3 +340,31 @@ test "tls auth: a corrupt flight record is not authenticated" {
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
 }
+
+// The flight scanner walks length-prefixed handshake messages to find CertificateVerify (15).
+// Driven directly here with a synthetic flight, because the live path only ever shows it one
+// well-formed shape: what matters is that it finds the message AFTER others, and that a length
+// running past the end of the buffer is rejected rather than read out of bounds.
+test "tls auth: the flight scanner finds CertificateVerify past earlier messages" {
+    let flight[8]
+    // message 1: type 8 (EncryptedExtensions), length 2, two payload bytes
+    poke8(flight + 0, 8); poke8(flight + 1, 0); poke8(flight + 2, 0); poke8(flight + 3, 2)
+    poke8(flight + 4, 0); poke8(flight + 5, 0)
+    // message 2: type 15 (CertificateVerify), length 1, one payload byte
+    poke8(flight + 6, 15); poke8(flight + 7, 0); poke8(flight + 8, 0); poke8(flight + 9, 1)
+    poke8(flight + 10, 0xab)
+    assert_eq(tls_flight_cv_offset(flight, 11), 6)
+}
+
+test "tls auth: a message length past the end of the flight is rejected" {
+    let flight[4]
+    poke8(flight + 0, 8); poke8(flight + 1, 0); poke8(flight + 2, 0); poke8(flight + 3, 200)
+    assert_eq(tls_flight_cv_offset(flight, 6), 0 - 1)
+}
+
+test "tls auth: a flight with no CertificateVerify reports absence" {
+    let flight[4]
+    poke8(flight + 0, 8); poke8(flight + 1, 0); poke8(flight + 2, 0); poke8(flight + 3, 1)
+    poke8(flight + 4, 0)
+    assert_eq(tls_flight_cv_offset(flight, 5), 0 - 1)
+}
