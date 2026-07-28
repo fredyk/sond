@@ -1,5 +1,6 @@
 use super::testutil::{
-    compile_and_capture, compile_and_run, compile_and_run_freestanding, parse_function,
+    compile_and_capture, compile_and_run, compile_and_run_freestanding,
+    freestanding_section_alignment, parse_function,
 };
 use super::*;
 use crate::lexer::tokenize;
@@ -1018,5 +1019,54 @@ fn a_pic16_serial_provider_replaces_the_backend_intrinsic() {
     assert!(
         !asm.contains("_sg_wait"),
         "the backend's hidden bit-bang intrinsic ceded to the provider:\n{asm}"
+    );
+}
+
+#[test]
+fn the_data_section_declares_its_alignment() {
+    // A futex uaddr must be 4-byte aligned or FUTEX_WAIT returns EINVAL WITHOUT EVER BLOCKING.
+    // The join's cells live in `.data`, so if the emitter declares no alignment for that section
+    // the ELF carries AddrAlign 1, the linker is free to start it anywhere, and whether every
+    // spawn in the program can sleep comes down to where the section happened to land. That is
+    // the worst shape a bug can take: it cost 743% of CPU on a machine at rest, with no error,
+    // no hang and no crash, while a smaller program with the same code was fine by luck.
+    //
+    // Freestanding, because a hosted link merges crt objects that declare 8 and hide the miss.
+    // Carries a string so `.rodata` exists to be checked too, and a spawn so a join cell does.
+    let src = "fn w() -> i64 { write(1, \"x\") }\nfn f() -> i64 { spawn w() 0 }\nfn main() -> i64 { f() }";
+    let (data_align, rodata_align, ctid) = freestanding_section_alignment(src);
+    assert!(
+        data_align >= 8,
+        ".data must declare at least 8-byte alignment, got {data_align}"
+    );
+    assert!(
+        rodata_align >= 8,
+        ".rodata must declare at least 8-byte alignment, got {rodata_align}"
+    );
+    assert_ne!(ctid, 0, "the test program should have a spawn cell to check");
+    assert_eq!(ctid % 8, 0, "the join cell must be 8-byte aligned, got {ctid:#x}");
+}
+
+#[test]
+fn the_join_does_not_retry_a_failed_futex_at_full_speed() {
+    // The join loops until the kernel clears the cell, and the loop used to jump back whatever
+    // the futex returned. A futex that fails (EINVAL on a misaligned address, and any other
+    // error) returns IMMEDIATELY, so the loop stopped being a wait and became a pure spin: 71826
+    // failed syscalls in six seconds, one core burned per thread, no diagnostic anywhere.
+    // Alignment is fixed separately; this pins the other half, that an unexpected error can never
+    // cost a core again, by sleeping before the retry instead of hammering.
+    let asm = emit_program(
+        &Parser::new(tokenize(
+            "fn w() -> i64 { 0 }\nfn f() -> i64 { spawn w() 0 }\nfn main() -> i64 { f() }",
+        ))
+        .parse_program(),
+    );
+    assert!(
+        asm.contains("cmpq $-11, %rax") && asm.contains("cmpq $-4, %rax"),
+        "the join must tell a retryable futex return (EAGAIN, EINTR) from a real error:\n{asm}"
+    );
+    assert!(
+        asm.contains("movq $35, %rax"),
+        "an unexpected futex error must sleep (nanosleep) before retrying, not spin:\n{asm}"
     );
 }

@@ -1315,6 +1315,29 @@ impl Codegen {
             self.line("    xorq %r10, %r10"); // timeout = NULL
             self.line("    movq $202, %rax"); // SYS_futex
             self.line("    syscall");
+            // Look at what the futex returned. Jumping back unconditionally turns any FAILING
+            // futex into a spin, because a failed one returns immediately instead of sleeping:
+            // that is how a misaligned cell (EINVAL) cost 743% of CPU with the machine at rest,
+            // 71826 failed syscalls in six seconds and not one line of diagnostic. Woken (>= 0),
+            // EAGAIN (the value changed first) and EINTR (a signal) are all normal and retry at
+            // once; the loop still terminates, since the cell only ever goes 1 -> 0.
+            self.line("    cmpq $-11, %rax"); // -EAGAIN
+            self.line(&format!("    je {wait}"));
+            self.line("    cmpq $-4, %rax"); // -EINTR
+            self.line(&format!("    je {wait}"));
+            self.line("    testq %rax, %rax");
+            self.line(&format!("    jns {wait}"));
+            // Any other error means this futex cannot block here. Waiting is still REQUIRED for
+            // correctness (the parent must not run on before the thread ends), so fall back to a
+            // sleeping poll: 1 ms per turn instead of a busy core. It should never run, and if it
+            // ever does it degrades throughput rather than burning the machine.
+            self.line("    pushq $1000000"); // timespec.tv_nsec = 1 ms
+            self.line("    pushq $0"); //      timespec.tv_sec  = 0
+            self.line("    movq %rsp, %rdi");
+            self.line("    xorq %rsi, %rsi");
+            self.line("    movq $35, %rax"); // SYS_nanosleep
+            self.line("    syscall");
+            self.line("    addq $16, %rsp");
             self.line(&format!("    jmp {wait}"));
             self.line(&format!("{done}:"));
         }
@@ -1610,6 +1633,15 @@ impl Codegen {
         let arrays = std::mem::take(&mut self.global_array_data);
         let ctids = std::mem::take(&mut self.all_ctids);
         self.line(".data");
+        // DECLARE the section's alignment, do not hope for it. Without a directive the assembler
+        // records AddrAlign 1 and the linker may start `.data` at any address, so whether an
+        // 8-byte datum in it is actually aligned depends on how much came before: a hosted link
+        // hides this (crt objects declare 8 and the merged section inherits it), a freestanding
+        // one does not. The cost was a futex whose address landed 2 mod 4, which makes FUTEX_WAIT
+        // fail with EINVAL WITHOUT EVER BLOCKING, turning every join into a spin: 743% of CPU on
+        // an idle machine, with no error and no crash, while the same code in a smaller program
+        // worked by luck. Everything emitted here is 8-byte data, so 8 is the floor.
+        self.line(".p2align 3");
         // The default thread's arena control block: [next_free_byte, block_end, total]. Every
         // program reads the arena through %r15, seeded at entry to point here; a spawned thread
         // gets its own block instead. Emitted unconditionally, since any allocation needs it.
@@ -1635,7 +1667,10 @@ impl Codegen {
                 .join(", ");
             self.line(&format!("{name}: .quad {quads}"));
         }
-        // One clear_child_tid cell per spawn site, zeroed (no live thread yet).
+        // One clear_child_tid cell per spawn site, zeroed (no live thread yet). Realigned here as
+        // a belt on top of the section's own declaration: these are futex addresses, where being
+        // off by two bytes costs a core and says nothing, so the guarantee is worth stating twice.
+        self.line(".p2align 3");
         for cell in ctids {
             self.line(&format!("{cell}: .quad 0"));
         }

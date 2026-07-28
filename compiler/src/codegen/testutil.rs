@@ -78,6 +78,53 @@ pub(crate) fn compile_and_capture(src: &str) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
+/// Links a freestanding program and returns the `AddrAlign` that `.data` and `.rodata` declare
+/// in the ELF, plus the address of `sond_ctid_0` (0 when the program has no spawn).
+///
+/// Freestanding on purpose: a hosted link pulls in crt objects that declare their own alignment,
+/// and the merged section inherits the strongest one, so a hosted binary hides an emitter that
+/// declares nothing. Alone in its section, the emitter's own declaration is all there is.
+pub(crate) fn freestanding_section_alignment(src: &str) -> (u64, u64, u64) {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let asm = emit_freestanding(&Parser::new(tokenize(src)).parse_program());
+    let dir = std::env::temp_dir();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stem = format!("sondc_align_{}_{}", std::process::id(), n);
+    let asm_path = dir.join(format!("{stem}.s"));
+    let bin_path = dir.join(&stem);
+    std::fs::write(&asm_path, asm).unwrap();
+    let status = Command::new("cc")
+        .args(["-nostdlib", "-static"])
+        .arg(&asm_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .status()
+        .expect("cc should be available");
+    assert!(status.success(), "freestanding link failed");
+
+    let sections = Command::new("readelf").args(["-SW"]).arg(&bin_path).output().unwrap();
+    let sections = String::from_utf8_lossy(&sections.stdout).to_string();
+    // `readelf -SW` puts the alignment in the last column of each section's row.
+    let align_of = |name: &str| -> u64 {
+        sections
+            .lines()
+            .find(|l| l.contains(&format!(" {name} ")))
+            .and_then(|l| l.split_whitespace().last().map(|s| s.to_string()))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    };
+    let syms = Command::new("nm").arg(&bin_path).output().unwrap();
+    let ctid = String::from_utf8_lossy(&syms.stdout)
+        .lines()
+        .find(|l| l.ends_with(" sond_ctid_0"))
+        .and_then(|l| u64::from_str_radix(l.split_whitespace().next().unwrap_or("0"), 16).ok())
+        .unwrap_or(0);
+
+    let _ = std::fs::remove_file(&asm_path);
+    let _ = std::fs::remove_file(&bin_path);
+    (align_of(".data"), align_of(".rodata"), ctid)
+}
+
 /// Compiles a freestanding program (no libc) and runs it. The binary is
 /// statically linked with its own `_start`: the shape of a Sond `/init`.
 pub(crate) fn compile_and_run_freestanding(src: &str) -> (i32, bool) {

@@ -364,6 +364,9 @@ impl Codegen {
         if !self.float_consts.is_empty() {
             let floats = std::mem::take(&mut self.float_consts);
             self.line(".section .rodata");
+            // Declared, not assumed: these are 8-byte doubles, and a section that declares no
+            // alignment records AddrAlign 1 and may start anywhere. See the note in emit_globals.
+            self.line(".p2align 3");
             for (label, bits) in &floats {
                 self.line(&format!("{label}:"));
                 self.line(&format!("    .quad {bits}"));
@@ -387,6 +390,7 @@ impl Codegen {
             }
         } else {
             self.line(".section .rodata");
+            self.line(".p2align 3");
             for (label, bytes) in &strings {
                 let escaped: String = bytes
                     .chars()
