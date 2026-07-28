@@ -153,6 +153,103 @@ pub fn check_struct_mutability(funcs: &[Function], structs: &[StructDef]) -> Res
 /// kind. `fn m(self)` is a value method, `fn m(self: *T)` is a pointer method;
 /// mixing them in a type is rejected (Go allows this and only lints, Sond does
 /// not). A method is any function whose first parameter is named `self`.
+/// Every block nested inside an expression: the branches of an `if`, the arms of a `match`, and
+/// the same again inside any sub-expression that can hold one.
+///
+/// `if` and `match` are EXPRESSIONS in Sond, so their bodies are blocks that a statement-level
+/// walk never reaches on its own. A check that does not come through here quietly stops applying
+/// the moment the author writes `if c { .. }` around the thing being guarded, and the clean
+/// compile then reads as permission. That is worse than having no check at all, and it lands on
+/// the shape every accept loop has: `for { let c = accept(); if c >= 0 { spawn handle(c) } }`.
+fn nested_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
+    match e {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            nested_blocks(cond, out);
+            out.push(then_branch);
+            if let Some(eb) = else_branch {
+                out.push(eb);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            nested_blocks(scrutinee, out);
+            for a in arms {
+                out.push(&a.body);
+            }
+        }
+        Expr::Field(b, _) | Expr::Unary(_, b) | Expr::Cast(b, _) => nested_blocks(b, out),
+        Expr::Binary(_, a, b) | Expr::Index(a, b) => {
+            nested_blocks(a, out);
+            nested_blocks(b, out);
+        }
+        Expr::Call(callee, args) => {
+            nested_blocks(callee, out);
+            for a in args {
+                nested_blocks(&a.value, out);
+            }
+        }
+        Expr::List(xs) => {
+            for x in xs {
+                nested_blocks(x, out);
+            }
+        }
+        Expr::SliceRange(b, lo, hi) => {
+            nested_blocks(b, out);
+            if let Some(l) = lo {
+                nested_blocks(l, out);
+            }
+            if let Some(h) = hi {
+                nested_blocks(h, out);
+            }
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields {
+                nested_blocks(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every block reachable from a statement's own expressions (its `for` body is separate: a caller
+/// that tracks loop nesting needs to treat that one differently).
+fn nested_blocks_of_stmt<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
+    match s {
+        Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Spawn(value) | Stmt::Return(Some(value)) => {
+            nested_blocks(value, out)
+        }
+        Stmt::Assign { target, value } => {
+            nested_blocks(target, out);
+            nested_blocks(value, out);
+        }
+        Stmt::For { cond, invariant, .. } => {
+            if let Some(c) = cond {
+                nested_blocks(c, out);
+            }
+            for i in invariant {
+                nested_blocks(i, out);
+            }
+        }
+        Stmt::Par(peers) | Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
+            for p in peers {
+                nested_blocks(p, out);
+            }
+        }
+        Stmt::GraphLet {
+            nodes, yield_expr, ..
+        } => {
+            for (_, e) in nodes {
+                nested_blocks(e, out);
+            }
+            nested_blocks(yield_expr, out);
+        }
+        _ => {}
+    }
+}
+
 /// Rejects a `spawn` inside a loop (RFC-0010 Layer B). Each spawn site owns one static join
 /// cell that holds the child TID until the structured join at function exit clears it. Spawning
 /// in a loop would overwrite that cell on the next iteration, so the earlier thread would never
@@ -172,6 +269,13 @@ pub fn check_spawn_not_in_loop(funcs: &[Function]) -> Result<(), String> {
                 }
                 Stmt::For { body, .. } => walk(&body.stmts, true, fname)?,
                 _ => {}
+            }
+            // Conditionals and match arms carry the loop nesting into their own blocks; without
+            // this the guard is bypassed by the one line every accept loop is written with.
+            let mut inner = Vec::new();
+            nested_blocks_of_stmt(s, &mut inner);
+            for b in inner {
+                walk(&b.stmts, in_loop, fname)?;
             }
         }
         Ok(())
@@ -870,7 +974,10 @@ pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> 
                         out.push(n);
                     }
                 }
-                Stmt::Par(peers) => {
+                // Every `par` form runs its peers on spawned threads, the result binding included:
+                // seeding only the bare `Stmt::Par` would leave `let a ~~ b = par f() ~~ g()`
+                // outside the effect check even though its peers are threads just the same.
+                Stmt::Par(peers) | Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
                     for p in peers {
                         if let Expr::Call(callee, _) = p
                             && let Expr::Var(n) = callee.as_ref()
@@ -881,6 +988,14 @@ pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> 
                 }
                 Stmt::For { body, .. } => spawn_targets(body, out),
                 _ => {}
+            }
+            // `if`/`match` bodies are blocks inside an expression, so a spawn written in one is
+            // invisible to the walk above: seeding must go through them or the effect check
+            // silently does not apply to a conditionally spawned worker.
+            let mut inner = Vec::new();
+            nested_blocks_of_stmt(s, &mut inner);
+            for blk in inner {
+                spawn_targets(blk, out);
             }
         }
     }
@@ -3286,9 +3401,35 @@ mod spawn_loop_tests {
     }
 
     #[test]
+    fn rejects_spawn_inside_an_if_inside_a_loop() {
+        // The shape every accept loop has: `for { let c = accept(); if c >= 0 { spawn h(c) } }`.
+        // An `if` is an EXPRESSION in Sond, so a walk that only descends through `for` bodies
+        // walks straight past it and the loop guard never fires -- which is worse than having no
+        // guard, because the author reads the clean compile as permission.
+        let e = check("fn w() -> i64 { 0 }\nfn f() -> i64 { for i in 0..3 { if i > 0 { spawn w() } } 0 }");
+        assert!(e.is_err(), "spawn inside an if inside a loop must be rejected");
+        assert!(e.unwrap_err().contains("loop"), "the error should mention the loop");
+    }
+
+    #[test]
+    fn rejects_spawn_inside_an_else_inside_a_loop() {
+        let e = check(
+            "fn w() -> i64 { 0 }\n\
+             fn f() -> i64 { for i in 0..3 { if i > 0 { i } else { spawn w() 0 } } 0 }",
+        );
+        assert!(e.is_err(), "spawn inside an else inside a loop must be rejected");
+    }
+
+    #[test]
     fn accepts_spawn_outside_a_loop() {
         let ok = check("fn w() -> i64 { 0 }\nfn f() -> i64 { spawn w() spawn w() 0 }");
         assert!(ok.is_ok(), "two straight-line spawns are fine, got {ok:?}");
+    }
+
+    #[test]
+    fn accepts_spawn_inside_an_if_outside_any_loop() {
+        let ok = check("fn w() -> i64 { 0 }\nfn f(c: i64) -> i64 { if c > 0 { spawn w() } 0 }");
+        assert!(ok.is_ok(), "a conditional spawn that runs once is fine, got {ok:?}");
     }
 }
 
@@ -3566,6 +3707,31 @@ mod exit_in_spawn_tests {
              fn f() -> i64 { spawn worker() 0 }",
         );
         assert!(e.is_err(), "exit reached through a call chain must be rejected");
+    }
+
+    #[test]
+    fn rejects_exit_in_a_body_spawned_from_inside_an_if() {
+        // `if` is an expression, so a seed walk that only looks at top-level statements and `for`
+        // bodies never sees this spawn and the effect check silently does not apply to `worker`.
+        let e = check(
+            "let SYS_exit = 60\n\
+             fn worker() -> i64 { syscall(SYS_exit, 2) 0 }\n\
+             fn f(c: i64) -> i64 { if c > 0 { spawn worker() } 0 }",
+        );
+        assert!(e.is_err(), "a spawn inside an if must still carry the effect check");
+    }
+
+    #[test]
+    fn rejects_exit_in_a_par_let_peer() {
+        // `let a ~~ b = par f() ~~ g()` runs its peers on spawned threads exactly like a bare
+        // `par`, so the same effect must be forbidden in them.
+        let e = check(
+            "let SYS_exit = 60\n\
+             fn worker() -> i64 { syscall(SYS_exit, 2) 0 }\n\
+             fn other() -> i64 { 1 }\n\
+             fn f() -> i64 { let a ~~ b = par worker() ~~ other()\na + b }",
+        );
+        assert!(e.is_err(), "a par-let peer runs on a thread, so exit must be rejected there too");
     }
 
     #[test]
