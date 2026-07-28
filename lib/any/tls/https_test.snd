@@ -207,12 +207,42 @@ fn h_serve(afd: i64, certlen: i64) {
     let cakey[32]
     let caiv[12]
     tls_traffic_key_iv(c_ap, cakey, caiv)
+    // The client's handshake key, to open and CHECK its Finished. A test server that only reads
+    // the client Finished and throws it away tests nothing: the one message the client alone
+    // produces would never be verified by anything, here or on the wire, and that is exactly how
+    // a broken Finished reaches production looking green.
+    let c_hs2[32]
+    derive_secret(hs, "c hs traffic", 12, h_tr, trlen, c_hs2)
+    let chkey[32]
+    let chiv[12]
+    tls_traffic_key_iv(c_hs2, chkey, chiv)
+
     // read client's CCS, Finished, GET; bail if the client aborted (rejected our certificate)
     let rb[2048]
     let mut rr = tls_read_record(afd, rb, 2048)
     if rr <= 0 { return }
     if peek8(rb) == 20 { rr = tls_read_record(afd, rb, 2048) }   // skip CCS -> client Finished
     if rr <= 0 { return }
+
+    // Verify it, the way a real server does: HMAC of the transcript through OUR Finished, under
+    // a key derived from the client handshake traffic secret. A mismatch means we hang up
+    // without serving, which is what the real servers did.
+    let cfdec[256]
+    let cm = tls_open(chkey, chiv, 0, rb, rr, cfdec)
+    if cm < 0 { return }
+    let cfk2[32]
+    hkdf_expand_label(c_hs2, "finished", 8, cfk2, 0, cfk2, 32)
+    let thc[32]
+    sha256_hash(h_tr, trlen + fl, thc)
+    let want[32]
+    hmac_sha256(cfk2, 32, thc, 32, want)
+    if peek8(cfdec) != 20 { return }                             // must be a Finished message
+    z = 0
+    for z < 32 {
+        if peek8(cfdec + 4 + z) != peek8(want + z) { return }
+        z = z + 1
+    }
+
     rr = tls_read_record(afd, rb, 2048)                          // client GET
     if rr <= 0 { return }
     let gdec[2048]
@@ -400,4 +430,42 @@ test "tls https: a non-application record in the flight returns a failure" {
     close_fd(sfd)
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
+}
+
+// The request builder copied each literal with a hand-written length, and two of them were short
+// by one: " HTTP/1.1\r\nHost: " is 17 characters and 16 were copied, dropping the space after the
+// colon, and "\r\nConnection: close\r\n\r\n" is 23 and 22 were copied, dropping the FINAL newline.
+// A request that ends in "\r\n\r" is never terminated, so a server waits for headers that never
+// arrive: Google hung until the client gave up, Cloudflare hung up without a word, and a local
+// `openssl s_server -www` answered anyway because it replies to the request line alone. Which is
+// how this survived: the only server it was ever tested against did not care.
+//
+// The assertion is on the BYTES, not on the length, so the next literal edited by hand cannot
+// pass by being the wrong string of the right size.
+let mut hr_buf[64]
+let mut hr_want[64]
+
+fn hr_eq(want: i64, got: i64, n: i64) -> i64 {
+    let mut i = 0
+    for i < n {
+        if peek8(want + i) != peek8(got + i) { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+test "tls https: the GET request is a complete, terminated HTTP request" {
+    let n = tls_http_req("example.com", 11, "/a", 2, hr_buf)
+    let want = "GET /a HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+    // The length is taken FROM the literal, not counted by hand: writing 56 here instead of 57
+    // is the very mistake under test, and I made it on the first try.
+    let mut i = 0
+    for peek8(want + i) != 0 { poke8(hr_want + i, peek8(want + i)); i = i + 1 }
+    assert_eq(n, i)
+    assert_eq(hr_eq(hr_want, hr_buf, i), 1)
+    // and it ends with the blank line that terminates the headers
+    assert_eq(peek8(hr_buf + n - 4), 13)
+    assert_eq(peek8(hr_buf + n - 3), 10)
+    assert_eq(peek8(hr_buf + n - 2), 13)
+    assert_eq(peek8(hr_buf + n - 1), 10)
 }

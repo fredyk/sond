@@ -45,20 +45,29 @@ fn tls_get(host: i64, port: i64, sni: i64, snilen: i64, path: i64, pathlen: i64,
 
 // Builds a minimal HTTP/1.1 GET request into `buf`: "GET <path> HTTP/1.1\r\nHost: <host>\r\n
 // Connection: close\r\n\r\n". Returns the length.
-fn tls_http_req(hosthdr: i64, hosthdrlen: i64, path: i64, pathlen: i64, buf: i64) -> i64 {
-    let mut o = 0
-    let g = "GET "
+// Copies a NUL-terminated literal into `buf + o` and returns the new offset. Counting a literal
+// by hand is how this file shipped a request that was never terminated: two of the three lengths
+// were short by one, so the header ended in "\r\n\r" and every strict server waited for a blank
+// line that never came. A literal knows where it ends; asking it cannot be off by one.
+fn tls_put_str(buf: i64, o: i64, s: i64) -> i64 {
+    let mut p = o
     let mut i = 0
-    for i < 4 { poke8(buf + o, peek8(g + i)); o = o + 1; i = i + 1 }
-    i = 0
+    for peek8(s + i) != 0 {
+        poke8(buf + p, peek8(s + i))
+        p = p + 1
+        i = i + 1
+    }
+    p
+}
+
+fn tls_http_req(hosthdr: i64, hosthdrlen: i64, path: i64, pathlen: i64, buf: i64) -> i64 {
+    let mut o = tls_put_str(buf, 0, "GET ")
+    let mut i = 0
     for i < pathlen { poke8(buf + o, peek8(path + i)); o = o + 1; i = i + 1 }
-    let h = " HTTP/1.1\r\nHost: "
-    i = 0
-    for i < 16 { poke8(buf + o, peek8(h + i)); o = o + 1; i = i + 1 }
+    o = tls_put_str(buf, o, " HTTP/1.1\r\nHost: ")
     i = 0
     for i < hosthdrlen { poke8(buf + o, peek8(hosthdr + i)); o = o + 1; i = i + 1 }
-    let tail = "\r\nConnection: close\r\n\r\n"
-    i = 0
-    for i < 22 { poke8(buf + o, peek8(tail + i)); o = o + 1; i = i + 1 }
-    o
+    // The trailing blank line is what ENDS the header block. Without it the request is
+    // incomplete and the server is right to wait.
+    tls_put_str(buf, o, "\r\nConnection: close\r\n\r\n")
 }
