@@ -646,6 +646,15 @@ test "http request: a refusal is refused all the way out, and writes nothing" {
     assert_eq(tls_req_header(r_buf, 0 - 1, "Accept", "text/plain"), 0 - 1)
 }
 
+test "http request: a negative body length is refused, not turned into no body at all" {
+    // A caller computing the length from a file size can land on a negative one; producing a
+    // valid-looking request without the body it asked for is the CRLF mistake again, doing
+    // something other than what was asked without saying so.
+    poke8(r_buf + 0, 90)
+    let o = tls_req_start(r_buf, "PUT", "/f", "h")
+    assert_eq(tls_req_end(r_buf, o, r_body, 0 - 5), 0 - 1)
+}
+
 test "http request: the body is NOT checked, because a body may hold anything" {
     // CRLF is data inside a body; only header lines are structure.
     let n = tls_req_end(r_buf, tls_req_start(r_buf, "POST", "/", "h"), "a\r\nb", 4)
