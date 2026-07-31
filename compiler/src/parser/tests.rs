@@ -698,3 +698,38 @@ fn parses_a_use_directive() {
     assert_eq!(uses.len(), 1);
     assert_eq!(uses[0].port, "Serial");
 }
+
+#[test]
+#[should_panic(expected = "unrecognised top-level declaration")]
+fn rejects_an_unrecognised_top_level_declaration() {
+    // A top-level declaration the parser does not know must be a syntax ERROR, never a
+    // silent stop.
+    //
+    // Why this test exists, and why it is worth a panic: the top-level loop used to run
+    // only `while` the next token was one it recognised, so anything else ended the loop
+    // quietly and EVERYTHING AFTER IT WAS NEVER PARSED. A file using `const` (which is not
+    // Sond — a named constant is `let NAME = ...`) lost every `test` block that followed,
+    // and the compiler then complained that the file had no tests. The error pointed at the
+    // wrong place entirely, and the real cause was three lines further up.
+    //
+    // This is the same failure already described in lexer.rs about a `#[no_main]` copied
+    // from Rust: "every file including it lost its test blocks, and the compiler said
+    // nothing". That one was closed on the lexer side, for characters that are not valid
+    // Sond at all. This closes the other half: words made of ordinary letters, which the
+    // lexer accepts happily and the parser then swallows.
+    //
+    // A compiler whose whole claim is that it rejects what it cannot prove cannot also
+    // accept what it cannot read.
+    let mut p = Parser::new(tokenize("const X = 1\ntest \"t\" { let y = 1 }"));
+    let _ = p.parse_program();
+}
+
+#[test]
+fn a_program_that_ends_cleanly_still_parses() {
+    // The guard above must not reject a perfectly normal file: the loop is allowed to end
+    // when the tokens run out, which is every well-formed program.
+    let mut p = Parser::new(tokenize("fn f() -> i64 { 1 }\ntest \"t\" { let y = 1 }"));
+    let funcs = p.parse_program();
+    assert_eq!(funcs.len(), 2, "the function and the test block");
+    assert!(funcs[1].is_test, "the test block survives");
+}

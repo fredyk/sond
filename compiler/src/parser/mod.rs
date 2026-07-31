@@ -118,6 +118,11 @@ impl Parser {
                 self.tokens.get(self.pos + 1)
             } else {
                 self.peek()
+                //
+                // NOTE: the loop below this one ends when the next token is not a known
+                // declaration. Falling out of it with tokens still pending is a SYNTAX
+                // ERROR and is reported after the loop — see the check at its end. It used
+                // to end quietly, and everything after the offending line was never parsed.
             };
             match kind {
                 // `fn` and `struct` consume their own leading visibility.
@@ -167,6 +172,26 @@ impl Parser {
                 }
             }
             self.skip_semicolons();
+        }
+        // Falling out of the loop with tokens left means the next thing is not a
+        // declaration this parser knows. That is a SYNTAX ERROR, and saying so is the whole
+        // point: the loop used to end here quietly and EVERYTHING AFTER THIS POINT WAS
+        // NEVER PARSED. A file with `const NAME = ...` (which is not Sond — a named constant
+        // is `let NAME = ...`) silently lost every `test` block that followed it, and the
+        // compiler then reported that the file had no tests at all. The message pointed
+        // nowhere near the cause.
+        //
+        // Same failure as the `#[no_main]` case described in lexer.rs, on the other side of
+        // the fence: that one was closed for characters that cannot be Sond, this one for
+        // words made of ordinary letters that the lexer accepts and the parser cannot use.
+        if let Some(tok) = self.peek() {
+            panic!(
+                "unrecognised top-level declaration at line {}: {:?}. \
+                 Expected one of: fn, let, struct, enum, iface, use, impl, test \
+                 (a named constant is `let NAME = ...`, Sond has no `const`).",
+                self.cur_line(),
+                tok
+            );
         }
         funcs
     }
