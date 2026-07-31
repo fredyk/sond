@@ -340,7 +340,9 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
             // A compiler whose whole claim is that it rejects what it cannot
             // prove cannot also accept what it cannot read.
             _ => {
-                panic!("unexpected character {c:?}");
+                // With the line: a program is usually built from includes, so "unexpected
+                // character" alone sends the author searching a file they may not have written.
+                panic!("unexpected character {c:?} at line {start_line}");
             }
         }
         // Attribute every token pushed this iteration to the line it started on.
@@ -435,3 +437,35 @@ fn keyword_or_ident(word: String) -> Token {
 #[cfg(test)]
 #[path = "lexer_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod lex_error_tests {
+    use super::*;
+
+    fn panic_text(e: &Box<dyn std::any::Any + Send>) -> String {
+        if let Some(s) = e.downcast_ref::<&str>() {
+            return (*s).to_string();
+        }
+        if let Some(s) = e.downcast_ref::<String>() {
+            return s.clone();
+        }
+        String::new()
+    }
+
+    #[test]
+    fn an_unreadable_character_says_which_line_it_is_on() {
+        // Refusing what it cannot read is right: a compiler whose claim is that it rejects what
+        // it cannot prove cannot also accept what it cannot read. But "unexpected character '?'"
+        // with no location sends the author searching the whole file, and in a program built from
+        // includes that file may not even be the one they wrote.
+        let src = "fn main() -> i64 {\n    let x = 1 ? 2\n    x\n}\n";
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let err = std::panic::catch_unwind(|| tokenize_located(src))
+            .expect_err("an unreadable character must be refused");
+        std::panic::set_hook(prev);
+        let msg = panic_text(&err);
+        assert!(msg.contains("'?'"), "name the character: {msg}");
+        assert!(msg.contains("line 2"), "name the line it is on: {msg}");
+    }
+}

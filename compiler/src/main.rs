@@ -68,8 +68,23 @@ fn main() -> ExitCode {
     // programs (a reusable library and the code that uses it) compile as one. `cov_scope`
     // is the set of functions coverage should measure (the entry's own code, not its
     // already-tested transitive dependencies).
+    // Silence the default panic hook HERE, before anything that can panic. Include resolution
+    // tokenizes every file it pulls in, so a character the lexer refuses used to escape as a raw
+    // Rust backtrace ("panicked at src/lexer.rs:343") with no file name and no line: the one
+    // message a compiler must never show, because it names the compiler's own source instead of
+    // the user's. The hook used to be set further down, after this phase.
+    std::panic::set_hook(Box::new(|_| {}));
+    let input_for_resolve = input.clone();
     let (mut src, cov_scope) =
-        match sondc::resolve::resolve_includes_scoped(std::path::Path::new(input)) {
+        match std::panic::catch_unwind(move || {
+            sondc::resolve::resolve_includes_scoped(std::path::Path::new(&input_for_resolve))
+        })
+        .unwrap_or_else(|e| {
+            Err(std::io::Error::other(format!(
+                "lex error while reading {input}: {}",
+                panic_message(&e)
+            )))
+        }) {
             Ok(s) => s,
             Err(e) => {
                 // `e` already names the file that failed (the entry, or the nested include that
@@ -127,8 +142,8 @@ fn main() -> ExitCode {
     // The parser and backend still `panic!`/`todo!` on constructs they do not
     // support yet. Catch that so the user (and the qwen example-writers, who
     // compile their own code) get a clean one-line error instead of a Rust
-    // backtrace, a good oracle explains the rejection.
-    std::panic::set_hook(Box::new(|_| {}));
+    // backtrace, a good oracle explains the rejection. (The hook is already
+    // silenced above, before include resolution, which can panic too.)
     let src_for_parse = src.clone();
     let (mut funcs, mut globals, mut structs, enums, ports, providers, uses) =
         match std::panic::catch_unwind(move || {
