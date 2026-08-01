@@ -144,6 +144,16 @@ pub fn resolve_includes(entry: &Path) -> std::io::Result<String> {
 /// transitively-included dependencies are assumed tested by their own suites, so they do not
 /// drag down the entry's coverage. (The testing library is filtered out downstream.)
 pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet<String>)> {
+    // Make the entry ABSOLUTE first. The search for a project's own `lib/` walks up from the
+    // entry's PARENT, and the parent of a relative path like `prog.snd` is the empty path, so the
+    // walk never starts and the only root left is the one under $HOME. The result is a compiler
+    // that resolves the same source differently depending on how the path was typed, and that is
+    // invisible on a machine with the standard library installed in the home directory: it only
+    // shows up in a container with an empty HOME, as a missing include that names the file rather
+    // than the reason. `absolute` rather than `canonicalize`: this needs the walk-up to start, not
+    // symlinks resolved, and it must not fail on a path that does not exist yet.
+    let owned = std::path::absolute(entry).unwrap_or_else(|_| entry.to_path_buf());
+    let entry: &Path = &owned;
     // First pass: walk the include graph, recording each file's private helper names, its direct
     // include edges, and a mangling id for the files that define private helpers. From that graph
     // we precompute, per file, how each COLLIDING private name (defined privately in more than one
@@ -463,6 +473,42 @@ mod tests {
     static UID: AtomicUsize = AtomicUsize::new(0);
     fn uid() -> usize {
         UID.fetch_add(1, Ordering::Relaxed)
+    }
+
+    // The walk-up that finds a project's own `lib/` starts at the entry file's PARENT. For a
+    // RELATIVE entry (`sondc prog.snd`, which is how everyone types it) that parent is the empty
+    // path, so the walk never starts and the only root left is the one in $HOME. On a developer
+    // machine with the standard library installed there, nothing is ever noticed; in a container
+    // with an empty HOME the same source stops compiling, and the error names the include rather
+    // than the reason. Same compilation must resolve the same way however the path is written.
+    #[test]
+    fn a_relative_entry_finds_the_project_lib_like_an_absolute_one_does() {
+        let dir = std::env::temp_dir().join(format!("sond_rel_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(dir.join("lib/mylib")).unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("lib/mylib/helper.snd"), "fn helper_answer() -> i64 { 42 }\n").unwrap();
+        std::fs::write(dir.join("src/prog.snd"), "include \"mylib/helper.snd\"\nfn main() -> i64 { helper_answer() }\n").unwrap();
+
+        let from_absolute = resolve_includes_scoped(&dir.join("src/prog.snd"))
+            .expect("an absolute entry resolves the project lib");
+
+        // The relative form, resolved from the same directory the author would be sitting in.
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.join("src")).unwrap();
+        let from_relative = resolve_includes_scoped(Path::new("prog.snd"));
+        std::env::set_current_dir(prev).unwrap();
+
+        let from_relative = from_relative.expect("a relative entry must resolve it too");
+        assert!(
+            from_relative.0.contains("helper_answer"),
+            "the relative form pulled in the include: {}",
+            from_relative.0
+        );
+        assert_eq!(
+            from_absolute.0, from_relative.0,
+            "both spellings of the same entry must produce the same program"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn tmp(name: &str, body: &str) -> PathBuf {
