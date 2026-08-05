@@ -14,6 +14,12 @@ pub enum Type {
     /// mutability rules: a value struct received as a parameter cannot have its
     /// fields mutated, a `*Point` can. A struct type is value XOR pointer.
     Ptr(Box<Type>),
+    /// `u32[]`: a VIEW of `T` over memory the caller owns, with no length of its own.
+    /// The runtime representation is the base address (an i64), exactly like an array
+    /// parameter; what it adds is the ELEMENT TYPE, so `v[i]` indexes at the element's
+    /// width instead of assuming a 64-bit word. This is what an image buffer needs: too
+    /// big for the stack, and its length belongs to the caller, not to the declaration.
+    View(Box<Type>),
 }
 
 /// Declaration visibility. The default is `Priv` (private to the module): a

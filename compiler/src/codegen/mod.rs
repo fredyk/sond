@@ -895,6 +895,10 @@ struct Codegen {
     /// knows to use the integer (`%rax`) or SSE (`%xmm0`) path for a `Var`. Reset per
     /// function alongside `locals`.
     var_types: HashMap<String, Ty>,
+    /// The ELEMENT type of each `u32[]`-style view in scope. The variable itself holds a base
+    /// address (an i64), so `var_types` says i64 for it; this is what `v[i]` needs, so the index
+    /// scales by the element's width instead of assuming a 64-bit word. Reset per function.
+    view_elem: HashMap<String, Ty>,
     /// The return kind of every user function, to type a call expression.
     fn_ret_types: HashMap<String, Ty>,
     /// Word count of each struct type (its by-value size), so a function returning a
@@ -962,6 +966,7 @@ impl Codegen {
         // Fresh per-function state (locals map + a unique return label).
         self.locals.clear();
         self.var_types.clear();
+        self.view_elem.clear();
         // The debug agent itself must NOT be instrumented, or `__dbg_step` (and every helper it
         // calls to serve the socket) would re-enter the checkpoint at each statement: unbounded
         // recursion. The agent is the `__dbg_` namespace, so disable the checkpoint for all of it.
@@ -1836,6 +1841,11 @@ impl Codegen {
                             self.line(&format!("    movq %rax, {off}(%rbp)"));
                         }
                         self.var_types.insert(name.clone(), recorded);
+                        // `let px: u32[] = heap_alloc(..)`: the variable holds the base address,
+                        // and the element type is what indexing needs.
+                        if let Some(crate::ast::Type::View(elem)) = ty.as_ref() {
+                            self.view_elem.insert(name.clone(), kind_of_type(elem));
+                        }
                     }
                 }
                 Stmt::Assign {
@@ -1856,21 +1866,40 @@ impl Codegen {
                         panic!("codegen: assignment to unknown variable `{name}`");
                     }
                 }
-                // Word-array write `base[index] = value`.
+                // `base[index] = value`: an 8-byte word, or the view's element width. The store
+                // must write EXACTLY the element's bytes: a 64-bit store into a u32 slot would
+                // silently overwrite the next element, which is the failure this type prevents.
                 Stmt::Assign {
                     target: Expr::Index(base, index),
                     value,
                 } => {
+                    let elem = match base.as_ref() {
+                        Expr::Var(n) => self.view_elem.get(n).copied(),
+                        _ => None,
+                    };
                     self.expr(base);
                     self.line("    pushq %rax");
                     self.expr(index);
-                    self.line("    shlq $3, %rax"); // index * 8
+                    let shift = match elem.map(|e| e.bits()) {
+                        Some(8) => 0,
+                        Some(16) => 1,
+                        Some(32) => 2,
+                        _ => 3,
+                    };
+                    if shift > 0 {
+                        self.line(&format!("    shlq ${shift}, %rax"));
+                    }
                     self.line("    pushq %rax");
                     self.expr(value); // value -> %rax
-                    self.line("    popq %rcx"); // index * 8
+                    self.line("    popq %rcx"); // scaled index
                     self.line("    popq %rdx"); // base
                     self.line("    addq %rdx, %rcx"); // address
-                    self.line("    movq %rax, (%rcx)");
+                    match elem.map(|e| e.bits()) {
+                        Some(8) => self.line("    movb %al, (%rcx)"),
+                        Some(16) => self.line("    movw %ax, (%rcx)"),
+                        Some(32) => self.line("    movl %eax, (%rcx)"),
+                        _ => self.line("    movq %rax, (%rcx)"),
+                    }
                 }
                 Stmt::Assign { .. } => todo!("x64 codegen: assignment to non-variable target"),
                 Stmt::Expr(e) => self.expr(e),

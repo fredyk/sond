@@ -1321,3 +1321,67 @@ fn a_logical_shift_right_respects_the_operand_width() {
         "an i64 keeps its own meaning: every bit participates"
     );
 }
+
+#[test]
+fn a_typed_view_indexes_memory_at_its_element_width() {
+    // An image buffer is millions of pixels: too big for the stack (2.7M RGBA is 11 MB against an
+    // 8 MB limit) and wrong as a global (the declared extent belongs to the whole program). It has
+    // to live in memory the program asks for, and be indexed as what it is. `u32[]` is a VIEW: an
+    // element type with no length of its own, over memory the caller owns. Backed by a stack array
+    // here so the test needs no allocator; the mechanism is the same, a base address plus a width.
+    //
+    // u32 rather than i32 for pixels, and the difference is not cosmetic: an opaque RGBA pixel has
+    // its top bit set, so as a signed 32-bit value it is negative, `px > 0` is false for every
+    // opaque pixel, and a shift without a mask returns garbage.
+    let src = "\
+        fn main() -> i64 {\n\
+            let backing[16]\n\
+            let px: u32[] = backing\n\
+            px[0] = 0xFF4080C0\n\
+            px[3] = 0x11223344\n\
+            print_int(px[0] >>> 24)\n\
+            print(\" \")\n\
+            print_int(px[0] & 0xFF)\n\
+            print(\" \")\n\
+            print_int(px[3])\n\
+            0\n\
+        }";
+    // The first pixel's alpha, its blue channel, and the fourth pixel read back whole.
+    assert_eq!(compile_and_capture(src), "255 192 287454020");
+}
+
+#[test]
+fn a_typed_view_reads_four_bytes_not_eight() {
+    // The width is the whole point: two adjacent u32 slots are independent values. An 8-byte store
+    // into slot 0 would swallow slot 1, and an 8-byte load would return both at once. Two full
+    // 32-bit patterns with their top bits set catch either mistake.
+    let src = "\
+        fn main() -> i64 {\n\
+            let backing[8]\n\
+            let a: u32[] = backing\n\
+            a[0] = 0xAAAAAAAA\n\
+            a[1] = 0xBBBBBBBB\n\
+            print_int(a[0])\n\
+            print(\" \")\n\
+            print_int(a[1])\n\
+            0\n\
+        }";
+    assert_eq!(compile_and_capture(src), "2863311530 3149642683");
+}
+
+#[test]
+fn an_untyped_array_still_indexes_as_64_bit_words() {
+    // Nothing written before this feature may change meaning: an array with no element type is
+    // still a word array, and `a[1]` is still the second 8-byte word.
+    let src = "\
+        fn main() -> i64 {\n\
+            let a[4]\n\
+            a[0] = 0xAAAAAAAA\n\
+            a[1] = 0xBBBBBBBB\n\
+            print_int(a[0])\n\
+            print(\" \")\n\
+            print_int(a[1])\n\
+            0\n\
+        }";
+    assert_eq!(compile_and_capture(src), "2863311530 3149642683");
+}

@@ -35,6 +35,9 @@ fn ty_of(decl: &AstType) -> Ty {
         // A `*Point` checks as its pointee struct type; value vs pointer is a
         // separate static (mutability) distinction, not a different `Ty` here.
         AstType::Ptr(inner) => return ty_of(inner),
+        // A view is held as its base address, so it checks as an integer here; the ELEMENT
+        // type is what the codegen needs, and it reads it from the declaration itself.
+        AstType::View(_) => return Ty::Int,
     };
     match name.as_str() {
         "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" => Ty::Int,

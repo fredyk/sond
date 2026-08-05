@@ -898,7 +898,15 @@ impl Parser {
             self.expect(Token::RBracket);
             return Type::Named("i64".to_string());
         }
-        Type::Named(self.expect_ident())
+        // `T[]` is a VIEW of T: the element type carries, the length does not. Postfix so it
+        // reads as the type it is a view of, matching `let px: u32[1024]` for the sized form.
+        let base = Type::Named(self.expect_ident());
+        if self.peek() == Some(&Token::LBracket) && self.peek_at(1) == Some(&Token::RBracket) {
+            self.expect(Token::LBracket);
+            self.expect(Token::RBracket);
+            return Type::View(Box::new(base));
+        }
+        base
     }
 }
 

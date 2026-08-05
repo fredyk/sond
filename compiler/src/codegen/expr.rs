@@ -25,6 +25,11 @@ impl Codegen {
                     Ty::I64
                 }
             }
+            // Indexing a view yields its ELEMENT type; indexing anything else is a 64-bit word.
+            Expr::Index(base, _) => match base.as_ref() {
+                Expr::Var(n) => self.view_elem.get(n).copied().unwrap_or(Ty::I64),
+                _ => Ty::I64,
+            },
             Expr::Unary(UnOp::Neg, inner) => self.ty_of(inner),
             Expr::Cast(_, ty) => kind_of_type(ty),
             Expr::If { then_branch, .. } => {
@@ -61,15 +66,43 @@ impl Codegen {
             }
             Expr::Binary(op, l, r) => self.binary(op, l, r),
             Expr::Call(callee, args) => self.call(callee, args),
-            // Word-array read `base[index]`: load the 8-byte word at base+index*8.
+            // `base[index]`: an 8-byte word by default, or the view's element width when the
+            // base is a typed view. The element width is the whole point of a view: two adjacent
+            // u32 slots must be independent, which an 8-byte load would not give.
             Expr::Index(base, index) => {
+                let elem = match base.as_ref() {
+                    Expr::Var(n) => self.view_elem.get(n).copied(),
+                    _ => None,
+                };
                 self.expr(base);
                 self.line("    pushq %rax");
                 self.expr(index);
-                self.line("    shlq $3, %rax"); // index * 8
+                let shift = match elem.map(|e| e.bits()) {
+                    Some(8) => 0,
+                    Some(16) => 1,
+                    Some(32) => 2,
+                    _ => 3,
+                };
+                if shift > 0 {
+                    self.line(&format!("    shlq ${shift}, %rax"));
+                }
                 self.line("    popq %rcx"); // base
                 self.line("    addq %rcx, %rax"); // address
-                self.line("    movq (%rax), %rax");
+                match elem {
+                    // Load exactly the element's bytes, extending by its signedness: an unsigned
+                    // element must arrive zero-extended or every later shift and comparison is
+                    // wrong for values with the top bit set (an opaque pixel is one).
+                    Some(e) => match (e.bits(), e.is_unsigned()) {
+                        (8, true) => self.line("    movzbq (%rax), %rax"),
+                        (8, false) => self.line("    movsbq (%rax), %rax"),
+                        (16, true) => self.line("    movzwq (%rax), %rax"),
+                        (16, false) => self.line("    movswq (%rax), %rax"),
+                        (32, true) => self.line("    movl (%rax), %eax"), // zero-extends to rax
+                        (32, false) => self.line("    movslq (%rax), %rax"),
+                        _ => self.line("    movq (%rax), %rax"),
+                    },
+                    None => self.line("    movq (%rax), %rax"),
+                }
             }
             Expr::Unary(op, e) => {
                 self.expr(e);

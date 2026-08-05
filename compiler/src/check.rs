@@ -1341,6 +1341,8 @@ pub fn check_receiver_kinds(funcs: &[Function]) -> Result<(), String> {
                 Type::Named(t) => (t.as_str(), true),
                 _ => continue,
             },
+            // A view is not a struct, so it never selects a method receiver kind.
+            Type::View(_) => continue,
         };
         match kind.get(tn) {
             Some((prev_ptr, prev_m)) if *prev_ptr != is_ptr => {
@@ -1380,6 +1382,7 @@ fn receiver_kind_map(funcs: &[Function]) -> HashMap<&str, bool> {
                     m.insert(t.as_str(), true);
                 }
             }
+            Type::View(_) => {}
         }
     }
     m
@@ -1411,6 +1414,7 @@ fn check_decl_ty(ty: &Type, kinds: &HashMap<&str, bool>) -> Result<(), String> {
             Type::Named(n) => (n.as_str(), true),
             _ => return Ok(()),
         },
+        Type::View(_) => return Ok(()),
     };
     match kinds.get(name) {
         Some(true) if !declared_ptr => Err(format!(
