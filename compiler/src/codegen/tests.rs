@@ -1347,6 +1347,34 @@ fn a_view_passed_to_a_function_keeps_its_element_width() {
 }
 
 #[test]
+fn an_eight_bit_view_addresses_single_bytes_and_carries_the_element_s_sign() {
+    // Bytes are what a camera hands over: a JPEG is a byte stream, and reading it through a word
+    // view would swallow seven neighbours per read. Eight `u8` writes must land in ONE word, and
+    // the SIGN must follow the element type, not the machine: the same 0xFF byte is 255 read as
+    // `u8` and -1 read as `i8`. That difference is the whole reason a pixel is `u32` and not
+    // `i32`, one width down.
+    let src = "\
+        fn fill(b: u8[n], n: i64) {\n\
+            let mut i = 0\n\
+            for i < n { b[i] = 0xFF\ni = i + 1 }\n\
+        }\n\
+        fn main() -> i64 {\n\
+            let backing[1]\n\
+            let b: u8[] = backing\n\
+            fill(b, 8)\n\
+            let s: i8[] = backing\n\
+            print_int(b[0])\n\
+            print(\" \")\n\
+            print_int(s[0])\n\
+            print(\" \")\n\
+            print_int(peek64(backing))\n\
+            0\n\
+        }";
+    // 255 unsigned, -1 signed, and the eight bytes filled exactly one 64-bit word (-1).
+    assert_eq!(compile_and_capture(src), "255 -1 -1");
+}
+
+#[test]
 fn a_typed_view_indexes_memory_at_its_element_width() {
     // An image buffer is millions of pixels: too big for the stack (2.7M RGBA is 11 MB against an
     // 8 MB limit) and wrong as a global (the declared extent belongs to the whole program). It has

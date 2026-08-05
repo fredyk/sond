@@ -3482,6 +3482,28 @@ mod tests {
     }
 
     #[test]
+    fn an_eight_bit_view_is_bounds_checked_in_bytes_not_words() {
+        // The capacity of a view is counted in ITS elements: one word of backing holds eight
+        // `u8`s, so a loop to 8 is in bounds and a loop to 9 is not. Counting in words would
+        // reject seven eighths of a legitimate byte buffer; counting in bytes for a word view
+        // would accept eight times too much.
+        assert!(
+            bounds(
+                "fn f() -> i64 { let backing[1]\nlet b: u8[] = backing\n\
+                 let mut i = 0\nfor i < 8 { b[i] = 1\ni = i + 1 }\n0 }"
+            )
+            .is_ok(),
+            "eight bytes fit in one word of backing"
+        );
+        let err = bounds(
+            "fn f() -> i64 { let backing[1]\nlet b: u8[] = backing\n\
+             let mut i = 0\nfor i < 9 { b[i] = 1\ni = i + 1 }\n0 }",
+        )
+        .unwrap_err();
+        assert!(err.contains("size 8"), "the bound is the byte capacity, got: {err}");
+    }
+
+    #[test]
     fn rejects_a_constant_index_from_arithmetic_out_of_bounds() {
         assert!(bounds("fn f() -> i64 { let a[4]\na[2 + 3] }").is_err());
     }
