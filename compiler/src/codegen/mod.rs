@@ -395,8 +395,11 @@ pub fn emit_uefi_g(globals: &[Global], structs: &[StructDef], funcs: &[Function]
     // efi_main entry (MS x64 ABI: rcx = ImageHandle, rdx = SystemTable).
     cg.line(".globl efi_main");
     cg.line("efi_main:");
-    cg.line("    movq %rcx, sond_imghandle(%rip)"); // stash ImageHandle for EBS
-    cg.line("    movq %rdx, sond_systab(%rip)"); // stash SystemTable for print
+    // Park the two arguments in scratch registers the zero-fill below does not touch (`stos`
+    // uses %rdi/%rcx/%rax; %r10 and %r11 are caller-saved and dead on entry). They are stashed
+    // AFTER the fill, so the fill cannot erase them no matter which section they end up in.
+    cg.line("    movq %rcx, %r10"); // ImageHandle
+    cg.line("    movq %rdx, %r11"); // SystemTable
     // Zero `.bss` before any Sond code runs. On ELF the zeros come from the program header
     // (`memsz > filesz`, the kernel supplies them); a PE has no such promise in the file, only
     // the loader's convention of zero-filling a section with no raw data. OVMF honours it, but
@@ -412,6 +415,8 @@ pub fn emit_uefi_g(globals: &[Global], structs: &[StructDef], funcs: &[Function]
     cg.line("    xorl %eax, %eax");
     cg.line("    cld");
     cg.line("    rep stosb");
+    cg.line("    movq %r10, sond_imghandle(%rip)"); // stash ImageHandle for EBS
+    cg.line("    movq %r11, sond_systab(%rip)"); // stash SystemTable for print
     cg.line("    subq $8, %rsp"); // 16-align the stack before the call
     cg.line("    leaq sond_arena_tcb(%rip), %r15"); // seed the thread-local arena pointer
     cg.line("    call sond_start");

@@ -560,6 +560,28 @@ fn the_uefi_entry_zeroes_bss_itself_instead_of_trusting_the_firmware() {
     );
 }
 
+#[test]
+fn the_uefi_entry_zeroes_bss_before_it_stashes_anything_of_its_own() {
+    // The zero-fill must not be able to erase what the entry just wrote down. Today it cannot,
+    // but only because `sond_systab` and `sond_imghandle` happen to land in `.data` while only
+    // arrays go to `.bss` — correct BY COINCIDENCE. The day anything moves a zeroed scalar to
+    // `.bss` (and `sond_systab` is a `.quad 0`, exactly the shape that would move), the entry
+    // would wipe the SystemTable it had just saved, and the symptom is a UEFI app that prints
+    // nothing, with no clue pointing here. Zeroing FIRST and stashing after makes the order
+    // correct by construction, whatever section anything ends up in.
+    let asm = emit_uefi_with_globals("let mut px[8]\nfn efi_main() -> i64 { px[0] }");
+    let entry = &asm[asm.find("efi_main:").expect("the UEFI entry is emitted")..];
+    let fill = entry.find("rep stos").expect("the entry zero-fills .bss");
+    let stash = entry
+        .find("sond_systab(%rip)")
+        .expect("the entry stashes the SystemTable");
+    assert!(
+        fill < stash,
+        "the entry must zero .bss BEFORE stashing anything, got:\n{}",
+        &entry[..entry.len().min(1200)]
+    );
+}
+
 /// Emits a UEFI program that has module-level globals, returning the assembly.
 fn emit_uefi_with_globals(src: &str) -> String {
     let mut p = Parser::new(tokenize(src));
