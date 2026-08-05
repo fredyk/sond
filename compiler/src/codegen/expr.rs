@@ -271,6 +271,8 @@ impl Codegen {
         let usig = self.ty_of(l).is_unsigned() || self.ty_of(r).is_unsigned();
         let ushift = self.ty_of(l).is_unsigned();
         let res = combine_kind(self.ty_of(l), self.ty_of(r));
+        // The LEFT operand's own type: a shift follows it, not the combined result type.
+        let lty = self.ty_of(l);
         match op {
             BinOp::Add => self.line("    addq %rcx, %rax"),
             BinOp::Sub => self.line("    subq %rcx, %rax"),
@@ -306,7 +308,21 @@ impl Codegen {
             BinOp::Shl => self.line("    shlq %cl, %rax"),
             BinOp::Shr if ushift => self.line("    shrq %cl, %rax"),
             BinOp::Shr => self.line("    sarq %cl, %rax"),
-            BinOp::LShr => self.line("    shrq %cl, %rax"),
+            // `>>>` shifts the VALUE and brings in zeros, so for a narrow type it must shift the
+            // narrow value: a signed i8/i16/i32 is held sign-extended in the 64-bit register, and
+            // shifting all 64 bits drags those sign bits down into the result. Zero the bits above
+            // the type's width first. An unsigned narrow operand is already zero-extended, so this
+            // is a no-op for it, and a 64-bit operand has nothing above its width to clear.
+            BinOp::LShr => {
+                if lty.bits() < 64 && !lty.is_unsigned() {
+                    match lty.bits() {
+                        8 => self.line("    movzbq %al, %rax"),
+                        16 => self.line("    movzwq %ax, %rax"),
+                        _ => self.line("    movl %eax, %eax"),
+                    }
+                }
+                self.line("    shrq %cl, %rax")
+            }
             BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne => {
                 // <,>,<=,>= use different condition codes when unsigned; ==,!= do not.
                 let setcc = match (op, usig) {

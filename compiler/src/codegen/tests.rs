@@ -1259,3 +1259,46 @@ fn the_emitted_object_marks_the_stack_non_executable() {
         );
     }
 }
+
+#[test]
+fn a_logical_shift_right_respects_the_operand_width() {
+    // `>>>` means "shift the value, bringing in zeros". For a NARROW signed type the value sits
+    // sign-extended in a 64-bit register, so shifting all 64 bits drags the sign bits down into
+    // the result: `-1 as i32 >>> 24` gave 1099511627775 (0xFF_FFFF_FFFF) instead of 255, and the
+    // answer does not even fit in an i32. It survived because the usual spelling masks afterwards
+    // ((px >>> 24) & 0xFF), which hides it, and because the same expression on a u32 is correct by
+    // accident: an unsigned narrow value is held ZERO-extended, so the 64-bit shift agrees.
+    //
+    // The pixel case is the one that made it matter: an opaque RGBA pixel has the top bit set, so
+    // as i32 it is negative, and reading its alpha with a shift returns garbage unless the author
+    // remembers the mask.
+    //
+    // Asserted through STDOUT, not through the exit status: an exit code is eight bits, so
+    // `1099511627775 & 0xFF` is also 255 and the broken compiler would have passed. Written that
+    // way first, and it did.
+    assert_eq!(
+        compile_and_capture("fn main() -> i64 { let x: i32 = 0 - 1\nprint_int(x >>> 24)\n0 }"),
+        "255",
+        "nothing above bit 31 may survive a logical shift of an i32"
+    );
+    assert_eq!(
+        compile_and_capture("fn main() -> i64 { let u: u32 = 0xFF4080C0\nprint_int(u >>> 24)\n0 }"),
+        "255",
+        "an opaque pixel's alpha through a u32 view (this already worked)"
+    );
+    assert_eq!(
+        compile_and_capture("fn main() -> i64 { let x: i16 = 0 - 1\nprint_int(x >>> 8)\n0 }"),
+        "255",
+        "16-bit follows the same rule"
+    );
+    assert_eq!(
+        compile_and_capture("fn main() -> i64 { let x: i8 = 0 - 1\nprint_int(x >>> 4)\n0 }"),
+        "15",
+        "and 8-bit"
+    );
+    assert_eq!(
+        compile_and_capture("fn main() -> i64 { let x: i64 = 0 - 1\nprint_int(x >>> 56)\n0 }"),
+        "255",
+        "an i64 keeps its own meaning: every bit participates"
+    );
+}
