@@ -1458,3 +1458,37 @@ fn an_untyped_array_still_indexes_as_64_bit_words() {
         }";
     assert_eq!(compile_and_capture(src), "2863311530 3149642683");
 }
+
+#[test]
+fn the_canonical_view_form_a_caller_writes_keeps_working() {
+    // This is not a feature test. It is a PROMISE, written where a promise can fail: the exact
+    // shape an outside project builds its image module on, both spellings of it, pinned so that
+    // changing the view again turns this red here instead of breaking someone else's code
+    // silently.
+    //
+    // It exists because that already happened. The form without a declared length was given out
+    // as frozen, a later fix rejected it, and the consumer found out by their build failing. The
+    // fix was right; announcing it as a promise instead of a test was not.
+    //
+    // A local carrying its own length, and a function taking the view with the length beside it:
+    assert_eq!(
+        compile_and_capture(
+            "fn fill(px: u32[n], n: i64) {\n\
+                 let mut i = 0\n\
+                 for i < n { px[i] = 0xFF4080C0\ni = i + 1 }\n\
+             }\n\
+             fn main() -> i64 {\n\
+                 let n = 4\n\
+                 let backing[2]\n\
+                 let px: u32[n] = backing\n\
+                 fill(px, n)\n\
+                 print_int(px[0] >>> 24)\n\
+                 print(\" \")\n\
+                 print_int(px[n - 1] & 0xFF)\n\
+                 0\n\
+             }"
+        ),
+        "255 192",
+        "the alpha of the first pixel and the blue of the last, through the form a caller writes"
+    );
+}
