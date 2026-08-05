@@ -522,6 +522,25 @@ fn a_partly_initialized_global_array_still_owns_its_whole_declared_size_on_real_
 }
 
 #[test]
+fn a_reserved_array_owns_its_whole_size_and_reads_as_zero_throughout_on_real_x64() {
+    // The `.data` side of this has its own test; `.bss` needs the same guard, because a
+    // reservation of the WRONG size fails in the one way no happy-path test notices: the array
+    // still works near element 0, and only its far end lands on the next global. So write EVERY
+    // element — under any short reservation, some write lands on the neighbour — and read the
+    // sentinel back. It stays zero only if the array really owns all 64 words. The sentinel's
+    // own read also pins the other half of the promise: memory nobody wrote reads as zero.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut px[64]\nlet mut sentinel[2]\n\
+             fn main() -> i64 { let mut i = 0\nfor i < 64 { px[i] = 1\ni = i + 1 }\n\
+             let mut s = 0\nlet mut j = 0\nfor j < 64 { s = s + px[j]\nj = j + 1 }\n\
+             s + sentinel[0] + sentinel[1] }"
+        ),
+        64
+    );
+}
+
+#[test]
 fn the_uefi_entry_zeroes_bss_itself_instead_of_trusting_the_firmware() {
     // On ELF the zeros are a guarantee: the program header says `memsz > filesz` and the kernel
     // supplies them. On UEFI they are a POLITENESS: the PE loader is *supposed* to zero-fill a
