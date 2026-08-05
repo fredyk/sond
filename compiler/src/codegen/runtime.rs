@@ -246,6 +246,12 @@ impl Codegen {
         for line in [
             ".text",
             "sond_view_alloc:",
+            // Nothing asked for, nothing handed out. Without this a negative length walked the
+            // bump cursor BACKWARDS and the crash landed on the next view declared, not on the
+            // bad one — a report pointing at healthy code. `test` sets the flags without touching
+            // the register, so the request survives for the arithmetic below.
+            "    testq %rdi, %rdi",
+            "    jle .Lva_empty",
             "    addq $7, %rdi",  // round the request up to the 8-byte grain
             "    andq $-8, %rdi",
             "    movq (%r15), %rax",   // next free byte
@@ -277,7 +283,11 @@ impl Codegen {
             "    movq %rax, %rcx",
             "    addq %rdi, %rcx",
             ".Lva_fit:",
-            "    movq %rcx, (%r15)", // hand out the old cursor, park the new one
+            "    movq %rcx, (%r15)",   // hand out the old cursor, park the new one
+            "    addq %rdi, 16(%r15)", // and count it, so `heap_used` sees this too
+            "    ret",
+            ".Lva_empty:",
+            "    movq (%r15), %rax", // an empty view still has an address: the current cursor
             "    ret",
         ] {
             self.line(line);

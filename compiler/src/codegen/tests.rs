@@ -1451,6 +1451,50 @@ fn declaring_a_view_with_a_length_reserves_it_zeroed() {
 }
 
 #[test]
+fn a_reservation_of_nothing_leaves_the_arena_usable() {
+    // A length of zero or below asks for no storage, and the answer has to be "here is nothing",
+    // not "here is the arena, broken". Measured before the guard: a negative length walked the
+    // bump cursor backwards and the SEGFAULT landed on the NEXT view — a healthy one, declared
+    // afterwards — which is the worst kind of report to receive, because the line that crashes is
+    // not the line that is wrong.
+    let src = "\
+        fn main() -> i64 {\n\
+            let bad = 0 - 5\n\
+            let broken: i32[bad]\n\
+            let none = 0\n\
+            let empty: i32[none]\n\
+            let m = 8\n\
+            let ok: i32[m]\n\
+            ok[0] = 42\n\
+            print_int(ok[0])\n\
+            0\n\
+        }";
+    assert_eq!(compile_and_capture(src), "42");
+}
+
+#[test]
+fn a_reservation_shows_up_in_the_arena_s_own_accounting() {
+    // The reservation bumps the same cursor as `heap_alloc`, so it must also add to the same
+    // total, or `heap_used()` reports zero while a program eats megabytes a second — a leak with
+    // the only instrument that could see it pointing the other way.
+    // Read the arena's own total (control block word 3) with builtins, so the test needs no
+    // library: it is the exact cell `heap_used()` reports.
+    let src = "\
+        fn main() -> i64 {\n\
+            let n = 100000\n\
+            let buf: u32[n]\n\
+            buf[0] = 1\n\
+            print_int(peek64(arena_tcb() + 16))\n\
+            0\n\
+        }";
+    assert_eq!(
+        compile_and_capture(src),
+        "400000",
+        "100000 u32 elements are 400000 bytes, and the arena has to say so"
+    );
+}
+
+#[test]
 fn reserving_a_view_on_uefi_is_refused_rather_than_emitted_as_a_syscall() {
     // The reservation grows its arena with `mmap`, and on UEFI there is no kernel to answer it:
     // the same declaration compiled cleanly and would have executed a `syscall` instruction on
