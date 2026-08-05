@@ -70,6 +70,27 @@ impl Ty {
     }
 }
 
+/// One element of a module-level table: a constant number, or the ADDRESS of a string literal's
+/// bytes in `.rodata`. A literal's address is as much a compile-time constant as an integer is,
+/// which is what makes a fixed list of texts a table of pointers rather than a runtime build-up.
+#[derive(Clone, PartialEq)]
+pub(crate) enum GlobalWord {
+    Num(i64),
+    Label(String),
+}
+
+impl GlobalWord {
+    fn is_zero(&self) -> bool {
+        *self == GlobalWord::Num(0)
+    }
+    fn operand(&self) -> String {
+        match self {
+            GlobalWord::Num(n) => n.to_string(),
+            GlobalWord::Label(l) => l.clone(),
+        }
+    }
+}
+
 /// Whether a declared type is `f64` (the SSE-class float).
 fn is_float_type(ty: &Type) -> bool {
     matches!(ty, Type::Named(n) if n == "f64")
@@ -890,7 +911,7 @@ struct Codegen {
     /// given are only the initializer's own elements: the rest of the declared length is a tail
     /// of zeros, which is RESERVED rather than written out (see `emit_globals`), so a buffer of
     /// millions of elements costs the compiler and the binary nothing per element.
-    global_array_data: Vec<(String, Vec<i64>, usize)>,
+    global_array_data: Vec<(String, Vec<GlobalWord>, usize)>,
     /// The value kind (`Int`/`Float`) of each in-scope local/parameter, so codegen
     /// knows to use the integer (`%rax`) or SSE (`%xmm0`) path for a `Var`. Reset per
     /// function alongside `locals`.
@@ -1236,10 +1257,12 @@ impl Codegen {
                 let mut words = match &g.init {
                     Expr::List(items) => items
                         .iter()
-                        .map(|e| {
-                            self.const_eval(e).unwrap_or_else(|| {
+                        .map(|e| match e {
+                            // A string literal contributes the address of its interned bytes.
+                            Expr::Str(text) => GlobalWord::Label(self.intern_string(text)),
+                            _ => GlobalWord::Num(self.const_eval(e).unwrap_or_else(|| {
                                 panic!("global array `{}` needs constant elements", g.name)
-                            })
+                            })),
                         })
                         .collect::<Vec<_>>(),
                     _ => Vec::new(),
@@ -1716,11 +1739,11 @@ impl Codegen {
         // reservation, not N literals of which N-2 say nothing.
         let (zeroed, valued): (Vec<_>, Vec<_>) = arrays
             .into_iter()
-            .partition(|(_, words, _)| words.iter().all(|w| *w == 0));
+            .partition(|(_, words, _)| words.iter().all(GlobalWord::is_zero));
         for (name, words, len) in valued {
             let quads = words
                 .iter()
-                .map(|w| w.to_string())
+                .map(GlobalWord::operand)
                 .collect::<Vec<_>>()
                 .join(", ");
             self.line(&format!("{name}: .quad {quads}"));
@@ -1757,7 +1780,7 @@ impl Codegen {
     /// binary. An image buffer of 2.7M pixels is a ~21 MB file of nothing that way. `.bss` states
     /// the size only; the loader (or the ELF program header's `memsz > filesz`) supplies the
     /// zeros, which is exactly the same guarantee the program had before.
-    fn emit_zeroed_arrays(&mut self, zeroed: Vec<(String, Vec<i64>, usize)>) {
+    fn emit_zeroed_arrays(&mut self, zeroed: Vec<(String, Vec<GlobalWord>, usize)>) {
         if zeroed.is_empty() {
             return;
         }

@@ -474,6 +474,27 @@ fn an_all_zero_global_array_is_reserved_in_bss_not_written_out() {
 }
 
 #[test]
+fn a_global_array_of_string_literals_holds_their_addresses() {
+    // A fixed list of texts (event names, menu labels) is a module-level table of pointers, and a
+    // string literal IS a compile-time constant: its address in `.rodata`. A scalar
+    // `let MSG = "hi"` already worked, so rejecting the same literal one bracket deeper was an
+    // inconsistency that pushed every fixed list into a function body.
+    let asm = emit_with_globals(
+        "let NAMES[2] = [\"uno\", \"dos\"]\nfn main() -> i64 { NAMES[0] }",
+    );
+    assert!(
+        asm.contains("NAMES: .quad .Lstr"),
+        "the table holds the literals' rodata addresses, got:\n{asm}"
+    );
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let NAMES[2] = [\"uno\", \"dos\"]\nfn main() -> i64 { peek8(NAMES[1]) }"
+        ),
+        100, // 'd' of "dos": the second entry really points at its own bytes
+    );
+}
+
+#[test]
 fn a_global_array_with_nonzero_elements_stays_in_data() {
     // Only ALL-ZERO arrays move: a constant table has values to write down, and `.bss` cannot
     // carry them. This is the guard that the size win does not silently drop initializers.

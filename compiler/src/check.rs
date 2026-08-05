@@ -1700,6 +1700,10 @@ struct Flow {
     ceilings: HashMap<String, i64>,
     /// Known exact constant values: `v == C`.
     consts: HashMap<String, i64>,
+    /// Local views in scope, as `name -> the local/parameter naming its length` (`None` when the
+    /// declaration gave no length). A view whose length is knowable another way — one taken
+    /// directly over a measurable array — is recorded as a size instead, like the array itself.
+    views: HashMap<String, Option<String>>,
 }
 
 impl Flow {
@@ -2602,6 +2606,13 @@ fn bounds_block(
                         .map(|words| words.saturating_mul(8) / elem_bytes(elem)),
                     _ => None,
                 };
+                // Rebinding a name drops whatever it used to be, view or not; then record it if
+                // this binding IS a view, so an index into it is never checked by accident against
+                // a size that belonged to something else.
+                flow.views.remove(name);
+                if let Some(Type::View(_, len)) = ty.as_ref() {
+                    flow.views.insert(name.clone(), len.clone());
+                }
                 match array_len {
                     // `let a[N]` records the known size; a scalar `let a = ..` reusing the
                     // name drops any prior size so a later index is not checked against it.
@@ -2868,7 +2879,7 @@ fn bounds_expr(
                     "function `{fname}`: cannot prove this index is in bounds for slice `{a}`; bound it with a `where`/`requires`/loop condition to 0..{a}.len"
                 ));
             }
-        } else if let Some(len) = view_len_of(a, params) {
+        } else if let Some(len) = view_len_of(a, params).or_else(|| flow.views.get(a).cloned()) {
             // A view is one word: a base address whose length lives elsewhere. `u32[n]` names the
             // parameter holding it, and the index is proven against THAT name, so bounding it by
             // another buffer's length proves nothing and is rejected — which is the mistake worth
@@ -2876,8 +2887,8 @@ fn bounds_expr(
             let Some(len) = len else {
                 return Err(format!(
                     "function `{fname}`: view `{a}` has no declared length, so an index into it \
-                     cannot be checked; declare it as `T[n]`, naming the parameter that carries \
-                     its length"
+                     cannot be checked; declare it as `T[n]`, naming the parameter or local that \
+                     carries its length"
                 ));
             };
             let bound = Expr::Var(len.clone());
@@ -3501,6 +3512,53 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("size 8"), "the bound is the byte capacity, got: {err}");
+    }
+
+    #[test]
+    fn rejects_indexing_a_local_view_whose_length_nobody_knows() {
+        // A view over a DERIVED address (`backing + 8`, an allocator's return) has no length the
+        // compiler can work out: the backing store's capacity is not the view's, because the view
+        // starts somewhere inside it. Silence here was worse than the parameter case it mirrors —
+        // `w[3000]` compiled without a word — so the rule is the same one: no known length, no
+        // indexing, and say which is missing.
+        let err = bounds(
+            "fn f() -> i64 { let backing[2]\nlet w: u32[] = backing + 8\nw[3000] = 1\n0 }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("length") && err.contains("w"),
+            "an unmeasurable local view must be refused, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rebinding_a_name_stops_treating_it_as_a_view() {
+        // The mirror of the rule, and the kind of false positive that would make people avoid the
+        // checked form: once a name is bound to something else, it is no longer a view, and
+        // indexing it is an ordinary word index again. Remembering the old view would reject
+        // perfectly good code with a message about a length that no longer applies to anything.
+        assert!(
+            bounds(
+                "fn f() -> i64 { let backing[4]\nlet v: u32[] = backing + 8\n\
+                 let v = backing\nv[1] = 1\n0 }"
+            )
+            .is_ok(),
+            "a name rebound away from a view must index like any other address"
+        );
+    }
+
+    #[test]
+    fn accepts_a_local_view_that_declares_its_length() {
+        // And the way out, which is the shape a heap buffer actually takes: name the local holding
+        // the length, `u32[n]`, exactly as a parameter does. The canonical loop then proves itself.
+        assert!(
+            bounds(
+                "fn f(n: i64) -> i64 { let raw = 0\nlet px: u32[n] = raw\n\
+                 let mut i = 0\nfor i < n { px[i] = 1\ni = i + 1 }\n0 }"
+            )
+            .is_ok(),
+            "a local view that names its length must be checkable, not refused"
+        );
     }
 
     #[test]
