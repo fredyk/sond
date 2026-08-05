@@ -1368,6 +1368,35 @@ fn a_view_passed_to_a_function_keeps_its_element_width() {
 }
 
 #[test]
+fn the_view_surface_a_caller_writes_against_stays_working() {
+    // A CONTRACT, not a feature test. This is the exact shape callers write against — length in
+    // the declaration, length in the signature, canonical loop, sub-view at a constant offset —
+    // and it is here so that a change to the compiler which breaks that shape breaks the suite
+    // first, instead of breaking somebody's build. Anything added later (more widths, 2D sugar)
+    // must leave this compiling unchanged; if it cannot, the callers get told BEFORE it lands,
+    // not after.
+    let src = "\
+        fn fill(px: u32[n], n: i64, v: i64) {\n\
+            let mut i = 0\n\
+            for i < n { px[i] = v\ni = i + 1 }\n\
+        }\n\
+        fn first(px: u32[n], n: i64, i: i64 where 0 <= i && i < n) -> i64 { px[i] }\n\
+        fn main() -> i64 {\n\
+            let backing[8]\n\
+            let buf: u32[16] = backing\n\
+            fill(buf, 16, 0xFF0000FF)\n\
+            let tail: u32[] = backing + 32\n\
+            print_int(first(buf, 16, 0))\n\
+            print(\" \")\n\
+            print_int(tail[7])\n\
+            0\n\
+        }";
+    // Every element written through the view, read back through a bounds-proven accessor and
+    // through a sub-view over the second half of the same store.
+    assert_eq!(compile_and_capture(src), "4278190335 4278190335");
+}
+
+#[test]
 fn an_eight_bit_view_addresses_single_bytes_and_carries_the_element_s_sign() {
     // Bytes are what a camera hands over: a JPEG is a byte stream, and reading it through a word
     // view would swallow seven neighbours per read. Eight `u8` writes must land in ONE word, and

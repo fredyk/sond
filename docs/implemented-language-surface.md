@@ -166,6 +166,18 @@ else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above
 - **`Slice`**: built-in length-carrying array `{ptr, len}`. `let s = Slice { ptr: a, len:
   a.len }`; pass so a fn knows the length (`fn sum(s: Slice)`); `s.len`, index `s[i]` /
   `s[i] = v`. Sub-slice `s[lo:hi]` is a VIEW, no copy (`s[:hi]`/`s[lo:]`/`s[:]`). Built in.
+- **Typed views** `T[]`: a base address over memory somebody else owns, indexed at the
+  ELEMENT's width instead of assuming a 64-bit word. What a big buffer needs: `let px:
+  u32[n] = heap_alloc(n * 4)`, then `px[i]`, one word at runtime. Element types: `u8`/`i8`,
+  `u16`/`i16`, `u32`/`i32`, `f32`, `i64`. The sign follows the element (`0xFF` is 255
+  through `u8[]`, −1 through `i8[]`); pixels want `u32`, since an opaque RGBA has its top
+  bit set and would be negative as `i32`.
+  **A view says how long it is**, either naming the parameter/local carrying its length
+  (`u32[n]`) or writing it down (`u32[16]`), and every index is PROVEN against that:
+  `for i < n { px[i] = .. }` passes with no annotation, bounding an index by another
+  buffer's length does not, and indexing a view that declared no length is a compile error
+  naming what is missing. A view taken over a measurable array (`let v: u32[] = backing`,
+  or `backing + K` for constant K) is checked against the capacity that is really there.
 - **Structs** (all fields i64, one word each). `struct Point { x: i64, y: i64 }`;
   `let p = Point { x: 1, y: 2 }` or `let p: Point` (zeroed); read/write `p.x` / `p.x = 5`.
   **Methods**: `impl Point { fn sum(self) -> i64 { self.x + self.y } }`, called `p.sum()`.

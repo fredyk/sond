@@ -910,8 +910,17 @@ impl Parser {
                     self.expect(Token::RBracket);
                     return Type::View(Box::new(base), None);
                 }
+                // The length is either the NAME of the parameter/local carrying it, or a literal
+                // for a view over a store whose size is written down at the declaration.
                 Some(Token::Ident(len)) if self.tokens.get(self.pos + 2) == Some(&Token::RBracket) => {
                     let len = len.clone();
+                    self.expect(Token::LBracket);
+                    self.advance();
+                    self.expect(Token::RBracket);
+                    return Type::View(Box::new(base), Some(len));
+                }
+                Some(Token::Int(len)) if self.tokens.get(self.pos + 2) == Some(&Token::RBracket) => {
+                    let len = len.to_string();
                     self.expect(Token::LBracket);
                     self.advance();
                     self.expect(Token::RBracket);

@@ -2913,7 +2913,11 @@ fn bounds_expr(
                      carries its length"
                 ));
             };
-            let bound = Expr::Var(len.clone());
+            // A literal length is a constant bound; a name is the variable carrying it.
+            let bound = match len.parse::<i64>() {
+                Ok(n) => Expr::Int(n),
+                Err(_) => Expr::Var(len.clone()),
+            };
             let asm = flow.assumptions();
             if !crate::verify::index_proven_in_bounds(idx, &bound, &asm, params) {
                 return Err(format!(
@@ -3570,6 +3574,33 @@ mod tests {
         assert!(
             err.contains("size 2"),
             "the capacity is what is LEFT after the offset, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_literal_length_in_a_view_type_is_a_constant_bound() {
+        // `u32[16]` writes the length down instead of naming a variable that carries it, and the
+        // checker has to read it as the NUMBER 16 — treating it as a variable called "16" would
+        // leave the prover with nothing to compare against, so the canonical loop would be
+        // rejected and the spelling would be useless.
+        // Over a raw address, so the ONLY length available is the one written in the type: a view
+        // over a measurable array would be checked against that array instead and prove nothing
+        // about this.
+        assert!(
+            bounds(
+                "fn f(raw: i64) -> i64 { let buf: u32[16] = raw\n\
+                 let mut i = 0\nfor i < 16 { buf[i] = 1\ni = i + 1 }\n0 }"
+            )
+            .is_ok(),
+            "a loop to the written-down length must prove itself"
+        );
+        assert!(
+            bounds(
+                "fn f(raw: i64) -> i64 { let buf: u32[16] = raw\n\
+                 let mut i = 0\nfor i < 17 { buf[i] = 1\ni = i + 1 }\n0 }"
+            )
+            .is_err(),
+            "and one past it must not"
         );
     }
 
