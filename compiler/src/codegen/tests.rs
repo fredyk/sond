@@ -1323,6 +1323,30 @@ fn a_logical_shift_right_respects_the_operand_width() {
 }
 
 #[test]
+fn a_view_passed_to_a_function_keeps_its_element_width() {
+    // The width has to survive the call, and this is the shape every real user writes: the buffer
+    // is created in one function and worked on in another (`fn fill(px: u32[n], n: i64)`). Knowing
+    // the element type only for LOCALS meant a view addressed at 8 bytes as soon as it was passed,
+    // so a loop over n elements wrote 2n words and ran off the end of the buffer — a segfault on a
+    // 2.7M-pixel image, and silent corruption on a small one.
+    let src = "\
+        fn write_two(px: u32[n], n: i64) {\n\
+            px[0] = 0xAAAAAAAA\n\
+            px[1] = 0xBBBBBBBB\n\
+        }\n\
+        fn main() -> i64 {\n\
+            let backing[8]\n\
+            let px: u32[] = backing\n\
+            write_two(px, 8)\n\
+            print_int(px[0])\n\
+            print(\" \")\n\
+            print_int(px[1])\n\
+            0\n\
+        }";
+    assert_eq!(compile_and_capture(src), "2863311530 3149642683");
+}
+
+#[test]
 fn a_typed_view_indexes_memory_at_its_element_width() {
     // An image buffer is millions of pixels: too big for the stack (2.7M RGBA is 11 MB against an
     // 8 MB limit) and wrong as a global (the declared extent belongs to the whole program). It has

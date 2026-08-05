@@ -2414,6 +2414,20 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
     Ok(())
 }
 
+/// The width in bytes of a view's element type. An unknown name is a 64-bit word, which is what
+/// every untyped Sond value is; the widths themselves are the machine's, not a choice.
+fn elem_bytes(elem: &Type) -> i64 {
+    let Type::Named(n) = elem else {
+        return 8;
+    };
+    match n.as_str() {
+        "i8" | "u8" | "bool" => 1,
+        "i16" | "u16" => 2,
+        "i32" | "u32" | "f32" => 4,
+        _ => 8,
+    }
+}
+
 /// Is `name` a parameter of VIEW type, and if so, which parameter carries its length? Returns
 /// `None` when `name` is not a view at all, `Some(None)` for a length-less `T[]` (nothing to
 /// prove an index against), and `Some(Some(n))` for `T[n]`.
@@ -2572,11 +2586,22 @@ fn bounds_block(
                 name,
                 value,
                 array_len,
+                ty,
                 ..
             } => {
                 bounds_expr(value, fname, sizes, flow, params, funcs)?;
                 // Rebinding the name drops any prior fact/const/counter about it.
                 flow.invalidate(name);
+                // `let a: u32[] = backing` over an array whose size is known: the view's length is
+                // not missing, it is the backing store's capacity IN ELEMENTS (4 words of backing
+                // hold 8 `u32`s). Recording it means a local view is checked exactly like the array
+                // it views, instead of being the one spelling that escapes the check.
+                let view_capacity = match (ty.as_ref(), value) {
+                    (Some(Type::View(elem, _)), Expr::Var(backing)) => sizes
+                        .get(backing)
+                        .map(|words| words.saturating_mul(8) / elem_bytes(elem)),
+                    _ => None,
+                };
                 match array_len {
                     // `let a[N]` records the known size; a scalar `let a = ..` reusing the
                     // name drops any prior size so a later index is not checked against it.
@@ -2607,6 +2632,12 @@ fn bounds_block(
                                 seed_interval_bound(flow, &fact);
                                 flow.facts.push(fact);
                             }
+                        }
+                        // Recorded AFTER the `remove` above, which drops the size of any name being
+                        // rebound: a view over a measurable array is one of the few non-array
+                        // bindings that DOES have a size worth keeping.
+                        if let Some(cap) = view_capacity {
+                            sizes.insert(name.clone(), cap);
                         }
                     }
                 }
@@ -3415,6 +3446,38 @@ mod tests {
         assert!(
             err.contains("dst"),
             "an index bounded by another buffer's length must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_variable_index_into_a_local_view_over_a_known_array() {
+        // A view declared as a LOCAL over an array the compiler can measure: the length is not
+        // missing at all, it is right there. `let backing[4]` is 32 bytes, so a `u32` view over it
+        // holds 8 elements, and a loop to a million must be rejected exactly as it would be on the
+        // array itself. Checking parameters but not locals would leave the same hole one keyword
+        // away.
+        let err = bounds(
+            "fn f() -> i64 { let backing[4]\nlet a: u32[] = backing\n\
+             let mut i = 0\nfor i < 1000000 { a[i] = 1\ni = i + 1 }\n0 }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("a") && err.contains("bounds"),
+            "an unbounded index into a local view must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_a_local_view_index_within_the_backing_arrays_size() {
+        // The other side of it, and the one that decides whether anyone uses this: 4 words of
+        // backing hold 8 `u32`s, so a loop to 8 is in bounds and must pass with no annotation.
+        assert!(
+            bounds(
+                "fn f() -> i64 { let backing[4]\nlet a: u32[] = backing\n\
+                 let mut i = 0\nfor i < 8 { a[i] = 1\ni = i + 1 }\n0 }"
+            )
+            .is_ok(),
+            "a loop within the backing array's real capacity must pass"
         );
     }
 

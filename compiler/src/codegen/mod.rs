@@ -991,6 +991,14 @@ impl Codegen {
             self.locals.insert(name.clone(), *off);
             self.var_types.insert(name.clone(), *kind);
         }
+        // A view PARAMETER carries its element type too. Registering this only for locals meant the
+        // width was lost the moment the buffer was passed to the function that works on it, which
+        // is how every real program is written, and indexing silently fell back to 8-byte words.
+        for p in &func.params {
+            if let crate::ast::Type::View(elem, _) = &p.ty {
+                self.view_elem.insert(p.name.clone(), kind_of_type(elem));
+            }
+        }
         for (name, off) in &layout.locals {
             self.locals.insert(name.clone(), *off);
         }
