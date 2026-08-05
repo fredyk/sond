@@ -442,6 +442,125 @@ fn global_array_constant_table() {
     assert_eq!(compile_and_run_with_globals(src), 21);
 }
 
+/// Emits a program that has module-level globals, returning the assembly.
+fn emit_with_globals(src: &str) -> String {
+    let mut p = Parser::new(tokenize(src));
+    let funcs = p.parse_program();
+    let globals = p.take_globals();
+    emit_program_g(&globals, &[], &funcs)
+}
+
+#[test]
+fn an_all_zero_global_array_is_reserved_in_bss_not_written_out() {
+    // A zeroed buffer `let mut px[N]` used to be emitted as N `.quad 0` LITERALS in `.data`, so
+    // the zeros travelled inside the binary: an image buffer of 2.7M pixels became a ~21 MB file
+    // of nothing, and the assembler had to chew through 2.7M literals to produce it. Zeros are
+    // reserved, not written: `.bss` states the size and the loader supplies the zeros.
+    let small = emit_with_globals("let mut px[8]\nfn main() -> i64 { px[0] }");
+    let big = emit_with_globals("let mut px[200000]\nfn main() -> i64 { px[0] }");
+    // Not byte-identical (the reserved size itself is written out, and 1600000 has more digits
+    // than 64), but the growth must be the digits of one number, not one literal per word.
+    assert!(
+        big.len() - small.len() < 64,
+        "the assembly for a zeroed array must not grow with its size: {} bytes for 8 words, \
+         {} bytes for 200000",
+        small.len(),
+        big.len()
+    );
+    assert!(
+        big.contains(".bss") && big.contains("px: .zero 1600000"),
+        "a zeroed array is reserved in .bss as its byte size, got:\n{big}"
+    );
+}
+
+#[test]
+fn a_global_array_with_nonzero_elements_stays_in_data() {
+    // Only ALL-ZERO arrays move: a constant table has values to write down, and `.bss` cannot
+    // carry them. This is the guard that the size win does not silently drop initializers.
+    let asm = emit_with_globals("let K[4] = [10, 20, 30, 40]\nfn main() -> i64 { K[0] }");
+    assert!(
+        asm.contains("K: .quad 10, 20, 30, 40"),
+        "a table with values keeps its literals in .data, got:\n{asm}"
+    );
+}
+
+#[test]
+fn a_partly_initialized_global_array_writes_only_its_values() {
+    // The hermano of the all-zero case: `let buf[N] = [a, b]` declares N words and initializes
+    // the first two, so the assembler was handed N literals of which N-2 were padding zeros. A
+    // 2.7M-word buffer with a two-word header hit exactly the problem the .bss fix removes, only
+    // through the other door. The values are written; the TAIL is reserved.
+    let small = emit_with_globals("let buf[8] = [1, 2]\nfn main() -> i64 { buf[0] }");
+    let big = emit_with_globals("let buf[100000] = [1, 2]\nfn main() -> i64 { buf[0] }");
+    assert!(
+        big.len() - small.len() < 64,
+        "only the given values are written out: {} bytes for 8 words, {} bytes for 100000",
+        small.len(),
+        big.len()
+    );
+    assert!(
+        big.contains("buf: .quad 1, 2") && big.contains(".zero 799984"),
+        "the values stay literal and the tail is reserved, got:\n{}",
+        &big[..big.len().min(4000)]
+    );
+}
+
+#[test]
+fn a_partly_initialized_global_array_still_owns_its_whole_declared_size_on_real_x64() {
+    // The reservation is not a size optimization, it is the array's EXTENT. Emitting only the
+    // given literals would leave `buf[2..N)` overlapping whatever the assembler placed next, so a
+    // write inside the buffer would silently corrupt an unrelated global. The NEXT array is the
+    // sentinel, because arrays are emitted in declaration order and land back to back: without
+    // the reservation `buf[2]` IS `sentinel[0]`.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let buf[8] = [1, 2]\nlet sentinel[2] = [9, 9]\n\
+             fn main() -> i64 { buf[2] = 100\nbuf[0] + buf[1] + buf[7] + sentinel[0] }"
+        ),
+        12
+    );
+}
+
+#[test]
+fn the_uefi_entry_zeroes_bss_itself_instead_of_trusting_the_firmware() {
+    // On ELF the zeros are a guarantee: the program header says `memsz > filesz` and the kernel
+    // supplies them. On UEFI they are a POLITENESS: the PE loader is *supposed* to zero-fill a
+    // section with no raw data, and EDK2/OVMF does, but this project has already been bitten by a
+    // strict firmware (VirtualBox) that disagreed with a lenient one about the same PE. A buffer
+    // that starts out full of garbage on one machine and zeroed on another is exactly the kind of
+    // bug that shows up as a corrupted image months later, so the entry zeroes its own `.bss`
+    // between the linker's `__bss_start__`/`__bss_end__` before any Sond code runs.
+    let asm = emit_uefi_with_globals("let mut px[8]\nfn efi_main() -> i64 { px[0] }");
+    assert!(
+        asm.contains("__bss_start__") && asm.contains("__bss_end__"),
+        "the UEFI entry bounds its .bss with the linker's symbols, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("rep stosb") || asm.contains("rep stosq"),
+        "the UEFI entry zero-fills that range, got:\n{asm}"
+    );
+}
+
+/// Emits a UEFI program that has module-level globals, returning the assembly.
+fn emit_uefi_with_globals(src: &str) -> String {
+    let mut p = Parser::new(tokenize(src));
+    let funcs = p.parse_program();
+    let globals = p.take_globals();
+    emit_uefi_g(&globals, &[], &funcs)
+}
+
+#[test]
+fn a_bss_global_array_still_reads_and_writes_on_real_x64() {
+    // The point of the section change is that NOTHING else changes: the array is still writable,
+    // still indexable, and still starts out zeroed.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut px[64]\nfn main() -> i64 { px[10] = 7\npx[63] = 35\npx[10] + px[63] + px[0] }"
+        ),
+        42
+    );
+}
+
 #[test]
 fn logical_right_shift_zero_fills() {
     // `>>>` is LOGICAL (zero-fill), `>>` is arithmetic. -1 is all-ones; >>> 60 = 15.

@@ -397,6 +397,21 @@ pub fn emit_uefi_g(globals: &[Global], structs: &[StructDef], funcs: &[Function]
     cg.line("efi_main:");
     cg.line("    movq %rcx, sond_imghandle(%rip)"); // stash ImageHandle for EBS
     cg.line("    movq %rdx, sond_systab(%rip)"); // stash SystemTable for print
+    // Zero `.bss` before any Sond code runs. On ELF the zeros come from the program header
+    // (`memsz > filesz`, the kernel supplies them); a PE has no such promise in the file, only
+    // the loader's convention of zero-filling a section with no raw data. OVMF honours it, but
+    // this target already boots on firmwares that disagree about the same PE, and a buffer that
+    // is zeroed on one machine and full of garbage on another is a bug that surfaces far from
+    // its cause. So the entry states it: `__bss_start__`/`__bss_end__` are the linker's own
+    // bounds for the section. Safe when there is nothing there (start == end, count 0). `cld`
+    // because the direction flag decides which way `stos` walks, and it is cheaper to set it
+    // than to trust every firmware to hand it over clear.
+    cg.line("    leaq __bss_start__(%rip), %rdi");
+    cg.line("    leaq __bss_end__(%rip), %rcx");
+    cg.line("    subq %rdi, %rcx"); // byte count
+    cg.line("    xorl %eax, %eax");
+    cg.line("    cld");
+    cg.line("    rep stosb");
     cg.line("    subq $8, %rsp"); // 16-align the stack before the call
     cg.line("    leaq sond_arena_tcb(%rip), %r15"); // seed the thread-local arena pointer
     cg.line("    call sond_start");
@@ -871,8 +886,11 @@ struct Codegen {
     /// Names of globals that are ARRAYS (a `Var` resolves to their ADDRESS, not a
     /// loaded value, so `K[i]` indexes into the table).
     global_arrays: HashSet<String>,
-    /// The array globals to emit in `.data`, as `(label, constant words)`.
-    global_array_data: Vec<(String, Vec<i64>)>,
+    /// The array globals to emit, as `(label, the words GIVEN, the declared length)`. The words
+    /// given are only the initializer's own elements: the rest of the declared length is a tail
+    /// of zeros, which is RESERVED rather than written out (see `emit_globals`), so a buffer of
+    /// millions of elements costs the compiler and the binary nothing per element.
+    global_array_data: Vec<(String, Vec<i64>, usize)>,
     /// The value kind (`Int`/`Float`) of each in-scope local/parameter, so codegen
     /// knows to use the integer (`%rax`) or SSE (`%xmm0`) path for a `Var`. Reset per
     /// function alongside `locals`.
@@ -1213,9 +1231,14 @@ impl Codegen {
                         .collect::<Vec<_>>(),
                     _ => Vec::new(),
                 };
-                words.resize(n as usize, 0); // pad/truncate to the declared size
+                // Truncate to the declared size; do NOT pad up to it. Padding materialized one
+                // `i64` per declared element, so declaring an image buffer cost the compiler
+                // 8 bytes of its own memory per pixel before it emitted a single instruction.
+                // The missing elements are zeros by definition, and zeros are reserved, not
+                // stored (`emit_globals`).
+                words.truncate(n as usize);
                 self.global_arrays.insert(g.name.clone());
-                self.global_array_data.push((g.name.clone(), words));
+                self.global_array_data.push((g.name.clone(), words, n as usize));
                 continue;
             }
             // A string-literal global is a pointer to its NUL-terminated bytes in `.rodata`: a
@@ -1674,13 +1697,24 @@ impl Codegen {
         for (name, label) in strs {
             self.line(&format!("{name}: .quad {label}"));
         }
-        for (name, words) in arrays {
+        // An array with values to write down stays here as literals; an ALL-ZERO one is reserved
+        // in `.bss` below instead (see `emit_zeroed_arrays`). A partly initialized one writes its
+        // values and reserves the rest: `let buf[N] = [hdr0, hdr1]` is two literals plus a
+        // reservation, not N literals of which N-2 say nothing.
+        let (zeroed, valued): (Vec<_>, Vec<_>) = arrays
+            .into_iter()
+            .partition(|(_, words, _)| words.iter().all(|w| *w == 0));
+        for (name, words, len) in valued {
             let quads = words
                 .iter()
                 .map(|w| w.to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
             self.line(&format!("{name}: .quad {quads}"));
+            let tail = len.saturating_sub(words.len());
+            if tail > 0 {
+                self.line(&format!("    .zero {}", tail * 8));
+            }
         }
         // One clear_child_tid cell per spawn site, zeroed (no live thread yet). Realigned here as
         // a belt on top of the section's own declaration: these are futex addresses, where being
@@ -1699,6 +1733,27 @@ impl Codegen {
         let result_cells = std::mem::take(&mut self.all_result_cells);
         for cell in result_cells {
             self.line(&format!("{cell}: .quad 0"));
+        }
+        self.emit_zeroed_arrays(zeroed);
+    }
+
+    /// Reserves the ALL-ZERO module-level arrays in `.bss`, one `.zero <bytes>` each.
+    ///
+    /// A zeroed buffer carries no information, so writing it out as `.quad 0` literals pays for
+    /// it twice: the assembler parses one literal per word, and the zeros then travel inside the
+    /// binary. An image buffer of 2.7M pixels is a ~21 MB file of nothing that way. `.bss` states
+    /// the size only; the loader (or the ELF program header's `memsz > filesz`) supplies the
+    /// zeros, which is exactly the same guarantee the program had before.
+    fn emit_zeroed_arrays(&mut self, zeroed: Vec<(String, Vec<i64>, usize)>) {
+        if zeroed.is_empty() {
+            return;
+        }
+        self.line(".bss");
+        // Same 8-byte floor as `.data`: everything here is word-indexed (`a[i]` is a `movq` at
+        // `base + i*8`), and an unaligned base would make those loads straddle cache lines.
+        self.line(".p2align 3");
+        for (name, _, len) in zeroed {
+            self.line(&format!("{name}: .zero {}", len * 8));
         }
     }
 
