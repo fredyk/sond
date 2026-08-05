@@ -231,6 +231,59 @@ impl Codegen {
     /// our image, stack, or the map buffer), and `sond_alloc_bump` serves from it.
     /// This is what lets `alloc` (hence virtio-net, TCP and SSH) keep working once
     /// the firmware (AllocatePool) is gone: the kernel owns memory now.
+    /// The reservation behind `let ar: i32[n]`: `%rdi` bytes from the calling thread's arena,
+    /// address in `%rax`. Same three-word control block (`%r15`) and same bump discipline as the
+    /// standard library's `heap_alloc`, deliberately: a program that uses both shares one arena
+    /// instead of running two that each think they own the space.
+    ///
+    /// Emitted only when a declaration actually needs it. The pages come from a fresh anonymous
+    /// mapping, so the storage is ZEROED, which is what every other declaration in the language
+    /// promises. There is no free: the arena grows and the OS reclaims it at exit.
+    pub(crate) fn emit_view_alloc_helper(&mut self) {
+        if !self.uses_view_alloc {
+            return;
+        }
+        for line in [
+            ".text",
+            "sond_view_alloc:",
+            "    addq $7, %rdi",  // round the request up to the 8-byte grain
+            "    andq $-8, %rdi",
+            "    movq (%r15), %rax",   // next free byte
+            "    movq %rax, %rcx",
+            "    addq %rdi, %rcx",     // where this request would end
+            "    cmpq 8(%r15), %rcx",  // does it fit in the current block?
+            "    jbe .Lva_fit",
+            // Grow: map a fresh block, at least 16 MiB, at least the request.
+            "    movq %rdi, %rsi",
+            "    cmpq $16777216, %rsi",
+            "    jae .Lva_size",
+            "    movq $16777216, %rsi",
+            ".Lva_size:",
+            "    pushq %rdi",
+            "    pushq %rsi",
+            "    movq $9, %rax",   // SYS_mmap
+            "    xorq %rdi, %rdi", // let the kernel choose the address
+            "    movq $3, %rdx",   // PROT_READ|PROT_WRITE
+            "    movq $34, %r10",  // MAP_PRIVATE|MAP_ANONYMOUS
+            "    movq $-1, %r8",   // no file
+            "    xorq %r9, %r9",   // offset 0
+            "    syscall",
+            "    popq %rsi",
+            "    popq %rdi",
+            "    movq %rax, (%r15)",  // the block starts here
+            "    addq %rax, %rsi",
+            "    movq %rsi, 8(%r15)", // and ends here
+            "    movq (%r15), %rax",
+            "    movq %rax, %rcx",
+            "    addq %rdi, %rcx",
+            ".Lva_fit:",
+            "    movq %rcx, (%r15)", // hand out the old cursor, park the new one
+            "    ret",
+        ] {
+            self.line(line);
+        }
+    }
+
     pub(crate) fn emit_heap_helpers(&mut self) {
         if !self.uses_heap {
             return;

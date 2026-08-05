@@ -172,6 +172,11 @@ else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above
   `u16`/`i16`, `u32`/`i32`, `f32`, `i64`. The sign follows the element (`0xFF` is 255
   through `u8[]`, −1 through `i8[]`); pixels want `u32`, since an opaque RGBA has its top
   bit set and would be negative as `i32`.
+  **Declaring one with a length RESERVES it**, zeroed: `let ar: i32[n]` hands over storage
+  for n elements with no allocator call, growing an arena shared with `heap_alloc` (hosted
+  and freestanding; on UEFI reserve explicitly with `alloc`, which the compiler will tell
+  you). A view given an initializer binds THAT address instead: `let px: u32[n] =
+  heap_alloc(n * 4)`, or a window over storage you already have.
   **A view says how long it is**, either naming the parameter/local carrying its length
   (`u32[n]`) or writing it down (`u32[16]`), and every index is PROVEN against that:
   `for i < n { px[i] = .. }` passes with no annotation, bounding an index by another

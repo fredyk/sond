@@ -1397,6 +1397,82 @@ fn the_view_surface_a_caller_writes_against_stays_working() {
 }
 
 #[test]
+fn declaring_a_view_with_a_length_reserves_it_zeroed() {
+    // `let ar: i32[n]` says everything needed to hand over storage: the element width and how
+    // many. Requiring an explicit allocator call on top was ceremony, and worse, the declaration
+    // on its own compiled to a NULL pointer that segfaulted on first use — the language handing
+    // out a loaded gun for the one spelling that reads as "give me a buffer".
+    //
+    // The memory comes zeroed, like every other declaration in the language: `let a[N]` is zeroed,
+    // a global is zeroed, and a buffer that starts out as whatever was there before is how you get
+    // an image with somebody else's pixels in it.
+    let src = "\
+        fn main() -> i64 {\n\
+            let n = 16\n\
+            let ar: i32[n]\n\
+            ar[0] = 7\n\
+            ar[15] = 35\n\
+            print_int(ar[0] + ar[15] + ar[8])\n\
+            0\n\
+        }";
+    assert_eq!(compile_and_capture(src), "42");
+
+    // The reservation must be the RIGHT size, and too small is the dangerous direction: the arena
+    // hands out consecutive blocks, so a short reservation puts the end of one buffer on top of
+    // the next. Fill the first completely, then read the second, which must still be untouched.
+    let sentinel = "\
+        fn main() -> i64 {\n\
+            let n = 64\n\
+            let a: u32[n]\n\
+            let b: u32[n]\n\
+            let mut i = 0\n\
+            for i < n { a[i] = 0xFFFFFFFF\ni = i + 1 }\n\
+            let mut s = 0\n\
+            let mut j = 0\n\
+            for j < n { s = s + b[j]\nj = j + 1 }\n\
+            print_int(s)\n\
+            0\n\
+        }";
+    assert_eq!(
+        compile_and_capture(sentinel),
+        "0",
+        "filling one reserved view must not reach into the next"
+    );
+
+    // And the size asked for is the element count times the element's own width, not a word each.
+    let asm = emit_program(&Parser::new(tokenize(
+        "fn main() -> i64 { let n = 16\nlet ar: i32[n]\nar[0] }",
+    ))
+    .parse_program());
+    assert!(
+        asm.contains("imulq $4, %rax, %rdi"),
+        "an i32 view reserves four bytes per element, got:\n{asm}"
+    );
+}
+
+#[test]
+fn reserving_a_view_on_uefi_is_refused_rather_than_emitted_as_a_syscall() {
+    // The reservation grows its arena with `mmap`, and on UEFI there is no kernel to answer it:
+    // the same declaration compiled cleanly and would have executed a `syscall` instruction on
+    // bare metal. A compile error naming the alternative is the only honest answer until the
+    // firmware path (AllocatePool, plus an explicit zero-fill, since pool memory is not zeroed)
+    // is written AND booted — and this machine cannot boot a UEFI image to prove it.
+    let err = std::panic::catch_unwind(|| {
+        emit_uefi_with_globals("fn efi_main() -> i64 { let n = 16\nlet ar: i32[n]\nar[0] }")
+    })
+    .expect_err("reserving on UEFI must be refused");
+    let msg = err
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    assert!(
+        msg.contains("alloc") && msg.contains("UEFI"),
+        "the error must name the target and the way out, got: {msg}"
+    );
+}
+
+#[test]
 fn an_eight_bit_view_addresses_single_bytes_and_carries_the_element_s_sign() {
     // Bytes are what a camera hands over: a JPEG is a byte stream, and reading it through a word
     // view would swallow seven neighbours per read. Eight `u8` writes must land in ONE word, and

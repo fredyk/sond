@@ -91,6 +91,15 @@ impl GlobalWord {
     }
 }
 
+/// The written form of an element type, for error messages that quote the user's own spelling.
+fn type_name_of(ty: &Type) -> String {
+    match ty {
+        Type::Named(n) => n.clone(),
+        Type::Ptr(inner) => format!("*{}", type_name_of(inner)),
+        Type::View(inner, _) => format!("{}[]", type_name_of(inner)),
+    }
+}
+
 /// Whether a declared type is `f64` (the SSE-class float).
 fn is_float_type(ty: &Type) -> bool {
     matches!(ty, Type::Named(n) if n == "f64")
@@ -222,6 +231,7 @@ fn emit_program_maybe_debug(
     cg.line("    ret");
     cg.emit_print_int_helper();
     cg.emit_print_int_signed_helper();
+    cg.emit_view_alloc_helper();
     cg.emit_globals();
     cg.emit_rodata();
     cg.line(".data");
@@ -270,6 +280,7 @@ pub fn emit_program_coverage_g(
     cg.line("    ret");
     cg.emit_print_int_helper();
     cg.emit_print_int_signed_helper();
+    cg.emit_view_alloc_helper();
     cg.emit_globals();
     // Intern each instrumented function's name (before rodata is emitted) so the table can
     // point at the string. Each entry is [name_ptr, name_len, first_point_id, point_count].
@@ -330,6 +341,7 @@ pub fn emit_shared_g(globals: &[Global], structs: &[StructDef], funcs: &[Functio
     }
     cg.emit_print_int_helper();
     cg.emit_print_int_signed_helper();
+    cg.emit_view_alloc_helper();
     cg.emit_globals();
     cg.emit_rodata();
     cg.line(".data");
@@ -376,6 +388,7 @@ pub fn emit_freestanding_g(globals: &[Global], structs: &[StructDef], funcs: &[F
     cg.line("    syscall");
     cg.emit_print_int_helper();
     cg.emit_print_int_signed_helper();
+    cg.emit_view_alloc_helper();
     cg.emit_globals();
     cg.emit_rodata();
     cg.line(".data");
@@ -462,6 +475,7 @@ pub fn emit_uefi_g(globals: &[Global], structs: &[StructDef], funcs: &[Function]
     cg.line("sond_ebs_done: .quad 0"); // 1 after ExitBootServices: alloc switches to the bump heap
     cg.line("sond_heap_ptr: .quad 0"); // post-EBS bump-allocator cursor
     cg.line("sond_heap_end: .quad 0"); // post-EBS bump-allocator limit
+    cg.emit_view_alloc_helper();
     cg.emit_globals();
     cg.emit_rodata();
     cg.out
@@ -871,6 +885,9 @@ struct Codegen {
     /// Whether the post-EBS heap is used (`alloc` after ExitBootServices, or the
     /// `exit_boot_services` call that seeds it). Emits the bump-allocator helpers.
     uses_heap: bool,
+    /// Whether any declaration reserved its own storage (`let ar: i32[n]`), so the reservation
+    /// helper is emitted. Off by default: a program that never declares one is byte-identical.
+    uses_view_alloc: bool,
     /// Whether `print` on UEFI is used (then it also emits a serial fallback used
     /// after ExitBootServices, when ConOut is dead).
     uses_print_serial: bool,
@@ -1861,7 +1878,41 @@ impl Codegen {
                         // width truncates the stored value.
                         let value_kind = self.ty_of(value);
                         let recorded = ty.as_ref().map_or(value_kind, kind_of_type);
-                        self.expr(value);
+                        // `let ar: i32[n]` with nothing to the right of it: the declaration
+                        // already said the element width and how many, which is everything a
+                        // reservation needs, so it RESERVES rather than binding a bare address.
+                        // Without this the same line compiled to a null pointer that faulted on
+                        // first use — the worst possible answer to the one spelling that reads as
+                        // "give me a buffer". A view initialized from an expression (an existing
+                        // address, an allocator's return) keeps binding that expression.
+                        let reserves = matches!(
+                            (ty.as_ref(), value),
+                            (Some(crate::ast::Type::View(_, Some(_))), Expr::Int(0))
+                        );
+                        if reserves {
+                            let Some(crate::ast::Type::View(elem, Some(len))) = ty.as_ref() else {
+                                unreachable!("checked by `reserves`")
+                            };
+                            // The arena grows with `mmap`, which needs a kernel underneath. On
+                            // UEFI there is none, and emitting the syscall anyway would produce a
+                            // binary that compiles and then executes a `syscall` instruction on
+                            // bare metal. Say so instead, and name the way out.
+                            assert!(
+                                !self.uefi,
+                                "reserving `{name}` with a declared length is not available on \
+                                 UEFI yet (its arena grows with a syscall); allocate it \
+                                 explicitly there: `let {name}: {}[n] = alloc(n * {})`",
+                                type_name_of(elem),
+                                (kind_of_type(elem).bits().max(8) / 8),
+                            );
+                            let width = kind_of_type(elem).bits().max(8) as i64 / 8;
+                            self.uses_view_alloc = true;
+                            self.expr(&Expr::Var(len.clone())); // element count -> %rax
+                            self.line(&format!("    imulq ${width}, %rax, %rdi"));
+                            self.line("    call sond_view_alloc");
+                        } else {
+                            self.expr(value);
+                        }
                         let off = self.slot(name);
                         if value_kind.is_float() {
                             self.line(&format!("    movsd %xmm0, {off}(%rbp)"));
