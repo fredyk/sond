@@ -11,6 +11,7 @@
 //! The harness `main` is produced as Sond SOURCE and parsed with the ordinary parser, so it
 //! is always a well-formed AST, no hand-built nodes to keep in sync with the language.
 
+use crate::token::Token;
 use crate::ast::Function;
 use crate::lexer::tokenize;
 use crate::parser::Parser;
@@ -177,5 +178,78 @@ mod tests {
         let src = format!("{:?}", main.body);
         assert!(src.contains("__test_0"));
         assert!(src.contains("__test_2"), "uses the real symbol __test_2");
+    }
+}
+
+/// Rejects a program whose `test` blocks did not all become tests.
+///
+/// The token stream is an oracle the parser cannot influence: the lexer classifies `test` as a
+/// keyword only when a string literal follows it, which is exactly a `test "name" { .. }` block,
+/// so counting those tokens counts the blocks the AUTHOR wrote. If fewer functions come out
+/// marked as tests than blocks went in, the parser dropped some, and the harness would then run
+/// a subset and report it as the whole: a green suite with phantom tests, which is worse than a
+/// red one because nobody looks. The coverage gate is computed on the same subset, so it lies
+/// too, and the compiler refuses to build under 80%: an author is then sent to add tests that
+/// are already there.
+///
+/// This happened: a file declaring 70 blocks reported "56 test(s), 0 failed" and named none of
+/// the missing 14, because statements orphaned by a bad edit ended the top-level parse early.
+pub fn check_all_tests_registered(tokens: &[Token], funcs: &[Function]) -> Result<(), String> {
+    let declared = tokens.iter().filter(|t| matches!(t, Token::Test)).count();
+    let registered = funcs.iter().filter(|f| f.is_test).count();
+    if declared != registered {
+        return Err(format!(
+            "the source declares {declared} `test` block(s) but only {registered} became tests, \
+             so {} would never run and the suite would report itself green without them. This is \
+             usually a block that did not close, or a statement left outside every function, \
+             which ends the parse early and takes everything after it.",
+            declared - registered
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod registered_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn check(src: &str) -> Result<(), String> {
+        let toks = tokenize(src);
+        let funcs = Parser::new(tokenize(src)).parse_program();
+        check_all_tests_registered(&toks, &funcs)
+    }
+
+    #[test]
+    fn a_file_whose_blocks_all_parse_is_accepted() {
+        let src = "fn f() -> i64 { 1 }\n\
+                   test \"one\" { assert_eq(f(), 1) }\n\
+                   test \"two\" { assert_eq(f(), 1) }\n";
+        assert!(check(src).is_ok(), "two blocks, two tests");
+    }
+
+    #[test]
+    fn the_word_test_outside_a_block_is_not_counted() {
+        // `test` is an ordinary identifier unless a string follows it, so a function or variable
+        // called `test` must not inflate the count and make a correct file fail.
+        let src = "fn test() -> i64 { 1 }\n\
+                   test \"only one\" { let test = 2\nassert_eq(test, 2) }\n";
+        assert!(check(src).is_ok(), "one real block; the identifiers are not blocks");
+    }
+
+    #[test]
+    fn a_dropped_block_is_reported_with_both_counts() {
+        // Two blocks written, one parsed: the shape a bad edit leaves behind.
+        let toks = tokenize(
+            "fn f() -> i64 { 1 }\n\
+             test \"one\" { assert_eq(f(), 1) }\n\
+             test \"two\" { assert_eq(f(), 1) }\n",
+        );
+        let funcs = Parser::new(tokenize("fn f() -> i64 { 1 }\ntest \"one\" { assert_eq(f(), 1) }\n"))
+            .parse_program();
+        let err = check_all_tests_registered(&toks, &funcs).expect_err("a dropped block is refused");
+        assert!(err.contains('2') && err.contains('1'), "name both counts: {err}");
+        assert!(err.contains("never run"), "say what the consequence is: {err}");
     }
 }

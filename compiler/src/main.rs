@@ -148,6 +148,9 @@ fn main() -> ExitCode {
     let (mut funcs, mut globals, mut structs, enums, ports, providers, uses) =
         match std::panic::catch_unwind(move || {
             let (toks, lines) = tokenize_located(&src_for_parse);
+            // Keep the token stream: it is the only count of `test` blocks the parser cannot
+            // influence, and comparing the two is what catches a parse that quietly dropped some.
+            let declared_tests = toks.clone();
             let mut p = Parser::with_lines(toks, lines);
             let funcs = p.parse_program();
             let globals = p.take_globals();
@@ -156,6 +159,8 @@ fn main() -> ExitCode {
             let ports = p.take_ports();
             let providers = p.take_providers();
             let uses = p.take_uses();
+            sondc::testing::check_all_tests_registered(&declared_tests, &funcs)
+                .unwrap_or_else(|e| panic!("{e}"));
             (funcs, globals, structs, enums, ports, providers, uses)
         }) {
             Ok(fg) => fg,

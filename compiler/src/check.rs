@@ -1342,7 +1342,7 @@ pub fn check_receiver_kinds(funcs: &[Function]) -> Result<(), String> {
                 _ => continue,
             },
             // A view is not a struct, so it never selects a method receiver kind.
-            Type::View(_) => continue,
+            Type::View(..) => continue,
         };
         match kind.get(tn) {
             Some((prev_ptr, prev_m)) if *prev_ptr != is_ptr => {
@@ -1382,7 +1382,7 @@ fn receiver_kind_map(funcs: &[Function]) -> HashMap<&str, bool> {
                     m.insert(t.as_str(), true);
                 }
             }
-            Type::View(_) => {}
+            Type::View(..) => {}
         }
     }
     m
@@ -1414,7 +1414,7 @@ fn check_decl_ty(ty: &Type, kinds: &HashMap<&str, bool>) -> Result<(), String> {
             Type::Named(n) => (n.as_str(), true),
             _ => return Ok(()),
         },
-        Type::View(_) => return Ok(()),
+        Type::View(..) => return Ok(()),
     };
     match kinds.get(name) {
         Some(true) if !declared_ptr => Err(format!(
@@ -2414,6 +2414,19 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
     Ok(())
 }
 
+/// Is `name` a parameter of VIEW type, and if so, which parameter carries its length? Returns
+/// `None` when `name` is not a view at all, `Some(None)` for a length-less `T[]` (nothing to
+/// prove an index against), and `Some(Some(n))` for `T[n]`.
+fn view_len_of(name: &str, params: &[Param]) -> Option<Option<String>> {
+    params
+        .iter()
+        .find(|p| p.name == name)
+        .and_then(|p| match &p.ty {
+            Type::View(_, len) => Some(len.clone()),
+            _ => None,
+        })
+}
+
 /// Is `name` a parameter of slice type? A slice's length bound (`s.len`) is a runtime value, so
 /// its indices are checked against that rather than a static array size.
 fn is_slice_param(name: &str, params: &[Param]) -> bool {
@@ -2822,6 +2835,25 @@ fn bounds_expr(
             if !crate::verify::index_proven_in_bounds(idx, &bound, &asm, params) {
                 return Err(format!(
                     "function `{fname}`: cannot prove this index is in bounds for slice `{a}`; bound it with a `where`/`requires`/loop condition to 0..{a}.len"
+                ));
+            }
+        } else if let Some(len) = view_len_of(a, params) {
+            // A view is one word: a base address whose length lives elsewhere. `u32[n]` names the
+            // parameter holding it, and the index is proven against THAT name, so bounding it by
+            // another buffer's length proves nothing and is rejected — which is the mistake worth
+            // catching, since both are just an `i64` at the call site.
+            let Some(len) = len else {
+                return Err(format!(
+                    "function `{fname}`: view `{a}` has no declared length, so an index into it \
+                     cannot be checked; declare it as `T[n]`, naming the parameter that carries \
+                     its length"
+                ));
+            };
+            let bound = Expr::Var(len.clone());
+            let asm = flow.assumptions();
+            if !crate::verify::index_proven_in_bounds(idx, &bound, &asm, params) {
+                return Err(format!(
+                    "function `{fname}`: cannot prove this index is in bounds for view `{a}`; bound it with a `where`/`requires`/loop condition to 0..{len}"
                 ));
             }
         }
@@ -3332,6 +3364,57 @@ mod tests {
     fn accepts_a_slice_index_proven_within_the_length() {
         assert!(
             bounds("fn f(s: Slice, i: i64 where 0 <= i && i < s.len) -> i64 { s[i] }").is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_indexing_a_view_that_never_says_how_long_it_is() {
+        // A view is one word: a base address over memory the caller owns. With no length there is
+        // nothing to prove an index against, and the compiler used to accept ANY index and emit a
+        // program that walked off the buffer. Rejecting is the whole point of the language; the
+        // message must name what is MISSING (the length), not blame the index.
+        let err = bounds("fn w(v: u32[], i: i64) { v[i] = 1 }").unwrap_err();
+        assert!(
+            err.contains("length") && err.contains("v"),
+            "the error must say the view has no declared length, got: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_the_canonical_loop_over_a_view_with_no_annotation_at_all() {
+        // `for i < n { px[i] = .. }` over a view declared `u32[n]` is THE loop every image pass
+        // writes. If it needed a `requires` on top, nobody would use the checked form, and an
+        // unused guarantee protects nothing.
+        assert!(
+            bounds(
+                "fn fill(px: u32[n], n: i64) { let mut i = 0\nfor i < n { px[i] = 0\ni = i + 1 } }"
+            )
+            .is_ok(),
+            "the canonical bounded loop must pass with no annotations"
+        );
+    }
+
+    #[test]
+    fn accepts_a_view_index_proven_against_its_own_declared_length() {
+        assert!(
+            bounds("fn get(px: u32[n], n: i64, i: i64 where 0 <= i && i < n) -> i64 { px[i] }")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_a_view_index_bounded_by_the_wrong_buffers_length() {
+        // The real mistake, and the one a length-less view could never catch: two buffers, each
+        // with its own length, and the index bounded against the OTHER one. `src` may be longer
+        // than `dst`, so this write runs off the end of `dst`.
+        let err = bounds(
+            "fn copy(dst: u32[n], n: i64, src: u32[m], m: i64, i: i64 where 0 <= i && i < m) \
+             { dst[i] = src[i] }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("dst"),
+            "an index bounded by another buffer's length must be rejected, got: {err}"
         );
     }
 

@@ -271,7 +271,10 @@ fn type_name(t: &Type) -> String {
     match t {
         Type::Named(s) => s.clone(),
         Type::Ptr(inner) => format!("*{}", type_name(inner)),
-        Type::View(inner) => format!("{}[]", type_name(inner)),
+        Type::View(inner, len) => match len {
+            Some(n) => format!("{}[{n}]", type_name(inner)),
+            None => format!("{}[]", type_name(inner)),
+        },
     }
 }
 

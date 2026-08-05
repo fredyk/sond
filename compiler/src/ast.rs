@@ -19,7 +19,14 @@ pub enum Type {
     /// parameter; what it adds is the ELEMENT TYPE, so `v[i]` indexes at the element's
     /// width instead of assuming a 64-bit word. This is what an image buffer needs: too
     /// big for the stack, and its length belongs to the caller, not to the declaration.
-    View(Box<Type>),
+    ///
+    /// `u32[n]` names the parameter that carries that length. It costs NOTHING at runtime
+    /// (the value is still one word) — the name exists so the bounds checker has something
+    /// to prove an index against, and so that proving it against a DIFFERENT buffer's
+    /// length is a compile error rather than a corrupted image. Indexing the length-less
+    /// form is rejected: there is nothing to check, and quietly not checking is how a view
+    /// would have become the one hole in a language that rejects what it cannot prove.
+    View(Box<Type>, Option<String>),
 }
 
 /// Declaration visibility. The default is `Priv` (private to the module): a

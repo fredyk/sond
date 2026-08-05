@@ -1843,7 +1843,7 @@ impl Codegen {
                         self.var_types.insert(name.clone(), recorded);
                         // `let px: u32[] = heap_alloc(..)`: the variable holds the base address,
                         // and the element type is what indexing needs.
-                        if let Some(crate::ast::Type::View(elem)) = ty.as_ref() {
+                        if let Some(crate::ast::Type::View(elem, _)) = ty.as_ref() {
                             self.view_elem.insert(name.clone(), kind_of_type(elem));
                         }
                     }
