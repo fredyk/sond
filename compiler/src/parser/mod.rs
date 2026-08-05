@@ -900,11 +900,25 @@ impl Parser {
         }
         // `T[]` is a VIEW of T: the element type carries, the length does not. Postfix so it
         // reads as the type it is a view of, matching `let px: u32[1024]` for the sized form.
+        // `T[n]` additionally NAMES the parameter holding the view's length, which is what the
+        // bounds checker proves indices against (`u32[]` alone cannot be indexed).
         let base = Type::Named(self.expect_ident());
-        if self.peek() == Some(&Token::LBracket) && self.peek_at(1) == Some(&Token::RBracket) {
-            self.expect(Token::LBracket);
-            self.expect(Token::RBracket);
-            return Type::View(Box::new(base));
+        if self.peek() == Some(&Token::LBracket) {
+            match self.tokens.get(self.pos + 1) {
+                Some(Token::RBracket) => {
+                    self.expect(Token::LBracket);
+                    self.expect(Token::RBracket);
+                    return Type::View(Box::new(base), None);
+                }
+                Some(Token::Ident(len)) if self.tokens.get(self.pos + 2) == Some(&Token::RBracket) => {
+                    let len = len.clone();
+                    self.expect(Token::LBracket);
+                    self.advance();
+                    self.expect(Token::RBracket);
+                    return Type::View(Box::new(base), Some(len));
+                }
+                _ => {}
+            }
         }
         base
     }

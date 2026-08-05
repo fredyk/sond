@@ -413,7 +413,7 @@ fn base_struct(ty: &Type) -> Option<&str> {
         Type::Named(n) => Some(n),
         Type::Ptr(inner) => base_struct(inner),
         // A view is a base address of ELEMENTS, never a struct value.
-        Type::View(_) => None,
+        Type::View(..) => None,
     }
 }
 
