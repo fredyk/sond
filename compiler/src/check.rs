@@ -2418,6 +2418,24 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
     Ok(())
 }
 
+/// How many BYTES a view taken over `init` can address: the whole array for `backing`, and what
+/// remains past the offset for `backing + K` with a constant `K` (an offset beyond the end leaves
+/// nothing, not a negative). `None` when the expression is not a measurable array at all, which
+/// is the honest answer for an allocator's return or an offset computed at runtime.
+fn view_bytes_available(init: &Expr, sizes: &HashMap<String, i64>) -> Option<i64> {
+    match init {
+        Expr::Var(backing) => sizes.get(backing).map(|words| words.saturating_mul(8)),
+        Expr::Binary(BinOp::Add, l, r) => {
+            let (Expr::Var(backing), Some(off)) = (l.as_ref(), const_index(r)) else {
+                return None;
+            };
+            let total = sizes.get(backing)?.saturating_mul(8);
+            (off >= 0).then(|| (total - off).max(0))
+        }
+        _ => None,
+    }
+}
+
 /// The width in bytes of a view's element type. An unknown name is a 64-bit word, which is what
 /// every untyped Sond value is; the widths themselves are the machine's, not a choice.
 fn elem_bytes(elem: &Type) -> i64 {
@@ -2600,10 +2618,14 @@ fn bounds_block(
                 // not missing, it is the backing store's capacity IN ELEMENTS (4 words of backing
                 // hold 8 `u32`s). Recording it means a local view is checked exactly like the array
                 // it views, instead of being the one spelling that escapes the check.
-                let view_capacity = match (ty.as_ref(), value) {
-                    (Some(Type::View(elem, _)), Expr::Var(backing)) => sizes
-                        .get(backing)
-                        .map(|words| words.saturating_mul(8) / elem_bytes(elem)),
+                // What a view can hold comes from the EXPRESSION it is taken over, not from the
+                // name alone: the whole backing store, or what is LEFT of it past a constant
+                // offset. An offset the compiler cannot reduce (`backing + i`, a pointer from
+                // elsewhere) leaves no capacity at all, and then the view has to declare its
+                // length or go unindexed — silence is the one answer that is not allowed.
+                let view_capacity = match ty.as_ref() {
+                    Some(Type::View(elem, _)) => view_bytes_available(value, sizes)
+                        .map(|bytes| bytes / elem_bytes(elem)),
                     _ => None,
                 };
                 // Rebinding a name drops whatever it used to be, view or not; then record it if
@@ -3516,18 +3538,38 @@ mod tests {
 
     #[test]
     fn rejects_indexing_a_local_view_whose_length_nobody_knows() {
-        // A view over a DERIVED address (`backing + 8`, an allocator's return) has no length the
-        // compiler can work out: the backing store's capacity is not the view's, because the view
-        // starts somewhere inside it. Silence here was worse than the parameter case it mirrors —
-        // `w[3000]` compiled without a word — so the rule is the same one: no known length, no
-        // indexing, and say which is missing.
+        // A view over an address the compiler cannot reduce — an offset computed at runtime, an
+        // allocator's return, a pointer from elsewhere — has no length to check against. (A
+        // CONSTANT offset does: that case has its own test.) Silence here was worse than the
+        // parameter case it mirrors — `w[3000]` compiled without a word — so the rule is the same
+        // one: no known length, no indexing, and say which is missing.
         let err = bounds(
-            "fn f() -> i64 { let backing[2]\nlet w: u32[] = backing + 8\nw[3000] = 1\n0 }",
+            "fn f(k: i64) -> i64 { let backing[2]\nlet w: u32[] = backing + k\nw[3000] = 1\n0 }",
         )
         .unwrap_err();
         assert!(
             err.contains("length") && err.contains("w"),
             "an unmeasurable local view must be refused, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_view_over_a_constant_offset_into_an_array_gets_the_capacity_that_is_left() {
+        // Refusing everything the compiler could not measure was too blunt: `backing + 8` is
+        // measurable. Two words of backing are 16 bytes, so a `u32` view starting 8 bytes in has
+        // exactly 2 elements left — index 1 is fine and index 2 runs past the end. Rejecting the
+        // good half would push people back to peek/poke, where nothing is checked at all.
+        assert!(
+            bounds("fn f() -> i64 { let backing[2]\nlet w: u32[] = backing + 8\nw[1] = 1\n0 }")
+                .is_ok(),
+            "the elements that fit after the offset must still be usable"
+        );
+        let err =
+            bounds("fn f() -> i64 { let backing[2]\nlet w: u32[] = backing + 8\nw[2] = 1\n0 }")
+                .unwrap_err();
+        assert!(
+            err.contains("size 2"),
+            "the capacity is what is LEFT after the offset, got: {err}"
         );
     }
 
