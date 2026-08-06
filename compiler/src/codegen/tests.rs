@@ -1558,6 +1558,65 @@ fn a_windows_program_calls_a_dll_under_the_microsoft_abi() {
 }
 
 #[test]
+fn the_three_part_for_loop_runs_like_its_hand_written_form() {
+    // `for let mut i = 0; i < n; i++ { .. }`: the shape every C-family programmer already knows,
+    // and the one an AI writer reaches for by reflex. It is sugar — init before the loop, step at
+    // the end of the body — so it has to behave EXACTLY like the hand-written version, including
+    // the counter surviving into the loop's own condition.
+    assert_eq!(
+        compile_and_run(
+            "fn main() -> i64 { let mut s = 0\nfor let mut i = 0; i < 5; i++ { s = s + i }\ns }"
+        ),
+        10
+    );
+    // A step other than ++, and a bound that is a variable rather than a literal.
+    assert_eq!(
+        compile_and_run(
+            "fn main() -> i64 { let n = 10\nlet mut s = 0\n\
+             for let mut i = 0; i < n; i = i + 2 { s = s + 1 }\ns }"
+        ),
+        5
+    );
+    // And it indexes a view under the bounds checker exactly as the plain form does: this is the
+    // loop the checker has to keep proving, or the sugar would cost the guarantee.
+    assert_eq!(
+        compile_and_run(
+            "fn main() -> i64 { let n = 8\nlet buf: i32[n]\n\
+             for let mut i = 0; i < n; i++ { buf[i] = i }\nbuf[7] }"
+        ),
+        7
+    );
+}
+
+#[test]
+fn a_view_can_be_declared_with_its_contents() {
+    // Reserving and then filling by hand is three lines of ceremony for a table of constants.
+    // `let buf: i32[n] = {a, b, c}` reserves AND writes, at the element's width, with the rest
+    // of the declared length left zeroed like any other reservation.
+    let src = "\
+        fn main() -> i64 {\n\
+            let n = 5\n\
+            let buf: i32[n] = {10, 20, 30}\n\
+            print_int(buf[0] + buf[1] + buf[2])\n\
+            print(\" \")\n\
+            print_int(buf[4])\n\
+            0\n\
+        }";
+    assert_eq!(compile_and_capture(src), "60 0");
+    // The elements land at the ELEMENT's width, not a word each: two u32 slots share one word.
+    let packed = "\
+        fn main() -> i64 {\n\
+            let n = 2\n\
+            let px: u32[n] = {0xAAAAAAAA, 0xBBBBBBBB}\n\
+            print_int(px[0])\n\
+            print(\" \")\n\
+            print_int(px[1])\n\
+            0\n\
+        }";
+    assert_eq!(compile_and_capture(packed), "2863311530 3149642683");
+}
+
+#[test]
 fn an_eight_bit_view_addresses_single_bytes_and_carries_the_element_s_sign() {
     // Bytes are what a camera hands over: a JPEG is a byte stream, and reading it through a word
     // view would swallow seven neighbours per read. Eight `u8` writes must land in ONE word, and

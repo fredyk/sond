@@ -1950,7 +1950,10 @@ impl Codegen {
                         // address, an allocator's return) keeps binding that expression.
                         let reserves = matches!(
                             (ty.as_ref(), value),
-                            (Some(crate::ast::Type::View(_, Some(_))), Expr::Int(0))
+                            (
+                                Some(crate::ast::Type::View(_, Some(_))),
+                                Expr::Int(0) | Expr::List(_)
+                            )
                         );
                         if reserves {
                             let Some(crate::ast::Type::View(elem, Some(len))) = ty.as_ref() else {
@@ -1973,6 +1976,26 @@ impl Codegen {
                             self.expr(&Expr::Var(len.clone())); // element count -> %rax
                             self.line(&format!("    imulq ${width}, %rax, %rdi"));
                             self.line("    call sond_view_alloc");
+                            // `= {a, b, c}`: write the given elements into the fresh storage, at
+                            // the element's width. What is left keeps the zeros the reservation
+                            // already guarantees, so a short list is a prefix, not a surprise.
+                            if let Expr::List(items) = value {
+                                let elem_kind = kind_of_type(elem);
+                                self.line("    pushq %rax"); // the base address
+                                for (i, item) in items.iter().enumerate() {
+                                    self.expr(item);
+                                    self.canon(elem_kind);
+                                    self.line("    movq (%rsp), %rcx");
+                                    let off = i as i64 * width;
+                                    match width {
+                                        1 => self.line(&format!("    movb %al, {off}(%rcx)")),
+                                        2 => self.line(&format!("    movw %ax, {off}(%rcx)")),
+                                        4 => self.line(&format!("    movl %eax, {off}(%rcx)")),
+                                        _ => self.line(&format!("    movq %rax, {off}(%rcx)")),
+                                    }
+                                }
+                                self.line("    popq %rax");
+                            }
                         } else {
                             self.expr(value);
                         }

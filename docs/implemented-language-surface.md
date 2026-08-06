@@ -95,6 +95,7 @@ for i < 10 {        // while-style loop
 }
 
 for i in 0..10 { .. }   // counting loop (half-open: 0..9)
+for let mut i = 0; i < n; i++ { .. }   // three-part loop; step may be any assignment
 for x in s { .. }       // foreach over a Slice/array element by element
 
 for {               // infinite loop
@@ -172,6 +173,8 @@ else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above
   `u16`/`i16`, `u32`/`i32`, `f32`, `i64`. The sign follows the element (`0xFF` is 255
   through `u8[]`, −1 through `i8[]`); pixels want `u32`, since an opaque RGBA has its top
   bit set and would be negative as `i32`.
+  **Declared with its contents**: `let buf: i32[n] = {10, 20, 30}` reserves and writes those
+  elements at the element's width; the rest of the declared length keeps its zeros.
   **Declaring one with a length RESERVES it**, zeroed: `let ar: i32[n]` hands over storage
   for n elements with no allocator call, growing an arena shared with `heap_alloc` (hosted
   and freestanding; on UEFI reserve explicitly with `alloc`, which the compiler will tell

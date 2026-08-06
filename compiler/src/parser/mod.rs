@@ -540,6 +540,48 @@ impl Parser {
                 Some(Token::For | Token::While) => {
                     // `while` is a synonym for the conditional `for`; bare `for {}` loops forever.
                     self.advance();
+                    // Three-part form `for let mut i = 0; i < n; i++ { body }`: the shape every
+                    // C-family writer reaches for. Sugar for what this parser already builds for
+                    // the counting form — init before the loop, step at the end of the body — so
+                    // it is the same loop by the time anything else sees it, bounds checker
+                    // included.
+                    if self.peek() == Some(&Token::Let) {
+                        let init = self.parse_let();
+                        self.expect(Token::Semicolon);
+                        let saved = self.no_struct_lit;
+                        self.no_struct_lit = true;
+                        let cond = self.parse_expr();
+                        self.no_struct_lit = saved;
+                        self.expect(Token::Semicolon);
+                        // The step: `i++` (two `+` tokens, no `++` in the lexer) or any
+                        // assignment, so `i = i + 2` reads the same way.
+                        let step = if matches!(self.peek(), Some(Token::Ident(_)))
+                            && self.tokens.get(self.pos + 1) == Some(&Token::Plus)
+                            && self.tokens.get(self.pos + 2) == Some(&Token::Plus)
+                        {
+                            let var = self.expect_ident();
+                            self.advance();
+                            self.advance();
+                            assign_inc(&var)
+                        } else {
+                            // Any assignment, so `i = i + 2` reads the same way.
+                            let target = self.parse_expr();
+                            self.expect(Token::Eq);
+                            let value = self.parse_expr();
+                            Stmt::Assign { target, value }
+                        };
+                        let mut body = self.parse_block();
+                        sink_tail(&mut body); // the step runs AFTER the body, not before
+                        body.stmts.push(step);
+                        stmts.push(init);
+                        stmts.push(Stmt::For {
+                            cond: Some(cond),
+                            body,
+                            invariant: Vec::new(),
+                        });
+                        self.skip_semicolons();
+                        continue;
+                    }
                     // Counting form `for i in a..b { body }`: declare `i = a`, loop
                     // while `i < b`, auto-increment. Desugar to a `let mut i` plus a
                     // `for i < b` whose body ends with `i = i + 1`.
@@ -816,7 +858,23 @@ impl Parser {
         // `let x = value`, or `let mut x` / `let a[N]` with no initializer (0),
         // the C-style "declare now, assign later" that AI writers reach for.
         let value = if self.eat(Token::Eq) {
-            self.parse_expr()
+            // `let buf: T[n] = {a, b, c}`: a view declared WITH its contents. Braces rather than
+            // brackets, which already mean an array literal for `let a[N] = [..]`, and read here
+            // without ambiguity because only a view-typed binding accepts them in this position.
+            if matches!(ty, Some(Type::View(..))) && self.peek() == Some(&Token::LBrace) {
+                self.expect(Token::LBrace);
+                let mut items = Vec::new();
+                while self.peek() != Some(&Token::RBrace) {
+                    items.push(self.parse_expr());
+                    if !self.eat(Token::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Token::RBrace);
+                Expr::List(items)
+            } else {
+                self.parse_expr()
+            }
         } else {
             Expr::Int(0)
         };
