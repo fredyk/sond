@@ -7,6 +7,7 @@ use crate::ast::{
     ProviderDef, Signature, Stmt, StructDef, Type, UnOp, UseDecl, Visibility,
 };
 use crate::token::Token;
+use std::collections::HashMap;
 
 /// A recursive-descent parser over a flat token stream.
 pub struct Parser {
@@ -25,6 +26,11 @@ pub struct Parser {
     ports: Vec<PortDef>,
     /// `extern fn` declarations collected while parsing the program.
     externs: Vec<Signature>,
+    /// The source text of each `string` binding, so `s.utf8` can hand over the very bytes the
+    /// literal was written with instead of re-encoding the characters.
+    string_bytes: HashMap<String, String>,
+    /// Byte count of the `.utf8` just parsed, to type the binding it initializes.
+    utf8_len: Option<usize>,
     /// Top-level `provides` (per-target implementations) collected while parsing.
     providers: Vec<ProviderDef>,
     /// Top-level `use Port` directives collected while parsing.
@@ -63,6 +69,8 @@ impl Parser {
             enums: Vec::new(),
             ports: Vec::new(),
             externs: Vec::new(),
+            string_bytes: HashMap::new(),
+            utf8_len: None,
             providers: Vec::new(),
             uses: Vec::new(),
             no_struct_lit: false,
@@ -871,12 +879,20 @@ impl Parser {
         // compiler counted when it emitted the literal, so it indexes with the same bounds check
         // as any other view and never has to be walked until a NUL turns up. Lowered here to
         // exactly that view, which is where all the checking already lives.
+        let mut string_chars: Option<Vec<char>> = None;
         let ty = match (&ty, self.peek()) {
             (Some(Type::Named(n)), Some(Token::Eq)) if n == "string" => {
                 if let Some(Token::Str(text)) = self.tokens.get(self.pos + 1) {
-                    let len = text.len().to_string();
+                    // A `string` is CHARACTERS, not bytes: the compiler reads the source as UTF-8,
+                    // so it can count them exactly and hand over the code points themselves. That
+                    // keeps `s.len` and `s[i]` talking about the same thing — with bytes, `.len`
+                    // of "año" would be 4 while it plainly has 3 characters, and the obvious loop
+                    // `for i in 0..s.len { s[i] }` would read half of the ñ.
+                    let chars: Vec<char> = text.chars().collect();
+                    let len = chars.len().to_string();
+                    string_chars = Some(chars);
                     Some(Type::View(
-                        Box::new(Type::Named("u8".to_string())),
+                        Box::new(Type::Named("u32".to_string())),
                         Some(len),
                     ))
                 } else {
@@ -887,6 +903,25 @@ impl Parser {
         };
         // `let x = value`, or `let mut x` / `let a[N]` with no initializer (0),
         // the C-style "declare now, assign later" that AI writers reach for.
+        // The literal becomes its code points, so the existing brace-initializer path reserves
+        // the storage and writes them: one mechanism, not a second one for text.
+        if let Some(chars) = string_chars {
+            self.expect(Token::Eq);
+            let Token::Str(text) = self.advance() else {
+                unreachable!("peeked above")
+            };
+            // The characters are what `s` holds; the original bytes stay reachable through
+            // `s.utf8`, which is the only way to get them and says so at the call site.
+            self.string_bytes.insert(name.clone(), text);
+            return Stmt::Let {
+                mutable,
+                name,
+                ty,
+                value: Expr::List(chars.into_iter().map(|c| Expr::Int(c as i64)).collect()),
+                array_len,
+            };
+        }
+        self.utf8_len = None;
         let value = if self.eat(Token::Eq) {
             // `let buf: T[n] = {a, b, c}`: a view declared WITH its contents. Braces rather than
             // brackets, which already mean an array literal for `let a[N] = [..]`, and read here
@@ -907,6 +942,15 @@ impl Parser {
             }
         } else {
             Expr::Int(0)
+        };
+        // `let b = s.utf8` is a view of BYTES, and its length is their count — typed here so the
+        // binding carries it, the same way any other view does.
+        let ty = match (ty, self.utf8_len.take()) {
+            (None, Some(n)) => Some(Type::View(
+                Box::new(Type::Named("u8".to_string())),
+                Some(n.to_string()),
+            )),
+            (t, _) => t,
         };
         Stmt::Let {
             mutable,

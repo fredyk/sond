@@ -1956,7 +1956,7 @@ impl Codegen {
                             (
                                 Some(crate::ast::Type::View(_, Some(_))),
                                 Expr::Int(0) | Expr::List(_)
-                            )
+                            ) if !matches!(value, Expr::Str(_))
                         );
                         if reserves {
                             let Some(crate::ast::Type::View(elem, Some(len))) = ty.as_ref() else {
@@ -1976,7 +1976,13 @@ impl Codegen {
                             );
                             let width = kind_of_type(elem).bits().max(8) as i64 / 8;
                             self.uses_view_alloc = true;
-                            self.expr(&Expr::Var(len.clone())); // element count -> %rax
+                            // The length is either a NAME holding the count or the count itself
+                            // written down; reading the second as a variable name looked for a
+                            // variable called `32`.
+                            match len.parse::<i64>() {
+                                Ok(n) => self.line(&format!("    movq ${n}, %rax")),
+                                Err(_) => self.expr(&Expr::Var(len.clone())),
+                            }
                             self.line(&format!("    imulq ${width}, %rax, %rdi"));
                             self.line("    call sond_view_alloc");
                             // `= {a, b, c}`: write the given elements into the fresh storage, at

@@ -33,7 +33,21 @@ impl Parser {
             match self.peek() {
                 Some(Token::Dot) => {
                     self.advance();
-                    lhs = Expr::Field(Box::new(lhs), self.expect_ident());
+                    let field = self.expect_ident();
+                    // `s.utf8`: the bytes the literal was written with, as a view whose length is
+                    // their COUNT IN BYTES — a different number from `s.len`, which counts
+                    // characters, and that is exactly why asking has to be explicit.
+                    if field == "utf8"
+                        && let Expr::Var(name) = &lhs
+                        && let Some(text) = self.string_bytes.get(name).cloned()
+                    {
+                        // Remember the BYTE count for the binding this feeds, so `b.len` answers
+                        // in bytes while `s.len` keeps answering in characters.
+                        self.utf8_len = Some(text.len());
+                        lhs = Expr::Str(text);
+                        continue;
+                    }
+                    lhs = Expr::Field(Box::new(lhs), field);
                     continue;
                 }
                 Some(Token::LParen) => {

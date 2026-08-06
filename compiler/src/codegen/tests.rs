@@ -1626,6 +1626,50 @@ fn a_string_walks_its_own_characters() {
 }
 
 #[test]
+fn a_view_with_a_written_down_length_reserves_its_own_storage() {
+    // `let b: u8[32]` is the byte buffer everything else is supposed to migrate TO — the thing
+    // you index instead of `peek`ing at. It died in codegen with `unknown variable \`32\``,
+    // because the reservation read the length as the NAME of a variable holding it, which is
+    // only one of the two ways a view can say how long it is.
+    let src = "\
+        fn main() -> i64 {\n\
+            let b: u8[32]\n\
+            b[0] = 65\n\
+            b[31] = 66\n\
+            print_int(b[0] + b[31])\n\
+            print(\" \")\n\
+            print_int(b[7])\n\
+            0\n\
+        }";
+    assert_eq!(compile_and_capture(src), "131 0");
+}
+
+#[test]
+fn a_string_hands_over_its_bytes_only_when_asked() {
+    // A literal is TEXT and binds to `string`; there is no second spelling that quietly turns it
+    // into an address. What a protocol needs — the exact bytes, the ñ as its UTF-8 pair — is a
+    // separate, explicit request on the string, so the two readings can never be confused for
+    // one another at a glance.
+    let src = "\
+        fn main() -> i64 {\n\
+            let s: string = \"año\"\n\
+            let b = s.utf8\n\
+            print_int(s.len)\n\
+            print(\" \")\n\
+            print_int(s[1])\n\
+            print(\" \")\n\
+            print_int(b.len)\n\
+            print(\" \")\n\
+            print_int(b[1])\n\
+            print(\" \")\n\
+            print_int(b[2])\n\
+            0\n\
+        }";
+    // Three characters, the ñ as U+00F1; four BYTES, the ñ as 0xC3 0xB1.
+    assert_eq!(compile_and_capture(src), "3 241 4 195 177");
+}
+
+#[test]
 fn a_view_can_be_declared_with_its_contents() {
     // Reserving and then filling by hand is three lines of ceremony for a table of constants.
     // `let buf: i32[n] = {a, b, c}` reserves AND writes, at the element's width, with the rest
