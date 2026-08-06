@@ -769,3 +769,19 @@ fn the_end_of_a_range_may_be_a_plain_variable() {
     let funcs = p.parse_program();
     assert_eq!(funcs.len(), 1);
 }
+
+#[test]
+fn a_struct_literal_still_parses_after_a_range_loop() {
+    // The range loop suppresses struct literals while reading its bounds, because `0..n {` must
+    // open the loop body. Restoring that flag to the WRONG value — an inner `saved` shadowing the
+    // outer one, so it restored `true` instead of the original — left it stuck ON for the rest of
+    // the parse, and every struct literal after a range loop failed with `unexpected token in
+    // expression: LBrace`. The fix for one form broke another, which is what this pins.
+    let funcs = Parser::new(tokenize(
+        "struct P { a: i64, b: i64 }\n\
+         fn f(n: i64) -> i64 { let mut s = 0\nfor i in 0..n { s = s + i }\n\
+         let p = P { a: 1, b: 2 }\np.a + s }",
+    ))
+    .parse_program();
+    assert_eq!(funcs.len(), 1, "a struct literal after a range loop must still parse");
+}

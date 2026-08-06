@@ -603,8 +603,12 @@ impl Parser {
                             // Every existing test bound the range with a LITERAL, which cannot
                             // start a struct literal, so the gap was invisible until a variable
                             // reached it — and a variable is the only bound anyone really uses.
-                            let saved = self.no_struct_lit;
-                            self.no_struct_lit = true;
+                            //
+                            // The flag is ALREADY suppressed here (set before the start was
+                            // parsed) and is restored once, below, from the OUTER `saved`. An
+                            // inner `let saved` here shadowed it, captured `true`, and restored
+                            // `true` — leaving struct literals suppressed for the rest of the
+                            // file.
                             let end = self.parse_expr();
                             self.no_struct_lit = saved;
                             let mut body = self.parse_block();
