@@ -4385,3 +4385,184 @@ mod exit_in_spawn_tests {
         assert!(ok.is_ok(), "a clean spawned body must be accepted, got {ok:?}");
     }
 }
+
+/// Rejects raw `peek`/`poke` on a buffer that was DECLARED as an array or a view.
+///
+/// A declared buffer knows how long it is, so `b[i]` is checked and `peek64(b + i * 8)` is not:
+/// the two spellings reach the same bytes and only one of them is watched. Leaving both available
+/// means the bounds check is opt-out by accident, and the way out is a byte shorter to type than
+/// the way in. So the raw form is refused where the checked form exists.
+///
+/// `peek`/`poke` stay legal on a RAW pointer: memory from an allocator, a string in rodata, a
+/// buffer a syscall filled. That is the boundary where there is no declared length to check
+/// against, and pretending otherwise would only push the same hole one call deeper.
+///
+/// Scoped to VIEWS for now, not to classic `let a[N]` arrays. Measured, not assumed: extending it
+/// to arrays refuses 35 sites across the standard library's own tests (`pad`, `one`, `buf`, `tmp`
+/// and friends), so landing it would break the library and every program built on it until each
+/// one is migrated. Views are new, nothing reaches into them raw yet, and the code being written
+/// against them right now is exactly the code this protects. The array half is a separate,
+/// announced migration, not a side effect of this.
+pub fn check_no_raw_access_to_declared_buffers(funcs: &[Function]) -> Result<(), String> {
+    fn is_raw_access(name: &str) -> bool {
+        matches!(
+            name,
+            "peek8" | "peek16" | "peek32" | "peek64" | "poke8" | "poke16" | "poke32" | "poke64"
+        )
+    }
+    // Every variable named anywhere in an expression.
+    fn names_in(e: &Expr, out: &mut Vec<String>) {
+        match e {
+            Expr::Var(n) => out.push(n.clone()),
+            Expr::Field(b, _) | Expr::Unary(_, b) | Expr::Cast(b, _) => names_in(b, out),
+            Expr::Binary(_, a, b) | Expr::Index(a, b) => {
+                names_in(a, out);
+                names_in(b, out);
+            }
+            Expr::Call(c, args) => {
+                names_in(c, out);
+                for a in args {
+                    names_in(&a.value, out);
+                }
+            }
+            Expr::List(xs) => {
+                for x in xs {
+                    names_in(x, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn walk_expr(e: &Expr, declared: &HashSet<String>, fname: &str) -> Result<(), String> {
+        if let Expr::Call(callee, args) = e
+            && let Expr::Var(cname) = callee.as_ref()
+            && is_raw_access(cname)
+            && let Some(first) = args.first()
+        {
+            let mut names = Vec::new();
+            names_in(&first.value, &mut names);
+            if let Some(hit) = names.iter().find(|n| declared.contains(*n)) {
+                return Err(format!(
+                    "function `{fname}`: `{cname}` reaches into `{hit}`, which is declared with a \
+                     length, so the compiler knows how long it is and cannot check this access. \
+                     Index it instead: `{hit}[i]`, which is checked. Raw `peek`/`poke` are for \
+                     pointers with no declared length (an allocation, a string, a buffer a syscall \
+                     filled), not for buffers that could be checked and are not."
+                ));
+            }
+        }
+        let mut inner = Vec::new();
+        nested_blocks(e, &mut inner);
+        for b in inner {
+            walk_block(b, declared, fname)?;
+        }
+        if let Expr::Call(_, args) = e {
+            for a in args {
+                walk_expr(&a.value, declared, fname)?;
+            }
+        }
+        if let Expr::Binary(_, l, r) = e {
+            walk_expr(l, declared, fname)?;
+            walk_expr(r, declared, fname)?;
+        }
+        Ok(())
+    }
+    fn walk_block(b: &Block, declared: &HashSet<String>, fname: &str) -> Result<(), String> {
+        let mut declared = declared.clone();
+        for s in &b.stmts {
+            // A name is only protected from the point it is declared with a length.
+            if let Stmt::Let { name, array_len, ty, value, .. } = s {
+                walk_expr(value, &declared, fname)?;
+                let is_view = matches!(ty.as_ref(), Some(Type::View(..)));
+                if is_view {
+                    declared.insert(name.clone());
+                } else {
+                    declared.remove(name); // rebinding drops the protection with the length
+                }
+                continue;
+            }
+            match s {
+                Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Spawn(e) => {
+                    walk_expr(e, &declared, fname)?
+                }
+                Stmt::Assign { target, value } => {
+                    walk_expr(target, &declared, fname)?;
+                    walk_expr(value, &declared, fname)?;
+                }
+                Stmt::For { body, .. } => walk_block(body, &declared, fname)?,
+                _ => {}
+            }
+            let mut inner = Vec::new();
+            nested_blocks_of_stmt(s, &mut inner);
+            for blk in inner {
+                walk_block(blk, &declared, fname)?;
+            }
+        }
+        if let Some(t) = &b.tail {
+            walk_expr(t, &declared, fname)?;
+        }
+        Ok(())
+    }
+    for f in funcs {
+        // A parameter declared as a view carries its length too, so it is protected from entry.
+        let mut declared: HashSet<String> = HashSet::new();
+        for p in &f.params {
+            if matches!(&p.ty, Type::View(..)) {
+                declared.insert(p.name.clone());
+            }
+        }
+        walk_block(&f.body, &declared, &f.name)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod raw_access_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn check(src: &str) -> Result<(), String> {
+        let funcs = Parser::new(tokenize(src)).parse_program();
+        check_no_raw_access_to_declared_buffers(&funcs)
+    }
+
+    #[test]
+    fn a_classic_array_is_not_refused_yet_and_that_is_deliberate() {
+        // Not an oversight: extending this to `let a[N]` refuses 35 sites in the standard
+        // library's own tests, so it would break the library and everything built on it until
+        // each site is migrated. Pinned here so the scope is a decision on the record rather
+        // than something that drifts.
+        let ok = check("fn f() -> i64 { let a[4]\npoke64(a + 8, 7)\n0 }");
+        assert!(ok.is_ok(), "the array half is a separate, announced migration, got {ok:?}");
+    }
+
+    #[test]
+    fn a_declared_view_cannot_be_reached_with_raw_peek() {
+        let e = check("fn f(px: u32[n], n: i64) -> i64 { peek32(px + 4) }");
+        assert!(e.is_err(), "raw peek into a declared view must be refused");
+    }
+
+    #[test]
+    fn a_raw_pointer_is_still_free_to_peek_and_poke() {
+        // The boundary where there IS no declared length: an allocation, a string, a buffer a
+        // syscall filled. Refusing here would push the same hole one call deeper, not close it.
+        let ok = check("fn f(p: i64) -> i64 { poke8(p, 65)\npeek8(p + 1) }");
+        assert!(ok.is_ok(), "a raw pointer has no length to check against, got {ok:?}");
+    }
+
+    #[test]
+    fn a_name_rebound_to_a_scalar_loses_the_protection_with_the_length() {
+        // Rebinding drops the length, so it must also drop the prohibition: refusing here would
+        // reject correct code, and a check that rejects correct code gets switched off.
+        let ok = check("fn f(p: i64) -> i64 { let a[4]\nlet a = p\npeek8(a) }");
+        assert!(ok.is_ok(), "after rebinding, `a` is a plain pointer again, got {ok:?}");
+    }
+
+    #[test]
+    fn the_prohibition_starts_where_the_declaration_does() {
+        // A name that is not a declared buffer YET must not be caught by a later declaration.
+        let ok = check("fn f(a: i64) -> i64 { let x = peek8(a)\nlet a[4]\nx }");
+        assert!(ok.is_ok(), "the parameter `a` is a raw pointer at that point, got {ok:?}");
+    }
+}
