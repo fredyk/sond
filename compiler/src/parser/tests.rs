@@ -733,3 +733,17 @@ fn a_program_that_ends_cleanly_still_parses() {
     assert_eq!(funcs.len(), 2, "the function and the test block");
     assert!(funcs[1].is_test, "the test block survives");
 }
+
+#[test]
+fn a_range_loop_accepts_a_variable_bound() {
+    // `for i in 0..n` is THE way to walk a buffer: the range's own index is proven inside 0..n, so
+    // indexing needs no guard. With a literal bound it parsed; with a VARIABLE one it did not,
+    // because the end expression was parsed with struct literals re-enabled, so `n {` read as the
+    // start of a struct literal and the loop body became its field list. The canonical form was
+    // the broken one.
+    let funcs = Parser::new(tokenize(
+        "fn f(n: i64) -> i64 { let mut s = 0\nfor i in 0..n { s = s + i }\ns }",
+    ))
+    .parse_program();
+    assert_eq!(funcs.len(), 1, "the program parses at all");
+}

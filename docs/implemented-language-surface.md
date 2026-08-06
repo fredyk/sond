@@ -94,7 +94,7 @@ for i < 10 {        // while-style loop
     i = i + 1
 }
 
-for i in 0..10 { .. }   // counting loop (half-open: 0..9)
+for i in 0..10 { .. }   // counting loop, half-open; bounds may be variables (0..n)
 for let mut i = 0; i < n; i++ { .. }   // three-part loop; step may be any assignment
 for x in s { .. }       // foreach over a Slice/array element by element
 
@@ -106,7 +106,12 @@ for {               // infinite loop
 return 0            // early return
 ```
 
-`if` is also an expression: `let m = if a > b { a } else { b }`; chains work (`else if`).
+`if` is also an expression: `let m = if a > b { a } else { b }`; `else if` chains to any
+depth (`if a { } else if b { } else if c { } else { }`).
+
+**`for i in 0..n` is the way to walk a buffer**: the index is PROVEN to live in `0..n`, so
+`px[i]` inside needs no `where`/guard. `0..n` is half-open (n excluded); there is no `..=`,
+no step and no descending form — count up, or use the three-part loop for anything else.
 
 ### Constraints (common gotchas)
 - **Functions are TOP-LEVEL only**: no `fn` inside another `fn`; factor helpers out.
@@ -167,25 +172,17 @@ else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above
 - **`Slice`**: built-in length-carrying array `{ptr, len}`. `let s = Slice { ptr: a, len:
   a.len }`; pass so a fn knows the length (`fn sum(s: Slice)`); `s.len`, index `s[i]` /
   `s[i] = v`. Sub-slice `s[lo:hi]` is a VIEW, no copy (`s[:hi]`/`s[lo:]`/`s[:]`). Built in.
-- **Typed views** `T[]`: a base address over memory somebody else owns, indexed at the
-  ELEMENT's width instead of assuming a 64-bit word. What a big buffer needs: `let px:
-  u32[n] = heap_alloc(n * 4)`, then `px[i]`, one word at runtime. Element types: `u8`/`i8`,
-  `u16`/`i16`, `u32`/`i32`, `f32`, `i64`. The sign follows the element (`0xFF` is 255
-  through `u8[]`, −1 through `i8[]`); pixels want `u32`, since an opaque RGBA has its top
-  bit set and would be negative as `i32`.
-  **Declared with its contents**: `let buf: i32[n] = {10, 20, 30}` reserves and writes those
-  elements at the element's width; the rest of the declared length keeps its zeros.
-  **Declaring one with a length RESERVES it**, zeroed: `let ar: i32[n]` hands over storage
-  for n elements with no allocator call, growing an arena shared with `heap_alloc` (hosted
-  and freestanding; on UEFI reserve explicitly with `alloc`, which the compiler will tell
-  you). A view given an initializer binds THAT address instead: `let px: u32[n] =
-  heap_alloc(n * 4)`, or a window over storage you already have.
-  **A view says how long it is**, either naming the parameter/local carrying its length
-  (`u32[n]`) or writing it down (`u32[16]`), and every index is PROVEN against that:
-  `for i < n { px[i] = .. }` passes with no annotation, bounding an index by another
-  buffer's length does not, and indexing a view that declared no length is a compile error
-  naming what is missing. A view taken over a measurable array (`let v: u32[] = backing`,
-  or `backing + K` for constant K) is checked against the capacity that is really there.
+- **Typed views** `T[]`: a base address, indexed at the ELEMENT's width, one word at
+  runtime. Elements `u8`/`i8`, `u16`/`i16`, `u32`/`i32`, `f32`, `i64`; the SIGN follows the
+  element, so pixels want `u32` (an opaque RGBA has its top bit set).
+  `let ar: i32[n]` RESERVES n elements, zeroed, no allocator call (UEFI: use `alloc`);
+  `= {10, 20, 30}` also writes them; `= <address>` binds that address instead
+  (`heap_alloc(..)`, or `base + K` for constant K, a sub-view of what is left).
+  **A view says how long it is** — `u32[n]` names the parameter/local holding its length,
+  `u32[16]` writes it down — and every index is PROVEN against it: `for i in 0..n` needs no
+  annotation, another buffer's length is rejected, and indexing a view with no declared
+  length is a compile error. Declaring one inside a function reserves on EVERY call and the
+  arena never gives it back: reserve outside hot loops (`heap_used()` shows the total).
 - **Structs** (all fields i64, one word each). `struct Point { x: i64, y: i64 }`;
   `let p = Point { x: 1, y: 2 }` or `let p: Point` (zeroed); read/write `p.x` / `p.x = 5`.
   **Methods**: `impl Point { fn sum(self) -> i64 { self.x + self.y } }`, called `p.sum()`.

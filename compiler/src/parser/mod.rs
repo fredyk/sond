@@ -595,10 +595,14 @@ impl Parser {
                         let saved = self.no_struct_lit;
                         self.no_struct_lit = true;
                         let first = self.parse_expr();
-                        self.no_struct_lit = saved;
                         if self.eat(Token::DotDot) {
                             // Counting form `for i in a..b`: i = a; while i < b; i += 1.
+                            // The END is parsed with struct literals still suppressed: a variable
+                            // bound followed by the loop body (`0..n {`) is otherwise read as the
+                            // start of a struct literal called `n`, which made the canonical way
+                            // to walk a buffer the one form that did not parse.
                             let end = self.parse_expr();
+                            self.no_struct_lit = saved;
                             let mut body = self.parse_block();
                             stmts.push(Stmt::Let {
                                 mutable: true,
