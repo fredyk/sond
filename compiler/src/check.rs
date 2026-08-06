@@ -4716,6 +4716,30 @@ mod raw_access_tests {
     }
 
     #[test]
+    fn a_string_is_not_refused_while_it_cannot_be_indexed() {
+        // A TRIPWIRE, not a guarantee. The rule keys on `Type::View(..)`, so the day `string`
+        // is represented as a length-carrying view this test goes RED.
+        //
+        // That is the point. The rule exists to push every declared buffer onto `buf[i]`, and it
+        // is only fair once `buf[i]` EXISTS. A `string` today carries no length to index with, so
+        // refusing `peek8` on it would take away the only access there is and leave the stdlib
+        // between two rules, each right on its own — which is exactly what a full migration of 47
+        // files hit: everything compiled except the 8 files where a parameter had become `string`.
+        //
+        // So when this goes red, the question to answer is NOT "how do I exempt string". It is
+        // "did `string` become indexable in the same change?" If yes, flip this test to assert
+        // refusal and migrate the `peek8` sites to `s[i]`. If no, the type change landed too
+        // early and the prohibition must not be wired yet.
+        let src = "fn largo(s: string) -> i64 { peek8(s + 0) }\n\
+                   fn main() -> i64 { largo(\"hola\") }";
+        let funcs = Parser::new(tokenize(src)).parse_program();
+        assert!(
+            check_no_raw_access_to_declared_buffers(&funcs).is_ok(),
+            "a string cannot be indexed yet, so raw access is the only access it has"
+        );
+    }
+
+    #[test]
     fn a_classic_array_is_not_refused_yet_and_that_is_deliberate() {
         // Not an oversight: extending this to `let a[N]` refuses 35 sites in the standard
         // library's own tests, so it would break the library and everything built on it until
