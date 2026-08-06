@@ -134,6 +134,18 @@ impl Codegen {
                 }
                 self.canon(target);
             }
+            // `s.len` on a view whose length is written down (a `string`, or `u32[16]`) is that
+            // constant: the compiler counted it, so nothing has to be walked to find out.
+            Expr::Field(base, field)
+                if field == "len"
+                    && matches!(base.as_ref(), Expr::Var(n) if self.view_len.contains_key(n)) =>
+            {
+                let Expr::Var(name) = base.as_ref() else {
+                    unreachable!("guarded above")
+                };
+                let n = self.view_len[name];
+                self.line(&format!("    movq ${n}, %rax"));
+            }
             other => todo!("x64 codegen for {other:?}"),
         }
     }

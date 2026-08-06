@@ -1589,6 +1589,43 @@ fn the_three_part_for_loop_runs_like_its_hand_written_form() {
 }
 
 #[test]
+fn a_view_over_a_string_literal_knows_how_long_it_is() {
+    // `string` is a TYPE, not a pointer with a convention attached: `let s: string = "hola"` is
+    // four bytes the compiler counted itself, indexed with the same bounds check as any other
+    // view. Without it, text was the one thing the language could not walk safely, and the
+    // natural way to handle it was the loop that reads until it happens to find a NUL — off the
+    // end of the buffer when there is not one.
+    let src = "\
+        fn main() -> i64 {\n\
+            let s: string = \"hola\"\n\
+            let mut sum = 0\n\
+            for i in 0..4 { sum = sum + s[i] }\n\
+            print_int(sum)\n\
+            print(\" \")\n\
+            print_int(s.len)\n\
+            0\n\
+        }";
+    // 104+111+108+97 = 420, and the length is the literal's own, NUL excluded.
+    assert_eq!(compile_and_capture(src), "420 4");
+}
+
+#[test]
+fn a_string_walks_its_own_characters() {
+    // `for c in s` over a `string`: the loop knows where to stop because the type carries the
+    // length. This is the form that replaces "read until a NUL turns up", which walks off the end
+    // of the buffer when the NUL is not there.
+    let src = "\
+        fn main() -> i64 {\n\
+            let s: string = \"hola\"\n\
+            let mut sum = 0\n\
+            for c in s { sum = sum + c }\n\
+            print_int(sum)\n\
+            0\n\
+        }";
+    assert_eq!(compile_and_capture(src), "420");
+}
+
+#[test]
 fn a_view_can_be_declared_with_its_contents() {
     // Reserving and then filling by hand is three lines of ceremony for a table of constants.
     // `let buf: i32[n] = {a, b, c}` reserves AND writes, at the element's width, with the rest

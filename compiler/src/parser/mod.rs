@@ -867,6 +867,24 @@ impl Parser {
                 }
             }
         }
+        // `let s: string = "..."`: `string` IS a type — a view of bytes whose length the
+        // compiler counted when it emitted the literal, so it indexes with the same bounds check
+        // as any other view and never has to be walked until a NUL turns up. Lowered here to
+        // exactly that view, which is where all the checking already lives.
+        let ty = match (&ty, self.peek()) {
+            (Some(Type::Named(n)), Some(Token::Eq)) if n == "string" => {
+                if let Some(Token::Str(text)) = self.tokens.get(self.pos + 1) {
+                    let len = text.len().to_string();
+                    Some(Type::View(
+                        Box::new(Type::Named("u8".to_string())),
+                        Some(len),
+                    ))
+                } else {
+                    ty
+                }
+            }
+            _ => ty,
+        };
         // `let x = value`, or `let mut x` / `let a[N]` with no initializer (0),
         // the C-style "declare now, assign later" that AI writers reach for.
         let value = if self.eat(Token::Eq) {

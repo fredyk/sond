@@ -948,6 +948,9 @@ struct Codegen {
     /// Names declared `extern fn`: called through the platform's C ABI and resolved by the
     /// linker, never emitted.
     extern_fns: HashSet<String>,
+    /// Views whose length is known at compile time (`u32[16]`, and every `let s: string = ".."`
+    /// once the parser has counted the literal), so `s.len` is that constant.
+    view_len: HashMap<String, i64>,
     /// Whether any declaration reserved its own storage (`let ar: i32[n]`), so the reservation
     /// helper is emitted. Off by default: a program that never declares one is byte-identical.
     uses_view_alloc: bool,
@@ -2011,8 +2014,11 @@ impl Codegen {
                         self.var_types.insert(name.clone(), recorded);
                         // `let px: u32[] = heap_alloc(..)`: the variable holds the base address,
                         // and the element type is what indexing needs.
-                        if let Some(crate::ast::Type::View(elem, _)) = ty.as_ref() {
+                        if let Some(crate::ast::Type::View(elem, len)) = ty.as_ref() {
                             self.view_elem.insert(name.clone(), kind_of_type(elem));
+                            if let Some(n) = len.as_ref().and_then(|l| l.parse::<i64>().ok()) {
+                                self.view_len.insert(name.clone(), n);
+                            }
                         }
                     }
                 }

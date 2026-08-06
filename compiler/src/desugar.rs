@@ -867,6 +867,18 @@ fn collect_array_sizes_block(b: &Block, out: &mut HashMap<String, i64>) {
                 out.insert(name.clone(), *n);
                 collect_array_sizes_expr(value, out);
             }
+            // A view whose length is written down (`u32[16]`, and every `let s: string = ".."`
+            // after the parser counts the literal) knows its own `.len` at compile time, exactly
+            // like a fixed array does.
+            Stmt::Let {
+                name,
+                ty: Some(Type::View(_, Some(len))),
+                value,
+                ..
+            } if len.parse::<i64>().is_ok() => {
+                out.insert(name.clone(), len.parse().unwrap());
+                collect_array_sizes_expr(value, out);
+            }
             Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
                 collect_array_sizes_expr(value, out)
             }

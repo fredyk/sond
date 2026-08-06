@@ -163,6 +163,7 @@ pub fn loop_invariant_verified(
         int_types: int_types_of(params),
         requires,
         bail: None,
+        refusal: None,
     };
     let init = State {
         env,
@@ -236,6 +237,9 @@ fn expr_mentions_any(e: &Expr, set: &HashSet<String>) -> bool {
 struct Ctx<'a> {
     contracts: &'a HashMap<String, &'a Function>,
     fresh: usize,
+    /// Set when the body was REFUSED outright (not merely unverifiable), so the caller reports
+    /// this instead of the bail reason.
+    refusal: Option<String>,
     /// Parameters typed `f64`. Float division is IEEE-754 (`±inf`/`NaN`, never a trap), so
     /// the divide-by-zero obligation is raised for INTEGER division only, a divisor known
     /// to be a float is exempt.
@@ -274,6 +278,13 @@ impl Ctx<'_> {
         if self.bail.is_none() {
             self.bail = Some(reason.to_string());
         }
+        None
+    }
+
+    /// A REFUSAL, not a limitation: the body contains something already proven wrong, so the
+    /// diagnostic must say that instead of reporting the fragment the prover could not enter.
+    fn refuse<T>(&mut self, message: String) -> Option<T> {
+        self.refusal = Some(message);
         None
     }
 }
@@ -318,6 +329,7 @@ fn verify_function(
     };
     let mut ctx = Ctx {
         contracts,
+        refusal: None,
         fresh: 0,
         float_vars: f
             .params
@@ -350,6 +362,12 @@ fn verify_function(
     // not compile), while a contract-free one is left as-is, no regression on code the
     // verifier simply cannot yet reason about.
     let Some(paths) = paths else {
+        // A REFUSAL outranks the early exit below: leaving a contract-free function alone is
+        // right when the prover merely could not follow it, and wrong when it already proved
+        // something in there is broken.
+        if let Some(refusal) = ctx.refusal.clone() {
+            return reject(refusal);
+        }
         if f.ensures.is_empty() {
             return Ok(());
         }
@@ -548,7 +566,16 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
                 invariant,
                 body,
             } if !invariant.is_empty() => eval_loop(live, cond.as_ref(), invariant, body, ctx)?,
-            Stmt::For { .. } => {
+            Stmt::For { body, .. } => {
+                // The prover cannot carry state through a loop it has no invariant for, and
+                // stops. But stopping must not WAIVE what the callees inside demand: a call
+                // whose arguments are constants can be judged here and now, and refusing it is
+                // the difference between a contract and a suggestion. `f(-5)` was rejected at
+                // the top level of a body and waved through one line deeper, inside a loop —
+                // which is where the work actually happens.
+                if let Some(bad) = constant_call_violating_a_precondition(body, ctx.contracts) {
+                    return ctx.refuse(bad);
+                }
                 return ctx.bail("a `for` loop without an `invariant { .. }` clause");
             }
             Stmt::Return(_) => return ctx.bail("an early `return`"),
@@ -2249,8 +2276,155 @@ fn counterexample_clause_alt(
     }
 }
 
+
+/// A call inside an unverifiable loop whose CONSTANT arguments already violate the callee's
+/// precondition, as a ready-made error. Constants need no loop reasoning: their value is the
+/// same on every iteration, so this judgement is exact and cannot produce a false positive.
+/// Anything argument-dependent still needs an `invariant` and is left alone.
+fn constant_call_violating_a_precondition(
+    body: &Block,
+    contracts: &HashMap<String, &Function>,
+) -> Option<String> {
+    fn const_of(e: &Expr) -> Option<i64> {
+        match e {
+            Expr::Int(n) => Some(*n),
+            Expr::Unary(UnOp::Neg, x) => const_of(x).map(|v| -v),
+            Expr::Binary(op, l, r) => {
+                let (a, b) = (const_of(l)?, const_of(r)?);
+                match op {
+                    BinOp::Add => Some(a + b),
+                    BinOp::Sub => Some(a - b),
+                    BinOp::Mul => Some(a * b),
+                    BinOp::Div if b != 0 => Some(a / b),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+    /// Evaluates a precondition with the parameters bound to constant arguments.
+    fn holds(prop: &Expr, env: &HashMap<String, i64>) -> Option<bool> {
+        let Expr::Binary(op, l, r) = prop else {
+            return None;
+        };
+        let value = |e: &Expr| -> Option<i64> {
+            match e {
+                Expr::Var(n) => env.get(n).copied(),
+                other => const_of(other),
+            }
+        };
+        let (a, b) = (value(l)?, value(r)?);
+        match op {
+            BinOp::Lt => Some(a < b),
+            BinOp::Le => Some(a <= b),
+            BinOp::Gt => Some(a > b),
+            BinOp::Ge => Some(a >= b),
+            BinOp::Eq => Some(a == b),
+            BinOp::Ne => Some(a != b),
+            _ => None,
+        }
+    }
+    fn walk_expr(e: &Expr, funcs: &HashMap<String, &Function>, out: &mut Option<String>) {
+        if out.is_some() {
+            return;
+        }
+        if let Expr::Call(callee, args) = e
+            && let Expr::Var(name) = callee.as_ref()
+            && let Some(g) = funcs.get(name.as_str()).copied()
+            && !g.requires.is_empty()
+            && g.params.len() == args.len()
+        {
+            let mut env = HashMap::new();
+            for (p, a) in g.params.iter().zip(args) {
+                if let Some(v) = const_of(&a.value) {
+                    env.insert(p.name.clone(), v);
+                }
+            }
+            for req in &g.requires {
+                if holds(req, &env) == Some(false) {
+                    *out = Some(format!(
+                        "function inside a loop: the precondition `{}` required when calling \
+                         `{name}` does not hold for these constant arguments",
+                        show_prop_src(req)
+                    ));
+                    return;
+                }
+            }
+        }
+        match e {
+            Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+                walk_expr(l, funcs, out);
+                walk_expr(r, funcs, out);
+            }
+            Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => walk_expr(x, funcs, out),
+            Expr::Call(c, args) => {
+                walk_expr(c, funcs, out);
+                for a in args {
+                    walk_expr(&a.value, funcs, out);
+                }
+            }
+            Expr::If { cond, then_branch, else_branch } => {
+                walk_expr(cond, funcs, out);
+                walk_block(then_branch, funcs, out);
+                if let Some(eb) = else_branch {
+                    walk_block(eb, funcs, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn walk_block(b: &Block, funcs: &HashMap<String, &Function>, out: &mut Option<String>) {
+        for s in &b.stmts {
+            match s {
+                Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Return(Some(value)) => {
+                    walk_expr(value, funcs, out)
+                }
+                Stmt::Assign { target, value } => {
+                    walk_expr(target, funcs, out);
+                    walk_expr(value, funcs, out);
+                }
+                Stmt::For { body, .. } => walk_block(body, funcs, out),
+                _ => {}
+            }
+        }
+        if let Some(t) = &b.tail {
+            walk_expr(t, funcs, out);
+        }
+    }
+    let mut out = None;
+    walk_block(body, contracts, &mut out);
+    out
+}
+
+/// A precondition written back out in source form, for the error message.
+fn show_prop_src(e: &Expr) -> String {
+    match e {
+        Expr::Int(n) => n.to_string(),
+        Expr::Var(v) => v.clone(),
+        Expr::Unary(UnOp::Neg, x) => format!("-{}", show_prop_src(x)),
+        Expr::Binary(op, l, r) => {
+            let o = match op {
+                BinOp::Lt => "<",
+                BinOp::Le => "<=",
+                BinOp::Gt => ">",
+                BinOp::Ge => ">=",
+                BinOp::Eq => "==",
+                BinOp::Ne => "!=",
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                _ => "?",
+            };
+            format!("{} {o} {}", show_prop_src(l), show_prop_src(r))
+        }
+        _ => "<expr>".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::lexer::tokenize;
     use crate::parser::Parser;
@@ -2264,6 +2438,22 @@ mod tests {
         let mut p = Parser::new(tokenize(src));
         let funcs = p.parse_program();
         (funcs, p.take_globals())
+    }
+
+    #[test]
+    fn a_precondition_is_still_required_inside_a_loop() {
+        // The prover gives up on a `for` without an `invariant`, and giving up silenced the
+        // CALLS inside it: `only_positive(-5)` was refused at the top level of a body and waved
+        // through one line deeper, inside a loop — which is where the work actually happens. Not
+        // being able to prove a loop's own postcondition is a reason to stop proving THAT; it is
+        // not a reason to stop demanding what a callee requires.
+        let src = "fn only_positive(x: i64) -> i64 requires { x > 0 } { x }\n\
+                   fn main() -> i64 { let mut i = 0\nfor i < 3 { only_positive(0 - 5)\ni = i + 1 }\n7 }";
+        let err = verify(&parse(src)).unwrap_err().message;
+        assert!(
+            err.contains("precondition") && err.contains("only_positive"),
+            "a violated precondition inside a loop must be refused, got: {err}"
+        );
     }
 
     #[test]
