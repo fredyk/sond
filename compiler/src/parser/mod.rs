@@ -556,7 +556,13 @@ impl Parser {
                         self.no_struct_lit = saved;
                         if self.eat(Token::DotDot) {
                             // Counting form `for i in a..b`: i = a; while i < b; i += 1.
+                            // The end needs the same restriction as the start: in `for i in
+                            // 0..n { ... }` the `{` opens the loop body, so a bare `n` must not
+                            // read as the name of a struct literal whose fields are the body.
+                            let saved = self.no_struct_lit;
+                            self.no_struct_lit = true;
                             let end = self.parse_expr();
+                            self.no_struct_lit = saved;
                             let mut body = self.parse_block();
                             stmts.push(Stmt::Let {
                                 mutable: true,

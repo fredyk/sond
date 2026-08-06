@@ -3155,6 +3155,30 @@ mod tests {
     }
 
     #[test]
+    fn a_counting_range_bounds_the_index_of_a_view_with_no_guard() {
+        // `for i in 0..n` over a view declared `u32[n]` needs NO hand-written guard: the loop
+        // condition the range desugars to (`i < n`) is what the prover reads, and it is exactly
+        // the view's length. This is the canonical way to walk a view, so it is pinned here.
+        let src = "fn main() -> i64 { let n = 8\n\
+                   let px: u32[n] = heap_alloc(n * 4)\n\
+                   for i in 0..n { px[i] = i }\n0 }\n\
+                   fn heap_alloc(n: i64) -> i64 { n }";
+        assert!(bounds(src).is_ok(), "the range itself should bound the index");
+    }
+
+    #[test]
+    fn a_counting_range_past_the_length_is_still_refused() {
+        // The other half, and the one that gives the test above its meaning: if `0..n+3` were
+        // accepted too, "no guard needed" would only mean the prover reads nothing. It must
+        // reject the overrun for the acceptance above to be evidence of anything.
+        let src = "fn main() -> i64 { let n = 8\n\
+                   let px: u32[n] = heap_alloc(n * 4)\n\
+                   for i in 0..n+3 { px[i] = i }\n0 }\n\
+                   fn heap_alloc(n: i64) -> i64 { n }";
+        assert!(bounds(src).is_err(), "walking past the declared length must not compile");
+    }
+
+    #[test]
     fn an_unguarded_global_increment_has_no_ceiling() {
         // SOUNDNESS: one UNGUARDED `cnt = cnt + 1` anywhere means `cnt` can grow without bound, so
         // `for i < cnt { buf[i] }` could overrun `buf[8]` and MUST be rejected, no ceiling is

@@ -733,3 +733,27 @@ fn a_program_that_ends_cleanly_still_parses() {
     assert_eq!(funcs.len(), 2, "the function and the test block");
     assert!(funcs[1].is_test, "the test block survives");
 }
+
+#[test]
+fn the_end_of_a_range_may_be_a_plain_variable() {
+    // `for i in 0..n { ... }` — the natural way to walk a buffer whose length is only
+    // known at run time, and the whole point of the counting loop over a typed view.
+    //
+    // It did not parse. The error was `expected Colon, got Eq`, which talks about STRUCT
+    // FIELDS, and left everyone looking for a missing feature in ranges: two agents
+    // concluded in turn that `for i in a..b` was unimplemented and asked for it to be
+    // built. It was implemented all along. The end of the range was parsed WITHOUT the
+    // `no_struct_lit` restriction that the start already sets, so `n { s = s + i }` read
+    // as a struct literal `n` with a field `s`, and the loop body was swallowed as its
+    // field list.
+    //
+    // That is why every existing test of this form passes: they all bound the range with a
+    // LITERAL (`0..3`, `0..5`), and a literal cannot start a struct literal, so the missing
+    // restriction was invisible. A variable is the first case that reaches it, and it is
+    // also the only case anyone actually needs — nobody walks a buffer up to a constant.
+    let mut p = Parser::new(tokenize(
+        "fn main() -> i64 { let n = 5\nlet mut s = 0\nfor i in 0..n { s = s + i }\ns }",
+    ));
+    let funcs = p.parse_program();
+    assert_eq!(funcs.len(), 1);
+}
