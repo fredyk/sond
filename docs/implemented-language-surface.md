@@ -1,12 +1,12 @@
 # Sond: Implemented Language Surface (what the compiler accepts TODAY)
 
-<!-- SOND-MD-BEGIN -->
 > **⭐ Prime Directive (permanent):** Sond is a language written by AI and used by AI.
 > Hard-to-implement features are never avoided, the goal is a language in which it is
 > *almost impossible* to make a programming or logic error: extremely hard for a human
 > to write, yet extraordinarily hard for an AI to be wrong. Correctness guarantees
 > always win over ease of authorship. (Full statement in `docs/rfc-0000-vision.md`.)
 
+<!-- SOND-MD-BEGIN -->
 > This is the practical, ground-truth reference for the CURRENT `sondc` compiler.
 > The design RFCs describe features (contracts, effects, modules, capabilities)
 > that are mostly NOT implemented yet. **To write programs that compile and run,
@@ -128,8 +128,7 @@ let mut counter = 0         // mutable global state, persists across calls
 ## Contracts (requires / ensures)
 
 A function can carry a contract, PROVEN AT COMPILE TIME for every input (not checked at
-runtime). If it cannot prove a postcondition the compiler REJECTS the program, so only
-add a contract the prover can verify.
+runtime). If it cannot prove a postcondition the compiler REJECTS the program.
 
 The prover handles straight-line bodies, loops whose `invariant` it VERIFIES (init and
 preservation, not merely trusts), and calls: a caller must prove the callee's `requires`, and
@@ -150,7 +149,7 @@ is a `requires` on that param (`&&` splits into conjuncts), proves bounds/overfl
 ## Builtins: provided by the COMPILER itself (no `include` needed)
 
 Everything below is emitted by the compiler directly and is ALWAYS available. Everything
-else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above).
+else (crypto, strings, drivers) is a `.snd` library you `include`.
 
 ### All targets
 - `print("literal")`: write a STRING LITERAL to the console EXACTLY as given, NO
@@ -158,25 +157,21 @@ else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above
   writes nothing.
 - `print_int(n)`: print the integer `n` in decimal (no newline).
 - `peek64/32/16/8(ptr) -> i64`: load a 64/32/16/8-bit value from `ptr` (zero-extended).
-- `poke64/32/16/8(ptr, val)`: store the low 64/32/16/8 bits of `val` at `ptr`. Sized forms
-  are for packed hardware structures (a device ring: 32-bit length, 16-bit flags).
+- `poke64/32/16/8(ptr, val)`: store the low 64/32/16/8 bits of `val` at `ptr`.
 - `let a[N]`: fixed-size array of N words on the stack (no allocator, every target);
   index with `a[i]`; `a.len` is the size N (`for i < a.len`). A constant index outside
   `[0, N)` is a compile error. Tables: `K[64]`.
 - **`Slice`**: built-in length-carrying array `{ptr, len}`. `let s = Slice { ptr: a, len:
   a.len }`; pass so a fn knows the length (`fn sum(s: Slice)`); `s.len`, index `s[i]` /
-  `s[i] = v`. Sub-slice `s[lo:hi]` is a VIEW, no copy (`s[:hi]`/`s[lo:]`/`s[:]`). Built in.
-- **Typed views** `T[]`: a base address over memory somebody else owns, indexed at the
-  ELEMENT's width instead of assuming a 64-bit word. What a big buffer needs: `let px:
-  u32[n] = heap_alloc(n * 4)`, then `px[i]`, one word at runtime. Element types: `u8`/`i8`,
-  `u16`/`i16`, `u32`/`i32`, `f32`, `i64`. The sign follows the element (`0xFF` is 255
-  through `u8[]`, −1 through `i8[]`); pixels want `u32`, since an opaque RGBA has its top
-  bit set and would be negative as `i32`.
+  `s[i] = v`. Sub-slice `s[lo:hi]` is a VIEW, no copy (`s[:hi]`/`s[lo:]`/`s[:]`).
+- **Typed views** `T[]`: a base address indexed at the ELEMENT's width instead of assuming a
+  64-bit word. Element types: `u8`/`i8`, `u16`/`i16`, `u32`/`i32`, `f32`, `i64`; the sign
+  follows the element (`0xFF` is 255 through `u8[]`, −1 through `i8[]`).
   **Declaring one with a length RESERVES it**, zeroed: `let ar: i32[n]` hands over storage
   for n elements with no allocator call, growing an arena shared with `heap_alloc` (hosted
   and freestanding; on UEFI reserve explicitly with `alloc`, which the compiler will tell
-  you). A view given an initializer binds THAT address instead: `let px: u32[n] =
-  heap_alloc(n * 4)`, or a window over storage you already have.
+  you). An initializer binds THAT address instead: `let px: u32[n] = heap_alloc(n * 4)`, or
+  a window over storage you already have.
   **A view says how long it is**, either naming the parameter/local carrying its length
   (`u32[n]`) or writing it down (`u32[16]`), and every index is PROVEN against that:
   `for i < n { px[i] = .. }` passes with no annotation, bounding an index by another
@@ -199,8 +194,7 @@ else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above
 - `outb(port, val)` / `outw(port, val)` / `outl(port, val)`: write a byte/word/dword to an I/O PORT.
 - `inb(port) -> i64` / `inw(port) -> i64` / `inl(port) -> i64`: read a byte/word/dword from an I/O PORT.
 
-The 32-bit `outl`/`inl` are for PCI config space (address→0xCF8, datum at 0xCFC). I/O ports
-are a SEPARATE address space: for a device register use `inb`/`outb`, NOT `peek8`/`poke8`
+I/O ports are a SEPARATE address space: for a device register use `inb`/`outb`, NOT `peek8`/`poke8`
 (those hit RAM). Hex literals allowed: `0x3F8`.
 
 ### UEFI target only (`--uefi`)
@@ -231,7 +225,7 @@ are a SEPARATE address space: for a device register use `inb`/`outb`, NOT `peek8
 
 `sond build`, `sond run` and `sond test` all enforce a coverage gate: a program is
 REJECTED unless its `test "..." { }` blocks exercise ≥80% of its own functions' basic
-blocks (the compiler lists the uncovered ones). Write tests or it will not compile.
+blocks (the compiler lists the uncovered ones).
 
 ```sond
 include "x86_64/linux/testing.snd"
@@ -239,11 +233,12 @@ fn double(x: i64) -> i64 { x + x }
 test "double works" { assert_eq(double(21), 42) }
 ```
 
-- `test "name" { ... }`: a test block. Each runs in a FORKED child, so one failing or
-  crashing assertion is isolated and reported per test; the suite keeps going.
+- `test "name" { ... }`: a test block. Each runs in a FORKED child.
 - `assert(cond)` / `assert_eq(actual, expected)` / `assert_ne(a, b)` (from `testing.snd`)
   abort the test on failure. Only i64 values are compared.
 - `sond test prog.snd` runs the suite and prints per-test pass/fail.
+
+<!-- SOND-MD-END -->
 
 ## How programs are compiled (for reference)
 
@@ -254,4 +249,3 @@ sondc prog.snd --uefi -o BOOTX64.EFI  # PE32+ EFI app; entry efi_main
 sondc prog.snd --shared -o libNAME.so # C-ABI .so; pub fn exported (C/Go/Rust/Python)
 ```
 
-<!-- SOND-MD-END -->
