@@ -735,15 +735,37 @@ fn a_program_that_ends_cleanly_still_parses() {
 }
 
 #[test]
-fn a_range_loop_accepts_a_variable_bound() {
-    // `for i in 0..n` is THE way to walk a buffer: the range's own index is proven inside 0..n, so
-    // indexing needs no guard. With a literal bound it parsed; with a VARIABLE one it did not,
-    // because the end expression was parsed with struct literals re-enabled, so `n {` read as the
-    // start of a struct literal and the loop body became its field list. The canonical form was
-    // the broken one.
+fn a_range_loop_accepts_a_parameter_as_its_bound() {
+    // The sibling of the test below, with the bound coming in as a PARAMETER rather than a local:
+    // the same missing restriction, reached by the shape a function that walks a caller's buffer
+    // actually has.
     let funcs = Parser::new(tokenize(
         "fn f(n: i64) -> i64 { let mut s = 0\nfor i in 0..n { s = s + i }\ns }",
     ))
     .parse_program();
     assert_eq!(funcs.len(), 1, "the program parses at all");
+}
+
+#[test]
+fn the_end_of_a_range_may_be_a_plain_variable() {
+    // `for i in 0..n { ... }` — the natural way to walk a buffer whose length is only
+    // known at run time, and the whole point of the counting loop over a typed view.
+    //
+    // It did not parse. The error was `expected Colon, got Eq`, which talks about STRUCT
+    // FIELDS, and left everyone looking for a missing feature in ranges: two agents
+    // concluded in turn that `for i in a..b` was unimplemented and asked for it to be
+    // built. It was implemented all along. The end of the range was parsed WITHOUT the
+    // `no_struct_lit` restriction that the start already sets, so `n { s = s + i }` read
+    // as a struct literal `n` with a field `s`, and the loop body was swallowed as its
+    // field list.
+    //
+    // That is why every existing test of this form passes: they all bound the range with a
+    // LITERAL (`0..3`, `0..5`), and a literal cannot start a struct literal, so the missing
+    // restriction was invisible. A variable is the first case that reaches it, and it is
+    // also the only case anyone actually needs — nobody walks a buffer up to a constant.
+    let mut p = Parser::new(tokenize(
+        "fn main() -> i64 { let n = 5\nlet mut s = 0\nfor i in 0..n { s = s + i }\ns }",
+    ));
+    let funcs = p.parse_program();
+    assert_eq!(funcs.len(), 1);
 }

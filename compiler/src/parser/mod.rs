@@ -597,10 +597,14 @@ impl Parser {
                         let first = self.parse_expr();
                         if self.eat(Token::DotDot) {
                             // Counting form `for i in a..b`: i = a; while i < b; i += 1.
-                            // The END is parsed with struct literals still suppressed: a variable
-                            // bound followed by the loop body (`0..n {`) is otherwise read as the
-                            // start of a struct literal called `n`, which made the canonical way
-                            // to walk a buffer the one form that did not parse.
+                            // The end needs the same restriction as the start: in `for i in
+                            // 0..n { ... }` the `{` opens the loop body, so a bare `n` must not
+                            // read as the name of a struct literal whose fields are the body.
+                            // Every existing test bound the range with a LITERAL, which cannot
+                            // start a struct literal, so the gap was invisible until a variable
+                            // reached it — and a variable is the only bound anyone really uses.
+                            let saved = self.no_struct_lit;
+                            self.no_struct_lit = true;
                             let end = self.parse_expr();
                             self.no_struct_lit = saved;
                             let mut body = self.parse_block();
