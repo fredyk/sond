@@ -141,72 +141,110 @@ test "reader returns what it has when n > remaining" {
 test "http route and handle GET /" {
     let m = mock_http_new()
 
-    let method_handle = bytes_from_cstr("GET")
-    let path_handle = bytes_from_cstr("/")
-    let status_handle = "200 OK"
-    let body_handle = bytes_from_cstr("Hello")
+    let __s0_143: string = "GET"
+    let method_handle = bytes_from_cstr(__s0_143.utf8)
+    let __s1_145: string = "/"
+    let path_handle = bytes_from_cstr(__s1_145.utf8)
+    let status_handle_text: string = "200 OK"
+    let status_handle = status_handle_text.utf8
+    let __s2_149: string = "Hello"
+    let body_handle = bytes_from_cstr(__s2_149.utf8)
 
     mock_http_route(m, method_handle, path_handle, status_handle, body_handle)
 
-    let req = bytes_from_cstr("GET / HTTP/1.1")
+    let __s3_154: string = "GET / HTTP/1.1"
+    let req = bytes_from_cstr(__s3_154.utf8)
     let resp = mock_http_handle(m, req)
 
-    let expect = http_response("200 OK", bytes_from_cstr("Hello"))
+    let __s4_158: string = "200 OK"
+    let __s5_158: string = "Hello"
+    let expect = http_response(__s4_158.utf8, bytes_from_cstr(__s5_158.utf8))
     assert_eq(bytes_eq(resp, expect), 1)
 }
 
 test "http route 404 for unmatched path" {
     let m = mock_http_new()
 
-    mock_http_route(m, bytes_from_cstr("GET"), bytes_from_cstr("/"), "200 OK", bytes_from_cstr("Root"))
+    let __lit0: string = "GET"
+    let __lit1: string = "/"
+    let __lit2: string = "200 OK"
+    let __lit3: string = "Root"
+    mock_http_route(m, bytes_from_cstr(__lit0.utf8), bytes_from_cstr(__lit1.utf8), __lit2.utf8, bytes_from_cstr(__lit3.utf8))
 
-    let req = bytes_from_cstr("GET /other HTTP/1.1")
+    let __s6_173: string = "GET /other HTTP/1.1"
+    let req = bytes_from_cstr(__s6_173.utf8)
     let resp = mock_http_handle(m, req)
 
     let expect_body = bytes_new()
     bytes_append_int(expect_body, 404)
-    let expect = http_response("404 Not Found", expect_body)
+    let __s0_179: string = "404 Not Found"
+    let expect = http_response(__s0_179.utf8, expect_body)
     assert_eq(bytes_eq(resp, expect), 1)
 }
 
 test "http routes and handles POST" {
     let m = mock_http_new()
 
-    let body = bytes_from_cstr("CREATED")
-    mock_http_route(m, bytes_from_cstr("POST"), bytes_from_cstr("/api/items"), "201 Created", body)
+    let __s7_186: string = "CREATED"
+    let body = bytes_from_cstr(__s7_186.utf8)
+    let __lit4: string = "POST"
+    let __lit5: string = "/api/items"
+    let __lit6: string = "201 Created"
+    mock_http_route(m, bytes_from_cstr(__lit4.utf8), bytes_from_cstr(__lit5.utf8), __lit6.utf8, body)
 
-    let req = bytes_from_cstr("POST /api/items HTTP/1.1")
+    let __s8_193: string = "POST /api/items HTTP/1.1"
+    let req = bytes_from_cstr(__s8_193.utf8)
     let resp = mock_http_handle(m, req)
 
     assert_eq(bytes_len(resp) > 0, 1)
-    let expect_body = bytes_from_cstr("CREATED")
-    assert_eq(bytes_eq(resp, http_response("201 Created", expect_body)), 1)
+    let __s9_198: string = "CREATED"
+    let expect_body = bytes_from_cstr(__s9_198.utf8)
+    let __s1_201: string = "201 Created"
+    assert_eq(bytes_eq(resp, http_response(__s1_201.utf8, expect_body)), 1)
 }
 
 test "different methods on same path" {
     let m = mock_http_new()
 
-    mock_http_route(m, bytes_from_cstr("GET"), bytes_from_cstr("/items"), "200 OK", bytes_from_cstr("JSON"))
-    mock_http_route(m, bytes_from_cstr("POST"), bytes_from_cstr("/items"), "201 Created", bytes_from_cstr(""))
+    let __lit7: string = "GET"
+    let __lit8: string = "/items"
+    let __lit9: string = "200 OK"
+    let __lit10: string = "JSON"
+    mock_http_route(m, bytes_from_cstr(__lit7.utf8), bytes_from_cstr(__lit8.utf8), __lit9.utf8, bytes_from_cstr(__lit10.utf8))
+    let __lit11: string = "POST"
+    let __lit12: string = "/items"
+    let __lit13: string = "201 Created"
+    let __lit14: string = ""
+    mock_http_route(m, bytes_from_cstr(__lit11.utf8), bytes_from_cstr(__lit12.utf8), __lit13.utf8, bytes_from_cstr(__lit14.utf8))
 
-    let resp_get = mock_http_handle(m, bytes_from_cstr("GET /items HTTP/1.1"))
-    let resp_post = mock_http_handle(m, bytes_from_cstr("POST /items HTTP/1.1"))
+    let __s10_217: string = "GET /items HTTP/1.1"
+    let resp_get = mock_http_handle(m, bytes_from_cstr(__s10_217.utf8))
+    let __s11_219: string = "POST /items HTTP/1.1"
+    let resp_post = mock_http_handle(m, bytes_from_cstr(__s11_219.utf8))
 
-    assert_eq(bytes_eq(resp_get, http_response("200 OK", bytes_from_cstr("JSON"))), 1)
-    assert_eq(bytes_eq(resp_post, http_response("201 Created", bytes_new())), 1)
+    let __s12_222: string = "200 OK"
+    let __s13_222: string = "JSON"
+    assert_eq(bytes_eq(resp_get, http_response(__s12_222.utf8, bytes_from_cstr(__s13_222.utf8))), 1)
+    let __s2_227: string = "201 Created"
+    assert_eq(bytes_eq(resp_post, http_response(__s2_227.utf8, bytes_new())), 1)
 }
 
 test "complete http flow with method, path and status extraction" {
     let m = mock_http_new()
 
-    let method_handle = bytes_from_cstr("PUT")
-    let path_handle = bytes_from_cstr("/users/42")
-    let status_handle = "200 OK"
-    let body_handle = bytes_from_cstr("{\"name\":\"Alice\"}")
+    let __s14_231: string = "PUT"
+    let method_handle = bytes_from_cstr(__s14_231.utf8)
+    let __s15_233: string = "/users/42"
+    let path_handle = bytes_from_cstr(__s15_233.utf8)
+    let status_handle_text: string = "200 OK"
+    let status_handle = status_handle_text.utf8
+    let __s16_237: string = "{\"name\":\"Alice\"}"
+    let body_handle = bytes_from_cstr(__s16_237.utf8)
 
     mock_http_route(m, method_handle, path_handle, status_handle, body_handle)
 
-    let req = bytes_from_cstr("PUT /users/42 HTTP/1.1")
+    let __s17_242: string = "PUT /users/42 HTTP/1.1"
+    let req = bytes_from_cstr(__s17_242.utf8)
     let resp = mock_http_handle(m, req)
 
     // The response ends with the exact JSON body bytes, in order.

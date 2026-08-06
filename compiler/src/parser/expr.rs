@@ -42,9 +42,12 @@ impl Parser {
                         && let Some(text) = self.string_bytes.get(name).cloned()
                     {
                         // Remember the BYTE count for the binding this feeds, so `b.len` answers
-                        // in bytes while `s.len` keeps answering in characters.
+                        // in bytes while `s.len` keeps answering in characters. The node KEEPS
+                        // the `.utf8` around it: these bytes were asked for, and the rule that
+                        // a literal may only become a `string` must be able to tell the
+                        // difference between asking and writing one.
                         self.utf8_len = Some(text.len());
-                        lhs = Expr::Str(text);
+                        lhs = Expr::Field(Box::new(Expr::Str(text)), "utf8".to_string());
                         continue;
                     }
                     lhs = Expr::Field(Box::new(lhs), field);

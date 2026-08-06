@@ -122,7 +122,8 @@ fn tls_connect_fd(fd: i64, sni: i64, snilen: i64, alpn: i64, alpnlen: i64, roots
     let th_sfin[32]
     sha256_hash(tr, trlen + finoff, th_sfin)
     let sfk[32]
-    hkdf_expand_label(s_hs, "finished", 8, sfk, 0, sfk, 32)
+    let __lit0: string = "finished"
+    hkdf_expand_label(s_hs, __lit0.utf8, 8, sfk, 0, sfk, 32)
     let sfin[32]
     hmac_sha256(sfk, 32, th_sfin, 32, sfin)
     i = 0
@@ -144,7 +145,8 @@ fn tls_connect_fd(fd: i64, sni: i64, snilen: i64, alpn: i64, alpnlen: i64, roots
 
     // client Finished (client handshake key, sequence 0), after a middlebox ChangeCipherSpec
     let cfk[32]
-    hkdf_expand_label(c_hs, "finished", 8, cfk, 0, cfk, 32)
+    let __lit1: string = "finished"
+    hkdf_expand_label(c_hs, __lit1.utf8, 8, cfk, 0, cfk, 32)
     let cfin[32]
     hmac_sha256(cfk, 32, th_full, 32, cfin)
     let cfmsg[40]
@@ -168,9 +170,11 @@ fn tls_connect_fd(fd: i64, sni: i64, snilen: i64, alpn: i64, alpnlen: i64, roots
     poke64(sess + 16, 0)                            // server app seq
     poke64(sess + 112, 0 - 1)                       // no alert seen yet
     let c_ap[32]
-    derive_secret(master, "c ap traffic", 12, tr, trlen + finend, c_ap)
+    let __lit2: string = "c ap traffic"
+    derive_secret(master, __lit2.utf8, 12, tr, trlen + finend, c_ap)
     let s_ap[32]
-    derive_secret(master, "s ap traffic", 12, tr, trlen + finend, s_ap)
+    let __lit3: string = "s ap traffic"
+    derive_secret(master, __lit3.utf8, 12, tr, trlen + finend, s_ap)
     tls_traffic_key_iv(c_ap, tls_sess_ckey(sess), tls_sess_civ(sess))
     tls_traffic_key_iv(s_ap, tls_sess_skey(sess), tls_sess_siv(sess))
     sess

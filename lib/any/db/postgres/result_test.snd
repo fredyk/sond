@@ -39,13 +39,18 @@ test "pg result: rows, columns, NULL, tag and end signal" {
     // RowDescription with 2 columns (only the count matters to the result model).
     poke8(m_rd, 84); pg_put_u16be(m_rd + 5, 2)
     // two data rows: ("1","alice") and ("2", NULL)
-    mk_datarow2(m_r1, "1", 1, "alice", 5)
-    mk_datarow2(m_r2, "2", 1, "alice", 0 - 1)
+    let __lit0: string = "1"
+    let __lit1: string = "alice"
+    mk_datarow2(m_r1, __lit0.utf8, 1, __lit1.utf8, 5)
+    let __lit2: string = "2"
+    let __lit3: string = "alice"
+    mk_datarow2(m_r2, __lit2.utf8, 1, __lit3.utf8, 0 - 1)
     // CommandComplete "SELECT 2"
     poke8(m_cc, 67)
-    let tag = "SELECT 2"
+    let tag_text: string = "SELECT 2"
+    let tag = tag_text.utf8
     let mut i = 0
-    for i < 8 { poke8(m_cc + 5 + i, peek8(tag + i)); i = i + 1 }
+    for i < 8 { poke8(m_cc + 5 + i, tag[i]); i = i + 1 }
     poke8(m_cc + 13, 0)
     // ReadyForQuery
     poke8(m_rfq, 90); pg_put_u32be(m_rfq + 1, 5); poke8(m_rfq + 5, 73)
@@ -79,9 +84,10 @@ test "pg result: rows, columns, NULL, tag and end signal" {
 test "pg result: an ErrorResponse marks the result failed and captures the message" {
     poke8(m_err, 69)                                // 'E'
     poke8(m_err + 5, 77)                            // 'M'
-    let msg = "boom"
+    let msg_text: string = "boom"
+    let msg = msg_text.utf8
     let mut i = 0
-    for i < 4 { poke8(m_err + 6 + i, peek8(msg + i)); i = i + 1 }
+    for i < 4 { poke8(m_err + 6 + i, msg[i]); i = i + 1 }
     poke8(m_err + 10, 0)                            // value NUL
     poke8(m_err + 11, 0)                            // fields terminator
 

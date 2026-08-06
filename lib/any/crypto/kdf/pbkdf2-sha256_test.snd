@@ -18,7 +18,8 @@ let mut p_got[32]
 
 // One iteration: DK = U_1 = HMAC(pw, salt || 00 00 00 01).
 test "pbkdf2-sha256: one iteration equals HMAC over salt||INT32BE(1)" {
-    let pw = "password"
+    let pw_text: string = "password"
+    let pw = pw_text.utf8
     poke8(p_salt + 0, 115); poke8(p_salt + 1, 97); poke8(p_salt + 2, 108); poke8(p_salt + 3, 116)  // "salt"
     // by hand: HMAC(pw, "salt" || 00000001)
     poke8(p_block + 0, 115); poke8(p_block + 1, 97); poke8(p_block + 2, 108); poke8(p_block + 3, 116)
@@ -32,7 +33,8 @@ test "pbkdf2-sha256: one iteration equals HMAC over salt||INT32BE(1)" {
 
 // Two iterations: T = U_1 xor U_2, with U_2 = HMAC(pw, U_1).
 test "pbkdf2-sha256: two iterations xor in HMAC(pw, U_1)" {
-    let pw = "password"
+    let pw_text: string = "password"
+    let pw = pw_text.utf8
     poke8(p_salt + 0, 115); poke8(p_salt + 1, 97); poke8(p_salt + 2, 108); poke8(p_salt + 3, 116)
     // by hand: U_1 = HMAC(pw, salt||INT(1)); U_2 = HMAC(pw, U_1); exp = U_1 xor U_2
     poke8(p_block + 0, 115); poke8(p_block + 1, 97); poke8(p_block + 2, 108); poke8(p_block + 3, 116)
@@ -49,7 +51,8 @@ test "pbkdf2-sha256: two iterations xor in HMAC(pw, U_1)" {
 
 // A shorter output length truncates the derived key.
 test "pbkdf2-sha256: dklen truncates the block" {
-    let pw = "pw"
+    let pw_text: string = "pw"
+    let pw = pw_text.utf8
     poke8(p_salt + 0, 1); poke8(p_salt + 1, 2)
     pbkdf2_sha256(pw, 2, p_salt, 2, 4, p_got, 16)
     pbkdf2_sha256(pw, 2, p_salt, 2, 4, p_exp, 32)

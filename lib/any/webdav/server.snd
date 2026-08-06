@@ -116,7 +116,8 @@ fn method_starts_with(buf: i64, prefix: i64) -> i64 {
 // Send OPTIONS response with DAV: 1,2.
 fn server_options(afd: i64) {
     let h = bytes_new()
-    bytes_append_cstr(h, "HTTP/1.1 200 OK\r\nDAV: 1,2\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n")
+    let __lit0: string = "HTTP/1.1 200 OK\r\nDAV: 1,2\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
+    bytes_append_cstr(h, __lit0.utf8)
     write_buf(afd, peek64(h), bytes_len(h))
 }
 
@@ -171,7 +172,8 @@ fn server_build_multistatus(entries_buf: i64) {
         // (to reuse bytes_push/growth), NUL-terminate it, then pass peek64() of the
         // handle -- the buffer's actual data pointer, a valid cstr.
         let href_buf = bytes_new()
-        bytes_append_cstr(href_buf, "/")
+        let __lit1: string = "/"
+        bytes_append_cstr(href_buf, __lit1.utf8)
         let mut hi = 0
         for hi < 255 invariant { hi <= 255 } {
             if hi >= dn_i { break }
@@ -215,20 +217,25 @@ fn server_propfind(afd: i64) {
     // Wrap entries in multistatus
     let wrapper = bytes_new()
     bytes_push(wrapper, 60); bytes_push(wrapper, 63)
-    bytes_append_cstr(wrapper, "xml version=\"1.0\" encoding=\"utf-8\"")
+    let __lit2: string = "xml version=\"1.0\" encoding=\"utf-8\""
+    bytes_append_cstr(wrapper, __lit2.utf8)
     bytes_push(wrapper, 32); bytes_push(wrapper, 62); bytes_push(wrapper, 10)
-    bytes_push(wrapper, 60); bytes_append_cstr(wrapper, "multistatus")
+    let __lit3: string = "multistatus"
+    bytes_push(wrapper, 60); bytes_append_cstr(wrapper, __lit3.utf8)
     bytes_push(wrapper, 32)
-    bytes_append_cstr(wrapper, "xmlns=\"DAV:\"")
+    let __lit4: string = "xmlns=\"DAV:\""
+    bytes_append_cstr(wrapper, __lit4.utf8)
     bytes_push(wrapper, 62); bytes_push(wrapper, 10)
     if entries != 0 && bytes_len(entries) > 0 {
         bytes_append(wrapper, entries)
     }
     bytes_push(wrapper, 60); bytes_push(wrapper, 47)
-    bytes_append_cstr(wrapper, "multistatus")
+    let __lit5: string = "multistatus"
+    bytes_append_cstr(wrapper, __lit5.utf8)
     bytes_push(wrapper, 62)
     body = wrapper
-    let resp = http_response("207 Multi-Status", body)
+    let __s0_236: string = "207 Multi-Status"
+    let resp = http_response(__s0_236.utf8, body)
     write_buf(afd, peek64(resp), bytes_len(resp))
 }
 
@@ -237,7 +244,8 @@ fn server_propfind(afd: i64) {
 // Handle MKCOL: create a collection. Returns 1 if handled, 0 otherwise.
 // Sends 201 Created on success.
 fn server_mkcol(afd: i64) {
-    server_send_status(afd, "201 Created")
+    let __lit6: string = "201 Created"
+    server_send_status(afd, __lit6.utf8)
 }
 
 // ── GET/PUT handler ─────────────────────────────────────────────────────
@@ -253,11 +261,13 @@ fn server_get_put(afd: i64, is_put: i64) {
             let rn = 0 // would be read_buf(afd, ..., ...) in real impl
             if rn <= 0 { break }
         }
-        server_send_status(afd, "201 Created")
+        let __lit7: string = "201 Created"
+        server_send_status(afd, __lit7.utf8)
     } else {
         // GET, check if there's content to serve
         // For now, return 404 (no real file serving)
-        server_send_status(afd, "404 Not Found")
+        let __lit8: string = "404 Not Found"
+        server_send_status(afd, __lit8.utf8)
     }
 }
 
@@ -265,7 +275,8 @@ fn server_get_put(afd: i64, is_put: i64) {
 
 // Handle DELETE: remove entry from tree. Stub: always returns 204.
 fn server_delete(afd: i64) {
-    server_send_status(afd, "204 No Content")
+    let __lit9: string = "204 No Content"
+    server_send_status(afd, __lit9.utf8)
 }
 
 // ── MAIN: Handle a WebDAV request ───────────────────────────────────────
@@ -306,7 +317,8 @@ pub fn dav_handle(afd: i64, req: i64) {
             let cl_found = 1
             let mut k = 0
             for k < 15 {
-                if bytes_get(hdr_bytes, ci2 + k) != peek8("Content-Length: " + k) {
+                let __lit10: string = "Content-Length: "
+                if bytes_get(hdr_bytes, ci2 + k) != peek8(__lit10.utf8 + k) {
                     cl_found = 0
                     break
                 }
@@ -331,15 +343,20 @@ pub fn dav_handle(afd: i64, req: i64) {
     }
 
     // Match method
-    if method_starts_with(method_buf, "OPTIONS") {
+    let __lit11: string = "OPTIONS"
+    if method_starts_with(method_buf, __lit11.utf8) {
         server_options(afd)
-    } else if method_starts_with(method_buf, "PROPFIND") {
+    let __lit12: string = "PROPFIND"
+    } else if method_starts_with(method_buf, __lit12.utf8) {
         server_propfind(afd)
-    } else if method_starts_with(method_buf, "MKCOL") {
+    let __lit13: string = "MKCOL"
+    } else if method_starts_with(method_buf, __lit13.utf8) {
         server_mkcol(afd)
-    } else if method_starts_with(method_buf, "DELETE") {
+    let __lit14: string = "DELETE"
+    } else if method_starts_with(method_buf, __lit14.utf8) {
         server_delete(afd)
-    } else if method_starts_with(method_buf, "PUT") {
+    let __lit15: string = "PUT"
+    } else if method_starts_with(method_buf, __lit15.utf8) {
         // Drain body from socket
         let buf[2048]
         let mut remaining = content_length
@@ -349,10 +366,14 @@ pub fn dav_handle(afd: i64, req: i64) {
             // read_buf(afd, buf, chunk) would drain here
             remaining = remaining - chunk
         }
-        server_send_status(afd, "201 Created")
-    } else if method_starts_with(method_buf, "GET") {
-        server_send_status(afd, "404 Not Found")
+        let __lit16: string = "201 Created"
+        server_send_status(afd, __lit16.utf8)
+    let __lit17: string = "GET"
+    } else if method_starts_with(method_buf, __lit17.utf8) {
+        let __lit18: string = "404 Not Found"
+        server_send_status(afd, __lit18.utf8)
     } else {
-        server_send_status(afd, "501 Not Implemented")
+        let __lit19: string = "501 Not Implemented"
+        server_send_status(afd, __lit19.utf8)
     }
 }

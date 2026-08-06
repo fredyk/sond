@@ -36,7 +36,8 @@ fn tls_early_secret(psk: i64, psklen: i64, out: i64) {
 fn tls_derive_handshake_secret(early: i64, ecdhe: i64, ecdhelen: i64, out: i64) {
     let derived[32]
     let empty[1]
-    derive_secret(early, "derived", 7, empty, 0, derived)
+    let __lit0: string = "derived"
+    derive_secret(early, __lit0.utf8, 7, empty, 0, derived)
     hkdf_extract(derived, 32, ecdhe, ecdhelen, out)
 }
 
@@ -47,18 +48,21 @@ fn tls_derive_master_secret(handshake: i64, out: i64) {
     let empty[1]
     let mut i = 0
     for i < 32 { poke8(zeros + i, 0); i = i + 1 }
-    derive_secret(handshake, "derived", 7, empty, 0, derived)
+    let __lit1: string = "derived"
+    derive_secret(handshake, __lit1.utf8, 7, empty, 0, derived)
     hkdf_extract(derived, 32, zeros, 32, out)
 }
 
 // client_handshake_traffic_secret = Derive-Secret(Handshake, "c hs traffic", transcript).
 fn tls_client_hs_traffic(handshake: i64, transcript: i64, tlen: i64, out: i64) {
-    derive_secret(handshake, "c hs traffic", 12, transcript, tlen, out)
+    let __lit2: string = "c hs traffic"
+    derive_secret(handshake, __lit2.utf8, 12, transcript, tlen, out)
 }
 
 // server_handshake_traffic_secret = Derive-Secret(Handshake, "s hs traffic", transcript).
 fn tls_server_hs_traffic(handshake: i64, transcript: i64, tlen: i64, out: i64) {
-    derive_secret(handshake, "s hs traffic", 12, transcript, tlen, out)
+    let __lit3: string = "s hs traffic"
+    derive_secret(handshake, __lit3.utf8, 12, transcript, tlen, out)
 }
 
 // Per-record key and iv for a traffic secret: HKDF-Expand-Label(secret, "key", "", 32)
@@ -66,6 +70,8 @@ fn tls_server_hs_traffic(handshake: i64, transcript: i64, tlen: i64, out: i64) {
 // 12-byte iv is the ChaCha20-Poly1305 nonce base.
 fn tls_traffic_key_iv(secret: i64, key_out: i64, iv_out: i64) {
     let empty[1]
-    hkdf_expand_label(secret, "key", 3, empty, 0, key_out, 32)
-    hkdf_expand_label(secret, "iv", 2, empty, 0, iv_out, 12)
+    let __lit4: string = "key"
+    hkdf_expand_label(secret, __lit4.utf8, 3, empty, 0, key_out, 32)
+    let __lit5: string = "iv"
+    hkdf_expand_label(secret, __lit5.utf8, 2, empty, 0, iv_out, 12)
 }

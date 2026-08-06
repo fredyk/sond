@@ -63,9 +63,13 @@ test "x509 roots: the real cloudflare chain anchors to the built-in trust store"
     r_chain[0] = r_leaf
     r_chain[1] = r_we1
     // GTS Root R4 is one of the built-in roots, so the cloudflare chain is trusted.
-    assert_eq(x509_verify_chain(r_chain, 2, r_ptrs, nr, r_host, rseth("cloudflare.com"), "20260901000000"), 1)
+    let __s0_65: string = "cloudflare.com"
+    let __s1_65: string = "20260901000000"
+    assert_eq(x509_verify_chain(r_chain, 2, r_ptrs, nr, r_host, rseth(__s0_65.utf8), __s1_65.utf8), 1)
     // an unrelated host is still rejected even with a full trust store
-    assert_eq(x509_verify_chain(r_chain, 2, r_ptrs, nr, r_host, rseth("evil.example"), "20260901000000"), 0)
+    let __s2_69: string = "evil.example"
+    let __s3_69: string = "20260901000000"
+    assert_eq(x509_verify_chain(r_chain, 2, r_ptrs, nr, r_host, rseth(__s2_69.utf8), __s3_69.utf8), 0)
 }
 
 test "x509 roots: accept_leaf and the chain edge cases against the built-in store" {
@@ -76,21 +80,33 @@ test "x509 roots: accept_leaf and the chain edge cases against the built-in stor
     r_chain[0] = r_leaf
     r_chain[1] = r_we1
     // single-issuer acceptance: the leaf is signed by WE1, names the host, and is valid
-    assert_eq(x509_accept_leaf(r_leaf, 0, r_we1, 0, r_host, rseth("cloudflare.com"), "20260901000000"), 1)
+    let __s0_82: string = "cloudflare.com"
+    let __s1_82: string = "20260901000000"
+    assert_eq(x509_accept_leaf(r_leaf, 0, r_we1, 0, r_host, rseth(__s0_82.utf8), __s1_82.utf8), 1)
     // an empty chain is rejected
-    assert_eq(x509_verify_chain(r_chain, 0, r_ptrs, nr, r_host, rseth("cloudflare.com"), "20260901000000"), 0)
+    let __s4_84: string = "cloudflare.com"
+    let __s5_84: string = "20260901000000"
+    assert_eq(x509_verify_chain(r_chain, 0, r_ptrs, nr, r_host, rseth(__s4_84.utf8), __s5_84.utf8), 0)
     // an empty trust store is rejected
-    assert_eq(x509_verify_chain(r_chain, 2, r_ptrs, 0, r_host, rseth("cloudflare.com"), "20260901000000"), 0)
+    let __s6_88: string = "cloudflare.com"
+    let __s7_88: string = "20260901000000"
+    assert_eq(x509_verify_chain(r_chain, 2, r_ptrs, 0, r_host, rseth(__s6_88.utf8), __s7_88.utf8), 0)
     // an instant before the leaf was issued is rejected
-    assert_eq(x509_verify_chain(r_chain, 2, r_ptrs, nr, r_host, rseth("cloudflare.com"), "20200101000000"), 0)
+    let __s8_92: string = "cloudflare.com"
+    let __s9_92: string = "20200101000000"
+    assert_eq(x509_verify_chain(r_chain, 2, r_ptrs, nr, r_host, rseth(__s8_92.utf8), __s9_92.utf8), 0)
     // a leaf whose EKU is clientAuth only is rejected (self-anchored, everything else valid)
     rload(CLIENTONLY_HEX, r_conly)
     r_chain[0] = r_conly
     r_ptrs[0] = r_conly
-    assert_eq(x509_verify_chain(r_chain, 1, r_ptrs, 1, r_host, rseth("clientonly.test"), "20270101000000"), 0)
+    let __s10_99: string = "clientonly.test"
+    let __s11_99: string = "20270101000000"
+    assert_eq(x509_verify_chain(r_chain, 1, r_ptrs, 1, r_host, rseth(__s10_99.utf8), __s11_99.utf8), 0)
     // a CA anchor whose keyUsage lacks keyCertSign is rejected
     rload(NOCERTSIGN_HEX, r_ncs)
     r_chain[0] = r_ncs
     r_ptrs[0] = r_ncs
-    assert_eq(x509_verify_chain(r_chain, 1, r_ptrs, 1, r_host, rseth("nocertsign.test"), "20270101000000"), 0)
+    let __s12_106: string = "nocertsign.test"
+    let __s13_106: string = "20270101000000"
+    assert_eq(x509_verify_chain(r_chain, 1, r_ptrs, 1, r_host, rseth(__s12_106.utf8), __s13_106.utf8), 0)
 }

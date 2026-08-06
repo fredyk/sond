@@ -4,25 +4,37 @@ include "x86_64/linux/testing.snd"
 
 test "a new map has no keys" {
     let m = map_new()
-    assert_eq(map_has(m, bytes_from_cstr("x")), 0)
-    assert_eq(map_get(m, bytes_from_cstr("x"), 0 - 1), 0 - 1)
+    let __s0_6: string = "x"
+    assert_eq(map_has(m, bytes_from_cstr(__s0_6.utf8)), 0)
+    let __s1_8: string = "x"
+    assert_eq(map_get(m, bytes_from_cstr(__s1_8.utf8), 0 - 1), 0 - 1)
 }
 test "set then get" {
     let m = map_new()
-    map_set(m, bytes_from_cstr("width"), 640)
-    map_set(m, bytes_from_cstr("height"), 480)
-    assert_eq(map_has(m, bytes_from_cstr("width")), 1)
-    assert_eq(map_get(m, bytes_from_cstr("width"), 0), 640)
-    assert_eq(map_get(m, bytes_from_cstr("height"), 0), 480)
+    let __lit0: string = "width"
+    map_set(m, bytes_from_cstr(__lit0.utf8), 640)
+    let __lit1: string = "height"
+    map_set(m, bytes_from_cstr(__lit1.utf8), 480)
+    let __s2_17: string = "width"
+    assert_eq(map_has(m, bytes_from_cstr(__s2_17.utf8)), 1)
+    let __s3_19: string = "width"
+    assert_eq(map_get(m, bytes_from_cstr(__s3_19.utf8), 0), 640)
+    let __s4_21: string = "height"
+    assert_eq(map_get(m, bytes_from_cstr(__s4_21.utf8), 0), 480)
 }
 test "set updates an existing key in place" {
     let m = map_new()
-    map_set(m, bytes_from_cstr("k"), 1)
-    map_set(m, bytes_from_cstr("k"), 2)
-    assert_eq(map_get(m, bytes_from_cstr("k"), 0), 2)
+    let __lit2: string = "k"
+    map_set(m, bytes_from_cstr(__lit2.utf8), 1)
+    let __lit3: string = "k"
+    map_set(m, bytes_from_cstr(__lit3.utf8), 2)
+    let __s5_30: string = "k"
+    assert_eq(map_get(m, bytes_from_cstr(__s5_30.utf8), 0), 2)
 }
 test "absent key returns the default" {
     let m = map_new()
-    map_set(m, bytes_from_cstr("a"), 5)
-    assert_eq(map_get(m, bytes_from_cstr("b"), 99), 99)
+    let __lit4: string = "a"
+    map_set(m, bytes_from_cstr(__lit4.utf8), 5)
+    let __s6_37: string = "b"
+    assert_eq(map_get(m, bytes_from_cstr(__s6_37.utf8), 99), 99)
 }

@@ -42,9 +42,11 @@ fn pg_put_cstr(buf: i64, s: i64) -> i64 {
 fn pg_startup(buf: i64, user: i64, db: i64) -> i64 {
     pg_put_u32be(buf + 4, PG_PROTO_V3)             // protocol version follows the length field
     let mut p = 8
-    p = p + pg_put_cstr(buf + p, "user")
+    let __lit0: string = "user"
+    p = p + pg_put_cstr(buf + p, __lit0.utf8)
     p = p + pg_put_cstr(buf + p, user)
-    p = p + pg_put_cstr(buf + p, "database")
+    let __lit1: string = "database"
+    p = p + pg_put_cstr(buf + p, __lit1.utf8)
     p = p + pg_put_cstr(buf + p, db)
     poke8(buf + p, 0)                              // empty key terminates the parameter list
     p = p + 1

@@ -33,16 +33,21 @@ test "scram-flow: client-final carries the ClientProof matching an independent r
     let sb = b64_encode(f_salt, 16, f_saltb64)
 
     // client-first-bare for user "user" with a client nonce
-    let cfbarelen = scram_client_first_bare("user", 4, "rOprNGfwEbeRWgbNEkqO", 20, f_cfbare)
+    let __s0_35: string = "user"
+    let __s1_35: string = "rOprNGfwEbeRWgbNEkqO"
+    let cfbarelen = scram_client_first_bare(__s0_35.utf8, 4, __s1_35.utf8, 20, f_cfbare)
 
     // server-first = "r=<full nonce>,s=<salt b64>,i=4096"
     let mut o = 0
-    o = f_app(f_sf, o, "r=rOprNGfwEbeRWgbNEkqO3rfcNHYJY1ZVvWVs7j,s=", 43)
+    let __lit0: string = "r=rOprNGfwEbeRWgbNEkqO3rfcNHYJY1ZVvWVs7j,s="
+    o = f_app(f_sf, o, __lit0.utf8, 43)
     o = f_app(f_sf, o, f_saltb64, sb)
-    o = f_app(f_sf, o, ",i=4096", 7)
+    let __lit1: string = ",i=4096"
+    o = f_app(f_sf, o, __lit1.utf8, 7)
     let sflen = o
 
-    let outlen = scram_client_final("pencil", 6, f_cfbare, cfbarelen, f_sf, sflen, f_out, f_srvsig)
+    let __s0_48: string = "pencil"
+    let outlen = scram_client_final(__s0_48.utf8, 6, f_cfbare, cfbarelen, f_sf, sflen, f_out, f_srvsig)
 
     // the message begins with "c=biws,r=" and contains ",p="
     assert_eq(peek8(f_out + 0), 99)                  // 'c'
@@ -60,10 +65,12 @@ test "scram-flow: client-final carries the ClientProof matching an independent r
     poke8(f_auth + a, 44); a = a + 1
     a = f_app(f_auth, a, f_sf, sflen)
     poke8(f_auth + a, 44); a = a + 1
-    a = f_app(f_auth, a, "c=biws,r=", 9)
+    let __lit2: string = "c=biws,r="
+    a = f_app(f_auth, a, __lit2.utf8, 9)
     a = f_app(f_auth, a, full, flen)
     let salted[32]
-    scram_salted_password("pencil", 6, f_salt, 16, 4096, salted)
+    let __lit3: string = "pencil"
+    scram_salted_password(__lit3.utf8, 6, f_salt, 16, 4096, salted)
     let ck[32]
     scram_client_key(salted, ck)
     let sk[32]

@@ -912,12 +912,16 @@ impl Parser {
             };
             // The characters are what `s` holds; the original bytes stay reachable through
             // `s.utf8`, which is the only way to get them and says so at the call site.
-            self.string_bytes.insert(name.clone(), text);
+            self.string_bytes.insert(name.clone(), text.clone());
+            // The value stays the LITERAL; the type says it is a view of code points. The codegen
+            // interns those in `.rodata` — constant data emitted once, not rebuilt on every call
+            // of the function it sits in.
+            let _ = chars;
             return Stmt::Let {
                 mutable,
                 name,
                 ty,
-                value: Expr::List(chars.into_iter().map(|c| Expr::Int(c as i64)).collect()),
+                value: Expr::Str(text),
                 array_len,
             };
         }
@@ -945,8 +949,13 @@ impl Parser {
         };
         // `let b = s.utf8` is a view of BYTES, and its length is their count — typed here so the
         // binding carries it, the same way any other view does.
+        // `let b = s.utf8` is a view of BYTES — but only when the value IS that request. A
+        // `.utf8` buried inside a larger expression (`let n = f(a, s.utf8)`) says nothing about
+        // what `n` is, and typing it as a view made an ordinary integer look like a buffer.
+        let is_utf8_value = matches!(&value, Expr::Field(inner, f)
+            if f == "utf8" && matches!(inner.as_ref(), Expr::Str(_)));
         let ty = match (ty, self.utf8_len.take()) {
-            (None, Some(n)) => Some(Type::View(
+            (None, Some(n)) if is_utf8_value => Some(Type::View(
                 Box::new(Type::Named("u8".to_string())),
                 Some(n.to_string()),
             )),

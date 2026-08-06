@@ -56,7 +56,8 @@ fn write_bytes(target: i64, src: i64, n: i64) {
 
 test "enc_bulk_string encodes hello" {
     let hello[6]
-    write_bytes(hello, "hello", 5)
+    let __s0_58: string = "hello"
+    write_bytes(hello, __s0_58.utf8, 5)
     let b = bytes_new()
     enc_bulk_string(hello, 5, b)
     assert_eq(bytes_len(b), 11)   // $5\r\nhello\r\n
@@ -83,16 +84,19 @@ test "enc_bulk_string encodes empty string" {
 
 test "enc_array_of_strings: 2 items" {
     let key[4]
-    write_bytes(key, "foo", 3)
+    let __s1_86: string = "foo"
+    write_bytes(key, __s1_86.utf8, 3)
     let val[4]
-    write_bytes(val, "bar", 3)
+    let __s2_89: string = "bar"
+    write_bytes(val, __s2_89.utf8, 3)
     let items[4]
     poke64(items, key)        // byte 0
     poke64(items + 8, 3)      // byte 8
     poke64(items + 16, val)   // byte 16
     poke64(items + 24, 3)     // byte 24
     let b = enc_array_of_strings(2, items)
-    let want = bytes_from_cstr("*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n")
+    let __s0_97: string = "*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"
+    let want = bytes_from_cstr(__s0_97.utf8)
     assert_eq(bytes_eq(b, want), 1)
 }
 
@@ -378,11 +382,14 @@ test "resp_reset sets cursor correctly" {
 
 test "encode command SET foo bar" {
     let key[4]
-    write_bytes(key, "SET", 3)
+    let __s3_383: string = "SET"
+    write_bytes(key, __s3_383.utf8, 3)
     let val[4]
-    write_bytes(val, "foo", 3)
+    let __s4_386: string = "foo"
+    write_bytes(val, __s4_386.utf8, 3)
     let val2[4]
-    write_bytes(val2, "bar", 3)
+    let __s5_389: string = "bar"
+    write_bytes(val2, __s5_389.utf8, 3)
     let items[6]
     poke64(items + 0, key)
     poke64(items + 8, 3)
@@ -399,7 +406,8 @@ test "encode command SET foo bar" {
 
 test "encode command PING" {
     let key[5]
-    write_bytes(key, "PING", 4)
+    let __s6_407: string = "PING"
+    write_bytes(key, __s6_407.utf8, 4)
     let items[2]
     poke64(items + 0, key)
     poke64(items + 8, 4)

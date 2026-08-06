@@ -201,7 +201,8 @@ pub fn mock_http_handle(h: i64, request_bytes: i64) -> i64 {
         // 404 Not Found
         let body = bytes_new()
         bytes_append_int(body, 404)
-        http_response("404 Not Found", body)
+        let __lit0: string = "404 Not Found"
+        http_response(__lit0.utf8, body)
     } else {
         let statuses = peek64(h + 16)
         let bodies = peek64(h + 24)

@@ -59,13 +59,21 @@ test "x509 chain: accept the real cloudflare leaf under its issuer WE1" {
     cload(LEAF_HEX, c_leaf)
     cload(WE1_HEX, c_we1)
     // signed by WE1, names cloudflare.com, valid on 2026-07-23
-    assert_eq(x509_accept_leaf(c_leaf, 0, c_we1, 0, c_host, cseth("cloudflare.com"), "20260723000000"), 1)
+    let __s0_61: string = "cloudflare.com"
+    let __s1_61: string = "20260723000000"
+    assert_eq(x509_accept_leaf(c_leaf, 0, c_we1, 0, c_host, cseth(__s0_61.utf8), __s1_61.utf8), 1)
     // a host it does not name is rejected
-    assert_eq(x509_accept_leaf(c_leaf, 0, c_we1, 0, c_host, cseth("evil.example"), "20260723000000"), 0)
+    let __s2_65: string = "evil.example"
+    let __s3_65: string = "20260723000000"
+    assert_eq(x509_accept_leaf(c_leaf, 0, c_we1, 0, c_host, cseth(__s2_65.utf8), __s3_65.utf8), 0)
     // outside the validity window is rejected
-    assert_eq(x509_accept_leaf(c_leaf, 0, c_we1, 0, c_host, cseth("cloudflare.com"), "20270101000000"), 0)
+    let __s4_69: string = "cloudflare.com"
+    let __s5_69: string = "20270101000000"
+    assert_eq(x509_accept_leaf(c_leaf, 0, c_we1, 0, c_host, cseth(__s4_69.utf8), __s5_69.utf8), 0)
     // a wrong issuer (the leaf as its own issuer) fails the signature
-    assert_eq(x509_accept_leaf(c_leaf, 0, c_leaf, 0, c_host, cseth("cloudflare.com"), "20260723000000"), 0)
+    let __s6_73: string = "cloudflare.com"
+    let __s7_73: string = "20260723000000"
+    assert_eq(x509_accept_leaf(c_leaf, 0, c_leaf, 0, c_host, cseth(__s6_73.utf8), __s7_73.utf8), 0)
 }
 
 test "x509 chain: verify the real cloudflare chain up to the GTS Root R4 trust anchor" {
@@ -77,27 +85,41 @@ test "x509 chain: verify the real cloudflare chain up to the GTS Root R4 trust a
     c_roots[0] = c_gtsr4
     // leaf <- WE1 (ECDSA P-256) <- GTS Root R4 (ECDSA P-384), names cloudflare.com, valid
     // 2026-09-01 (inside every certificate's window).
-    assert_eq(x509_verify_chain(c_chain, 2, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 1)
+    let __s0_87: string = "cloudflare.com"
+    let __s1_87: string = "20260901000000"
+    assert_eq(x509_verify_chain(c_chain, 2, c_roots, 1, c_host, cseth(__s0_87.utf8), __s1_87.utf8), 1)
     // a host the leaf does not name is rejected
-    assert_eq(x509_verify_chain(c_chain, 2, c_roots, 1, c_host, cseth("evil.example"), "20260901000000"), 0)
+    let __s2_91: string = "evil.example"
+    let __s3_91: string = "20260901000000"
+    assert_eq(x509_verify_chain(c_chain, 2, c_roots, 1, c_host, cseth(__s2_91.utf8), __s3_91.utf8), 0)
     // outside the leaf's validity window is rejected
-    assert_eq(x509_verify_chain(c_chain, 2, c_roots, 1, c_host, cseth("cloudflare.com"), "20261101000000"), 0)
+    let __s4_95: string = "cloudflare.com"
+    let __s5_95: string = "20261101000000"
+    assert_eq(x509_verify_chain(c_chain, 2, c_roots, 1, c_host, cseth(__s4_95.utf8), __s5_95.utf8), 0)
     // an empty trust store: the top of the chain is anchored to nothing trusted
-    assert_eq(x509_verify_chain(c_chain, 2, c_roots, 0, c_host, cseth("cloudflare.com"), "20260901000000"), 0)
+    let __s6_99: string = "cloudflare.com"
+    let __s7_99: string = "20260901000000"
+    assert_eq(x509_verify_chain(c_chain, 2, c_roots, 0, c_host, cseth(__s6_99.utf8), __s7_99.utf8), 0)
     // Trusting the INTERMEDIATE directly is legitimate and must work: a trust anchor is a name
     // and a key (RFC 5280 6.1.1), not necessarily a self-signed certificate, and putting WE1 in
     // the store is an explicit statement that WE1 is trusted. This assertion used to expect 0,
     // which was not a security property but an accident of requiring the TOP of the chain to be
     // signed by a root: WE1 does not sign itself, so it could never anchor its own leaf.
     c_roots[0] = c_we1
-    assert_eq(x509_verify_chain(c_chain, 2, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 1)
+    let __s8_108: string = "cloudflare.com"
+    let __s9_108: string = "20260901000000"
+    assert_eq(x509_verify_chain(c_chain, 2, c_roots, 1, c_host, cseth(__s8_108.utf8), __s9_108.utf8), 1)
     // But an unrelated CA in the store anchors nothing, which is the property that assertion was
     // reaching for: GTS Root R4 signs WE1, it does not sign the leaf, so a chain of just the leaf
     // has no path to it.
     c_roots[0] = c_gtsr4
-    assert_eq(x509_verify_chain(c_chain, 1, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 0)
+    let __s10_115: string = "cloudflare.com"
+    let __s11_115: string = "20260901000000"
+    assert_eq(x509_verify_chain(c_chain, 1, c_roots, 1, c_host, cseth(__s10_115.utf8), __s11_115.utf8), 0)
     // an empty chain is rejected
-    assert_eq(x509_verify_chain(c_chain, 0, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 0)
+    let __s12_119: string = "cloudflare.com"
+    let __s13_119: string = "20260901000000"
+    assert_eq(x509_verify_chain(c_chain, 0, c_roots, 1, c_host, cseth(__s12_119.utf8), __s13_119.utf8), 0)
 }
 
 test "x509 chain: basicConstraints is enforced (issuers and anchors must be CAs)" {
@@ -114,7 +136,9 @@ test "x509 chain: basicConstraints is enforced (issuers and anchors must be CAs)
     // NOT be accepted as a trust anchor: a non-CA cannot vouch for a chain.
     c_chain[0] = c_nonca
     c_roots[0] = c_nonca
-    assert_eq(x509_verify_chain(c_chain, 1, c_roots, 1, c_host, cseth("nonca.test"), "20270101000000"), 0)
+    let __s14_138: string = "nonca.test"
+    let __s15_138: string = "20270101000000"
+    assert_eq(x509_verify_chain(c_chain, 1, c_roots, 1, c_host, cseth(__s14_138.utf8), __s15_138.utf8), 0)
 }
 
 test "x509 chain: a leaf whose EKU lacks serverAuth is rejected" {
@@ -123,7 +147,9 @@ test "x509 chain: a leaf whose EKU lacks serverAuth is rejected" {
     // clientAuth only: it must not be accepted to authenticate a TLS server.
     c_chain[0] = c_conly
     c_roots[0] = c_conly
-    assert_eq(x509_verify_chain(c_chain, 1, c_roots, 1, c_host, cseth("clientonly.test"), "20270101000000"), 0)
+    let __s16_149: string = "clientonly.test"
+    let __s17_149: string = "20270101000000"
+    assert_eq(x509_verify_chain(c_chain, 1, c_roots, 1, c_host, cseth(__s16_149.utf8), __s17_149.utf8), 0)
 }
 
 test "x509 chain: a CA anchor without keyCertSign is rejected" {
@@ -132,7 +158,9 @@ test "x509 chain: a CA anchor without keyCertSign is rejected" {
     // signature verifies, but its keyUsage lacks keyCertSign: it must not anchor a chain.
     c_chain[0] = c_ncs
     c_roots[0] = c_ncs
-    assert_eq(x509_verify_chain(c_chain, 1, c_roots, 1, c_host, cseth("nocertsign.test"), "20270101000000"), 0)
+    let __s18_160: string = "nocertsign.test"
+    let __s19_160: string = "20270101000000"
+    assert_eq(x509_verify_chain(c_chain, 1, c_roots, 1, c_host, cseth(__s18_160.utf8), __s19_160.utf8), 0)
 }
 
 // A server may append certificates ABOVE the trust anchor. Every public CA does it: the last
@@ -154,11 +182,17 @@ test "x509 chain: a certificate above the trust anchor is ignored" {
     c_chain[1] = c_we1
     c_chain[2] = c_crossr4           // GTS Root R4 as issued by GlobalSign, which we do NOT trust
     c_roots[0] = c_gtsr4             // we trust GTS Root R4 itself, and it signs WE1
-    assert_eq(x509_verify_chain(c_chain, 3, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 1)
+    let __s20_184: string = "cloudflare.com"
+    let __s21_184: string = "20260901000000"
+    assert_eq(x509_verify_chain(c_chain, 3, c_roots, 1, c_host, cseth(__s20_184.utf8), __s21_184.utf8), 1)
     // and the anchor still has to be reached through verified links: break the host and it fails
-    assert_eq(x509_verify_chain(c_chain, 3, c_roots, 1, c_host, cseth("evil.example"), "20260901000000"), 0)
+    let __s22_188: string = "evil.example"
+    let __s23_188: string = "20260901000000"
+    assert_eq(x509_verify_chain(c_chain, 3, c_roots, 1, c_host, cseth(__s22_188.utf8), __s23_188.utf8), 0)
     // with nothing trusted, three certificates are no better than two
-    assert_eq(x509_verify_chain(c_chain, 3, c_roots, 0, c_host, cseth("cloudflare.com"), "20260901000000"), 0)
+    let __s24_192: string = "cloudflare.com"
+    let __s25_192: string = "20260901000000"
+    assert_eq(x509_verify_chain(c_chain, 3, c_roots, 0, c_host, cseth(__s24_192.utf8), __s25_192.utf8), 0)
 }
 
 // The anchor may also be the LAST certificate presented, which is what a server sends when it
@@ -172,5 +206,7 @@ test "x509 chain: the trust anchor may be the last certificate presented" {
     c_chain[1] = c_we1
     c_chain[2] = c_gtsr4
     c_roots[0] = c_gtsr4
-    assert_eq(x509_verify_chain(c_chain, 3, c_roots, 1, c_host, cseth("cloudflare.com"), "20260901000000"), 1)
+    let __s26_208: string = "cloudflare.com"
+    let __s27_208: string = "20260901000000"
+    assert_eq(x509_verify_chain(c_chain, 3, c_roots, 1, c_host, cseth(__s26_208.utf8), __s27_208.utf8), 1)
 }

@@ -30,11 +30,14 @@ pub fn http_path(req: i64) -> i64 {
 // `status` is a cstr like "200 OK"; `body` is a byte buffer.
 pub fn http_response(status: i64, body: i64) -> i64 {
     let r = bytes_new()
-    bytes_append_cstr(r, "HTTP/1.1 ")
+    let __lit0: string = "HTTP/1.1 "
+    bytes_append_cstr(r, __lit0.utf8)
     bytes_append_cstr(r, status)
-    bytes_append_cstr(r, "\r\nContent-Length: ")
+    let __lit1: string = "\r\nContent-Length: "
+    bytes_append_cstr(r, __lit1.utf8)
     bytes_append_int(r, bytes_len(body))
-    bytes_append_cstr(r, "\r\n\r\n")
+    let __lit2: string = "\r\n\r\n"
+    bytes_append_cstr(r, __lit2.utf8)
     bytes_append(r, body)
     r
 }

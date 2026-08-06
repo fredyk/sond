@@ -28,23 +28,29 @@ fn t_dig_eq(out: i64, hex: i64, n: i64) -> i64 {
 let mut t_out[64]
 
 test "sha512: digest of \"abc\"" {
-    sha512_hash("abc", 3, t_out)
+    let __lit0: string = "abc"
+    sha512_hash(__lit0.utf8, 3, t_out)
+    let __m0: string = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
     assert_eq(t_dig_eq(t_out,
-        "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+        __m0.utf8,
         64), 1)
 }
 
 test "sha384: digest of the empty string" {
-    sha384_hash("", 0, t_out)
+    let __lit1: string = ""
+    sha384_hash(__lit1.utf8, 0, t_out)
+    let __m1: string = "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b"
     assert_eq(t_dig_eq(t_out,
-        "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b",
+        __m1.utf8,
         48), 1)
 }
 
 test "sha384: digest of \"abc\"" {
-    sha384_hash("abc", 3, t_out)
+    let __lit2: string = "abc"
+    sha384_hash(__lit2.utf8, 3, t_out)
+    let __m2: string = "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"
     assert_eq(t_dig_eq(t_out,
-        "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7",
+        __m2.utf8,
         48), 1)
 }
 
@@ -55,7 +61,8 @@ test "sha384: 112-byte message exercises two-block padding" {
     let mut i = 0
     for i < 112 { poke8(a112 + i, 97); i = i + 1 }
     sha384_hash(a112, 112, t_out)
+    let __m3: string = "187d4e07cb306103c69967bf544d0dfbe9042577599c73c330abc0cb64c61236d5ed565ee19119d8c31779a38f791fcd"
     assert_eq(t_dig_eq(t_out,
-        "187d4e07cb306103c69967bf544d0dfbe9042577599c73c330abc0cb64c61236d5ed565ee19119d8c31779a38f791fcd",
+        __m3.utf8,
         48), 1)
 }

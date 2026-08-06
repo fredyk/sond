@@ -121,7 +121,8 @@ pub fn redis_connect_new(port: i64) -> i64 {
     let fd = sock(AF_INET, SOCK_STREAM, 0)
     if fd < 0 { return 0 }
     let sa[2]
-    let ip = ip_from_cstr("127.0.0.1")
+    let __s0_123: string = "127.0.0.1"
+    let ip = ip_from_cstr(__s0_123.utf8)
     sockaddr_in_build(sa, ip, port)
     if connect_sock(fd, sa, 16) < 0 { close_fd(fd); return 0 }
     set_rcvtimeo(fd, 5)
@@ -219,20 +220,23 @@ fn ptr_to_item(items: i64, idx: i64, ptr: i64) {
 
 // Send PING command.
 pub fn redis_ping(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "PING")
+    let __lit0: string = "PING"
+    ptr_to_item(items, 0, __lit0.utf8)
     redis_command(buf, fd, 1, items)
 }
 
 // Send GET key.
 pub fn redis_get(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "GET", 3)
+    let __lit1: string = "GET"
+    add_cmd_arg(items, 0, __lit1.utf8, 3)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send SET key value.
 pub fn redis_set(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
-    add_cmd_arg(items, 0, "SET", 3)
+    let __lit2: string = "SET"
+    add_cmd_arg(items, 0, __lit2.utf8, 3)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, value, strlen(value))
     redis_command(buf, fd, 3, items)
@@ -242,10 +246,12 @@ pub fn redis_set(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
 pub fn redis_setex(fd: i64, buf: i64, items: i64, key: i64, value: i64, secs: i64) -> i64 {
     let tmp[20]
     let slen = itoa(secs, tmp)
-    add_cmd_arg(items, 0, "SET", 3)
+    let __lit3: string = "SET"
+    add_cmd_arg(items, 0, __lit3.utf8, 3)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, value, strlen(value))
-    add_cmd_arg(items, 3, "EX", 2)
+    let __lit4: string = "EX"
+    add_cmd_arg(items, 3, __lit4.utf8, 2)
     poke64(items + 4 * 16, tmp)
     poke64(items + 4 * 16 + 8, slen)
     redis_command(buf, fd, 5, items)
@@ -255,7 +261,8 @@ pub fn redis_setex(fd: i64, buf: i64, items: i64, key: i64, value: i64, secs: i6
 pub fn redis_setex2(fd: i64, buf: i64, items: i64, key: i64, secs: i64, value: i64) -> i64 {
     let tmp[20]
     let slen = itoa(secs, tmp)
-    add_cmd_arg(items, 0, "SETEX", 5)
+    let __lit5: string = "SETEX"
+    add_cmd_arg(items, 0, __lit5.utf8, 5)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, tmp, slen)
     add_cmd_arg(items, 3, value, strlen(value))
@@ -264,7 +271,8 @@ pub fn redis_setex2(fd: i64, buf: i64, items: i64, key: i64, secs: i64, value: i
 
 // Send GETSET key value.
 pub fn redis_getset(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
-    add_cmd_arg(items, 0, "GETSET", 6)
+    let __lit6: string = "GETSET"
+    add_cmd_arg(items, 0, __lit6.utf8, 6)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, value, strlen(value))
     redis_command(buf, fd, 3, items)
@@ -272,7 +280,8 @@ pub fn redis_getset(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 
 
 // Send APPEND key value.
 pub fn redis_append(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
-    add_cmd_arg(items, 0, "APPEND", 6)
+    let __lit7: string = "APPEND"
+    add_cmd_arg(items, 0, __lit7.utf8, 6)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, value, strlen(value))
     redis_command(buf, fd, 3, items)
@@ -280,14 +289,16 @@ pub fn redis_append(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 
 
 // Send STRLEN key.
 pub fn redis_strlen(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "STRLEN", 6)
+    let __lit8: string = "STRLEN"
+    add_cmd_arg(items, 0, __lit8.utf8, 6)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send INCR key.
 pub fn redis_incr(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "INCR", 4)
+    let __lit9: string = "INCR"
+    add_cmd_arg(items, 0, __lit9.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
@@ -296,7 +307,8 @@ pub fn redis_incr(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
 pub fn redis_incrby(fd: i64, buf: i64, items: i64, key: i64, amount: i64) -> i64 {
     let tmp[20]
     let slen = itoa(amount, tmp)
-    add_cmd_arg(items, 0, "INCRBY", 6)
+    let __lit10: string = "INCRBY"
+    add_cmd_arg(items, 0, __lit10.utf8, 6)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, tmp, slen)
     redis_command(buf, fd, 3, items)
@@ -304,7 +316,8 @@ pub fn redis_incrby(fd: i64, buf: i64, items: i64, key: i64, amount: i64) -> i64
 
 // Send DECR key.
 pub fn redis_decr(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "DECR", 4)
+    let __lit11: string = "DECR"
+    add_cmd_arg(items, 0, __lit11.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
@@ -313,7 +326,8 @@ pub fn redis_decr(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
 pub fn redis_decrby(fd: i64, buf: i64, items: i64, key: i64, amount: i64) -> i64 {
     let tmp[20]
     let slen = itoa(amount, tmp)
-    add_cmd_arg(items, 0, "DECRBY", 6)
+    let __lit12: string = "DECRBY"
+    add_cmd_arg(items, 0, __lit12.utf8, 6)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, tmp, slen)
     redis_command(buf, fd, 3, items)
@@ -321,7 +335,8 @@ pub fn redis_decrby(fd: i64, buf: i64, items: i64, key: i64, amount: i64) -> i64
 
 // Send DEL key... (variable args).
 pub fn redis_del(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
-    add_cmd_arg(items, 0, "DEL", 3)
+    let __lit13: string = "DEL"
+    add_cmd_arg(items, 0, __lit13.utf8, 3)
     let mut slot = 1
     let mut i = 0
     for i < n_keys {
@@ -337,14 +352,16 @@ pub fn redis_del(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
 
 // Send EXISTS key.
 pub fn redis_exists(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "EXISTS", 6)
+    let __lit14: string = "EXISTS"
+    add_cmd_arg(items, 0, __lit14.utf8, 6)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send TTL key.
 pub fn redis_ttl(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "TTL", 3)
+    let __lit15: string = "TTL"
+    add_cmd_arg(items, 0, __lit15.utf8, 3)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
@@ -353,7 +370,8 @@ pub fn redis_ttl(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
 pub fn redis_expire(fd: i64, buf: i64, items: i64, key: i64, seconds: i64) -> i64 {
     let tmp[20]
     let slen = itoa(seconds, tmp)
-    add_cmd_arg(items, 0, "EXPIRE", 6)
+    let __lit16: string = "EXPIRE"
+    add_cmd_arg(items, 0, __lit16.utf8, 6)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, tmp, slen)
     redis_command(buf, fd, 3, items)
@@ -361,14 +379,16 @@ pub fn redis_expire(fd: i64, buf: i64, items: i64, key: i64, seconds: i64) -> i6
 
 // Send TYPE key.
 pub fn redis_type(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "TYPE", 4)
+    let __lit17: string = "TYPE"
+    add_cmd_arg(items, 0, __lit17.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send RENAME key newkey.
 pub fn redis_rename(fd: i64, buf: i64, items: i64, key: i64, newkey: i64) -> i64 {
-    add_cmd_arg(items, 0, "RENAME", 6)
+    let __lit18: string = "RENAME"
+    add_cmd_arg(items, 0, __lit18.utf8, 6)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, newkey, strlen(newkey))
     redis_command(buf, fd, 3, items)
@@ -376,20 +396,23 @@ pub fn redis_rename(fd: i64, buf: i64, items: i64, key: i64, newkey: i64) -> i64
 
 // Send KEYS pattern.
 pub fn redis_keys(fd: i64, buf: i64, items: i64, pattern: i64) -> i64 {
-    add_cmd_arg(items, 0, "KEYS", 4)
+    let __lit19: string = "KEYS"
+    add_cmd_arg(items, 0, __lit19.utf8, 4)
     add_cmd_arg(items, 1, pattern, strlen(pattern))
     redis_command(buf, fd, 2, items)
 }
 
 // Send FLUSHDB.
 pub fn redis_flushdb(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "FLUSHDB")
+    let __lit20: string = "FLUSHDB"
+    ptr_to_item(items, 0, __lit20.utf8)
     redis_command(buf, fd, 1, items)
 }
 
 // Send DBSIZE.
 pub fn redis_dbsize(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "DBSIZE")
+    let __lit21: string = "DBSIZE"
+    ptr_to_item(items, 0, __lit21.utf8)
     redis_command(buf, fd, 1, items)
 }
 
@@ -397,21 +420,24 @@ pub fn redis_dbsize(fd: i64, buf: i64, items: i64) -> i64 {
 pub fn redis_select(fd: i64, buf: i64, items: i64, index: i64) -> i64 {
     let tmp[20]
     let slen = itoa(index, tmp)
-    add_cmd_arg(items, 0, "SELECT", 6)
+    let __lit22: string = "SELECT"
+    add_cmd_arg(items, 0, __lit22.utf8, 6)
     add_cmd_arg(items, 1, tmp, slen)
     redis_command(buf, fd, 2, items)
 }
 
 // Send ECHO message.
 pub fn redis_echo(fd: i64, buf: i64, items: i64, msg: i64) -> i64 {
-    add_cmd_arg(items, 0, "ECHO", 4)
+    let __lit23: string = "ECHO"
+    add_cmd_arg(items, 0, __lit23.utf8, 4)
     add_cmd_arg(items, 1, msg, strlen(msg))
     redis_command(buf, fd, 2, items)
 }
 
 // Send PING with message.
 pub fn redis_ping_msg(fd: i64, buf: i64, items: i64, msg: i64) -> i64 {
-    add_cmd_arg(items, 0, "PING", 4)
+    let __lit24: string = "PING"
+    add_cmd_arg(items, 0, __lit24.utf8, 4)
     add_cmd_arg(items, 1, msg, strlen(msg))
     redis_command(buf, fd, 2, items)
 }
@@ -420,7 +446,8 @@ pub fn redis_ping_msg(fd: i64, buf: i64, items: i64, msg: i64) -> i64 {
 
 // Send LPUSH key value.
 pub fn redis_lpush(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
-    add_cmd_arg(items, 0, "LPUSH", 5)
+    let __lit25: string = "LPUSH"
+    add_cmd_arg(items, 0, __lit25.utf8, 5)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, value, strlen(value))
     redis_command(buf, fd, 3, items)
@@ -428,7 +455,8 @@ pub fn redis_lpush(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
 
 // Send RPUSH key value.
 pub fn redis_rpush(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
-    add_cmd_arg(items, 0, "RPUSH", 5)
+    let __lit26: string = "RPUSH"
+    add_cmd_arg(items, 0, __lit26.utf8, 5)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, value, strlen(value))
     redis_command(buf, fd, 3, items)
@@ -436,21 +464,24 @@ pub fn redis_rpush(fd: i64, buf: i64, items: i64, key: i64, value: i64) -> i64 {
 
 // Send LPOP key.
 pub fn redis_lpop(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "LPOP", 4)
+    let __lit27: string = "LPOP"
+    add_cmd_arg(items, 0, __lit27.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send RPOP key.
 pub fn redis_rpop(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "RPOP", 4)
+    let __lit28: string = "RPOP"
+    add_cmd_arg(items, 0, __lit28.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send LLEN key.
 pub fn redis_llen(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "LLEN", 4)
+    let __lit29: string = "LLEN"
+    add_cmd_arg(items, 0, __lit29.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
@@ -461,7 +492,8 @@ pub fn redis_lrange(fd: i64, buf: i64, items: i64, key: i64, start: i64, stop: i
     let stop_tmp[20]
     let start_len = itoa(start, start_tmp)
     let stop_len = itoa(stop, stop_tmp)
-    add_cmd_arg(items, 0, "LRANGE", 6)
+    let __lit30: string = "LRANGE"
+    add_cmd_arg(items, 0, __lit30.utf8, 6)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, start_tmp, start_len)
     add_cmd_arg(items, 3, stop_tmp, stop_len)
@@ -472,7 +504,8 @@ pub fn redis_lrange(fd: i64, buf: i64, items: i64, key: i64, start: i64, stop: i
 pub fn redis_lindex(fd: i64, buf: i64, items: i64, key: i64, index: i64) -> i64 {
     let idx_tmp[20]
     let idx_len = itoa(index, idx_tmp)
-    add_cmd_arg(items, 0, "LINDEX", 6)
+    let __lit31: string = "LINDEX"
+    add_cmd_arg(items, 0, __lit31.utf8, 6)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, idx_tmp, idx_len)
     redis_command(buf, fd, 3, items)
@@ -482,7 +515,8 @@ pub fn redis_lindex(fd: i64, buf: i64, items: i64, key: i64, index: i64) -> i64 
 pub fn redis_lset(fd: i64, buf: i64, items: i64, key: i64, index: i64, value: i64) -> i64 {
     let idx_tmp[20]
     let idx_len = itoa(index, idx_tmp)
-    add_cmd_arg(items, 0, "LSET", 4)
+    let __lit32: string = "LSET"
+    add_cmd_arg(items, 0, __lit32.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, idx_tmp, idx_len)
     add_cmd_arg(items, 3, value, strlen(value))
@@ -495,7 +529,8 @@ pub fn redis_ltrim(fd: i64, buf: i64, items: i64, key: i64, start: i64, stop: i6
     let stop_tmp[20]
     let start_len = itoa(start, start_tmp)
     let stop_len = itoa(stop, stop_tmp)
-    add_cmd_arg(items, 0, "LTRIM", 5)
+    let __lit33: string = "LTRIM"
+    add_cmd_arg(items, 0, __lit33.utf8, 5)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, start_tmp, start_len)
     add_cmd_arg(items, 3, stop_tmp, stop_len)
@@ -506,7 +541,8 @@ pub fn redis_ltrim(fd: i64, buf: i64, items: i64, key: i64, start: i64, stop: i6
 pub fn redis_lrem(fd: i64, buf: i64, items: i64, key: i64, count: i64, value: i64) -> i64 {
     let cnt_tmp[20]
     let cnt_len = itoa(count, cnt_tmp)
-    add_cmd_arg(items, 0, "LREM", 4)
+    let __lit34: string = "LREM"
+    add_cmd_arg(items, 0, __lit34.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, cnt_tmp, cnt_len)
     add_cmd_arg(items, 3, value, strlen(value))
@@ -517,7 +553,8 @@ pub fn redis_lrem(fd: i64, buf: i64, items: i64, key: i64, count: i64, value: i6
 
 // Send HSET key field value.
 pub fn redis_hset(fd: i64, buf: i64, items: i64, key: i64, field: i64, value: i64) -> i64 {
-    add_cmd_arg(items, 0, "HSET", 4)
+    let __lit35: string = "HSET"
+    add_cmd_arg(items, 0, __lit35.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, field, strlen(field))
     add_cmd_arg(items, 3, value, strlen(value))
@@ -526,7 +563,8 @@ pub fn redis_hset(fd: i64, buf: i64, items: i64, key: i64, field: i64, value: i6
 
 // Send HGET key field.
 pub fn redis_hget(fd: i64, buf: i64, items: i64, key: i64, field: i64) -> i64 {
-    add_cmd_arg(items, 0, "HGET", 4)
+    let __lit36: string = "HGET"
+    add_cmd_arg(items, 0, __lit36.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, field, strlen(field))
     redis_command(buf, fd, 3, items)
@@ -534,7 +572,8 @@ pub fn redis_hget(fd: i64, buf: i64, items: i64, key: i64, field: i64) -> i64 {
 
 // Send HDEL key field...
 pub fn redis_hdel(fd: i64, buf: i64, items: i64, key: i64, n_fields: i64, fields: i64) -> i64 {
-    add_cmd_arg(items, 0, "HDEL", 4)
+    let __lit37: string = "HDEL"
+    add_cmd_arg(items, 0, __lit37.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     let mut slot = 2
     let mut i = 0
@@ -551,35 +590,40 @@ pub fn redis_hdel(fd: i64, buf: i64, items: i64, key: i64, n_fields: i64, fields
 
 // Send HGETALL key.
 pub fn redis_hgetall(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "HGETALL", 7)
+    let __lit38: string = "HGETALL"
+    add_cmd_arg(items, 0, __lit38.utf8, 7)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send HLEN key.
 pub fn redis_hlen(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "HLEN", 4)
+    let __lit39: string = "HLEN"
+    add_cmd_arg(items, 0, __lit39.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send HKEYS key.
 pub fn redis_hkeys(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "HKEYS", 5)
+    let __lit40: string = "HKEYS"
+    add_cmd_arg(items, 0, __lit40.utf8, 5)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send HVALS key.
 pub fn redis_hvals(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "HVALS", 5)
+    let __lit41: string = "HVALS"
+    add_cmd_arg(items, 0, __lit41.utf8, 5)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send HEXISTS key field.
 pub fn redis_hexists(fd: i64, buf: i64, items: i64, key: i64, field: i64) -> i64 {
-    add_cmd_arg(items, 0, "HEXISTS", 7)
+    let __lit42: string = "HEXISTS"
+    add_cmd_arg(items, 0, __lit42.utf8, 7)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, field, strlen(field))
     redis_command(buf, fd, 3, items)
@@ -589,7 +633,8 @@ pub fn redis_hexists(fd: i64, buf: i64, items: i64, key: i64, field: i64) -> i64
 pub fn redis_hincrby(fd: i64, buf: i64, items: i64, key: i64, field: i64, amount: i64) -> i64 {
     let amt_tmp[20]
     let amt_len = itoa(amount, amt_tmp)
-    add_cmd_arg(items, 0, "HINCRBY", 7)
+    let __lit43: string = "HINCRBY"
+    add_cmd_arg(items, 0, __lit43.utf8, 7)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, field, strlen(field))
     add_cmd_arg(items, 3, amt_tmp, amt_len)
@@ -600,7 +645,8 @@ pub fn redis_hincrby(fd: i64, buf: i64, items: i64, key: i64, field: i64, amount
 
 // Send SADD key member.
 pub fn redis_sadd(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
-    add_cmd_arg(items, 0, "SADD", 4)
+    let __lit44: string = "SADD"
+    add_cmd_arg(items, 0, __lit44.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, member, strlen(member))
     redis_command(buf, fd, 3, items)
@@ -608,7 +654,8 @@ pub fn redis_sadd(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
 
 // Send SREM key member.
 pub fn redis_srem(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
-    add_cmd_arg(items, 0, "SREM", 4)
+    let __lit45: string = "SREM"
+    add_cmd_arg(items, 0, __lit45.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, member, strlen(member))
     redis_command(buf, fd, 3, items)
@@ -616,14 +663,16 @@ pub fn redis_srem(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
 
 // Send SMEMBERS key.
 pub fn redis_smembers(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "SMEMBERS", 8)
+    let __lit46: string = "SMEMBERS"
+    add_cmd_arg(items, 0, __lit46.utf8, 8)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send SISMEMBER key member.
 pub fn redis_sismember(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
-    add_cmd_arg(items, 0, "SISMEMBER", 9)
+    let __lit47: string = "SISMEMBER"
+    add_cmd_arg(items, 0, __lit47.utf8, 9)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, member, strlen(member))
     redis_command(buf, fd, 3, items)
@@ -631,14 +680,16 @@ pub fn redis_sismember(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> 
 
 // Send SCARD key.
 pub fn redis_scard(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "SCARD", 5)
+    let __lit48: string = "SCARD"
+    add_cmd_arg(items, 0, __lit48.utf8, 5)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send SPOP key.
 pub fn redis_spop(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "SPOP", 4)
+    let __lit49: string = "SPOP"
+    add_cmd_arg(items, 0, __lit49.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
@@ -647,7 +698,8 @@ pub fn redis_spop(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
 pub fn redis_srandmember(fd: i64, buf: i64, items: i64, key: i64, count: i64) -> i64 {
     let cnt_tmp[20]
     let cnt_len = itoa(count, cnt_tmp)
-    add_cmd_arg(items, 0, "SRANDMEMBER", 11)
+    let __lit50: string = "SRANDMEMBER"
+    add_cmd_arg(items, 0, __lit50.utf8, 11)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, cnt_tmp, cnt_len)
     redis_command(buf, fd, 3, items)
@@ -655,7 +707,8 @@ pub fn redis_srandmember(fd: i64, buf: i64, items: i64, key: i64, count: i64) ->
 
 // Send SDIFF key...
 pub fn redis_sdiff(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
-    add_cmd_arg(items, 0, "SDIFF", 5)
+    let __lit51: string = "SDIFF"
+    add_cmd_arg(items, 0, __lit51.utf8, 5)
     let mut slot = 1
     let mut i = 0
     for i < n_keys {
@@ -671,7 +724,8 @@ pub fn redis_sdiff(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64
 
 // Send SINTER key...
 pub fn redis_sinter(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
-    add_cmd_arg(items, 0, "SINTER", 6)
+    let __lit52: string = "SINTER"
+    add_cmd_arg(items, 0, __lit52.utf8, 6)
     let mut slot = 1
     let mut i = 0
     for i < n_keys {
@@ -687,7 +741,8 @@ pub fn redis_sinter(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i6
 
 // Send SUNION key...
 pub fn redis_sunion(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
-    add_cmd_arg(items, 0, "SUNION", 6)
+    let __lit53: string = "SUNION"
+    add_cmd_arg(items, 0, __lit53.utf8, 6)
     let mut slot = 1
     let mut i = 0
     for i < n_keys {
@@ -707,7 +762,8 @@ pub fn redis_sunion(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i6
 pub fn redis_zadd(fd: i64, buf: i64, items: i64, key: i64, score: i64, member: i64) -> i64 {
     let score_tmp[32]
     let score_len = itoa(score, score_tmp)
-    add_cmd_arg(items, 0, "ZADD", 4)
+    let __lit54: string = "ZADD"
+    add_cmd_arg(items, 0, __lit54.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, score_tmp, score_len)
     add_cmd_arg(items, 3, member, strlen(member))
@@ -720,7 +776,8 @@ pub fn redis_zrange(fd: i64, buf: i64, items: i64, key: i64, start: i64, stop: i
     let stop_tmp[20]
     let start_len = itoa(start, start_tmp)
     let stop_len = itoa(stop, stop_tmp)
-    add_cmd_arg(items, 0, "ZRANGE", 6)
+    let __lit55: string = "ZRANGE"
+    add_cmd_arg(items, 0, __lit55.utf8, 6)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, start_tmp, start_len)
     add_cmd_arg(items, 3, stop_tmp, stop_len)
@@ -729,7 +786,8 @@ pub fn redis_zrange(fd: i64, buf: i64, items: i64, key: i64, start: i64, stop: i
 
 // Send ZSCORE key member.
 pub fn redis_zscore(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
-    add_cmd_arg(items, 0, "ZSCORE", 6)
+    let __lit56: string = "ZSCORE"
+    add_cmd_arg(items, 0, __lit56.utf8, 6)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, member, strlen(member))
     redis_command(buf, fd, 3, items)
@@ -737,14 +795,16 @@ pub fn redis_zscore(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64
 
 // Send ZCARD key.
 pub fn redis_zcard(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "ZCARD", 5)
+    let __lit57: string = "ZCARD"
+    add_cmd_arg(items, 0, __lit57.utf8, 5)
     add_cmd_arg(items, 1, key, strlen(key))
     redis_command(buf, fd, 2, items)
 }
 
 // Send ZREM key member.
 pub fn redis_zrem(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
-    add_cmd_arg(items, 0, "ZREM", 4)
+    let __lit58: string = "ZREM"
+    add_cmd_arg(items, 0, __lit58.utf8, 4)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, member, strlen(member))
     redis_command(buf, fd, 3, items)
@@ -752,7 +812,8 @@ pub fn redis_zrem(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
 
 // Send ZRANK key member.
 pub fn redis_zrank(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
-    add_cmd_arg(items, 0, "ZRANK", 5)
+    let __lit59: string = "ZRANK"
+    add_cmd_arg(items, 0, __lit59.utf8, 5)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, member, strlen(member))
     redis_command(buf, fd, 3, items)
@@ -760,7 +821,8 @@ pub fn redis_zrank(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 
 
 // Send ZREVRANK key member.
 pub fn redis_zrevrank(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i64 {
-    add_cmd_arg(items, 0, "ZREVRANK", 8)
+    let __lit60: string = "ZREVRANK"
+    add_cmd_arg(items, 0, __lit60.utf8, 8)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, member, strlen(member))
     redis_command(buf, fd, 3, items)
@@ -770,7 +832,8 @@ pub fn redis_zrevrank(fd: i64, buf: i64, items: i64, key: i64, member: i64) -> i
 pub fn redis_zincrby(fd: i64, buf: i64, items: i64, key: i64, increment: i64, member: i64) -> i64 {
     let inc_tmp[32]
     let inc_len = itoa(increment, inc_tmp)
-    add_cmd_arg(items, 0, "ZINCRBY", 7)
+    let __lit61: string = "ZINCRBY"
+    add_cmd_arg(items, 0, __lit61.utf8, 7)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, inc_tmp, inc_len)
     add_cmd_arg(items, 3, member, strlen(member))
@@ -783,7 +846,8 @@ pub fn redis_zcount(fd: i64, buf: i64, items: i64, key: i64, min: i64, max: i64)
     let max_tmp[32]
     let min_len = itoa(min, min_tmp)
     let max_len = itoa(max, max_tmp)
-    add_cmd_arg(items, 0, "ZCOUNT", 6)
+    let __lit62: string = "ZCOUNT"
+    add_cmd_arg(items, 0, __lit62.utf8, 6)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, min_tmp, min_len)
     add_cmd_arg(items, 3, max_tmp, max_len)
@@ -792,7 +856,8 @@ pub fn redis_zcount(fd: i64, buf: i64, items: i64, key: i64, min: i64, max: i64)
 
 // Send ZLEXCOUNT key min max.
 pub fn redis_zlexcount(fd: i64, buf: i64, items: i64, key: i64, min: i64, max: i64) -> i64 {
-    add_cmd_arg(items, 0, "ZLEXCOUNT", 9)
+    let __lit63: string = "ZLEXCOUNT"
+    add_cmd_arg(items, 0, __lit63.utf8, 9)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, min, strlen(min))
     add_cmd_arg(items, 3, max, strlen(max))
@@ -805,7 +870,8 @@ pub fn redis_zremrangebyrank(fd: i64, buf: i64, items: i64, key: i64, start: i64
     let stop_tmp[20]
     let start_len = itoa(start, start_tmp)
     let stop_len = itoa(stop, stop_tmp)
-    add_cmd_arg(items, 0, "ZREMRANGEBYRANK", 15)
+    let __lit64: string = "ZREMRANGEBYRANK"
+    add_cmd_arg(items, 0, __lit64.utf8, 15)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, start_tmp, start_len)
     add_cmd_arg(items, 3, stop_tmp, stop_len)
@@ -818,7 +884,8 @@ pub fn redis_zremrangebyscore(fd: i64, buf: i64, items: i64, key: i64, min: i64,
     let max_tmp[32]
     let min_len = itoa(min, min_tmp)
     let max_len = itoa(max, max_tmp)
-    add_cmd_arg(items, 0, "ZREMRANGEBYSCORE", 16)
+    let __lit65: string = "ZREMRANGEBYSCORE"
+    add_cmd_arg(items, 0, __lit65.utf8, 16)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, min_tmp, min_len)
     add_cmd_arg(items, 3, max_tmp, max_len)
@@ -827,7 +894,8 @@ pub fn redis_zremrangebyscore(fd: i64, buf: i64, items: i64, key: i64, min: i64,
 
 // Send ZREMRANGEBYLEX key min max.
 pub fn redis_zremrangebylex(fd: i64, buf: i64, items: i64, key: i64, min: i64, max: i64) -> i64 {
-    add_cmd_arg(items, 0, "ZREMRANGEBYLEX", 14)
+    let __lit66: string = "ZREMRANGEBYLEX"
+    add_cmd_arg(items, 0, __lit66.utf8, 14)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, min, strlen(min))
     add_cmd_arg(items, 3, max, strlen(max))
@@ -840,7 +908,8 @@ pub fn redis_zrangebyscore(fd: i64, buf: i64, items: i64, key: i64, min: i64, ma
     let max_tmp[32]
     let min_len = itoa(min, min_tmp)
     let max_len = itoa(max, max_tmp)
-    add_cmd_arg(items, 0, "ZRANGEBYSCORE", 13)
+    let __lit67: string = "ZRANGEBYSCORE"
+    add_cmd_arg(items, 0, __lit67.utf8, 13)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, min_tmp, min_len)
     add_cmd_arg(items, 3, max_tmp, max_len)
@@ -849,7 +918,8 @@ pub fn redis_zrangebyscore(fd: i64, buf: i64, items: i64, key: i64, min: i64, ma
 
 // Send ZRANGEBYLEX key min max.
 pub fn redis_zrangebylex(fd: i64, buf: i64, items: i64, key: i64, min: i64, max: i64) -> i64 {
-    add_cmd_arg(items, 0, "ZRANGEBYLEX", 11)
+    let __lit68: string = "ZRANGEBYLEX"
+    add_cmd_arg(items, 0, __lit68.utf8, 11)
     add_cmd_arg(items, 1, key, strlen(key))
     add_cmd_arg(items, 2, min, strlen(min))
     add_cmd_arg(items, 3, max, strlen(max))
@@ -858,7 +928,8 @@ pub fn redis_zrangebylex(fd: i64, buf: i64, items: i64, key: i64, min: i64, max:
 
 // Send ZINTERSTORE dst key...
 pub fn redis_zinterstore(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
-    add_cmd_arg(items, 0, "ZINTERSTORE", 11)
+    let __lit69: string = "ZINTERSTORE"
+    add_cmd_arg(items, 0, __lit69.utf8, 11)
     // Command name is slot 0; dst (the first entry of `keys`) goes in slot 1.
     let dst_ptr = peek64(keys + 0)  // first key is actually dst name
     let dst_len = strlen(dst_ptr)
@@ -879,7 +950,8 @@ pub fn redis_zinterstore(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) 
 
 // Send ZUNIONSTORE dst key...
 pub fn redis_zunionstore(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
-    add_cmd_arg(items, 0, "ZUNIONSTORE", 11)
+    let __lit70: string = "ZUNIONSTORE"
+    add_cmd_arg(items, 0, __lit70.utf8, 11)
     // Command name is slot 0; dst (the first entry of `keys`) goes in slot 1.
     let dst_ptr = peek64(keys + 0)
     let dst_len = strlen(dst_ptr)
@@ -900,7 +972,8 @@ pub fn redis_zunionstore(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) 
 
 // Send ZMSCORE key member...
 pub fn redis_zmscore(fd: i64, buf: i64, items: i64, key: i64, n_members: i64, members: i64) -> i64 {
-    add_cmd_arg(items, 0, "ZMSCORE", 7)
+    let __lit71: string = "ZMSCORE"
+    add_cmd_arg(items, 0, __lit71.utf8, 7)
     add_cmd_arg(items, 1, key, strlen(key))
     let mut slot = 2
     let mut i = 0
@@ -919,53 +992,63 @@ pub fn redis_zmscore(fd: i64, buf: i64, items: i64, key: i64, n_members: i64, me
 
 // Send INFO.
 pub fn redis_info(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "INFO")
+    let __lit72: string = "INFO"
+    ptr_to_item(items, 0, __lit72.utf8)
     redis_command(buf, fd, 1, items)
 }
 
 // Send CONFIG GET param.
 pub fn redis_config_get(fd: i64, buf: i64, items: i64, param: i64) -> i64 {
-    add_cmd_arg(items, 0, "CONFIG", 6)
-    add_cmd_arg(items, 1, "GET", 3)
+    let __lit73: string = "CONFIG"
+    add_cmd_arg(items, 0, __lit73.utf8, 6)
+    let __lit74: string = "GET"
+    add_cmd_arg(items, 1, __lit74.utf8, 3)
     add_cmd_arg(items, 2, param, strlen(param))
     redis_command(buf, fd, 3, items)
 }
 
 // Send SAVE.
 pub fn redis_save(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "SAVE")
+    let __lit75: string = "SAVE"
+    ptr_to_item(items, 0, __lit75.utf8)
     redis_command(buf, fd, 1, items)
 }
 
 // Send BGSAVE.
 pub fn redis_bgsave(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "BGSAVE")
+    let __lit76: string = "BGSAVE"
+    ptr_to_item(items, 0, __lit76.utf8)
     redis_command(buf, fd, 1, items)
 }
 
 // Send LASTSAVE.
 pub fn redis_lastsave(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "LASTSAVE")
+    let __lit77: string = "LASTSAVE"
+    ptr_to_item(items, 0, __lit77.utf8)
     redis_command(buf, fd, 1, items)
 }
 
 // Send SHUTDOWN.
 pub fn redis_shutdown(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "SHUTDOWN")
+    let __lit78: string = "SHUTDOWN"
+    ptr_to_item(items, 0, __lit78.utf8)
     redis_command(buf, fd, 1, items)
 }
 
 // Send DEBUG OBJECT key.
 pub fn redis_debug_object(fd: i64, buf: i64, items: i64, key: i64) -> i64 {
-    add_cmd_arg(items, 0, "DEBUG", 5)
-    add_cmd_arg(items, 1, "OBJECT", 6)
+    let __lit79: string = "DEBUG"
+    add_cmd_arg(items, 0, __lit79.utf8, 5)
+    let __lit80: string = "OBJECT"
+    add_cmd_arg(items, 1, __lit80.utf8, 6)
     add_cmd_arg(items, 2, key, strlen(key))
     redis_command(buf, fd, 3, items)
 }
 
 // Send MONITOR (fires and forget, no response expected).
 pub fn redis_monitor(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "MONITOR")
+    let __lit81: string = "MONITOR"
+    ptr_to_item(items, 0, __lit81.utf8)
     // MONITOR is a normal RESP command; it must be encoded like every other
     // helper before hitting the wire. Sending raw bytes straight off the
     // "MONITOR" string literal (as this used to do, padded by a hardcoded
@@ -978,42 +1061,51 @@ pub fn redis_monitor(fd: i64, buf: i64, items: i64) -> i64 {
 
 // Send CLIENT LIST.
 pub fn redis_client_list(fd: i64, buf: i64, items: i64) -> i64 {
-    add_cmd_arg(items, 0, "CLIENT", 6)
-    add_cmd_arg(items, 1, "LIST", 4)
+    let __lit82: string = "CLIENT"
+    add_cmd_arg(items, 0, __lit82.utf8, 6)
+    let __lit83: string = "LIST"
+    add_cmd_arg(items, 1, __lit83.utf8, 4)
     redis_command(buf, fd, 2, items)
 }
 
 // Send CLIENT KILL id.
 pub fn redis_client_kill(fd: i64, buf: i64, items: i64, id: i64) -> i64 {
-    add_cmd_arg(items, 0, "CLIENT", 6)
-    add_cmd_arg(items, 1, "KILL", 4)
-    add_cmd_arg(items, 2, "ID", 2)
+    let __lit84: string = "CLIENT"
+    add_cmd_arg(items, 0, __lit84.utf8, 6)
+    let __lit85: string = "KILL"
+    add_cmd_arg(items, 1, __lit85.utf8, 4)
+    let __lit86: string = "ID"
+    add_cmd_arg(items, 2, __lit86.utf8, 2)
     add_cmd_arg(items, 3, id, strlen(id))
     redis_command(buf, fd, 4, items)
 }
 
 // Send AUTH password.
 pub fn redis_auth(fd: i64, buf: i64, items: i64, password: i64) -> i64 {
-    add_cmd_arg(items, 0, "AUTH", 4)
+    let __lit87: string = "AUTH"
+    add_cmd_arg(items, 0, __lit87.utf8, 4)
     add_cmd_arg(items, 1, password, strlen(password))
     redis_command(buf, fd, 2, items)
 }
 
 // Send QUIT.
 pub fn redis_quit(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "QUIT")
+    let __lit88: string = "QUIT"
+    ptr_to_item(items, 0, __lit88.utf8)
     redis_command(buf, fd, 1, items)
 }
 
 // Send TIME.
 pub fn redis_time(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "TIME")
+    let __lit89: string = "TIME"
+    ptr_to_item(items, 0, __lit89.utf8)
     redis_command(buf, fd, 1, items)
 }
 
 // Send UPTIME.
 pub fn redis_uptime(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "UPTIME")
+    let __lit90: string = "UPTIME"
+    ptr_to_item(items, 0, __lit90.utf8)
     redis_command(buf, fd, 1, items)
 }
 
@@ -1021,7 +1113,8 @@ pub fn redis_uptime(fd: i64, buf: i64, items: i64) -> i64 {
 pub fn redis_slaveof(fd: i64, buf: i64, items: i64, host: i64, port: i64) -> i64 {
     let port_tmp[20]
     let port_len = itoa(port, port_tmp)
-    add_cmd_arg(items, 0, "SLAVEOF", 7)
+    let __lit91: string = "SLAVEOF"
+    add_cmd_arg(items, 0, __lit91.utf8, 7)
     add_cmd_arg(items, 1, host, strlen(host))
     add_cmd_arg(items, 2, port_tmp, port_len)
     redis_command(buf, fd, 3, items)
@@ -1033,7 +1126,8 @@ pub fn redis_wait(fd: i64, buf: i64, items: i64, num_slaves: i64, timeout: i64) 
     let to_tmp[20]
     let ns_len = itoa(num_slaves, ns_tmp)
     let to_len = itoa(timeout, to_tmp)
-    add_cmd_arg(items, 0, "WAIT", 4)
+    let __lit92: string = "WAIT"
+    add_cmd_arg(items, 0, __lit92.utf8, 4)
     add_cmd_arg(items, 1, ns_tmp, ns_len)
     add_cmd_arg(items, 2, to_tmp, to_len)
     redis_command(buf, fd, 3, items)
@@ -1043,25 +1137,29 @@ pub fn redis_wait(fd: i64, buf: i64, items: i64, num_slaves: i64, timeout: i64) 
 
 // Send MULTI.
 pub fn redis_multi(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "MULTI")
+    let __lit93: string = "MULTI"
+    ptr_to_item(items, 0, __lit93.utf8)
     redis_command(buf, fd, 1, items)
 }
 
 // Send EXEC.
 pub fn redis_exec(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "EXEC")
+    let __lit94: string = "EXEC"
+    ptr_to_item(items, 0, __lit94.utf8)
     redis_command(buf, fd, 1, items)
 }
 
 // Send DISCARD.
 pub fn redis_discard(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "DISCARD")
+    let __lit95: string = "DISCARD"
+    ptr_to_item(items, 0, __lit95.utf8)
     redis_command(buf, fd, 1, items)
 }
 
 // Send WATCH key...
 pub fn redis_watch(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64 {
-    add_cmd_arg(items, 0, "WATCH", 5)
+    let __lit96: string = "WATCH"
+    add_cmd_arg(items, 0, __lit96.utf8, 5)
     let mut slot = 1
     let mut i = 0
     for i < n_keys {
@@ -1077,7 +1175,8 @@ pub fn redis_watch(fd: i64, buf: i64, items: i64, n_keys: i64, keys: i64) -> i64
 
 // Send UNWATCH.
 pub fn redis_unwatch(fd: i64, buf: i64, items: i64) -> i64 {
-    ptr_to_item(items, 0, "UNWATCH")
+    let __lit97: string = "UNWATCH"
+    ptr_to_item(items, 0, __lit97.utf8)
     redis_command(buf, fd, 1, items)
 }
 
@@ -1085,7 +1184,8 @@ pub fn redis_unwatch(fd: i64, buf: i64, items: i64) -> i64 {
 
 // Send SUBSCRIBE channel...
 pub fn redis_subscribe(fd: i64, buf: i64, items: i64, n_channels: i64, channels: i64) -> i64 {
-    add_cmd_arg(items, 0, "SUBSCRIBE", 9)
+    let __lit98: string = "SUBSCRIBE"
+    add_cmd_arg(items, 0, __lit98.utf8, 9)
     let mut slot = 1
     let mut i = 0
     for i < n_channels {
@@ -1101,7 +1201,8 @@ pub fn redis_subscribe(fd: i64, buf: i64, items: i64, n_channels: i64, channels:
 
 // Send UNSUBSCRIBE channel...
 pub fn redis_unsubscribe(fd: i64, buf: i64, items: i64, n_channels: i64, channels: i64) -> i64 {
-    add_cmd_arg(items, 0, "UNSUBSCRIBE", 11)
+    let __lit99: string = "UNSUBSCRIBE"
+    add_cmd_arg(items, 0, __lit99.utf8, 11)
     let mut slot = 1
     let mut i = 0
     for i < n_channels {
@@ -1117,7 +1218,8 @@ pub fn redis_unsubscribe(fd: i64, buf: i64, items: i64, n_channels: i64, channel
 
 // Send PSUBSCRIBE pattern...
 pub fn redis_psubscribe(fd: i64, buf: i64, items: i64, n_patterns: i64, patterns: i64) -> i64 {
-    add_cmd_arg(items, 0, "PSUBSCRIBE", 10)
+    let __lit100: string = "PSUBSCRIBE"
+    add_cmd_arg(items, 0, __lit100.utf8, 10)
     let mut slot = 1
     let mut i = 0
     for i < n_patterns {
@@ -1133,7 +1235,8 @@ pub fn redis_psubscribe(fd: i64, buf: i64, items: i64, n_patterns: i64, patterns
 
 // Send PUNSUBSCRIBE pattern...
 pub fn redis_punsubscribe(fd: i64, buf: i64, items: i64, n_patterns: i64, patterns: i64) -> i64 {
-    add_cmd_arg(items, 0, "PUNSUBSCRIBE", 12)
+    let __lit101: string = "PUNSUBSCRIBE"
+    add_cmd_arg(items, 0, __lit101.utf8, 12)
     let mut slot = 1
     let mut i = 0
     for i < n_patterns {
@@ -1149,7 +1252,8 @@ pub fn redis_punsubscribe(fd: i64, buf: i64, items: i64, n_patterns: i64, patter
 
 // Send PUBLISH channel message.
 pub fn redis_publish(fd: i64, buf: i64, items: i64, channel: i64, message: i64) -> i64 {
-    add_cmd_arg(items, 0, "PUBLISH", 7)
+    let __lit102: string = "PUBLISH"
+    add_cmd_arg(items, 0, __lit102.utf8, 7)
     add_cmd_arg(items, 1, channel, strlen(channel))
     add_cmd_arg(items, 2, message, strlen(message))
     redis_command(buf, fd, 3, items)

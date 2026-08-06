@@ -41,46 +41,70 @@ pub fn xml_elem_self(buf: i64, name: i64) {
 // A resource entry: <response><href>path</href> ...propstat...</propstat></response>
 // `has_collection` is 1 if collection, 0 if file.
 pub fn xml_propfind_response(buf: i64, href_val: i64, displayname_val: i64, content_len_val: i64, has_collection: i64) {
-    bytes_push(buf, 60); bytes_append_cstr(buf, "response"); bytes_push(buf, 62)
-    bytes_push(buf, 60); bytes_append_cstr(buf, "href"); bytes_push(buf, 62)
+    let __lit0: string = "response"
+    bytes_push(buf, 60); bytes_append_cstr(buf, __lit0.utf8); bytes_push(buf, 62)
+    let __lit1: string = "href"
+    bytes_push(buf, 60); bytes_append_cstr(buf, __lit1.utf8); bytes_push(buf, 62)
     bytes_append_cstr(buf, href_val)
-    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, "href"); bytes_push(buf, 62)
-    bytes_push(buf, 60); bytes_append_cstr(buf, "propstat"); bytes_push(buf, 62)
-    bytes_push(buf, 60); bytes_append_cstr(buf, "prop"); bytes_push(buf, 62)
-    bytes_push(buf, 60); bytes_append_cstr(buf, "displayname"); bytes_push(buf, 62)
+    let __lit2: string = "href"
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, __lit2.utf8); bytes_push(buf, 62)
+    let __lit3: string = "propstat"
+    bytes_push(buf, 60); bytes_append_cstr(buf, __lit3.utf8); bytes_push(buf, 62)
+    let __lit4: string = "prop"
+    bytes_push(buf, 60); bytes_append_cstr(buf, __lit4.utf8); bytes_push(buf, 62)
+    let __lit5: string = "displayname"
+    bytes_push(buf, 60); bytes_append_cstr(buf, __lit5.utf8); bytes_push(buf, 62)
     bytes_append_cstr(buf, displayname_val)
-    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, "displayname"); bytes_push(buf, 62)
-    bytes_push(buf, 60); bytes_append_cstr(buf, "resourcetype"); bytes_push(buf, 62)
+    let __lit6: string = "displayname"
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, __lit6.utf8); bytes_push(buf, 62)
+    let __lit7: string = "resourcetype"
+    bytes_push(buf, 60); bytes_append_cstr(buf, __lit7.utf8); bytes_push(buf, 62)
     if has_collection != 0 {
-        xml_elem_self(buf, "collection")
+        let __lit8: string = "collection"
+        xml_elem_self(buf, __lit8.utf8)
     } else {
-        xml_elem_self(buf, "resourcetype")
+        let __lit9: string = "resourcetype"
+        xml_elem_self(buf, __lit9.utf8)
     }
-    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, "resourcetype"); bytes_push(buf, 62)
-    bytes_push(buf, 60); bytes_append_cstr(buf, "getcontentlength"); bytes_push(buf, 62)
+    let __lit10: string = "resourcetype"
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, __lit10.utf8); bytes_push(buf, 62)
+    let __lit11: string = "getcontentlength"
+    bytes_push(buf, 60); bytes_append_cstr(buf, __lit11.utf8); bytes_push(buf, 62)
     if has_collection == 0 && content_len_val != 0 {
         bytes_append_int(buf, content_len_val)
     } else {
-        bytes_push(buf, 48)  // "0"
+        let __lit12: string = "0"
+        bytes_push(buf, 48)  // __lit12.utf8
     }
-    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, "getcontentlength"); bytes_push(buf, 62)
-    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, "prop"); bytes_push(buf, 62)
-    bytes_push(buf, 60); bytes_append_cstr(buf, "status"); bytes_push(buf, 62)
-    bytes_append_cstr(buf, "HTTP/1.1 200 OK")
-    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, "status"); bytes_push(buf, 62)
-    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, "propstat"); bytes_push(buf, 62)
-    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, "response"); bytes_push(buf, 62)
+    let __lit13: string = "getcontentlength"
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, __lit13.utf8); bytes_push(buf, 62)
+    let __lit14: string = "prop"
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, __lit14.utf8); bytes_push(buf, 62)
+    let __lit15: string = "status"
+    bytes_push(buf, 60); bytes_append_cstr(buf, __lit15.utf8); bytes_push(buf, 62)
+    let __lit16: string = "HTTP/1.1 200 OK"
+    bytes_append_cstr(buf, __lit16.utf8)
+    let __lit17: string = "status"
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, __lit17.utf8); bytes_push(buf, 62)
+    let __lit18: string = "propstat"
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, __lit18.utf8); bytes_push(buf, 62)
+    let __lit19: string = "response"
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, __lit19.utf8); bytes_push(buf, 62)
 }
 
 // The outer <multistatus xmlns="DAV:">...</multistatus> wrapper.
 pub fn xml_multistatus(buf: i64, entries: i64) {
-    bytes_push(buf, 60); bytes_push(buf, 63); bytes_append_cstr(buf, "xml version=\"1.0\" encoding=\"utf-8\"")
+    let __lit20: string = "xml version=\"1.0\" encoding=\"utf-8\""
+    bytes_push(buf, 60); bytes_push(buf, 63); bytes_append_cstr(buf, __lit20.utf8)
     bytes_push(buf, 32); bytes_push(buf, 62); bytes_push(buf, 10)
-    bytes_push(buf, 60); bytes_append_cstr(buf, "multistatus"); bytes_push(buf, 32)
-    bytes_append_cstr(buf, "xmlns=\"DAV:\"")
+    let __lit21: string = "multistatus"
+    bytes_push(buf, 60); bytes_append_cstr(buf, __lit21.utf8); bytes_push(buf, 32)
+    let __lit22: string = "xmlns=\"DAV:\""
+    bytes_append_cstr(buf, __lit22.utf8)
     bytes_push(buf, 62); bytes_push(buf, 10)
     if bytes_len(entries) > 0 { bytes_append(buf, entries) }
-    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, "multistatus"); bytes_push(buf, 62)
+    let __lit23: string = "multistatus"
+    bytes_push(buf, 60); bytes_push(buf, 47); bytes_append_cstr(buf, __lit23.utf8); bytes_push(buf, 62)
 }
 
 // ── XML parsers ─────────────────────────────────────────────────────────
@@ -205,7 +229,8 @@ pub fn xml_extract_hrefs(out: i64, base: i64, buf: i64) -> i64 {
     let mut count = 0
     let mut search_from = 0
     for {
-        let href_content = xml_get_tag_content(buf, "href", search_from)
+        let __s0_231: string = "href"
+        let href_content = xml_get_tag_content(buf, __s0_231.utf8, search_from)
         if bytes_len(href_content) == 0 { break }
         let fb = if bytes_len(href_content) > 0 { bytes_get(href_content, 0) } else { -1 }
         // Prepend base if href doesn't start with '/'
@@ -223,7 +248,8 @@ pub fn xml_extract_hrefs(out: i64, base: i64, buf: i64) -> i64 {
         }
         bytes_push(out, 0); bytes_push(out, 10)
         count = count + 1
-        search_from = xml_find_open_tag(buf, "response", search_from + 1)
+        let __lit24: string = "response"
+        search_from = xml_find_open_tag(buf, __lit24.utf8, search_from + 1)
         if search_from == -1 { break }
     }
     count
@@ -233,7 +259,8 @@ pub fn xml_count_responses(buf: i64) -> i64 {
     let mut count = 0
     let mut from = 0
     for {
-        let pos = xml_find_open_tag(buf, "response", from)
+        let __s0_261: string = "response"
+        let pos = xml_find_open_tag(buf, __s0_261.utf8, from)
         if pos == -1 { break }
         count = count + 1
         from = pos + 1
@@ -242,41 +269,57 @@ pub fn xml_count_responses(buf: i64) -> i64 {
 }
 
 pub fn xml_parse_response(xml: i64, start_pos: i64, out: i64, cf_slot: i64) -> i64 {
-    let resp_end = xml_find_close_tag(xml, "response", start_pos)
+    let __s0_271: string = "response"
+    let resp_end = xml_find_close_tag(xml, __s0_271.utf8, start_pos)
     if resp_end == -1 { return 0 }
-    let href = xml_get_tag_content(xml, "href", start_pos)
+    let __s1_272: string = "href"
+    let href = xml_get_tag_content(xml, __s1_272.utf8, start_pos)
     bytes_append(out, href); bytes_push(out, 0)
-    let dn = xml_get_tag_content(xml, "displayname", start_pos)
+    let __s2_275: string = "displayname"
+    let dn = xml_get_tag_content(xml, __s2_275.utf8, start_pos)
     bytes_append(out, dn); bytes_push(out, 0)
-    let has_coll = xml_has_tag(xml, "collection", start_pos)
+    let __s0_280: string = "collection"
+    let has_coll = xml_has_tag(xml, __s0_280.utf8, start_pos)
     poke64(cf_slot, has_coll)  // 1 for collection, 0 for file
-    let clen_str = xml_get_tag_content(xml, "getcontentlength", start_pos)
+    let __s3_280: string = "getcontentlength"
+    let clen_str = xml_get_tag_content(xml, __s3_280.utf8, start_pos)
     bytes_append(out, clen_str); bytes_push(out, 0)
     1
 }
 
 pub fn xml_build_propfind_body(name: i64) -> i64 {
     let body = bytes_new()
-    bytes_push(body, 60); bytes_push(body, 63); bytes_append_cstr(body, "xml version=\"1.0\" encoding=\"utf-8\"")
+    let __lit25: string = "xml version=\"1.0\" encoding=\"utf-8\""
+    bytes_push(body, 60); bytes_push(body, 63); bytes_append_cstr(body, __lit25.utf8)
     bytes_push(body, 32); bytes_push(body, 62); bytes_push(body, 10)
-    bytes_push(body, 60); bytes_append_cstr(body, "propfind"); bytes_push(body, 32)
-    bytes_append_cstr(body, "xmlns=\"DAV:\"")
+    let __lit26: string = "propfind"
+    bytes_push(body, 60); bytes_append_cstr(body, __lit26.utf8); bytes_push(body, 32)
+    let __lit27: string = "xmlns=\"DAV:\""
+    bytes_append_cstr(body, __lit27.utf8)
     bytes_push(body, 62); bytes_push(body, 10)
-    bytes_push(body, 60); bytes_append_cstr(body, "prop"); bytes_push(body, 62)
+    let __lit28: string = "prop"
+    bytes_push(body, 60); bytes_append_cstr(body, __lit28.utf8); bytes_push(body, 62)
     bytes_push(body, 10)
-    bytes_append_cstr(body, "    <displayname/>")
+    let __lit29: string = "    <displayname/>"
+    bytes_append_cstr(body, __lit29.utf8)
     bytes_push(body, 10)
-    bytes_append_cstr(body, "    <resourcetype/>")
+    let __lit30: string = "    <resourcetype/>"
+    bytes_append_cstr(body, __lit30.utf8)
     bytes_push(body, 10)
-    bytes_append_cstr(body, "    <getcontentlength/>")
+    let __lit31: string = "    <getcontentlength/>"
+    bytes_append_cstr(body, __lit31.utf8)
     bytes_push(body, 10)
-    bytes_append_cstr(body, "    <getlastmodified/>")
+    let __lit32: string = "    <getlastmodified/>"
+    bytes_append_cstr(body, __lit32.utf8)
     bytes_push(body, 10)
-    bytes_append_cstr(body, "    <lockdiscovery/>")
+    let __lit33: string = "    <lockdiscovery/>"
+    bytes_append_cstr(body, __lit33.utf8)
     bytes_push(body, 10)
-    bytes_push(body, 60); bytes_push(body, 47); bytes_append_cstr(body, "prop"); bytes_push(body, 62)
+    let __lit34: string = "prop"
+    bytes_push(body, 60); bytes_push(body, 47); bytes_append_cstr(body, __lit34.utf8); bytes_push(body, 62)
     bytes_push(body, 10)
-    bytes_push(body, 60); bytes_push(body, 47); bytes_append_cstr(body, "propfind"); bytes_push(body, 62)
+    let __lit35: string = "propfind"
+    bytes_push(body, 60); bytes_push(body, 47); bytes_append_cstr(body, __lit35.utf8); bytes_push(body, 62)
     body
 }
 

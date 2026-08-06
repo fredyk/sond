@@ -82,7 +82,8 @@ test "printk_send_byte writes multiple bytes in order" {
 test "printk emits <level>message\\n for KERN_INFO" {
     let p = mock_port_new()
     mock_port_set_in(p, 0x3FB, 32)
-    printk(p, KERN_INFO, "hi")
+    let __lit0: string = "hi"
+    printk(p, KERN_INFO, __lit0.utf8)
     // '<' '6' '>' 'h' 'i' '\n'  (KERN_INFO == 6)
     assert_eq(mock_port_writes(p, 0x3F8), 6)
     assert_eq(mock_port_write_at(p, 0x3F8, 0), 60)   // '<'
@@ -96,21 +97,24 @@ test "printk emits <level>message\\n for KERN_INFO" {
 test "printk emits the correct level digit for KERN_EMERG" {
     let p = mock_port_new()
     mock_port_set_in(p, 0x3FB, 32)
-    printk(p, KERN_EMERG, "x")
+    let __lit1: string = "x"
+    printk(p, KERN_EMERG, __lit1.utf8)
     assert_eq(mock_port_write_at(p, 0x3F8, 1), 48)   // '0'
 }
 
 test "printk emits the correct level digit for KERN_DEBUG" {
     let p = mock_port_new()
     mock_port_set_in(p, 0x3FB, 32)
-    printk(p, KERN_DEBUG, "x")
+    let __lit2: string = "x"
+    printk(p, KERN_DEBUG, __lit2.utf8)
     assert_eq(mock_port_write_at(p, 0x3F8, 1), 55)   // '7'
 }
 
 test "printk always terminates the line with LF even for empty messages" {
     let p = mock_port_new()
     mock_port_set_in(p, 0x3FB, 32)
-    printk(p, KERN_WARNING, "")
+    let __lit3: string = ""
+    printk(p, KERN_WARNING, __lit3.utf8)
     // '<' '4' '>' '\n' == 4 bytes, nothing from the empty message body.
     assert_eq(mock_port_writes(p, 0x3F8), 4)
     assert_eq(mock_port_write_at(p, 0x3F8, 3), 10)
@@ -121,56 +125,65 @@ test "printk always terminates the line with LF even for empty messages" {
 test "pr_emerg tags the line with level 0" {
     let p = mock_port_new()
     mock_port_set_in(p, 0x3FB, 32)
-    pr_emerg(p, "boom")
+    let __lit4: string = "boom"
+    pr_emerg(p, __lit4.utf8)
     assert_eq(mock_port_write_at(p, 0x3F8, 1), 48)  // '0'
 }
 
 test "pr_alert tags the line with level 1" {
     let p = mock_port_new()
     mock_port_set_in(p, 0x3FB, 32)
-    pr_alert(p, "a")
+    let __lit5: string = "a"
+    pr_alert(p, __lit5.utf8)
     assert_eq(mock_port_write_at(p, 0x3F8, 1), 49)  // '1'
 }
 
 test "pr_crit tags the line with level 2" {
     let p = mock_port_new()
     mock_port_set_in(p, 0x3FB, 32)
-    pr_crit(p, "a")
+    let __lit6: string = "a"
+    pr_crit(p, __lit6.utf8)
     assert_eq(mock_port_write_at(p, 0x3F8, 1), 50)  // '2'
 }
 
 test "pr_err tags the line with level 3" {
     let p = mock_port_new()
     mock_port_set_in(p, 0x3FB, 32)
-    pr_err(p, "a")
+    let __lit7: string = "a"
+    pr_err(p, __lit7.utf8)
     assert_eq(mock_port_write_at(p, 0x3F8, 1), 51)  // '3'
 }
 
 test "pr_warn tags the line with level 4" {
     let p = mock_port_new()
     mock_port_set_in(p, 0x3FB, 32)
-    pr_warn(p, "a")
+    let __lit8: string = "a"
+    pr_warn(p, __lit8.utf8)
     assert_eq(mock_port_write_at(p, 0x3F8, 1), 52)  // '4'
 }
 
 test "pr_notice tags the line with level 5" {
     let p = mock_port_new()
     mock_port_set_in(p, 0x3FB, 32)
-    pr_notice(p, "a")
+    let __lit9: string = "a"
+    pr_notice(p, __lit9.utf8)
     assert_eq(mock_port_write_at(p, 0x3F8, 1), 53)  // '5'
 }
 
 test "pr_info tags the line with level 6 and writes the full message" {
     let p = mock_port_new()
     mock_port_set_in(p, 0x3FB, 32)
-    pr_info(p, "via pr_info")
-    assert_uart_wrote(p, "<6>via pr_info\n")
+    let __lit10: string = "via pr_info"
+    pr_info(p, __lit10.utf8)
+    let __s0_177: string = "<6>via pr_info\n"
+    assert_uart_wrote(p, __s0_177.utf8)
 }
 
 test "pr_debug tags the line with level 7" {
     let p = mock_port_new()
     mock_port_set_in(p, 0x3FB, 32)
-    pr_debug(p, "a")
+    let __lit11: string = "a"
+    pr_debug(p, __lit11.utf8)
     assert_eq(mock_port_write_at(p, 0x3F8, 1), 55)  // '7'
 }
 

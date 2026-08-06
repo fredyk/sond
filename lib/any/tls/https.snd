@@ -20,7 +20,8 @@ include "any/tls/session.snd"
 // identity check alone use tls_handshake_auth.
 fn tls_get(host: i64, port: i64, sni: i64, snilen: i64, path: i64, pathlen: i64, out: i64, cap: i64,
            roots: i64, nroots: i64, now14: i64) -> i64 {
-    let sess = tls_connect(host, port, sni, snilen, "http/1.1", 8, roots, nroots, now14)
+    let __s0_22: string = "http/1.1"
+    let sess = tls_connect(host, port, sni, snilen, __s0_22.utf8, 8, roots, nroots, now14)
     if sess == 0 { return 0 - 1 }
     let req = heap_alloc(2048)
     let rq = tls_http_req(sni, snilen, path, pathlen, req)
@@ -145,11 +146,13 @@ fn tls_is_chunked(buf: i64, hdrend: i64) -> i64 {
         // status line is skipped by the same rule.
         let at_line = if i == 0 { 0 } else { peek8(buf + i - 1) == 10 }
         if at_line == 1 {
-            if tls_word_at(buf, i, hdrend, "transfer-encoding:") == 1 {
+            let __lit0: string = "transfer-encoding:"
+            if tls_word_at(buf, i, hdrend, __lit0.utf8) == 1 {
                 let mut p = i + 18                  // past the colon
                 for p < hdrend {                    // ...to the end of THIS line only
                     if peek8(buf + p) == 13 { return 0 }
-                    if tls_word_at(buf, p, hdrend, "chunked") == 1 { return 1 }
+                    let __lit1: string = "chunked"
+                    if tls_word_at(buf, p, hdrend, __lit1.utf8) == 1 { return 1 }
                     p = p + 1
                 }
                 return 0
@@ -214,11 +217,14 @@ fn tls_req_start(buf: i64, method: i64, path: i64, host: i64) -> i64 {
     if tls_hdr_safe(path) == 0 { return 0 - 1 }
     if tls_hdr_safe(host) == 0 { return 0 - 1 }
     let mut o = tls_put_str(buf, 0, method)
-    o = tls_put_str(buf, o, " ")
+    let __lit2: string = " "
+    o = tls_put_str(buf, o, __lit2.utf8)
     o = tls_put_str(buf, o, path)
-    o = tls_put_str(buf, o, " HTTP/1.1\r\nHost: ")
+    let __lit3: string = " HTTP/1.1\r\nHost: "
+    o = tls_put_str(buf, o, __lit3.utf8)
     o = tls_put_str(buf, o, host)
-    tls_put_str(buf, o, "\r\n")
+    let __lit4: string = "\r\n"
+    tls_put_str(buf, o, __lit4.utf8)
 }
 
 // Appends one "Name: value" header line at `o`. Returns the new offset, or -1 without writing
@@ -229,9 +235,11 @@ fn tls_req_header(buf: i64, o: i64, name: i64, value: i64) -> i64 {
     if tls_hdr_safe(name) == 0 { return 0 - 1 }
     if tls_hdr_safe(value) == 0 { return 0 - 1 }
     let mut p = tls_put_str(buf, o, name)
-    p = tls_put_str(buf, p, ": ")
+    let __lit5: string = ": "
+    p = tls_put_str(buf, p, __lit5.utf8)
     p = tls_put_str(buf, p, value)
-    tls_put_str(buf, p, "\r\n")
+    let __lit6: string = "\r\n"
+    tls_put_str(buf, p, __lit6.utf8)
 }
 
 // Closes the header block and appends the body. `bodylen` is the byte count and it is the
@@ -249,24 +257,30 @@ fn tls_req_end(buf: i64, o: i64, body: i64, bodylen: i64) -> i64 {
     if bodylen < 0 { return 0 - 1 }
     let mut p = o
     if bodylen > 0 {
-        p = tls_put_str(buf, p, "Content-Length: ")
+        let __lit7: string = "Content-Length: "
+        p = tls_put_str(buf, p, __lit7.utf8)
         p = tls_put_uint(buf, p, bodylen)
-        p = tls_put_str(buf, p, "\r\n")
+        let __lit8: string = "\r\n"
+        p = tls_put_str(buf, p, __lit8.utf8)
     }
-    p = tls_put_str(buf, p, "Connection: close\r\n\r\n")
+    let __lit9: string = "Connection: close\r\n\r\n"
+    p = tls_put_str(buf, p, __lit9.utf8)
     let mut j = 0
     for j < bodylen { poke8(buf + p, peek8(body + j)); p = p + 1; j = j + 1 }
     p
 }
 
 fn tls_http_req(hosthdr: i64, hosthdrlen: i64, path: i64, pathlen: i64, buf: i64) -> i64 {
-    let mut o = tls_put_str(buf, 0, "GET ")
+    let __s0_273: string = "GET "
+    let mut o = tls_put_str(buf, 0, __s0_273.utf8)
     let mut i = 0
     for i < pathlen { poke8(buf + o, peek8(path + i)); o = o + 1; i = i + 1 }
-    o = tls_put_str(buf, o, " HTTP/1.1\r\nHost: ")
+    let __lit10: string = " HTTP/1.1\r\nHost: "
+    o = tls_put_str(buf, o, __lit10.utf8)
     i = 0
     for i < hosthdrlen { poke8(buf + o, peek8(hosthdr + i)); o = o + 1; i = i + 1 }
     // The trailing blank line is what ENDS the header block. Without it the request is
     // incomplete and the server is right to wait.
-    tls_put_str(buf, o, "\r\nConnection: close\r\n\r\n")
+    let __lit11: string = "\r\nConnection: close\r\n\r\n"
+    tls_put_str(buf, o, __lit11.utf8)
 }

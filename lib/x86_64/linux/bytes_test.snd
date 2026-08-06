@@ -30,39 +30,50 @@ test "growing past the initial capacity preserves the data" {
 }
 
 test "bytes_from_cstr copies a string literal" {
-    let b = bytes_from_cstr("Hi!")
+    let __s0_32: string = "Hi!"
+    let b = bytes_from_cstr(__s0_32.utf8)
     assert_eq(bytes_len(b), 3)
     assert_eq(bytes_get(b, 0), 72)
     assert_eq(bytes_get(b, 2), 33)
 }
 
 test "bytes_eq: equal buffers" {
-    assert_eq(bytes_eq(bytes_from_cstr("GET"), bytes_from_cstr("GET")), 1)
+    let __s1_40: string = "GET"
+    let __s2_40: string = "GET"
+    assert_eq(bytes_eq(bytes_from_cstr(__s1_40.utf8), bytes_from_cstr(__s2_40.utf8)), 1)
 }
 
 test "bytes_eq: different length" {
-    assert_eq(bytes_eq(bytes_from_cstr("GET"), bytes_from_cstr("POST")), 0)
+    let __s3_46: string = "GET"
+    let __s4_46: string = "POST"
+    assert_eq(bytes_eq(bytes_from_cstr(__s3_46.utf8), bytes_from_cstr(__s4_46.utf8)), 0)
 }
 
 test "bytes_eq: same length, different bytes" {
-    assert_eq(bytes_eq(bytes_from_cstr("GET"), bytes_from_cstr("PUT")), 0)
+    let __s5_52: string = "GET"
+    let __s6_52: string = "PUT"
+    assert_eq(bytes_eq(bytes_from_cstr(__s5_52.utf8), bytes_from_cstr(__s6_52.utf8)), 0)
 }
 
 test "bytes_index_of: found" {
-    assert_eq(bytes_index_of(bytes_from_cstr("a/b"), 47), 1)
+    let __s7_58: string = "a/b"
+    assert_eq(bytes_index_of(bytes_from_cstr(__s7_58.utf8), 47), 1)
 }
 
 test "bytes_index_of: not found" {
-    assert_eq(bytes_index_of(bytes_from_cstr("abc"), 47), 0 - 1)
+    let __s8_63: string = "abc"
+    assert_eq(bytes_index_of(bytes_from_cstr(__s8_63.utf8), 47), 0 - 1)
 }
 
 test "bytes_index_of_from starts at the offset" {
-    let b = bytes_from_cstr("a b c")
+    let __s9_68: string = "a b c"
+    let b = bytes_from_cstr(__s9_68.utf8)
     assert_eq(bytes_index_of_from(b, 32, 2), 3)
 }
 
 test "bytes_slice extracts a subrange" {
-    let b = bytes_from_cstr("GET /x")
+    let __s10_74: string = "GET /x"
+    let b = bytes_from_cstr(__s10_74.utf8)
     let path = bytes_slice(b, 4, 6)
     assert_eq(bytes_len(path), 2)
     assert_eq(bytes_get(path, 0), 47)
@@ -70,28 +81,35 @@ test "bytes_slice extracts a subrange" {
 }
 
 test "bytes_append_cstr appends a literal" {
-    let b = bytes_from_cstr("AB")
-    bytes_append_cstr(b, "CD")
+    let __s11_83: string = "AB"
+    let b = bytes_from_cstr(__s11_83.utf8)
+    let __lit0: string = "CD"
+    bytes_append_cstr(b, __lit0.utf8)
     assert_eq(bytes_len(b), 4)
     assert_eq(bytes_get(b, 3), 68)
 }
 
 test "bytes_append concatenates buffers" {
-    let a = bytes_from_cstr("foo")
-    bytes_append(a, bytes_from_cstr("bar"))
-    assert_eq(bytes_eq(a, bytes_from_cstr("foobar")), 1)
+    let __s12_92: string = "foo"
+    let a = bytes_from_cstr(__s12_92.utf8)
+    let __lit1: string = "bar"
+    bytes_append(a, bytes_from_cstr(__lit1.utf8))
+    let __s13_96: string = "foobar"
+    assert_eq(bytes_eq(a, bytes_from_cstr(__s13_96.utf8)), 1)
 }
 
 test "bytes_append_int: zero" {
     let b = bytes_new()
     bytes_append_int(b, 0)
-    assert_eq(bytes_eq(b, bytes_from_cstr("0")), 1)
+    let __s14_103: string = "0"
+    assert_eq(bytes_eq(b, bytes_from_cstr(__s14_103.utf8)), 1)
 }
 
 test "bytes_append_int: multi-digit" {
     let b = bytes_new()
     bytes_append_int(b, 1234)
-    assert_eq(bytes_eq(b, bytes_from_cstr("1234")), 1)
+    let __s15_110: string = "1234"
+    assert_eq(bytes_eq(b, bytes_from_cstr(__s15_110.utf8)), 1)
 }
 
 test "bytes_from_raw copies a raw region" {
@@ -100,5 +118,6 @@ test "bytes_from_raw copies a raw region" {
     poke8(mem + 1, 66)
     poke8(mem + 2, 67)
     let b = bytes_from_raw(mem, 3)
-    assert_eq(bytes_eq(b, bytes_from_cstr("ABC")), 1)
+    let __s16_120: string = "ABC"
+    assert_eq(bytes_eq(b, bytes_from_cstr(__s16_120.utf8)), 1)
 }

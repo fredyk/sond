@@ -120,9 +120,12 @@ fn __value() -> i64 {
     if c == 123 { return __object() }     // {
     if c == 91 { return __array() }       // [
     if c == 34 { return __string() }      // "
-    if c == 116 { if __lit("true") == 1 { return __node(JSON_BOOL, 1, 0) } __j_err = 1; return __node(JSON_NULL, 0, 0) }
-    if c == 102 { if __lit("false") == 1 { return __node(JSON_BOOL, 0, 0) } __j_err = 1; return __node(JSON_NULL, 0, 0) }
-    if c == 110 { if __lit("null") == 1 { return __node(JSON_NULL, 0, 0) } __j_err = 1; return __node(JSON_NULL, 0, 0) }
+    let __lit0: string = "true"
+    if c == 116 { if __lit(__lit0.utf8) == 1 { return __node(JSON_BOOL, 1, 0) } __j_err = 1; return __node(JSON_NULL, 0, 0) }
+    let __lit1: string = "false"
+    if c == 102 { if __lit(__lit1.utf8) == 1 { return __node(JSON_BOOL, 0, 0) } __j_err = 1; return __node(JSON_NULL, 0, 0) }
+    let __lit2: string = "null"
+    if c == 110 { if __lit(__lit2.utf8) == 1 { return __node(JSON_NULL, 0, 0) } __j_err = 1; return __node(JSON_NULL, 0, 0) }
     if c == 45 || (c >= 48 && c <= 57) { return __number() }
     __j_err = 1
     __node(JSON_NULL, 0, 0)
@@ -236,9 +239,12 @@ fn __enc_str(s: i64, b: i64) {
 
 fn __encode(node: i64, b: i64) {
     let t = node[0]
-    if t == JSON_NULL { bytes_append_cstr(b, "null"); return }
+    let __lit3: string = "null"
+    if t == JSON_NULL { bytes_append_cstr(b, __lit3.utf8); return }
     if t == JSON_BOOL {
-        if node[1] == 1 { bytes_append_cstr(b, "true") } else { bytes_append_cstr(b, "false") }
+        let __lit4: string = "true"
+        let __lit5: string = "false"
+        if node[1] == 1 { bytes_append_cstr(b, __lit4.utf8) } else { bytes_append_cstr(b, __lit5.utf8) }
         return
     }
     if t == JSON_INT { bytes_append_int(b, node[1]); return }

@@ -2468,16 +2468,6 @@ const LITERAL_BUILTINS: [&str; 7] = [
 /// "walk it until a NUL turns up" the natural thing to write — with an address and no length
 /// there is nothing else you can do with it.
 ///
-/// NOT WIRED IN YET, and the reason is worth writing down. Turning it on forces every function
-/// that takes text to declare `string`, and the standard library then hits the OTHER rule: raw
-/// `peek`/`poke` into a buffer the compiler knows the length of is refused, so those bodies must
-/// index instead — and a `string` today carries no length to index against. Measured: 47 files
-/// need the signature change, and 8 of them then need their bodies rewritten, which cannot be
-/// done until `string` carries its own length (a pointer AND a count, the way every language
-/// that got this right does it). The rule below is implemented and tested so that work has a
-/// finished target to land on; it starts rejecting the day `string` can answer `s.len` for a
-/// value it did not see created.
-#[allow(dead_code)]
 pub fn check_string_literal_types(funcs: &[Function]) -> Result<(), String> {
     let sigs: HashMap<&str, &Function> = funcs.iter().map(|f| (f.name.as_str(), f)).collect();
     for f in funcs {
@@ -2489,9 +2479,11 @@ pub fn check_string_literal_types(funcs: &[Function]) -> Result<(), String> {
 fn is_string_ty(ty: &Type) -> bool {
     match ty {
         Type::Named(n) => n == "string",
-        // `let s: string = ".."` is lowered to a byte view by the parser, so the lowered form
-        // counts as the same type.
-        Type::View(inner, _) => matches!(inner.as_ref(), Type::Named(n) if n == "u8"),
+        // `let s: string = ".."` is lowered to a view of code points, and `s.utf8` to a view of
+        // bytes; both are what a literal is allowed to become.
+        Type::View(inner, _) => {
+            matches!(inner.as_ref(), Type::Named(n) if n == "u32" || n == "u8")
+        }
         _ => false,
     }
 }

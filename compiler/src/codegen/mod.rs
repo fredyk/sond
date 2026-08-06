@@ -948,6 +948,10 @@ struct Codegen {
     /// Names declared `extern fn`: called through the platform's C ABI and resolved by the
     /// linker, never emitted.
     extern_fns: HashSet<String>,
+    /// Character literals (`let s: string = ".."`) interned in `.rodata` as one `.long` per code
+    /// point: constant data, emitted once, not rebuilt on every call — a string in a function
+    /// that runs per connection was reserving arena and copying itself each time.
+    char_consts: Vec<(String, Vec<u32>)>,
     /// Views whose length is known at compile time (`u32[16]`, and every `let s: string = ".."`
     /// once the parser has counted the literal), so `s.len` is that constant.
     view_len: HashMap<String, i64>,
@@ -1951,6 +1955,29 @@ impl Codegen {
                         // first use — the worst possible answer to the one spelling that reads as
                         // "give me a buffer". A view initialized from an expression (an existing
                         // address, an allocator's return) keeps binding that expression.
+                        // `let s: string = ".."`: the code points are CONSTANT, so they are
+                        // interned in `.rodata` and the binding is their address. Building them
+                        // at run time meant a function called per connection reserved arena and
+                        // copied its own literal on every call.
+                        if let (Some(crate::ast::Type::View(elem, Some(_))), Expr::Str(text)) =
+                            (ty.as_ref(), value)
+                            && kind_of_type(elem) == Ty::U32
+                        {
+                            let label = format!(".Lchars{}", self.char_consts.len());
+                            let cps: Vec<u32> = text.chars().map(|c| c as u32).collect();
+                            self.char_consts.push((label.clone(), cps));
+                            self.line(&format!("    leaq {label}(%rip), %rax"));
+                            let off = self.slot(name);
+                            self.line(&format!("    movq %rax, {off}(%rbp)"));
+                            self.var_types.insert(name.clone(), Ty::I64);
+                            self.view_elem.insert(name.clone(), Ty::U32);
+                            if let Some(crate::ast::Type::View(_, Some(l))) = ty.as_ref()
+                                && let Ok(n) = l.parse::<i64>()
+                            {
+                                self.view_len.insert(name.clone(), n);
+                            }
+                            continue;
+                        }
                         let reserves = matches!(
                             (ty.as_ref(), value),
                             (

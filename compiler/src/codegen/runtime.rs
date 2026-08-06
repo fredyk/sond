@@ -423,6 +423,18 @@ impl Codegen {
     /// Emits the string-literal data. On UEFI each string is UTF-16 (CHAR16),
     /// as ConOut expects; on the ELF targets it is raw bytes for `write`.
     pub(crate) fn emit_rodata(&mut self) {
+        // Character literals: one 4-byte code point each, read-only and emitted once. The
+        // reservation path would have rebuilt them on every call of the function they appear in.
+        if !self.char_consts.is_empty() {
+            let chars = std::mem::take(&mut self.char_consts);
+            self.line(".section .rodata");
+            self.line(".p2align 2");
+            for (label, cps) in &chars {
+                self.line(&format!("{label}:"));
+                let vals: Vec<String> = cps.iter().map(|c| c.to_string()).collect();
+                self.line(&format!("    .long {}", vals.join(", ")));
+            }
+        }
         // `f64` literals: 8-byte IEEE-754 doubles in read-only data, all targets.
         if !self.float_consts.is_empty() {
             let floats = std::mem::take(&mut self.float_consts);

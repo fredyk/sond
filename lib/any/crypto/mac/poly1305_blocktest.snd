@@ -41,11 +41,14 @@ fn load_hex(buf: i64, n: i64, hexstr: i64) {
 // key || "Cryptographic Forum Research Group" (34 bytes) -> a8061dc1305136c6c22b8baf0c0127a9.
 fn run_rfc_kat() -> i64 {
     let key[32]
-    load_hex(key, 32, "85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b")
-    let msg = "Cryptographic Forum Research Group"
+    let __lit0: string = "85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b"
+    load_hex(key, 32, __lit0.utf8)
+    let msg_text: string = "Cryptographic Forum Research Group"
+    let msg = msg_text.utf8
     let tag[16]
     poly1305_mac(msg, 34, key, tag)
-    eq_hex(tag, 16, "a8061dc1305136c6c22b8baf0c0127a9")
+    let __lit1: string = "a8061dc1305136c6c22b8baf0c0127a9"
+    eq_hex(tag, 16, __lit1.utf8)
 }
 
 // Known-answer test that exercises the final reduction (freeze) mod 2^130-5: for this
@@ -54,12 +57,15 @@ fn run_rfc_kat() -> i64 {
 // tag is from a conformant Poly1305.
 fn run_freeze_kat() -> i64 {
     let key[32]
-    load_hex(key, 32, "0d6ecf3091f253b41576d73899fa5bbc1d7edf40a10263c42586e748a90a6bcc")
+    let __lit2: string = "0d6ecf3091f253b41576d73899fa5bbc1d7edf40a10263c42586e748a90a6bcc"
+    load_hex(key, 32, __lit2.utf8)
     let msg[16]
-    load_hex(msg, 16, "030a11181f262d343b424950575e656c")
+    let __lit3: string = "030a11181f262d343b424950575e656c"
+    load_hex(msg, 16, __lit3.utf8)
     let tag[16]
     poly1305_mac(msg, 16, key, tag)
-    eq_hex(tag, 16, "9ba66393bb0090762cbbf08a0fa3728b")
+    let __lit4: string = "9ba66393bb0090762cbbf08a0fa3728b"
+    eq_hex(tag, 16, __lit4.utf8)
 }
 
 // Test RFC 8439 §2.5.2 Poly1305 vector (32-byte key, empty message).

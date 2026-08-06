@@ -88,19 +88,27 @@ fn dav_build_request(method: i64, path: i64, host: i64, port: i64, extra_headers
     // out-of-bounds read that crashes every real caller (dav_get, dav_put, ...).
     bytes_append_cstr(req, path)
     bytes_push(req, 32)
-    bytes_append_cstr(req, "HTTP/1.1\r\n")
-    bytes_append_cstr(req, "Host: ")
+    let __lit0: string = "HTTP/1.1\r\n"
+    bytes_append_cstr(req, __lit0.utf8)
+    let __lit1: string = "Host: "
+    bytes_append_cstr(req, __lit1.utf8)
     bytes_append_cstr(req, host)
-    bytes_append_cstr(req, ":")
+    let __lit2: string = ":"
+    bytes_append_cstr(req, __lit2.utf8)
     bytes_append_int(req, port)
-    bytes_append_cstr(req, "\r\n")
-    bytes_append_cstr(req, "Content-Type: text/xml; charset=utf-8\r\n")
-    bytes_append_cstr(req, "Connection: close\r\n")
+    let __lit3: string = "\r\n"
+    bytes_append_cstr(req, __lit3.utf8)
+    let __lit4: string = "Content-Type: text/xml; charset=utf-8\r\n"
+    bytes_append_cstr(req, __lit4.utf8)
+    let __lit5: string = "Connection: close\r\n"
+    bytes_append_cstr(req, __lit5.utf8)
 
     if body != 0 && bytes_len(body) > 0 {
-        bytes_append_cstr(req, "Content-Length: ")
+        let __lit6: string = "Content-Length: "
+        bytes_append_cstr(req, __lit6.utf8)
         bytes_append_int(req, bytes_len(body))
-        bytes_append_cstr(req, "\r\n")
+        let __lit7: string = "\r\n"
+        bytes_append_cstr(req, __lit7.utf8)
     }
 
     if extra_headers != 0 && bytes_len(extra_headers) > 0 {
@@ -112,7 +120,8 @@ fn dav_build_request(method: i64, path: i64, host: i64, port: i64, extra_headers
         }
     }
 
-    bytes_append_cstr(req, "\r\n")
+    let __lit8: string = "\r\n"
+    bytes_append_cstr(req, __lit8.utf8)
 
     if body != 0 && bytes_len(body) > 0 {
         bytes_append(req, body)
@@ -242,7 +251,8 @@ pub fn dav_propfind(host: i64, port: i64, path: i64, depth: i64) -> i64 {
     if fd < 0 { return -1 }
     let body = xml_build_propfind_body(path)
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Depth: ")
+    let __lit9: string = "Depth: "
+    bytes_append_cstr(hdr, __lit9.utf8)
     // `depth` is a cstr per the doc comment above (every call passes "0"/"1"/
     // "infinity"), not a bytes handle: bytes_len/bytes_get would walk it as a
     // [data, len, cap] header instead of characters. Default to "0" when unset (depth == 0
@@ -252,8 +262,10 @@ pub fn dav_propfind(host: i64, port: i64, path: i64, depth: i64) -> i64 {
     } else {
         bytes_push(hdr, 48)
     }
-    bytes_append_cstr(hdr, "\r\n")
-    let req = dav_build_request("PROPFIND", path, host, port, hdr, body)
+    let __lit10: string = "\r\n"
+    bytes_append_cstr(hdr, __lit10.utf8)
+    let __s0_266: string = "PROPFIND"
+    let req = dav_build_request(__s0_266.utf8, path, host, port, hdr, body)
     write_buf(fd, peek64(req), bytes_len(req))
     let resp = dav_drain_response(fd)
     close_fd(fd)
@@ -264,7 +276,8 @@ pub fn dav_propfind(host: i64, port: i64, path: i64, depth: i64) -> i64 {
 pub fn dav_get(host: i64, port: i64, path: i64) -> i64 {
     let fd = dav_connect(host, port)
     if fd < 0 { return -1 }
-    let req = dav_build_request("GET", path, host, port, 0, 0)
+    let __s1_278: string = "GET"
+    let req = dav_build_request(__s1_278.utf8, path, host, port, 0, 0)
     write_buf(fd, peek64(req), bytes_len(req))
     let resp = dav_drain_response(fd)
     let status = dav_response_status(resp)
@@ -276,7 +289,8 @@ pub fn dav_get(host: i64, port: i64, path: i64) -> i64 {
 pub fn dav_put(host: i64, port: i64, path: i64, body: i64) -> i64 {
     let fd = dav_connect(host, port)
     if fd < 0 { return -1 }
-    let req = dav_build_request("PUT", path, host, port, 0, body)
+    let __s2_291: string = "PUT"
+    let req = dav_build_request(__s2_291.utf8, path, host, port, 0, body)
     write_buf(fd, peek64(req), bytes_len(req))
     let resp = dav_drain_response(fd)
     let status = dav_response_status(resp)
@@ -288,7 +302,8 @@ pub fn dav_put(host: i64, port: i64, path: i64, body: i64) -> i64 {
 pub fn dav_mkcol(host: i64, port: i64, path: i64) -> i64 {
     let fd = dav_connect(host, port)
     if fd < 0 { return -1 }
-    let req = dav_build_request("MKCOL", path, host, port, 0, 0)
+    let __s3_304: string = "MKCOL"
+    let req = dav_build_request(__s3_304.utf8, path, host, port, 0, 0)
     write_buf(fd, peek64(req), bytes_len(req))
     let resp = dav_drain_response(fd)
     let status = dav_response_status(resp)
@@ -300,7 +315,8 @@ pub fn dav_mkcol(host: i64, port: i64, path: i64) -> i64 {
 pub fn dav_delete(host: i64, port: i64, path: i64) -> i64 {
     let fd = dav_connect(host, port)
     if fd < 0 { return -1 }
-    let req = dav_build_request("DELETE", path, host, port, 0, 0)
+    let __s4_317: string = "DELETE"
+    let req = dav_build_request(__s4_317.utf8, path, host, port, 0, 0)
     write_buf(fd, peek64(req), bytes_len(req))
     let resp = dav_drain_response(fd)
     let status = dav_response_status(resp)
@@ -313,14 +329,18 @@ pub fn dav_move(host: i64, port: i64, src: i64, dst_path: i64) -> i64 {
     let fd = dav_connect(host, port)
     if fd < 0 { return -1 }
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Destination: ")
+    let __lit11: string = "Destination: "
+    bytes_append_cstr(hdr, __lit11.utf8)
     bytes_append_cstr(hdr, host)
-    bytes_append_cstr(hdr, ":")
+    let __lit12: string = ":"
+    bytes_append_cstr(hdr, __lit12.utf8)
     bytes_append_int(hdr, port)
     // `dst_path` is a cstr like `src`/`path` elsewhere in this file, not a bytes handle.
     bytes_append_cstr(hdr, dst_path)
-    bytes_append_cstr(hdr, "\r\n")
-    let req = dav_build_request("MOVE", src, host, port, hdr, 0)
+    let __lit13: string = "\r\n"
+    bytes_append_cstr(hdr, __lit13.utf8)
+    let __s5_341: string = "MOVE"
+    let req = dav_build_request(__s5_341.utf8, src, host, port, hdr, 0)
     write_buf(fd, peek64(req), bytes_len(req))
     let resp = dav_drain_response(fd)
     let status = dav_response_status(resp)
@@ -333,14 +353,18 @@ pub fn dav_copy(host: i64, port: i64, src: i64, dst_path: i64) -> i64 {
     let fd = dav_connect(host, port)
     if fd < 0 { return -1 }
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Destination: ")
+    let __lit14: string = "Destination: "
+    bytes_append_cstr(hdr, __lit14.utf8)
     bytes_append_cstr(hdr, host)
-    bytes_append_cstr(hdr, ":")
+    let __lit15: string = ":"
+    bytes_append_cstr(hdr, __lit15.utf8)
     bytes_append_int(hdr, port)
     // `dst_path` is a cstr like `src`/`path` elsewhere in this file, not a bytes handle.
     bytes_append_cstr(hdr, dst_path)
-    bytes_append_cstr(hdr, "\r\n")
-    let req = dav_build_request("COPY", src, host, port, hdr, 0)
+    let __lit16: string = "\r\n"
+    bytes_append_cstr(hdr, __lit16.utf8)
+    let __s6_365: string = "COPY"
+    let req = dav_build_request(__s6_365.utf8, src, host, port, hdr, 0)
     write_buf(fd, peek64(req), bytes_len(req))
     let resp = dav_drain_response(fd)
     let status = dav_response_status(resp)

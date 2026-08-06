@@ -14,10 +14,14 @@ fn build_test_multistatus(out: i64) {
     let mut buf = bytes_new()
 
     // Resource 1: a collection "/docs/"
-    xml_propfind_response(buf, "/docs/", "Documents", 0, 1)
+    let __lit0: string = "/docs/"
+    let __lit1: string = "Documents"
+    xml_propfind_response(buf, __lit0.utf8, __lit1.utf8, 0, 1)
 
     // Resource 2: a file "/docs/readme.txt"
-    xml_propfind_response(buf, "/docs/readme.txt", "readme.txt", 256, 0)
+    let __lit2: string = "/docs/readme.txt"
+    let __lit3: string = "readme.txt"
+    xml_propfind_response(buf, __lit2.utf8, __lit3.utf8, 256, 0)
 
     let n = bytes_len(buf)
     let mut i = 0
@@ -60,76 +64,103 @@ fn buf_to_stack(src: i64, dst: i64, max: i64) -> i64 {
 
 test "xml_element rounds trip" {
     let buf = bytes_new()
-    xml_element(buf, "title", "Hello World")
-    let content = xml_get_tag_content(buf, "title", 0)
-    assert(buf_eq_cstr(content, "Hello World"))
+    let __lit4: string = "title"
+    let __lit5: string = "Hello World"
+    xml_element(buf, __lit4.utf8, __lit5.utf8)
+    let __s0_69: string = "title"
+    let content = xml_get_tag_content(buf, __s0_69.utf8, 0)
+    let __s0_71: string = "Hello World"
+    assert(buf_eq_cstr(content, __s0_71.utf8))
 }
 
 test "xml_element with empty value" {
     let buf = bytes_new()
-    xml_element(buf, "empty", "")
-    let content = xml_get_tag_content(buf, "empty", 0)
+    let __lit6: string = "empty"
+    let __lit7: string = ""
+    xml_element(buf, __lit6.utf8, __lit7.utf8)
+    let __s1_79: string = "empty"
+    let content = xml_get_tag_content(buf, __s1_79.utf8, 0)
     assert_eq(bytes_len(content), 0)
 }
 
 test "xml_elem_self produces self-closing tag" {
     let buf = bytes_new()
-    xml_elem_self(buf, "br")
-    let found = xml_has_tag(buf, "br", 0)
+    let __lit8: string = "br"
+    xml_elem_self(buf, __lit8.utf8)
+    let __s0_88: string = "br"
+    let found = xml_has_tag(buf, __s0_88.utf8, 0)
     assert_eq(found, 1)
 }
 
 test "xml_find_open_tag finds response tag" {
     let buf = bytes_new()
     build_test_multistatus(buf)
-    let pos = xml_find_open_tag(buf, "response", 0)
+    let __s0_95: string = "response"
+    let pos = xml_find_open_tag(buf, __s0_95.utf8, 0)
     assert(pos >= 0)
 }
 
 test "xml_find_close_tag finds </response>" {
     let buf = bytes_new()
     build_test_multistatus(buf)
-    let pos = xml_find_open_tag(buf, "response", 0)
-    let close_pos = xml_find_close_tag(buf, "response", pos + 1)
+    let __s1_103: string = "response"
+    let pos = xml_find_open_tag(buf, __s1_103.utf8, 0)
+    let __s0_105: string = "response"
+    let close_pos = xml_find_close_tag(buf, __s0_105.utf8, pos + 1)
     assert(close_pos > pos)
 }
 
 test "xml_find_close_tag returns -1 for nonexistent tag" {
-    let buf = bytes_from_cstr("<hello/>")
-    assert_eq(xml_find_close_tag(buf, "response", 0), -1)
+    let __s0_113: string = "<hello/>"
+    let buf = bytes_from_cstr(__s0_113.utf8)
+    let __s1_112: string = "response"
+    assert_eq(xml_find_close_tag(buf, __s1_112.utf8, 0), -1)
 }
 
 test "xml_get_tag_content extracts href value" {
     let buf = bytes_new()
-    xml_element(buf, "href", "/some/path")
-    let content = xml_get_tag_content(buf, "href", 0)
-    assert(buf_eq_cstr(content, "/some/path"))
+    let __lit9: string = "href"
+    let __lit10: string = "/some/path"
+    xml_element(buf, __lit9.utf8, __lit10.utf8)
+    let __s2_117: string = "href"
+    let content = xml_get_tag_content(buf, __s2_117.utf8, 0)
+    let __s1_125: string = "/some/path"
+    assert(buf_eq_cstr(content, __s1_125.utf8))
 }
 
 test "xml_get_tag_content returns empty for missing tag" {
     let buf = bytes_new()
-    xml_element(buf, "href", "/test")
-    let content = xml_get_tag_content(buf, "nothere", 0)
+    let __lit11: string = "href"
+    let __lit12: string = "/test"
+    xml_element(buf, __lit11.utf8, __lit12.utf8)
+    let __s3_127: string = "nothere"
+    let content = xml_get_tag_content(buf, __s3_127.utf8, 0)
     assert_eq(bytes_len(content), 0)
 }
 
 test "xml_has_tag: collection present returns 1" {
     let buf = bytes_new()
     bytes_push(buf, 60)
-    bytes_append_cstr(buf, "resourcetype")
+    let __lit13: string = "resourcetype"
+    bytes_append_cstr(buf, __lit13.utf8)
     bytes_push(buf, 62)
-    xml_elem_self(buf, "collection")
+    let __lit14: string = "collection"
+    xml_elem_self(buf, __lit14.utf8)
     bytes_push(buf, 60)
     bytes_push(buf, 47)
-    bytes_append_cstr(buf, "resourcetype")
+    let __lit15: string = "resourcetype"
+    bytes_append_cstr(buf, __lit15.utf8)
     bytes_push(buf, 62)
-    assert(xml_has_tag(buf, "collection", 0))
+    let __s1_150: string = "collection"
+    assert(xml_has_tag(buf, __s1_150.utf8, 0))
 }
 
 test "xml_has_tag: collection absent returns 0" {
     let buf = bytes_new()
-    xml_elem_self(buf, "resourcetype")
-    let found = xml_has_tag(buf, "collection", 0)
+    let __lit16: string = "resourcetype"
+    xml_elem_self(buf, __lit16.utf8)
+    let __s2_158: string = "collection"
+    let found = xml_has_tag(buf, __s2_158.utf8, 0)
     assert_eq(found, 0)
 }
 
@@ -142,20 +173,23 @@ test "xml_extract_hrefs extracts two hrefs" {
     // First NUL-delimited field is "/docs/"
     let pos1 = bytes_index_of(out, 0)
     let href1 = bytes_slice(out, 0, pos1)
-    assert(buf_eq_cstr(href1, "/docs/"))
+    let __s2_174: string = "/docs/"
+    assert(buf_eq_cstr(href1, __s2_174.utf8))
     // Second href
     let after_nl = pos1 + 2
     let pos2 = bytes_index_of_from(out, 0, after_nl)
     assert(pos2 != -1)
     let href2 = bytes_slice(out, after_nl, pos2)
-    assert(buf_eq_cstr(href2, "/docs/readme.txt"))
+    let __s3_181: string = "/docs/readme.txt"
+    assert(buf_eq_cstr(href2, __s3_181.utf8))
 }
 
 test "xml_extract_hrefs base not prepended for absolute hrefs" {
     let out = bytes_new()
     let buf = bytes_new()
     build_test_multistatus(buf)
-    let count = xml_extract_hrefs(out, "http://base", buf)
+    let __s0_190: string = "http://base"
+    let count = xml_extract_hrefs(out, __s0_190.utf8, buf)
     assert_eq(count, 2)
     // First href starts with '/' (47)
     assert_eq(bytes_get(out, 0), 47)
@@ -164,8 +198,11 @@ test "xml_extract_hrefs base not prepended for absolute hrefs" {
 test "xml_extract_hrefs prepends base for relative hrefs" {
     let out = bytes_new()
     let entry = bytes_new()
-    xml_propfind_response(entry, "relative/path", "RelFile", 42, 0)
-    let count = xml_extract_hrefs(out, "http://localhost", entry)
+    let __lit17: string = "relative/path"
+    let __lit18: string = "RelFile"
+    xml_propfind_response(entry, __lit17.utf8, __lit18.utf8, 42, 0)
+    let __s1_203: string = "http://localhost"
+    let count = xml_extract_hrefs(out, __s1_203.utf8, entry)
     assert(count >= 1)
     // First href should start with the base URL
     let pos1 = bytes_index_of(out, 0)
@@ -189,23 +226,35 @@ test "xml_count_responses returns 0 for empty buffer" {
 
 test "xml_propfind_response generates valid structure" {
     let out = bytes_new()
-    xml_propfind_response(out, "/file", "myfile", 100, 0)
-    assert(xml_find_open_tag(out, "response", 0) >= 0)
-    assert(xml_find_open_tag(out, "href", 0) >= 0)
-    assert(xml_find_close_tag(out, "response", 0) >= 0)
-    assert(xml_find_open_tag(out, "propstat", 0) >= 0)
+    let __lit19: string = "/file"
+    let __lit20: string = "myfile"
+    xml_propfind_response(out, __lit19.utf8, __lit20.utf8, 100, 0)
+    let __s2_219: string = "response"
+    assert(xml_find_open_tag(out, __s2_219.utf8, 0) >= 0)
+    let __s3_221: string = "href"
+    assert(xml_find_open_tag(out, __s3_221.utf8, 0) >= 0)
+    let __s2_225: string = "response"
+    assert(xml_find_close_tag(out, __s2_225.utf8, 0) >= 0)
+    let __s4_224: string = "propstat"
+    assert(xml_find_open_tag(out, __s4_224.utf8, 0) >= 0)
 }
 
 test "xml_propfind_response collection has <collection/>" {
     let out = bytes_new()
-    xml_propfind_response(out, "/dir", "mydir", 0, 1)
-    assert(xml_has_tag(out, "collection", 0) != 0)
+    let __lit21: string = "/dir"
+    let __lit22: string = "mydir"
+    xml_propfind_response(out, __lit21.utf8, __lit22.utf8, 0, 1)
+    let __s3_239: string = "collection"
+    assert(xml_has_tag(out, __s3_239.utf8, 0) != 0)
 }
 
 test "xml_propfind_response file does NOT have <collection/>" {
     let out = bytes_new()
-    xml_propfind_response(out, "/file", "myfile", 256, 0)
-    assert_eq(xml_has_tag(out, "collection", 0), 0)
+    let __lit23: string = "/file"
+    let __lit24: string = "myfile"
+    xml_propfind_response(out, __lit23.utf8, __lit24.utf8, 256, 0)
+    let __s4_248: string = "collection"
+    assert_eq(xml_has_tag(out, __s4_248.utf8, 0), 0)
 }
 
 test "xml_parse_response extracts href from multistatus" {
@@ -217,7 +266,8 @@ test "xml_parse_response extracts href from multistatus" {
     assert_eq(result, 1)
     let n1 = bytes_index_of(out, 0)
     let href = bytes_slice(out, 0, n1)
-    assert(buf_eq_cstr(href, "/docs/"))
+    let __s4_265: string = "/docs/"
+    assert(buf_eq_cstr(href, __s4_265.utf8))
 }
 
 test "xml_parse_response extracts collection flag" {
@@ -232,27 +282,36 @@ test "xml_parse_response extracts collection flag" {
 }
 
 test "xml_build_propfind_body builds valid XML" {
-    let body = xml_build_propfind_body("/test")
+    let __s0_284: string = "/test"
+    let body = xml_build_propfind_body(__s0_284.utf8)
     assert(bytes_len(body) > 0)
 }
 
 test "xml_build_propfind_body contains propfind tag" {
-    let body = xml_build_propfind_body("/test")
-    assert(xml_find_open_tag(body, "propfind", 0) >= 0)
+    let __s1_290: string = "/test"
+    let body = xml_build_propfind_body(__s1_290.utf8)
+    let __s5_274: string = "propfind"
+    assert(xml_find_open_tag(body, __s5_274.utf8, 0) >= 0)
 }
 
 test "xml_build_propfind_body contains DAV namespace" {
-    let body = xml_build_propfind_body("/test")
-    assert(xml_find_open_tag(body, "propfind", 0) >= 0)
+    let __s2_297: string = "/test"
+    let body = xml_build_propfind_body(__s2_297.utf8)
+    let __s6_280: string = "propfind"
+    assert(xml_find_open_tag(body, __s6_280.utf8, 0) >= 0)
 }
 
 test "xml_multistatus wraps responses correctly" {
     let responses = bytes_new()
-    xml_propfind_response(responses, "/a", "A", 100, 0)
+    let __lit25: string = "/a"
+    let __lit26: string = "A"
+    xml_propfind_response(responses, __lit25.utf8, __lit26.utf8, 100, 0)
     let wrapped = bytes_new()
     xml_multistatus(wrapped, responses)
-    assert(xml_find_open_tag(wrapped, "multistatus", 0) >= 0)
-    assert(xml_find_open_tag(wrapped, "response", 0) >= 0)
+    let __s7_291: string = "multistatus"
+    assert(xml_find_open_tag(wrapped, __s7_291.utf8, 0) >= 0)
+    let __s8_293: string = "response"
+    assert(xml_find_open_tag(wrapped, __s8_293.utf8, 0) >= 0)
 }
 
 test "xml_get_tag_content handles whitespace/indentation" {
@@ -260,40 +319,52 @@ test "xml_get_tag_content handles whitespace/indentation" {
     bytes_push(buf, 10)  // \n
     bytes_push(buf, 32); bytes_push(buf, 32)  // two spaces
     bytes_push(buf, 60)
-    bytes_append_cstr(buf, "displayname")
+    let __lit27: string = "displayname"
+    bytes_append_cstr(buf, __lit27.utf8)
     bytes_push(buf, 62)
-    bytes_append_cstr(buf, "indented")
+    let __lit28: string = "indented"
+    bytes_append_cstr(buf, __lit28.utf8)
     bytes_push(buf, 60)
     bytes_push(buf, 47)
-    bytes_append_cstr(buf, "displayname")
+    let __lit29: string = "displayname"
+    bytes_append_cstr(buf, __lit29.utf8)
     bytes_push(buf, 62)
-    let content = xml_get_tag_content(buf, "displayname", 0)
-    assert(buf_eq_cstr(content, "indented"))
+    let __s4_303: string = "displayname"
+    let content = xml_get_tag_content(buf, __s4_303.utf8, 0)
+    let __s5_327: string = "indented"
+    assert(buf_eq_cstr(content, __s5_327.utf8))
 }
 
 // Additional coverage tests for helper functions
 test "buf_eq_cstr: matches simple string" {
     let buf = bytes_new()
-    bytes_append_cstr(buf, "hello")
-    assert(buf_eq_cstr(buf, "hello") != 0)
+    let __lit30: string = "hello"
+    bytes_append_cstr(buf, __lit30.utf8)
+    let __s6_336: string = "hello"
+    assert(buf_eq_cstr(buf, __s6_336.utf8) != 0)
 }
 
 test "buf_eq_cstr: different strings" {
     let buf = bytes_new()
-    bytes_append_cstr(buf, "hello")
-    let result = buf_eq_cstr(buf, "world")
+    let __lit31: string = "hello"
+    bytes_append_cstr(buf, __lit31.utf8)
+    let __s7_344: string = "world"
+    let result = buf_eq_cstr(buf, __s7_344.utf8)
     assert_eq(result, 0)
 }
 
 test "xml_extract_hrefs: single href in buffer" {
     let buf = bytes_new()
     bytes_push(buf, 60)
-    bytes_append_cstr(buf, "href")
+    let __lit32: string = "href"
+    bytes_append_cstr(buf, __lit32.utf8)
     bytes_push(buf, 62)
-    bytes_append_cstr(buf, "/path/to/file")
+    let __lit33: string = "/path/to/file"
+    bytes_append_cstr(buf, __lit33.utf8)
     bytes_push(buf, 60)
     bytes_push(buf, 47)
-    bytes_append_cstr(buf, "href")
+    let __lit34: string = "href"
+    bytes_append_cstr(buf, __lit34.utf8)
     bytes_push(buf, 62)
     let out = bytes_new()
     let count = xml_extract_hrefs(out, 0, buf)
@@ -305,19 +376,28 @@ test "xml_extract_hrefs: single href in buffer" {
 }
 
 test "xml_build_propfind_body: has all expected elements" {
-    let body = xml_build_propfind_body("/test")
-    assert(xml_find_open_tag(body, "propfind", 0) >= 0)
-    assert(xml_find_open_tag(body, "prop", 0) >= 0)
-    assert(xml_find_open_tag(body, "displayname", 0) >= 0)
-    assert(xml_find_open_tag(body, "resourcetype", 0) >= 0)
-    assert(xml_find_open_tag(body, "getcontentlength", 0) >= 0)
-    assert(xml_find_open_tag(body, "getlastmodified", 0) >= 0)
-    assert(xml_find_open_tag(body, "lockdiscovery", 0) >= 0)
+    let __s3_378: string = "/test"
+    let body = xml_build_propfind_body(__s3_378.utf8)
+    let __s9_357: string = "propfind"
+    assert(xml_find_open_tag(body, __s9_357.utf8, 0) >= 0)
+    let __s10_359: string = "prop"
+    assert(xml_find_open_tag(body, __s10_359.utf8, 0) >= 0)
+    let __s11_361: string = "displayname"
+    assert(xml_find_open_tag(body, __s11_361.utf8, 0) >= 0)
+    let __s12_363: string = "resourcetype"
+    assert(xml_find_open_tag(body, __s12_363.utf8, 0) >= 0)
+    let __s13_365: string = "getcontentlength"
+    assert(xml_find_open_tag(body, __s13_365.utf8, 0) >= 0)
+    let __s14_367: string = "getlastmodified"
+    assert(xml_find_open_tag(body, __s14_367.utf8, 0) >= 0)
+    let __s15_369: string = "lockdiscovery"
+    assert(xml_find_open_tag(body, __s15_369.utf8, 0) >= 0)
 }
 
 test "buf_to_stack: copies bytes to stack array" {
     let src = bytes_new()
-    bytes_append_cstr(src, "hello")
+    let __lit35: string = "hello"
+    bytes_append_cstr(src, __lit35.utf8)
     let dst[32]
     let copied = buf_to_stack(src, dst, 32)
     assert_eq(copied, 5)  // "hello" is 5 chars
@@ -329,22 +409,26 @@ test "buf_to_stack: copies bytes to stack array" {
 
 test "buf_eq_cstr: empty buffer" {
     let buf = bytes_new()
-    let result = buf_eq_cstr(buf, "")
+    let __s8_404: string = ""
+    let result = buf_eq_cstr(buf, __s8_404.utf8)
     assert_eq(result, 1)  // empty buffer matches empty cstr
 }
 
 test "buf_eq_cstr: buffer longer than the cstr stops at the cstr's NUL" {
     let buf = bytes_new()
-    bytes_append_cstr(buf, "hello world")
+    let __lit36: string = "hello world"
+    bytes_append_cstr(buf, __lit36.utf8)
     // Only the first 5 bytes are compared; the loop must exit via the cstr's
     // own NUL terminator (cc == 0), not via reaching the buffer's length.
-    let result = buf_eq_cstr(buf, "hello")
+    let __s9_415: string = "hello"
+    let result = buf_eq_cstr(buf, __s9_415.utf8)
     assert_eq(result, 1)
 }
 
 test "buf_to_stack: truncates to max when the buffer is longer" {
     let src = bytes_new()
-    bytes_append_cstr(src, "hello world")
+    let __lit37: string = "hello world"
+    bytes_append_cstr(src, __lit37.utf8)
     let dst[4]
     let copied = buf_to_stack(src, dst, 4)
     assert_eq(copied, 4)
@@ -355,47 +439,70 @@ test "buf_to_stack: truncates to max when the buffer is longer" {
 test "xml_propfind_response: default href" {
     // Test with "/" as href (common case)
     let buf = bytes_new()
-    xml_propfind_response(buf, "/", "root", 0, 1)
-    let href = xml_get_tag_content(buf, "href", 0)
-    assert(buf_eq_cstr(href, "/"))
-    assert(xml_has_tag(buf, "collection", 0) != 0)
+    let __lit38: string = "/"
+    let __lit39: string = "root"
+    xml_propfind_response(buf, __lit38.utf8, __lit39.utf8, 0, 1)
+    let __s5_403: string = "href"
+    let href = xml_get_tag_content(buf, __s5_403.utf8, 0)
+    let __s10_439: string = "/"
+    assert(buf_eq_cstr(href, __s10_439.utf8))
+    let __s5_430: string = "collection"
+    assert(xml_has_tag(buf, __s5_430.utf8, 0) != 0)
 }
 
 test "xml_element: nested tags" {
     let buf = bytes_new()
     bytes_push(buf, 60)
-    bytes_append_cstr(buf, "prop")
+    let __lit40: string = "prop"
+    bytes_append_cstr(buf, __lit40.utf8)
     bytes_push(buf, 62)
-    xml_element(buf, "displayname", "testname")
+    let __lit41: string = "displayname"
+    let __lit42: string = "testname"
+    xml_element(buf, __lit41.utf8, __lit42.utf8)
     bytes_push(buf, 60)
     bytes_push(buf, 47)
-    bytes_append_cstr(buf, "prop")
+    let __lit43: string = "prop"
+    bytes_append_cstr(buf, __lit43.utf8)
     bytes_push(buf, 62)
-    let content = xml_get_tag_content(buf, "displayname", 0)
-    assert(buf_eq_cstr(content, "testname"))
+    let __s6_423: string = "displayname"
+    let content = xml_get_tag_content(buf, __s6_423.utf8, 0)
+    let __s11_461: string = "testname"
+    assert(buf_eq_cstr(content, __s11_461.utf8))
 }
 
 test "xml_propfind_response full round-trip" {
     let buf = bytes_new()
-    xml_propfind_response(buf, "/docs/readme.txt", "readme.txt", 256, 0)
+    let __lit44: string = "/docs/readme.txt"
+    let __lit45: string = "readme.txt"
+    xml_propfind_response(buf, __lit44.utf8, __lit45.utf8, 256, 0)
     // href
-    let href = xml_get_tag_content(buf, "href", 0)
-    assert(buf_eq_cstr(href, "/docs/readme.txt"))
+    let __s7_434: string = "href"
+    let href = xml_get_tag_content(buf, __s7_434.utf8, 0)
+    let __s12_473: string = "/docs/readme.txt"
+    assert(buf_eq_cstr(href, __s12_473.utf8))
     // displayname
-    let dn = xml_get_tag_content(buf, "displayname", 0)
-    assert(buf_eq_cstr(dn, "readme.txt"))
+    let __s8_438: string = "displayname"
+    let dn = xml_get_tag_content(buf, __s8_438.utf8, 0)
+    let __s13_478: string = "readme.txt"
+    assert(buf_eq_cstr(dn, __s13_478.utf8))
 }
 
 test "xml_propfind_response collection round-trip" {
     let buf = bytes_new()
-    xml_propfind_response(buf, "/docs/", "Documents", 0, 1)
+    let __lit46: string = "/docs/"
+    let __lit47: string = "Documents"
+    xml_propfind_response(buf, __lit46.utf8, __lit47.utf8, 0, 1)
     // href
-    let href = xml_get_tag_content(buf, "href", 0)
-    assert(buf_eq_cstr(href, "/docs/"))
+    let __s9_449: string = "href"
+    let href = xml_get_tag_content(buf, __s9_449.utf8, 0)
+    let __s14_490: string = "/docs/"
+    assert(buf_eq_cstr(href, __s14_490.utf8))
     // has collection
-    assert(xml_has_tag(buf, "collection", 0) != 0)
+    let __s6_478: string = "collection"
+    assert(xml_has_tag(buf, __s6_478.utf8, 0) != 0)
     // getcontentlength should be "0" for collections
-    let clen = xml_get_tag_content(buf, "getcontentlength", 0)
+    let __s10_455: string = "getcontentlength"
+    let clen = xml_get_tag_content(buf, __s10_455.utf8, 0)
     assert_ne(bytes_len(clen), 0)  // content-length tag should have content (zero)
 }
 
@@ -403,8 +510,10 @@ test "parse second response block separately" {
     let xml_buf = bytes_new()
     build_test_multistatus(xml_buf)
     // Find the second <response> block
-    let first_resp_end = xml_find_close_tag(xml_buf, "response", 0)
-    let second_resp_start = xml_find_open_tag(xml_buf, "response", first_resp_end + 2)
+    let __s3_483: string = "response"
+    let first_resp_end = xml_find_close_tag(xml_buf, __s3_483.utf8, 0)
+    let __s16_481: string = "response"
+    let second_resp_start = xml_find_open_tag(xml_buf, __s16_481.utf8, first_resp_end + 2)
     assert(second_resp_start >= 0)
     let out = bytes_new()
     let cf_buf: i64 = heap_alloc(8)
@@ -412,7 +521,8 @@ test "parse second response block separately" {
     assert_eq(result, 1)
     let n1 = bytes_index_of(out, 0)
     let href = bytes_slice(out, 0, n1)
-    assert(buf_eq_cstr(href, "/docs/readme.txt"))
+    let __s15_516: string = "/docs/readme.txt"
+    assert(buf_eq_cstr(href, __s15_516.utf8))
 }
 // COV
 // UPDATE

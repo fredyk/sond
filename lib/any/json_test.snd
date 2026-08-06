@@ -9,68 +9,97 @@ include "x86_64/linux/testing.snd"
 fn parse(s: i64) -> i64 { json_parse(s, strlen(s)) }
 
 test "parses a flat object and reads scalar fields" {
-    let o = parse("{\"port\": 5432, \"name\": \"pgv\", \"ok\": true, \"off\": false, \"z\": null}")
+    let __s0_11: string = "{\"port\": 5432, \"name\": \"pgv\", \"ok\": true, \"off\": false, \"z\": null}"
+    let o = parse(__s0_11.utf8)
     assert_eq(json_type(o), JSON_OBJ)
-    assert_eq(json_type(json_get(o, "port")), JSON_INT)
-    assert_eq(json_int(json_get(o, "port")), 5432)
-    assert_eq(json_type(json_get(o, "name")), JSON_STR)
-    assert_eq(streq(json_str(json_get(o, "name")), "pgv"), 1)
-    assert_eq(json_bool(json_get(o, "ok")), 1)
-    assert_eq(json_bool(json_get(o, "off")), 0)
-    assert_eq(json_type(json_get(o, "z")), JSON_NULL)
+    let __s0_14: string = "port"
+    assert_eq(json_type(json_get(o, __s0_14.utf8)), JSON_INT)
+    let __s1_16: string = "port"
+    assert_eq(json_int(json_get(o, __s1_16.utf8)), 5432)
+    let __s2_18: string = "name"
+    assert_eq(json_type(json_get(o, __s2_18.utf8)), JSON_STR)
+    let __s3_20: string = "name"
+    let __s4_20: string = "pgv"
+    assert_eq(streq(json_str(json_get(o, __s3_20.utf8)), __s4_20.utf8), 1)
+    let __s5_23: string = "ok"
+    assert_eq(json_bool(json_get(o, __s5_23.utf8)), 1)
+    let __s6_25: string = "off"
+    assert_eq(json_bool(json_get(o, __s6_25.utf8)), 0)
+    let __s7_27: string = "z"
+    assert_eq(json_type(json_get(o, __s7_27.utf8)), JSON_NULL)
 }
 
 test "a missing key returns -1" {
-    let o = parse("{\"a\": 1}")
-    assert_eq(json_get(o, "b"), 0 - 1)
+    let __s1_24: string = "{\"a\": 1}"
+    let o = parse(__s1_24.utf8)
+    let __s8_34: string = "b"
+    assert_eq(json_get(o, __s8_34.utf8), 0 - 1)
 }
 
 test "parses an array of integers" {
-    let a = parse("[10, 20, 30]")
+    let __s2_30: string = "[10, 20, 30]"
+    let a = parse(__s2_30.utf8)
     assert_eq(json_type(a), JSON_ARR)
     assert_eq(json_arr_len(a), 3)
     assert_eq(json_int(json_arr_get(a, 1)), 20)
 }
 
 test "a negative integer" {
-    let o = parse("{\"n\": -7}")
-    assert_eq(json_int(json_get(o, "n")), 0 - 7)
+    let __s3_38: string = "{\"n\": -7}"
+    let o = parse(__s3_38.utf8)
+    let __s9_49: string = "n"
+    assert_eq(json_int(json_get(o, __s9_49.utf8)), 0 - 7)
 }
 
 test "decodes a backslash-n escape in a string" {
-    let o = parse("{\"s\": \"a\\nb\"}")
-    let s = json_str(json_get(o, "s"))
-    assert_eq(json_str_len(json_get(o, "s")), 3)
+    let __s4_44: string = "{\"s\": \"a\\nb\"}"
+    let o = parse(__s4_44.utf8)
+    let __s10_56: string = "s"
+    let s = json_str(json_get(o, __s10_56.utf8))
+    let __s11_58: string = "s"
+    assert_eq(json_str_len(json_get(o, __s11_58.utf8)), 3)
     assert_eq(peek8(s + 1), 10)
 }
 
 test "nested object and array" {
-    let o = parse("{\"cfg\": {\"dim\": 384}, \"tags\": [\"a\", \"b\"]}")
-    let cfg = json_get(o, "cfg")
-    assert_eq(json_int(json_get(cfg, "dim")), 384)
-    let tags = json_get(o, "tags")
+    let __s5_52: string = "{\"cfg\": {\"dim\": 384}, \"tags\": [\"a\", \"b\"]}"
+    let o = parse(__s5_52.utf8)
+    let __s12_66: string = "cfg"
+    let cfg = json_get(o, __s12_66.utf8)
+    let __s13_68: string = "dim"
+    assert_eq(json_int(json_get(cfg, __s13_68.utf8)), 384)
+    let __s14_70: string = "tags"
+    let tags = json_get(o, __s14_70.utf8)
     assert_eq(json_arr_len(tags), 2)
-    assert_eq(streq(json_str(json_arr_get(tags, 1)), "b"), 1)
+    let __s0_73: string = "b"
+    assert_eq(streq(json_str(json_arr_get(tags, 1)), __s0_73.utf8), 1)
 }
 
 test "malformed input returns -1" {
-    assert_eq(parse("{\"a\": }"), 0 - 1)
+    let __s6_62: string = "{\"a\": }"
+    assert_eq(parse(__s6_62.utf8), 0 - 1)
 }
 
 test "empty object and empty array" {
-    assert_eq(json_type(parse("{}")), JSON_OBJ)
-    assert_eq(json_arr_len(parse("[]")), 0)
+    let __s7_67: string = "{}"
+    assert_eq(json_type(parse(__s7_67.utf8)), JSON_OBJ)
+    let __s8_69: string = "[]"
+    assert_eq(json_arr_len(parse(__s8_69.utf8)), 0)
 }
 
 test "a float keeps its integer part" {
-    let o = parse("{\"x\": 3.14, \"e\": 2e3}")
-    assert_eq(json_int(json_get(o, "x")), 3)
+    let __s9_74: string = "{\"x\": 3.14, \"e\": 2e3}"
+    let o = parse(__s9_74.utf8)
+    let __s15_91: string = "x"
+    assert_eq(json_int(json_get(o, __s15_91.utf8)), 3)
 }
 
 test "decodes all simple escapes" {
     // "\t\r\\\"/\b\f" -> tab cr backslash quote slash backspace formfeed
-    let o = parse("{\"s\": \"\\t\\r\\\\\\\"\\/\\b\\f\"}")
-    let s = json_str(json_get(o, "s"))
+    let __s10_81: string = "{\"s\": \"\\t\\r\\\\\\\"\\/\\b\\f\"}"
+    let o = parse(__s10_81.utf8)
+    let __s16_99: string = "s"
+    let s = json_str(json_get(o, __s16_99.utf8))
     assert_eq(peek8(s + 0), 9)     // \t
     assert_eq(peek8(s + 1), 13)    // \r
     assert_eq(peek8(s + 2), 92)    // backslash
@@ -81,55 +110,83 @@ test "decodes all simple escapes" {
 }
 
 test "a truncated literal is an error" {
-    assert_eq(parse("tru"), 0 - 1)
-    assert_eq(parse("nul"), 0 - 1)
-    assert_eq(parse("fals"), 0 - 1)
+    let __s11_94: string = "tru"
+    assert_eq(parse(__s11_94.utf8), 0 - 1)
+    let __s12_96: string = "nul"
+    assert_eq(parse(__s12_96.utf8), 0 - 1)
+    let __s13_98: string = "fals"
+    assert_eq(parse(__s13_98.utf8), 0 - 1)
 }
 
 test "empty input is an error" {
-    assert_eq(parse(""), 0 - 1)
+    let __s14_103: string = ""
+    assert_eq(parse(__s14_103.utf8), 0 - 1)
 }
 
 test "an unterminated string is an error" {
-    assert_eq(parse("{\"a\": \"xyz"), 0 - 1)
+    let __s15_108: string = "{\"a\": \"xyz"
+    assert_eq(parse(__s15_108.utf8), 0 - 1)
 }
 
 test "an unterminated array is an error" {
-    assert_eq(parse("[1, 2"), 0 - 1)
+    let __s16_113: string = "[1, 2"
+    assert_eq(parse(__s16_113.utf8), 0 - 1)
 }
 
 test "top-level scalars parse" {
-    assert_eq(json_int(parse("42")), 42)
-    assert_eq(json_bool(parse("true")), 1)
-    assert_eq(json_type(parse("null")), JSON_NULL)
-    assert_eq(streq(json_str(parse("\"hi\"")), "hi"), 1)
+    let __s17_118: string = "42"
+    assert_eq(json_int(parse(__s17_118.utf8)), 42)
+    let __s18_120: string = "true"
+    assert_eq(json_bool(parse(__s18_120.utf8)), 1)
+    let __s19_122: string = "null"
+    assert_eq(json_type(parse(__s19_122.utf8)), JSON_NULL)
+    let __s20_124: string = "\"hi\""
+    let __s21_124: string = "hi"
+    assert_eq(streq(json_str(parse(__s20_124.utf8)), __s21_124.utf8), 1)
 }
 
 test "builds and encodes an object, round-trips through the parser" {
     let o = json_new_obj()
-    json_obj_put(o, "port", json_new_int(5432))
-    json_obj_put(o, "name", json_new_str("pgv"))
-    json_obj_put(o, "ok", json_new_bool(1))
+    let __lit0: string = "port"
+    json_obj_put(o, __lit0.utf8, json_new_int(5432))
+    let __lit1: string = "name"
+    let __lit2: string = "pgv"
+    json_obj_put(o, __lit1.utf8, json_new_str(__lit2.utf8))
+    let __lit3: string = "ok"
+    json_obj_put(o, __lit3.utf8, json_new_bool(1))
     let tags = json_new_arr()
-    json_arr_push(tags, json_new_str("a"))
+    let __lit4: string = "a"
+    json_arr_push(tags, json_new_str(__lit4.utf8))
     json_arr_push(tags, json_new_int(2))
-    json_obj_put(o, "tags", tags)
+    let __lit5: string = "tags"
+    json_obj_put(o, __lit5.utf8, tags)
     let buf = json_encode(o)
     // parse the encoded bytes back and check the values survived
     let p = json_parse(peek64(buf), bytes_len(buf))
-    assert_eq(json_int(json_get(p, "port")), 5432)
-    assert_eq(streq(json_str(json_get(p, "name")), "pgv"), 1)
-    assert_eq(json_bool(json_get(p, "ok")), 1)
-    assert_eq(json_arr_len(json_get(p, "tags")), 2)
-    assert_eq(streq(json_str(json_arr_get(json_get(p, "tags"), 0)), "a"), 1)
+    let __s17_164: string = "port"
+    assert_eq(json_int(json_get(p, __s17_164.utf8)), 5432)
+    let __s18_166: string = "name"
+    let __s19_166: string = "pgv"
+    assert_eq(streq(json_str(json_get(p, __s18_166.utf8)), __s19_166.utf8), 1)
+    let __s20_169: string = "ok"
+    assert_eq(json_bool(json_get(p, __s20_169.utf8)), 1)
+    let __s21_171: string = "tags"
+    assert_eq(json_arr_len(json_get(p, __s21_171.utf8)), 2)
+    let __s22_173: string = "tags"
+    let __s23_173: string = "a"
+    assert_eq(streq(json_str(json_arr_get(json_get(p, __s22_173.utf8), 0)), __s23_173.utf8), 1)
 }
 
 test "encode escapes quotes and control chars" {
     let o = json_new_obj()
-    json_obj_put(o, "s", json_new_str("a\"b"))
+    let __lit6: string = "s"
+    let __lit7: string = "a\"b"
+    json_obj_put(o, __lit6.utf8, json_new_str(__lit7.utf8))
     let buf = json_encode(o)
     let p = json_parse(peek64(buf), bytes_len(buf))
-    assert_eq(streq(json_str(json_get(p, "s")), "a\"b"), 1)
+    let __s24_185: string = "s"
+    let __s25_185: string = "a\"b"
+    assert_eq(streq(json_str(json_get(p, __s24_185.utf8)), __s25_185.utf8), 1)
 }
 
 test "encodes null and empties" {

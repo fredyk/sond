@@ -13,12 +13,18 @@ let O_CREAT = 64
 let O_TRUNC = 512
 
 test "http_safe_path allows names and subdirs, rejects traversal and bad chars" {
-    assert_eq(http_safe_path(bytes_from_cstr("index.html")), 1)
-    assert_eq(http_safe_path(bytes_from_cstr("assets/logo.svg")), 1)
-    assert_eq(http_safe_path(bytes_from_cstr("../etc/passwd")), 0)
-    assert_eq(http_safe_path(bytes_from_cstr("x..y")), 0)
-    assert_eq(http_safe_path(bytes_from_cstr("a b")), 0)
-    assert_eq(http_safe_path(bytes_from_cstr("")), 0)
+    let __s0_15: string = "index.html"
+    assert_eq(http_safe_path(bytes_from_cstr(__s0_15.utf8)), 1)
+    let __s1_17: string = "assets/logo.svg"
+    assert_eq(http_safe_path(bytes_from_cstr(__s1_17.utf8)), 1)
+    let __s2_19: string = "../etc/passwd"
+    assert_eq(http_safe_path(bytes_from_cstr(__s2_19.utf8)), 0)
+    let __s3_21: string = "x..y"
+    assert_eq(http_safe_path(bytes_from_cstr(__s3_21.utf8)), 0)
+    let __s4_23: string = "a b"
+    assert_eq(http_safe_path(bytes_from_cstr(__s4_23.utf8)), 0)
+    let __s5_25: string = ""
+    assert_eq(http_safe_path(bytes_from_cstr(__s5_25.utf8)), 0)
 }
 
 test "http_send_redirect writes a 301 with the Location header" {
@@ -27,21 +33,25 @@ test "http_send_redirect writes a 301 with the Location header" {
     syscall(SYS_pipe, fds)
     let rfd = peek32(fds + 0)
     let wfd = peek32(fds + 4)
-    http_send_redirect(wfd, "https://sondlang.org/")
+    let __lit0: string = "https://sondlang.org/"
+    http_send_redirect(wfd, __lit0.utf8)
     close_fd(wfd)
     let buf[64]
     let n = read_buf(rfd, buf, 512)
     close_fd(rfd)
     let resp = bytes_from_raw(buf, n)
-    let want = bytes_from_cstr("HTTP/1.1 301 Moved Permanently\r\nLocation: https://sondlang.org/")
+    let __s6_42: string = "HTTP/1.1 301 Moved Permanently\r\nLocation: https://sondlang.org/"
+    let want = bytes_from_cstr(__s6_42.utf8)
     assert_eq(bytes_eq(bytes_slice(resp, 0, bytes_len(want)), want), 1)
 }
 
 // Integration: over a real loopback socket, http_serve_file streams a file as 200 (covering
 // http_file_size), and a missing file falls to http_send_status's 404.
 test "http_serve_file streams a 200 and 404s a missing file" {
-    let fd = open_file("__httptest.txt", O_WRONLY | O_CREAT | O_TRUNC, 420)
-    write_buf(fd, "hello sond\n", 11)
+    let __s0_50: string = "__httptest.txt"
+    let fd = open_file(__s0_50.utf8, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    let __s0_52: string = "hello sond\n"
+    write_buf(fd, __s0_52.utf8, 11)
     close_fd(fd)
 
     let port = 48241
@@ -63,13 +73,15 @@ test "http_serve_file streams a 200 and 404s a missing file" {
             let ca[2]
             sockaddr_in_build(ca, ip, port)
             if connect_sock(cfd, ca, 16) < 0 { syscall(SYS_exit, 2) }
-            let rq = bytes_from_cstr("GET /x HTTP/1.1\r\n\r\n")
+            let __s7_73: string = "GET /x HTTP/1.1\r\n\r\n"
+            let rq = bytes_from_cstr(__s7_73.utf8)
             write_buf(cfd, peek64(rq), bytes_len(rq))
             let rbuf[256]
             let rn = read_buf(cfd, rbuf, 256)
             close_fd(cfd)
             let resp = bytes_from_raw(rbuf, rn)
-            let want = bytes_from_cstr("HTTP/1.1 200 OK")
+            let __s8_80: string = "HTTP/1.1 200 OK"
+            let want = bytes_from_cstr(__s8_80.utf8)
             let mut is200 = 1
             let mut i = 0
             for i < 15 {
@@ -87,13 +99,18 @@ test "http_serve_file streams a 200 and 404s a missing file" {
     let a1 = accept_sock(sfd, 0, 0)
     let rb1[128]
     read_buf(a1, rb1, 128)
-    http_serve_file_cc(a1, bytes_from_cstr("__httptest.txt"), "text/plain", "no-store")
+    let __lit1: string = "__httptest.txt"
+    let __lit2: string = "text/plain"
+    let __lit3: string = "no-store"
+    http_serve_file_cc(a1, bytes_from_cstr(__lit1.utf8), __lit2.utf8, __lit3.utf8)
     http_finish(a1)
 
     let a2 = accept_sock(sfd, 0, 0)
     let rb2[128]
     read_buf(a2, rb2, 128)
-    http_serve_file(a2, bytes_from_cstr("__no_such_file__"), "text/plain")
+    let __lit4: string = "__no_such_file__"
+    let __lit5: string = "text/plain"
+    http_serve_file(a2, bytes_from_cstr(__lit4.utf8), __lit5.utf8)
     http_finish(a2)
 
     close_fd(sfd)

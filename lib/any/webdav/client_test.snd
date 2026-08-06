@@ -44,9 +44,11 @@ fn buf_eq_buf(buf1: i64, buf2: i64) -> i64 {
 fn mk_resp(status_buf: i64, headers_buf: i64) -> i64 {
     let r = bytes_new()
     bytes_append(r, status_buf)
-    bytes_append_cstr(r, "\r\n")
+    let __lit0: string = "\r\n"
+    bytes_append_cstr(r, __lit0.utf8)
     bytes_append(r, headers_buf)
-    bytes_append_cstr(r, "\r\n")
+    let __lit1: string = "\r\n"
+    bytes_append_cstr(r, __lit1.utf8)
     r
 }
 
@@ -54,9 +56,11 @@ fn mk_resp(status_buf: i64, headers_buf: i64) -> i64 {
 fn mk_resp_body(status_buf: i64, headers_buf: i64, body_buf: i64) -> i64 {
     let r = bytes_new()
     bytes_append(r, status_buf)
-    bytes_append_cstr(r, "\r\n")
+    let __lit2: string = "\r\n"
+    bytes_append_cstr(r, __lit2.utf8)
     bytes_append(r, headers_buf)
-    bytes_append_cstr(r, "\r\n")
+    let __lit3: string = "\r\n"
+    bytes_append_cstr(r, __lit3.utf8)
     if bytes_len(body_buf) > 0 { bytes_append(r, body_buf) }
     r
 }
@@ -64,20 +68,25 @@ fn mk_resp_body(status_buf: i64, headers_buf: i64, body_buf: i64) -> i64 {
 // Make a GET-style request buffer.
 fn mk_req_get(path_buf: i64) -> i64 {
     let r = bytes_new()
-    bytes_append_cstr(r, "GET ")
+    let __lit4: string = "GET "
+    bytes_append_cstr(r, __lit4.utf8)
     bytes_append(r, path_buf)
-    bytes_append_cstr(r, " HTTP/1.1\r\nHost: 127.0.0.1:80\r\nConnection: close\r\n\r\n")
+    let __lit5: string = " HTTP/1.1\r\nHost: 127.0.0.1:80\r\nConnection: close\r\n\r\n"
+    bytes_append_cstr(r, __lit5.utf8)
     r
 }
 
 // Make a PUT-style request buffer with body.
 fn mk_req_put(path_buf: i64, body_buf: i64) -> i64 {
     let r = bytes_new()
-    bytes_append_cstr(r, "PUT ")
+    let __lit6: string = "PUT "
+    bytes_append_cstr(r, __lit6.utf8)
     bytes_append(r, path_buf)
-    bytes_append_cstr(r, " HTTP/1.1\r\nHost: 127.0.0.1:80\r\nContent-Type: text/xml; charset=utf-8\r\nContent-Length: ")
+    let __lit7: string = " HTTP/1.1\r\nHost: 127.0.0.1:80\r\nContent-Type: text/xml; charset=utf-8\r\nContent-Length: "
+    bytes_append_cstr(r, __lit7.utf8)
     bytes_append_int(r, bytes_len(body_buf))
-    bytes_append_cstr(r, "\r\n\r\n")
+    let __lit8: string = "\r\n\r\n"
+    bytes_append_cstr(r, __lit8.utf8)
     bytes_append(r, body_buf)
     r
 }
@@ -85,15 +94,21 @@ fn mk_req_put(path_buf: i64, body_buf: i64) -> i64 {
 // Make a PROPFIND request buffer.
 fn mk_req_propfind() -> i64 {
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Depth: 0\r\n")
-    let body = xml_build_propfind_body("/")
-    bytes_append_cstr(hdr, "\r\n")
+    let __lit9: string = "Depth: 0\r\n"
+    bytes_append_cstr(hdr, __lit9.utf8)
+    let __s0_98: string = "/"
+    let body = xml_build_propfind_body(__s0_98.utf8)
+    let __lit10: string = "\r\n"
+    bytes_append_cstr(hdr, __lit10.utf8)
     let r = bytes_new()
-    bytes_append_cstr(r, "PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1:80\r\nContent-Type: text/xml; charset=utf-8\r\n")
+    let __lit11: string = "PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1:80\r\nContent-Type: text/xml; charset=utf-8\r\n"
+    bytes_append_cstr(r, __lit11.utf8)
     bytes_append(r, hdr)
-    bytes_append_cstr(r, "Content-Length: ")
+    let __lit12: string = "Content-Length: "
+    bytes_append_cstr(r, __lit12.utf8)
     bytes_append_int(r, bytes_len(body))
-    bytes_append_cstr(r, "\r\n\r\n")
+    let __lit13: string = "\r\n\r\n"
+    bytes_append_cstr(r, __lit13.utf8)
     bytes_append(r, body)
     r
 }
@@ -174,25 +189,29 @@ fn read_captured(caprfd: i64) -> i64 {
 
 test "dav_response_status: 200 OK" {
     let buf = bytes_new()
-    bytes_append_cstr(buf, "HTTP/1.1 200 OK\r\n")
+    let __lit14: string = "HTTP/1.1 200 OK\r\n"
+    bytes_append_cstr(buf, __lit14.utf8)
     assert_eq(dav_response_status(buf), 200)
 }
 
 test "dav_response_status: 207 Multi-Status" {
     let buf = bytes_new()
-    bytes_append_cstr(buf, "HTTP/1.1 207 Multi-Status\r\n")
+    let __lit15: string = "HTTP/1.1 207 Multi-Status\r\n"
+    bytes_append_cstr(buf, __lit15.utf8)
     assert_eq(dav_response_status(buf), 207)
 }
 
 test "dav_response_status: 404" {
     let buf = bytes_new()
-    bytes_append_cstr(buf, "HTTP/1.1 404 Not Found\r\n")
+    let __lit16: string = "HTTP/1.1 404 Not Found\r\n"
+    bytes_append_cstr(buf, __lit16.utf8)
     assert_eq(dav_response_status(buf), 404)
 }
 
 test "dav_response_status: 500" {
     let buf = bytes_new()
-    bytes_append_cstr(buf, "HTTP/1.1 500 Internal Server Error\r\n")
+    let __lit17: string = "HTTP/1.1 500 Internal Server Error\r\n"
+    bytes_append_cstr(buf, __lit17.utf8)
     assert_eq(dav_response_status(buf), 500)
 }
 
@@ -203,13 +222,15 @@ test "dav_response_status: empty buffer" {
 
 test "dav_response_status: short buffer" {
     let buf = bytes_new()
-    bytes_append_cstr(buf, "HTTP")
+    let __lit18: string = "HTTP"
+    bytes_append_cstr(buf, __lit18.utf8)
     assert_eq(dav_response_status(buf), -1)
 }
 
 test "dav_response_status: garbage" {
     let buf = bytes_new()
-    bytes_append_cstr(buf, "GARBAGE\r\n")
+    let __lit19: string = "GARBAGE\r\n"
+    bytes_append_cstr(buf, __lit19.utf8)
     assert_eq(dav_response_status(buf), -1)
 }
 
@@ -244,47 +265,61 @@ test "dav_is_success: 500" {
 
 test "dav_get_content_length: 42 found" {
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Content-Length: 42\r\nContent-Type: text/plain\r\n")
-    let resp = mk_resp(bytes_from_cstr("HTTP/1.1 200 OK"), hdr)
+    let __lit20: string = "Content-Length: 42\r\nContent-Type: text/plain\r\n"
+    bytes_append_cstr(hdr, __lit20.utf8)
+    let __s0_269: string = "HTTP/1.1 200 OK"
+    let resp = mk_resp(bytes_from_cstr(__s0_269.utf8), hdr)
     assert_eq(dav_get_content_length(resp), 42)
 }
 
 test "dav_get_content_length: zero found" {
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Content-Length: 0\r\n")
-    let resp = mk_resp(bytes_from_cstr("HTTP/1.1 204 No Content"), hdr)
+    let __lit21: string = "Content-Length: 0\r\n"
+    bytes_append_cstr(hdr, __lit21.utf8)
+    let __s1_278: string = "HTTP/1.1 204 No Content"
+    let resp = mk_resp(bytes_from_cstr(__s1_278.utf8), hdr)
     assert_eq(dav_get_content_length(resp), 0)
 }
 
 test "dav_get_content_length: missing header" {
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Content-Type: text/plain\r\n")
-    let resp = mk_resp(bytes_from_cstr("HTTP/1.1 200 OK"), hdr)
+    let __lit22: string = "Content-Type: text/plain\r\n"
+    bytes_append_cstr(hdr, __lit22.utf8)
+    let __s2_287: string = "HTTP/1.1 200 OK"
+    let resp = mk_resp(bytes_from_cstr(__s2_287.utf8), hdr)
     assert_eq(dav_get_content_length(resp), 0)
 }
 
 test "dav_get_content_length: large value" {
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Content-Length: 123456\r\n")
-    let resp = mk_resp(bytes_from_cstr("HTTP/1.1 200 OK"), hdr)
+    let __lit23: string = "Content-Length: 123456\r\n"
+    bytes_append_cstr(hdr, __lit23.utf8)
+    let __s3_296: string = "HTTP/1.1 200 OK"
+    let resp = mk_resp(bytes_from_cstr(__s3_296.utf8), hdr)
     assert_eq(dav_get_content_length(resp), 123456)
 }
 
 test "dav_response_body: extracts body" {
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Content-Length: 5\r\nContent-Type: text/plain\r\n")
-    let body = bytes_from_cstr("hello")
-    let resp = mk_resp_body(bytes_from_cstr("HTTP/1.1 200 OK"), hdr, body)
+    let __lit24: string = "Content-Length: 5\r\nContent-Type: text/plain\r\n"
+    bytes_append_cstr(hdr, __lit24.utf8)
+    let __s4_305: string = "hello"
+    let body = bytes_from_cstr(__s4_305.utf8)
+    let __s5_307: string = "HTTP/1.1 200 OK"
+    let resp = mk_resp_body(bytes_from_cstr(__s5_307.utf8), hdr, body)
     let out = bytes_new()
     let status = dav_response_body(resp, out)
     assert_eq(status, 200)
-    assert(buf_eq_cstr(out, "hello"))
+    let __s0_312: string = "hello"
+    assert(buf_eq_cstr(out, __s0_312.utf8))
 }
 
 test "dav_response_body: empty body 204" {
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Content-Length: 0\r\nContent-Type: text/plain\r\n")
-    let resp = mk_resp_body(bytes_from_cstr("HTTP/1.1 204 No Content"), hdr, bytes_new())
+    let __lit25: string = "Content-Length: 0\r\nContent-Type: text/plain\r\n"
+    bytes_append_cstr(hdr, __lit25.utf8)
+    let __s6_319: string = "HTTP/1.1 204 No Content"
+    let resp = mk_resp_body(bytes_from_cstr(__s6_319.utf8), hdr, bytes_new())
     let out = bytes_new()
     let status = dav_response_body(resp, out)
     assert_eq(status, 204)
@@ -299,8 +334,10 @@ test "dav_response_body: large body 100 bytes" {
         i = i + 1
     }
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Content-Length: 100\r\nContent-Type: application/octet-stream\r\n")
-    let resp = mk_resp_body(bytes_from_cstr("HTTP/1.1 200 OK"), hdr, body)
+    let __lit26: string = "Content-Length: 100\r\nContent-Type: application/octet-stream\r\n"
+    bytes_append_cstr(hdr, __lit26.utf8)
+    let __s7_337: string = "HTTP/1.1 200 OK"
+    let resp = mk_resp_body(bytes_from_cstr(__s7_337.utf8), hdr, body)
     let out = bytes_new()
     let status = dav_response_body(resp, out)
     assert_eq(status, 200)
@@ -308,10 +345,13 @@ test "dav_response_body: large body 100 bytes" {
 }
 
 test "dav_response_body: 207 Multi-Status XML body" {
-    let xml_body = bytes_from_cstr("<multistatus xmlns=\"DAV:\"><html/></multistatus>")
+    let __s8_346: string = "<multistatus xmlns=\"DAV:\"><html/></multistatus>"
+    let xml_body = bytes_from_cstr(__s8_346.utf8)
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Content-Length: 49\r\nContent-Type: application/xml\r\n")
-    let resp = mk_resp_body(bytes_from_cstr("HTTP/1.1 207 Multi-Status"), hdr, xml_body)
+    let __lit27: string = "Content-Length: 49\r\nContent-Type: application/xml\r\n"
+    bytes_append_cstr(hdr, __lit27.utf8)
+    let __s9_351: string = "HTTP/1.1 207 Multi-Status"
+    let resp = mk_resp_body(bytes_from_cstr(__s9_351.utf8), hdr, xml_body)
     let out = bytes_new()
     let status = dav_response_body(resp, out)
     assert_eq(status, 207)
@@ -321,15 +361,18 @@ test "dav_response_body: 207 Multi-Status XML body" {
 
 test "dav_response_body: 401 Unauthorized" {
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "WWW-Authenticate: Basic realm=\"webdav\"\r\n")
-    let resp = mk_resp(bytes_from_cstr("HTTP/1.1 401 Unauthorized"), hdr)
+    let __lit28: string = "WWW-Authenticate: Basic realm=\"webdav\"\r\n"
+    bytes_append_cstr(hdr, __lit28.utf8)
+    let __s10_364: string = "HTTP/1.1 401 Unauthorized"
+    let resp = mk_resp(bytes_from_cstr(__s10_364.utf8), hdr)
     let out = bytes_new()
     let status = dav_response_body(resp, out)
     assert_eq(status, 401)
 }
 
 test "dav_build_request: GET structure" {
-    let path_buf = bytes_from_cstr("/test")
+    let __s11_372: string = "/test"
+    let path_buf = bytes_from_cstr(__s11_372.utf8)
     let req = mk_req_get(path_buf)
     assert_eq(check_req_at(req, 0, 71), 1)  // 'G'
     assert_eq(check_req_at(req, 1, 69), 1)  // 'E'
@@ -339,15 +382,18 @@ test "dav_build_request: GET structure" {
 }
 
 test "dav_build_request: PUT structure" {
-    let body = bytes_from_cstr("hello world")
-    let path_buf = bytes_from_cstr("/upload")
+    let __s12_383: string = "hello world"
+    let body = bytes_from_cstr(__s12_383.utf8)
+    let __s13_385: string = "/upload"
+    let path_buf = bytes_from_cstr(__s13_385.utf8)
     let req = mk_req_put(path_buf, body)
     assert_eq(check_req_at(req, 0, 80), 1)  // 'P'
 }
 
 test "dav_build_request: PROPFIND has propfind tag" {
     let req = mk_req_propfind()
-    let pos = xml_find_open_tag(req, "propfind", 0)
+    let __s0_378: string = "propfind"
+    let pos = xml_find_open_tag(req, __s0_378.utf8, 0)
     assert(pos >= 0)
 }
 
@@ -358,38 +404,49 @@ test "dav_build_request: PROPFIND has Depth header" {
 }
 
 test "dav_build_request: PROPFIND body has xml" {
-    let body = xml_build_propfind_body("/")
+    let __s1_391: string = "/"
+    let body = xml_build_propfind_body(__s1_391.utf8)
     assert(bytes_len(body) > 0)
-    assert(xml_find_open_tag(body, "propfind", 0) >= 0)
+    let __s1_392: string = "propfind"
+    assert(xml_find_open_tag(body, __s1_392.utf8, 0) >= 0)
 }
 
 test "dav_make_resp_body: basic" {
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Content-Length: 5\r\nContent-Type: text/plain\r\n")
-    let body = bytes_from_cstr("hello")
-    let resp = mk_resp_body(bytes_from_cstr("HTTP/1.1 200 OK"), hdr, body)
+    let __lit29: string = "Content-Length: 5\r\nContent-Type: text/plain\r\n"
+    bytes_append_cstr(hdr, __lit29.utf8)
+    let __s14_416: string = "hello"
+    let body = bytes_from_cstr(__s14_416.utf8)
+    let __s15_418: string = "HTTP/1.1 200 OK"
+    let resp = mk_resp_body(bytes_from_cstr(__s15_418.utf8), hdr, body)
     assert(bytes_len(resp) > 0)
 }
 
 test "buf_eq_cstr: match" {
-    let buf = bytes_from_cstr("hello")
-    assert_eq(buf_eq_cstr(buf, "hello"), 1)
+    let __s16_424: string = "hello"
+    let buf = bytes_from_cstr(__s16_424.utf8)
+    let __s1_427: string = "hello"
+    assert_eq(buf_eq_cstr(buf, __s1_427.utf8), 1)
 }
 
 test "buf_eq_cstr: no match" {
-    let buf = bytes_from_cstr("hello")
-    assert_eq(buf_eq_cstr(buf, "world"), 0)
+    let __s17_430: string = "hello"
+    let buf = bytes_from_cstr(__s17_430.utf8)
+    let __s2_434: string = "world"
+    assert_eq(buf_eq_cstr(buf, __s2_434.utf8), 0)
 }
 
 test "buf_eq_cstr: empty" {
     let buf = bytes_new()
-    assert_eq(buf_eq_cstr(buf, ""), 1)
+    let __s3_440: string = ""
+    assert_eq(buf_eq_cstr(buf, __s3_440.utf8), 1)
 }
 
 // Coverage helpers
 test "dav_response_status: edge 199" {
     let buf = bytes_new()
-    bytes_append_cstr(buf, "HTTP/1.1 199 Minimal\r\n")
+    let __lit30: string = "HTTP/1.1 199 Minimal\r\n"
+    bytes_append_cstr(buf, __lit30.utf8)
     assert_eq(dav_response_status(buf), 199)
 }
 
@@ -399,12 +456,14 @@ test "dav_is_success: boundary 300" {
 
 test "dav_response_body: body with special chars" {
     let hdr = bytes_new()
-    bytes_append_cstr(hdr, "Content-Length: 3\r\n")
+    let __lit31: string = "Content-Length: 3\r\n"
+    bytes_append_cstr(hdr, __lit31.utf8)
     let body = bytes_new()
     bytes_push(body, 36)
     bytes_push(body, 64)
     bytes_push(body, 35)
-    let resp = mk_resp_body(bytes_from_cstr("HTTP/1.1 200 OK"), hdr, body)
+    let __s18_460: string = "HTTP/1.1 200 OK"
+    let resp = mk_resp_body(bytes_from_cstr(__s18_460.utf8), hdr, body)
     let out = bytes_new()
     let status = dav_response_body(resp, out)
     assert_eq(status, 200)
@@ -412,20 +471,26 @@ test "dav_response_body: body with special chars" {
 }
 
 test "buf_eq_buf: match" {
-    let a = bytes_from_cstr("hello")
-    let b = bytes_from_cstr("hello")
+    let __s19_469: string = "hello"
+    let a = bytes_from_cstr(__s19_469.utf8)
+    let __s20_471: string = "hello"
+    let b = bytes_from_cstr(__s20_471.utf8)
     assert_eq(buf_eq_buf(a, b), 1)
 }
 
 test "buf_eq_buf: no match" {
-    let a = bytes_from_cstr("hello")
-    let b = bytes_from_cstr("world")
+    let __s21_477: string = "hello"
+    let a = bytes_from_cstr(__s21_477.utf8)
+    let __s22_479: string = "world"
+    let b = bytes_from_cstr(__s22_479.utf8)
     assert_eq(buf_eq_buf(a, b), 0)
 }
 
 test "buf_eq_buf: different lengths" {
-    let a = bytes_from_cstr("hello")
-    let b = bytes_from_cstr("hi")
+    let __s23_485: string = "hello"
+    let a = bytes_from_cstr(__s23_485.utf8)
+    let __s24_487: string = "hi"
+    let b = bytes_from_cstr(__s24_487.utf8)
     assert_eq(buf_eq_buf(a, b), 0)
 }
 
@@ -436,23 +501,28 @@ test "buf_eq_buf: empty buffers" {
 }
 
 test "buf_eq_cstr: bytes handle comparison via cstr" {
-    let buf = bytes_from_cstr("test")
-    assert_eq(buf_eq_cstr(buf, "test"), 1)
+    let __s25_499: string = "test"
+    let buf = bytes_from_cstr(__s25_499.utf8)
+    let __s4_505: string = "test"
+    assert_eq(buf_eq_cstr(buf, __s4_505.utf8), 1)
 }
 
 test "check_req_at: match position" {
-    let path_buf = bytes_from_cstr("GET /test")
+    let __s26_505: string = "GET /test"
+    let path_buf = bytes_from_cstr(__s26_505.utf8)
     assert_eq(check_req_at(path_buf, 0, 71), 1)  // G
     assert_eq(check_req_at(path_buf, 4, 47), 1)  // /
 }
 
 test "check_req_at: no match" {
-    let path_buf = bytes_from_cstr("GET")
+    let __s27_512: string = "GET"
+    let path_buf = bytes_from_cstr(__s27_512.utf8)
     assert_eq(check_req_at(path_buf, 0, 65), 0)  // A != G
 }
 
 test "check_req_at: out of range" {
-    let req = bytes_from_cstr("GET / HTTP/1.1\r\n")
+    let __s28_518: string = "GET / HTTP/1.1\r\n"
+    let req = bytes_from_cstr(__s28_518.utf8)
     assert_eq(check_req_at(req, 10000, 0), 0)
 }
 
@@ -461,12 +531,14 @@ test "check_req_at: out of range" {
 test "dav_connect: succeeds against a real listening socket" {
     let port = 18401
     let lfd = mock_listen(port)
-    let resp = bytes_from_cstr("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+    let __s29_528: string = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+    let resp = bytes_from_cstr(__s29_528.utf8)
     let cap[1]
     syscall(SYS_pipe, cap)
     let capwfd = peek32(cap + 4)
     let pid = mock_serve_once(lfd, resp, capwfd)
-    let cfd = dav_connect("127.0.0.1", port)
+    let __s0_539: string = "127.0.0.1"
+    let cfd = dav_connect(__s0_539.utf8, port)
     assert(cfd >= 0)
     close_fd(cfd)
     reap_child(pid)
@@ -474,7 +546,8 @@ test "dav_connect: succeeds against a real listening socket" {
 }
 
 test "dav_connect: fails (-1) against a port nobody is listening on" {
-    let cfd = dav_connect("127.0.0.1", 18402)
+    let __s1_548: string = "127.0.0.1"
+    let cfd = dav_connect(__s1_548.utf8, 18402)
     assert_eq(cfd, -1)
 }
 
@@ -483,22 +556,28 @@ test "dav_connect: fails (-1) against a port nobody is listening on" {
 test "dav_get: real round trip returns 200 and sends a well-formed GET request" {
     let port = 18404
     let lfd = mock_listen(port)
-    let resp = bytes_from_cstr("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+    let __s30_551: string = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+    let resp = bytes_from_cstr(__s30_551.utf8)
     let cap[1]
     syscall(SYS_pipe, cap)
     let caprfd = peek32(cap + 0)
     let capwfd = peek32(cap + 4)
     let pid = mock_serve_once(lfd, resp, capwfd)
-    let status = dav_get("127.0.0.1", port, "/x.txt")
+    let __s0_565: string = "127.0.0.1"
+    let __s1_565: string = "/x.txt"
+    let status = dav_get(__s0_565.utf8, port, __s1_565.utf8)
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(status, 200)
-    let want = bytes_from_cstr("GET /x.txt HTTP/1.1\r\nHost: 127.0.0.1:18404\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\n\r\n")
+    let __s31_562: string = "GET /x.txt HTTP/1.1\r\nHost: 127.0.0.1:18404\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\n\r\n"
+    let want = bytes_from_cstr(__s31_562.utf8)
     assert_eq(bytes_eq(captured, want), 1)
 }
 
 test "dav_get: returns -1 when the server is unreachable" {
-    let status = dav_get("127.0.0.1", 18405, "/nope")
+    let __s2_577: string = "127.0.0.1"
+    let __s3_577: string = "/nope"
+    let status = dav_get(__s2_577.utf8, 18405, __s3_577.utf8)
     assert_eq(status, -1)
 }
 
@@ -507,18 +586,23 @@ test "dav_get: returns -1 when the server is unreachable" {
 test "dav_put: real round trip returns 201 and sends body with Content-Length" {
     let port = 18406
     let lfd = mock_listen(port)
-    let resp = bytes_from_cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
+    let __s32_577: string = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"
+    let resp = bytes_from_cstr(__s32_577.utf8)
     let cap[1]
     syscall(SYS_pipe, cap)
     let caprfd = peek32(cap + 0)
     let capwfd = peek32(cap + 4)
     let pid = mock_serve_once(lfd, resp, capwfd)
-    let body = bytes_from_cstr("hello world")
-    let status = dav_put("127.0.0.1", port, "/up.txt", body)
+    let __s33_584: string = "hello world"
+    let body = bytes_from_cstr(__s33_584.utf8)
+    let __s0_597: string = "127.0.0.1"
+    let __s1_597: string = "/up.txt"
+    let status = dav_put(__s0_597.utf8, port, __s1_597.utf8, body)
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(status, 201)
-    let want = bytes_from_cstr("PUT /up.txt HTTP/1.1\r\nHost: 127.0.0.1:18406\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nContent-Length: 11\r\n\r\nhello world")
+    let __s34_590: string = "PUT /up.txt HTTP/1.1\r\nHost: 127.0.0.1:18406\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nContent-Length: 11\r\n\r\nhello world"
+    let want = bytes_from_cstr(__s34_590.utf8)
     assert_eq(bytes_eq(captured, want), 1)
 }
 
@@ -527,34 +611,42 @@ test "dav_put: real round trip returns 201 and sends body with Content-Length" {
 test "dav_mkcol: real round trip returns 201 and sends a well-formed MKCOL request" {
     let port = 18407
     let lfd = mock_listen(port)
-    let resp = bytes_from_cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
+    let __s35_600: string = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"
+    let resp = bytes_from_cstr(__s35_600.utf8)
     let cap[1]
     syscall(SYS_pipe, cap)
     let caprfd = peek32(cap + 0)
     let capwfd = peek32(cap + 4)
     let pid = mock_serve_once(lfd, resp, capwfd)
-    let status = dav_mkcol("127.0.0.1", port, "/newdir")
+    let __s0_620: string = "127.0.0.1"
+    let __s1_620: string = "/newdir"
+    let status = dav_mkcol(__s0_620.utf8, port, __s1_620.utf8)
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(status, 201)
-    let want = bytes_from_cstr("MKCOL /newdir HTTP/1.1\r\nHost: 127.0.0.1:18407\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\n\r\n")
+    let __s36_611: string = "MKCOL /newdir HTTP/1.1\r\nHost: 127.0.0.1:18407\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\n\r\n"
+    let want = bytes_from_cstr(__s36_611.utf8)
     assert_eq(bytes_eq(captured, want), 1)
 }
 
 test "dav_delete: real round trip returns 204 and sends a well-formed DELETE request" {
     let port = 18408
     let lfd = mock_listen(port)
-    let resp = bytes_from_cstr("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+    let __s37_619: string = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
+    let resp = bytes_from_cstr(__s37_619.utf8)
     let cap[1]
     syscall(SYS_pipe, cap)
     let caprfd = peek32(cap + 0)
     let capwfd = peek32(cap + 4)
     let pid = mock_serve_once(lfd, resp, capwfd)
-    let status = dav_delete("127.0.0.1", port, "/old.txt")
+    let __s0_641: string = "127.0.0.1"
+    let __s1_641: string = "/old.txt"
+    let status = dav_delete(__s0_641.utf8, port, __s1_641.utf8)
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(status, 204)
-    let want = bytes_from_cstr("DELETE /old.txt HTTP/1.1\r\nHost: 127.0.0.1:18408\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\n\r\n")
+    let __s38_630: string = "DELETE /old.txt HTTP/1.1\r\nHost: 127.0.0.1:18408\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\n\r\n"
+    let want = bytes_from_cstr(__s38_630.utf8)
     assert_eq(bytes_eq(captured, want), 1)
 }
 
@@ -563,34 +655,44 @@ test "dav_delete: real round trip returns 204 and sends a well-formed DELETE req
 test "dav_move: real round trip returns 201 and sends a Destination header" {
     let port = 18409
     let lfd = mock_listen(port)
-    let resp = bytes_from_cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
+    let __s39_640: string = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"
+    let resp = bytes_from_cstr(__s39_640.utf8)
     let cap[1]
     syscall(SYS_pipe, cap)
     let caprfd = peek32(cap + 0)
     let capwfd = peek32(cap + 4)
     let pid = mock_serve_once(lfd, resp, capwfd)
-    let status = dav_move("127.0.0.1", port, "/src.txt", "/dst.txt")
+    let __s0_664: string = "127.0.0.1"
+    let __s1_664: string = "/src.txt"
+    let __s2_664: string = "/dst.txt"
+    let status = dav_move(__s0_664.utf8, port, __s1_664.utf8, __s2_664.utf8)
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(status, 201)
-    let want = bytes_from_cstr("MOVE /src.txt HTTP/1.1\r\nHost: 127.0.0.1:18409\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nDestination: 127.0.0.1:18409/dst.txt\r\n\r\n")
+    let __s40_651: string = "MOVE /src.txt HTTP/1.1\r\nHost: 127.0.0.1:18409\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nDestination: 127.0.0.1:18409/dst.txt\r\n\r\n"
+    let want = bytes_from_cstr(__s40_651.utf8)
     assert_eq(bytes_eq(captured, want), 1)
 }
 
 test "dav_copy: real round trip returns 201 and sends a Destination header" {
     let port = 18410
     let lfd = mock_listen(port)
-    let resp = bytes_from_cstr("HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n")
+    let __s41_659: string = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"
+    let resp = bytes_from_cstr(__s41_659.utf8)
     let cap[1]
     syscall(SYS_pipe, cap)
     let caprfd = peek32(cap + 0)
     let capwfd = peek32(cap + 4)
     let pid = mock_serve_once(lfd, resp, capwfd)
-    let status = dav_copy("127.0.0.1", port, "/src2.txt", "/dst2.txt")
+    let __s0_686: string = "127.0.0.1"
+    let __s1_686: string = "/src2.txt"
+    let __s2_686: string = "/dst2.txt"
+    let status = dav_copy(__s0_686.utf8, port, __s1_686.utf8, __s2_686.utf8)
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(status, 201)
-    let want = bytes_from_cstr("COPY /src2.txt HTTP/1.1\r\nHost: 127.0.0.1:18410\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nDestination: 127.0.0.1:18410/dst2.txt\r\n\r\n")
+    let __s42_670: string = "COPY /src2.txt HTTP/1.1\r\nHost: 127.0.0.1:18410\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nDestination: 127.0.0.1:18410/dst2.txt\r\n\r\n"
+    let want = bytes_from_cstr(__s42_670.utf8)
     assert_eq(bytes_eq(captured, want), 1)
 }
 
@@ -599,21 +701,28 @@ test "dav_copy: real round trip returns 201 and sends a Destination header" {
 test "dav_propfind: real round trip returns 207 and sends Depth + XML body" {
     let port = 18411
     let lfd = mock_listen(port)
-    let resp = bytes_from_cstr("HTTP/1.1 207 Multi-Status\r\nContent-Length: 0\r\n\r\n")
+    let __s43_680: string = "HTTP/1.1 207 Multi-Status\r\nContent-Length: 0\r\n\r\n"
+    let resp = bytes_from_cstr(__s43_680.utf8)
     let cap[1]
     syscall(SYS_pipe, cap)
     let caprfd = peek32(cap + 0)
     let capwfd = peek32(cap + 4)
     let pid = mock_serve_once(lfd, resp, capwfd)
-    let resp2 = dav_propfind("127.0.0.1", port, "/", "1")
+    let __s0_710: string = "127.0.0.1"
+    let __s1_710: string = "/"
+    let __s2_710: string = "1"
+    let resp2 = dav_propfind(__s0_710.utf8, port, __s1_710.utf8, __s2_710.utf8)
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(dav_response_status(resp2), 207)
-    let expected_body = xml_build_propfind_body("/")
+    let __s2_647: string = "/"
+    let expected_body = xml_build_propfind_body(__s2_647.utf8)
     let want = bytes_new()
-    bytes_append_cstr(want, "PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1:18411\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nContent-Length: ")
+    let __lit32: string = "PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1:18411\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nContent-Length: "
+    bytes_append_cstr(want, __lit32.utf8)
     bytes_append_int(want, bytes_len(expected_body))
-    bytes_append_cstr(want, "\r\nDepth: 1\r\n\r\n")
+    let __lit33: string = "\r\nDepth: 1\r\n\r\n"
+    bytes_append_cstr(want, __lit33.utf8)
     bytes_append(want, expected_body)
     assert_eq(bytes_eq(captured, want), 1)
 }
@@ -621,21 +730,28 @@ test "dav_propfind: real round trip returns 207 and sends Depth + XML body" {
 test "dav_propfind: an empty depth cstr defaults the header to 0" {
     let port = 18412
     let lfd = mock_listen(port)
-    let resp = bytes_from_cstr("HTTP/1.1 207 Multi-Status\r\nContent-Length: 0\r\n\r\n")
+    let __s44_706: string = "HTTP/1.1 207 Multi-Status\r\nContent-Length: 0\r\n\r\n"
+    let resp = bytes_from_cstr(__s44_706.utf8)
     let cap[1]
     syscall(SYS_pipe, cap)
     let caprfd = peek32(cap + 0)
     let capwfd = peek32(cap + 4)
     let pid = mock_serve_once(lfd, resp, capwfd)
-    let resp2 = dav_propfind("127.0.0.1", port, "/", "")
+    let __s3_739: string = "127.0.0.1"
+    let __s4_739: string = "/"
+    let __s5_739: string = ""
+    let resp2 = dav_propfind(__s3_739.utf8, port, __s4_739.utf8, __s5_739.utf8)
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(dav_response_status(resp2), 207)
-    let expected_body = xml_build_propfind_body("/")
+    let __s3_672: string = "/"
+    let expected_body = xml_build_propfind_body(__s3_672.utf8)
     let want = bytes_new()
-    bytes_append_cstr(want, "PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1:18412\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nContent-Length: ")
+    let __lit34: string = "PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1:18412\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nContent-Length: "
+    bytes_append_cstr(want, __lit34.utf8)
     bytes_append_int(want, bytes_len(expected_body))
-    bytes_append_cstr(want, "\r\nDepth: 0\r\n\r\n")
+    let __lit35: string = "\r\nDepth: 0\r\n\r\n"
+    bytes_append_cstr(want, __lit35.utf8)
     bytes_append(want, expected_body)
     assert_eq(bytes_eq(captured, want), 1)
 }
@@ -647,22 +763,26 @@ test "dav_propfind: an empty depth cstr defaults the header to 0" {
 // it directly callable here, same as server_test.snd calls dav_read_entry/method_starts_with.
 
 test "dav_ip_from_cstr: full four-octet address" {
-    assert_eq(dav_ip_from_cstr("127.0.0.1"), 2130706433)
+    let __s0_765: string = "127.0.0.1"
+    assert_eq(dav_ip_from_cstr(__s0_765.utf8), 2130706433)
 }
 
 test "dav_ip_from_cstr: single octet, no dots at all" {
     // oct stays 0 the whole time: the fallback assigns o0, leaving o1..o3 at 0.
-    assert_eq(dav_ip_from_cstr("10"), 10 * 16777216)
+    let __s1_771: string = "10"
+    assert_eq(dav_ip_from_cstr(__s1_771.utf8), 10 * 16777216)
 }
 
 test "dav_ip_from_cstr: two octets, one dot" {
     // one dot seen -> oct == 1 when the string ends: fallback assigns o1.
-    assert_eq(dav_ip_from_cstr("10.20"), 10 * 16777216 + 20 * 65536)
+    let __s2_777: string = "10.20"
+    assert_eq(dav_ip_from_cstr(__s2_777.utf8), 10 * 16777216 + 20 * 65536)
 }
 
 test "dav_ip_from_cstr: three octets, two dots" {
     // two dots seen -> oct == 2 when the string ends: fallback assigns o2.
-    assert_eq(dav_ip_from_cstr("10.20.30"), 10 * 16777216 + 20 * 65536 + 30 * 256)
+    let __s3_783: string = "10.20.30"
+    assert_eq(dav_ip_from_cstr(__s3_783.utf8), 10 * 16777216 + 20 * 65536 + 30 * 256)
 }
 
 // ── bytes.snd primitives pulled in transitively, exercised directly ───────
@@ -670,15 +790,18 @@ test "dav_ip_from_cstr: three octets, two dots" {
 // resolve_includes_scoped measures, so real coverage needs a real call somewhere.)
 
 test "bytes_index_of: found and not found" {
-    let a = bytes_from_cstr("HTTP/1.1 200 OK")
+    let __s45_759: string = "HTTP/1.1 200 OK"
+    let a = bytes_from_cstr(__s45_759.utf8)
     assert_eq(bytes_index_of(a, 32), 8)   // first space
     assert_eq(bytes_index_of(a, 63), -1)  // '?' not present
 }
 
 test "bytes_slice: middle range and empty range" {
-    let a = bytes_from_cstr("multistatus")
+    let __s46_766: string = "multistatus"
+    let a = bytes_from_cstr(__s46_766.utf8)
     let mid = bytes_slice(a, 5, 11)
-    assert_eq(bytes_eq(mid, bytes_from_cstr("status")), 1)
+    let __s47_769: string = "status"
+    assert_eq(bytes_eq(mid, bytes_from_cstr(__s47_769.utf8)), 1)
     let empty = bytes_slice(a, 3, 3)
     assert_eq(bytes_len(empty), 0)
 }
@@ -690,41 +813,50 @@ test "bytes_slice: middle range and empty range" {
 // always > 0 in the round trips.
 
 test "bytes_eq: equal buffers" {
-    let a = bytes_from_cstr("webdav")
-    let b = bytes_from_cstr("webdav")
+    let __s48_782: string = "webdav"
+    let a = bytes_from_cstr(__s48_782.utf8)
+    let __s49_784: string = "webdav"
+    let b = bytes_from_cstr(__s49_784.utf8)
     assert_eq(bytes_eq(a, b), 1)
 }
 
 test "bytes_eq: different length" {
-    let a = bytes_from_cstr("webdav")
-    let b = bytes_from_cstr("web")
+    let __s50_790: string = "webdav"
+    let a = bytes_from_cstr(__s50_790.utf8)
+    let __s51_792: string = "web"
+    let b = bytes_from_cstr(__s51_792.utf8)
     assert_eq(bytes_eq(a, b), 0)
 }
 
 test "bytes_eq: same length, different content" {
-    let a = bytes_from_cstr("PROPFIND")
-    let b = bytes_from_cstr("PROPFINE")
+    let __s52_798: string = "PROPFIND"
+    let a = bytes_from_cstr(__s52_798.utf8)
+    let __s53_800: string = "PROPFINE"
+    let b = bytes_from_cstr(__s53_800.utf8)
     assert_eq(bytes_eq(a, b), 0)
 }
 
 test "bytes_append_int: zero" {
     let b = bytes_new()
     bytes_append_int(b, 0)
-    assert_eq(bytes_eq(b, bytes_from_cstr("0")), 1)
+    let __s54_808: string = "0"
+    assert_eq(bytes_eq(b, bytes_from_cstr(__s54_808.utf8)), 1)
 }
 
 // ── dav_response_status: non-digit status code ─────────────────────────────
 
 test "dav_response_status: non-digit characters where the code should be" {
     let buf = bytes_new()
-    bytes_append_cstr(buf, "HTTP/1.1 XYZ Broken\r\n")
+    let __lit36: string = "HTTP/1.1 XYZ Broken\r\n"
+    bytes_append_cstr(buf, __lit36.utf8)
     assert_eq(dav_response_status(buf), -1)
 }
 
 // ── dav_response_body: the two branches the happy-path tests never hit ────
 
 test "dav_response_body: buffer too short to hold a header/body separator" {
-    let resp = bytes_from_cstr("HT")
+    let __s55_824: string = "HT"
+    let resp = bytes_from_cstr(__s55_824.utf8)
     let out = bytes_new()
     let status = dav_response_body(resp, out)
     assert_eq(status, -1)  // dav_response_status also rejects a 2-byte buffer
@@ -732,7 +864,8 @@ test "dav_response_body: buffer too short to hold a header/body separator" {
 }
 
 test "dav_response_body: no CRLFCRLF separator anywhere, body left empty" {
-    let resp = bytes_from_cstr("HTTP/1.1 200 OK\r\nContent-Type: text/plain")
+    let __s56_833: string = "HTTP/1.1 200 OK\r\nContent-Type: text/plain"
+    let resp = bytes_from_cstr(__s56_833.utf8)
     let out = bytes_new()
     let status = dav_response_body(resp, out)
     assert_eq(status, 200)
@@ -744,33 +877,49 @@ test "dav_response_body: no CRLFCRLF separator anywhere, body left empty" {
 // "if fd < 0 { return -1 }" guard right after dav_connect, and it was untested for them.
 
 test "dav_put: returns -1 when the server is unreachable" {
-    let body = bytes_from_cstr("x")
-    let status = dav_put("127.0.0.1", 18413, "/nope", body)
+    let __s57_846: string = "x"
+    let body = bytes_from_cstr(__s57_846.utf8)
+    let __s2_861: string = "127.0.0.1"
+    let __s3_861: string = "/nope"
+    let status = dav_put(__s2_861.utf8, 18413, __s3_861.utf8, body)
     assert_eq(status, -1)
 }
 
 test "dav_mkcol: returns -1 when the server is unreachable" {
-    let status = dav_mkcol("127.0.0.1", 18414, "/nope")
+    let __s2_870: string = "127.0.0.1"
+    let __s3_870: string = "/nope"
+    let status = dav_mkcol(__s2_870.utf8, 18414, __s3_870.utf8)
     assert_eq(status, -1)
 }
 
 test "dav_delete: returns -1 when the server is unreachable" {
-    let status = dav_delete("127.0.0.1", 18415, "/nope")
+    let __s2_879: string = "127.0.0.1"
+    let __s3_879: string = "/nope"
+    let status = dav_delete(__s2_879.utf8, 18415, __s3_879.utf8)
     assert_eq(status, -1)
 }
 
 test "dav_move: returns -1 when the server is unreachable" {
-    let status = dav_move("127.0.0.1", 18416, "/src", "/dst")
+    let __s3_889: string = "127.0.0.1"
+    let __s4_889: string = "/src"
+    let __s5_889: string = "/dst"
+    let status = dav_move(__s3_889.utf8, 18416, __s4_889.utf8, __s5_889.utf8)
     assert_eq(status, -1)
 }
 
 test "dav_copy: returns -1 when the server is unreachable" {
-    let status = dav_copy("127.0.0.1", 18417, "/src", "/dst")
+    let __s3_900: string = "127.0.0.1"
+    let __s4_900: string = "/src"
+    let __s5_900: string = "/dst"
+    let status = dav_copy(__s3_900.utf8, 18417, __s4_900.utf8, __s5_900.utf8)
     assert_eq(status, -1)
 }
 
 test "dav_propfind: returns -1 when the server is unreachable" {
-    let resp = dav_propfind("127.0.0.1", 18418, "/", "1")
+    let __s6_914: string = "127.0.0.1"
+    let __s7_914: string = "/"
+    let __s8_914: string = "1"
+    let resp = dav_propfind(__s6_914.utf8, 18418, __s7_914.utf8, __s8_914.utf8)
     assert_eq(resp, -1)
 }
 

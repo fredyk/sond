@@ -148,10 +148,15 @@ fn printk_demo() -> i64 {
     // test coverage: these five calls used to end their literals in "\n",
     // doubling up with printk's own LF and never showing up in any test
     // because this file had 0% coverage before the mock_port seam existed.)
-    printk(0, KERN_INFO, "boot: printk ready")
-    printk(0, KERN_WARNING, "printk works with all levels")
-    pr_info(0, "via pr_info")
-    pr_err(0, "via pr_err")
-    pr_warn(0, "via pr_warn")
+    let __lit0: string = "boot: printk ready"
+    printk(0, KERN_INFO, __lit0.utf8)
+    let __lit1: string = "printk works with all levels"
+    printk(0, KERN_WARNING, __lit1.utf8)
+    let __lit2: string = "via pr_info"
+    pr_info(0, __lit2.utf8)
+    let __lit3: string = "via pr_err"
+    pr_err(0, __lit3.utf8)
+    let __lit4: string = "via pr_warn"
+    pr_warn(0, __lit4.utf8)
     0
 }

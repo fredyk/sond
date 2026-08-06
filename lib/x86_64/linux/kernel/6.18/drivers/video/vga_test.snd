@@ -194,7 +194,8 @@ test "vgacon_puts writes consecutive characters at VGA_ATTR" {
     let fb[500]
     vga_fb = fb
     vgacon_init(0)
-    vgacon_puts("Hi")
+    let __lit0: string = "Hi"
+    vgacon_puts(__lit0.utf8)
     assert_eq(peek16(fb), 'H' | (VGA_ATTR << 8))
     assert_eq(peek16(fb + 2), 'i' | (VGA_ATTR << 8))
     assert_eq(vgacon_get_col(), 2)
@@ -229,7 +230,8 @@ test "efi_main runs the full demo and returns 0" {
     let fb[500]
     vga_fb = fb
     assert_eq(efi_main(), 0)
-    // The demo ends with vgacon_puts("\n--- End of VGA demo ---\n"), so the
+    let __lit1: string = "\n--- End of VGA demo ---\n"
+    // The demo ends with vgacon_puts(__lit1.utf8), so the
     // cursor should have advanced off column 0 (proves the puts calls ran,
     // not just that the function returned early).
     assert(vgacon_get_row() > 0)

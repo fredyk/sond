@@ -65,7 +65,8 @@ fn ch_name_eq(a: i64, b: i64, n: i64) -> i64 {
 }
 
 test "clienthello: SNI extraction, with and without ECH, and the no-SNI case" {
-    let name = "example.com"
+    let name_text: string = "example.com"
+    let name = name_text.utf8
     let n1 = build_ch(ch_buf, name, 11, 0)
     poke64(ch_ech, 7)                                    // poison; must be overwritten to 0
     assert_eq(tls_sni_parse(ch_buf, n1, ch_out, 256, ch_ech), 11)
@@ -94,7 +95,8 @@ test "clienthello: a long SNI exercises the two-byte length path" {
 }
 
 test "clienthello: hostile inputs are rejected, never read past the buffer" {
-    let name = "example.com"
+    let name_text: string = "example.com"
+    let name = name_text.utf8
     // every truncated prefix must be rejected
     let n = build_ch(ch_buf, name, 11, 0)
     let mut k = 0

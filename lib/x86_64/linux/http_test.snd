@@ -3,30 +3,45 @@ include "x86_64/linux/http.snd"
 include "x86_64/linux/testing.snd"
 
 test "parse the method" {
-    let req = bytes_from_cstr("GET /index.html HTTP/1.1")
-    assert_eq(bytes_eq(http_method(req), bytes_from_cstr("GET")), 1)
+    let __s0_5: string = "GET /index.html HTTP/1.1"
+    let req = bytes_from_cstr(__s0_5.utf8)
+    let __s1_7: string = "GET"
+    assert_eq(bytes_eq(http_method(req), bytes_from_cstr(__s1_7.utf8)), 1)
 }
 
 test "parse the path" {
-    let req = bytes_from_cstr("GET /index.html HTTP/1.1")
-    assert_eq(bytes_eq(http_path(req), bytes_from_cstr("/index.html")), 1)
+    let __s2_12: string = "GET /index.html HTTP/1.1"
+    let req = bytes_from_cstr(__s2_12.utf8)
+    let __s3_14: string = "/index.html"
+    assert_eq(bytes_eq(http_path(req), bytes_from_cstr(__s3_14.utf8)), 1)
 }
 
 test "parse a POST with a root path" {
-    let req = bytes_from_cstr("POST / HTTP/1.1")
-    assert_eq(bytes_eq(http_method(req), bytes_from_cstr("POST")), 1)
-    assert_eq(bytes_eq(http_path(req), bytes_from_cstr("/")), 1)
+    let __s4_19: string = "POST / HTTP/1.1"
+    let req = bytes_from_cstr(__s4_19.utf8)
+    let __s5_21: string = "POST"
+    assert_eq(bytes_eq(http_method(req), bytes_from_cstr(__s5_21.utf8)), 1)
+    let __s6_23: string = "/"
+    assert_eq(bytes_eq(http_path(req), bytes_from_cstr(__s6_23.utf8)), 1)
 }
 
 test "build a 200 response" {
-    let resp = http_response("200 OK", bytes_from_cstr("Hi"))
-    let want = bytes_from_cstr("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nHi")
+    let __s7_28: string = "200 OK"
+    let __s8_28: string = "Hi"
+    let resp = http_response(__s7_28.utf8, bytes_from_cstr(__s8_28.utf8))
+    let __s9_31: string = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nHi"
+    let want = bytes_from_cstr(__s9_31.utf8)
     assert_eq(bytes_eq(resp, want), 1)
 }
 
 test "parse headers into a map" {
-    let req = bytes_from_cstr("GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n")
+    let __s10_37: string = "GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n"
+    let req = bytes_from_cstr(__s10_37.utf8)
     let h = http_headers(req)
-    assert_eq(bytes_eq(map_get(h, bytes_from_cstr("Host"), 0), bytes_from_cstr("example.com")), 1)
-    assert_eq(bytes_eq(map_get(h, bytes_from_cstr("Content-Length"), 0), bytes_from_cstr("5")), 1)
+    let __s11_40: string = "Host"
+    let __s12_40: string = "example.com"
+    assert_eq(bytes_eq(map_get(h, bytes_from_cstr(__s11_40.utf8), 0), bytes_from_cstr(__s12_40.utf8)), 1)
+    let __s13_43: string = "Content-Length"
+    let __s14_43: string = "5"
+    assert_eq(bytes_eq(map_get(h, bytes_from_cstr(__s13_43.utf8), 0), bytes_from_cstr(__s14_43.utf8)), 1)
 }

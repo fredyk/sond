@@ -51,7 +51,8 @@ test "net6: an IPv6 loopback round trip over ::1" {
         let ca[4]
         sockaddr_in6_build(ca, n6_addr, port)
         if connect_sock(cfd, ca, 28) < 0 { syscall(SYS_exit, 2) }
-        n6_write(cfd, "hi6", 3)
+        let __lit0: string = "hi6"
+        n6_write(cfd, __lit0.utf8, 3)
         n6_close(cfd)
         syscall(SYS_exit, 0)
     }

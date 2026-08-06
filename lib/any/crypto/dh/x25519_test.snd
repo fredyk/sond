@@ -462,10 +462,13 @@ fn x25t_eq_hex(buf: i64, hexstr: i64) -> i64 {
 // answer, not a different one.
 test "x25519: bit 255 of u is masked off, not used" {
     let scalar[32]; let u[32]; let out[32]
-    x25t_load_hex(scalar, "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4")
-    x25t_load_hex(u, "0900000000000000000000000000000000000000000000000000000000000080")
+    let __lit0: string = "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4"
+    x25t_load_hex(scalar, __lit0.utf8)
+    let __lit1: string = "0900000000000000000000000000000000000000000000000000000000000080"
+    x25t_load_hex(u, __lit1.utf8)
     x25519(scalar, u, out)
-    assert_eq(x25t_eq_hex(out, "1c9fd88f45606d932a80c71824ae151d15d73e77de38e8e000852e614fae7019"), 1)
+    let __s0_469: string = "1c9fd88f45606d932a80c71824ae151d15d73e77de38e8e000852e614fae7019"
+    assert_eq(x25t_eq_hex(out, __s0_469.utf8), 1)
 }
 
 // u = 2^256-1: both non-canonical conditions at once, bit 255 set and the remaining
@@ -473,10 +476,13 @@ test "x25519: bit 255 of u is masked off, not used" {
 // modulo p.
 test "x25519: u = 2^256-1 is masked and reduced mod p" {
     let scalar[32]; let u[32]; let out[32]
-    x25t_load_hex(scalar, "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4")
-    x25t_load_hex(u, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+    let __lit2: string = "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4"
+    x25t_load_hex(scalar, __lit2.utf8)
+    let __lit3: string = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    x25t_load_hex(u, __lit3.utf8)
     x25519(scalar, u, out)
-    assert_eq(x25t_eq_hex(out, "76b00406ce7e87774c0038dd8d89b188047977f8828ca1dcb8f98bb5d5d0cf48"), 1)
+    let __s1_483: string = "76b00406ce7e87774c0038dd8d89b188047977f8828ca1dcb8f98bb5d5d0cf48"
+    assert_eq(x25t_eq_hex(out, __s1_483.utf8), 1)
 }
 
 // u = p is the same point as u = 0, so the shared secret is all zeros. A peer can
@@ -484,13 +490,17 @@ test "x25519: u = 2^256-1 is masked and reduced mod p" {
 // distinct point would be.
 test "x25519: u = p is the same point as u = 0" {
     let scalar[32]; let up[32]; let uz[32]; let outp[32]; let outz[32]
-    x25t_load_hex(scalar, "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4")
-    x25t_load_hex(up, "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f")
-    x25t_load_hex(uz, "0000000000000000000000000000000000000000000000000000000000000000")
+    let __lit4: string = "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4"
+    x25t_load_hex(scalar, __lit4.utf8)
+    let __lit5: string = "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    x25t_load_hex(up, __lit5.utf8)
+    let __lit6: string = "0000000000000000000000000000000000000000000000000000000000000000"
+    x25t_load_hex(uz, __lit6.utf8)
     x25519(scalar, up, outp)
     x25519(scalar, uz, outz)
     assert_eq(bytes32_eq(outp, outz), 1)
-    assert_eq(x25t_eq_hex(outp, "0000000000000000000000000000000000000000000000000000000000000000"), 1)
+    let __s2_501: string = "0000000000000000000000000000000000000000000000000000000000000000"
+    assert_eq(x25t_eq_hex(outp, __s2_501.utf8), 1)
 }
 
 // ── The carry invariant ──

@@ -134,6 +134,10 @@ impl Codegen {
                 }
                 self.canon(target);
             }
+            // `s.utf8`: the literal's own bytes, at their address in `.rodata`.
+            Expr::Field(inner, field) if field == "utf8" && matches!(inner.as_ref(), Expr::Str(_)) => {
+                self.expr(inner)
+            }
             // `s.len` on a view whose length is written down (a `string`, or `u32[16]`) is that
             // constant: the compiler counted it, so nothing has to be walked to find out.
             Expr::Field(base, field)

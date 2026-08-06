@@ -74,9 +74,11 @@ fn http_finish(afd: i64) -> i64 {
 // marketing site. Bodyless and keep-alive, so a pooled connection stays reusable.
 fn http_send_redirect(afd: i64, location: i64) {
     let h = bytes_new()
-    bytes_append_cstr(h, "HTTP/1.1 301 Moved Permanently\r\nLocation: ")
+    let __lit0: string = "HTTP/1.1 301 Moved Permanently\r\nLocation: "
+    bytes_append_cstr(h, __lit0.utf8)
     bytes_append_cstr(h, location)
-    bytes_append_cstr(h, "\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n")
+    let __lit1: string = "\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
+    bytes_append_cstr(h, __lit1.utf8)
     write_buf(afd, peek64(h), bytes_len(h))
 }
 
@@ -99,20 +101,25 @@ fn http_serve_file_cc(afd: i64, path: i64, ctype: i64, cc: i64) -> i64 {
     bytes_push(p, 0)                                   // NUL-terminate for open
     let fd = open_file(peek64(p), 0, 0)                // O_RDONLY
     if fd < 0 {
-        http_send_status(afd, "404 Not Found")
+        let __lit2: string = "404 Not Found"
+        http_send_status(afd, __lit2.utf8)
         return 0
     }
     let sz = http_file_size(fd)
     let h = bytes_new()
-    bytes_append_cstr(h, "HTTP/1.1 200 OK\r\nContent-Type: ")
+    let __lit3: string = "HTTP/1.1 200 OK\r\nContent-Type: "
+    bytes_append_cstr(h, __lit3.utf8)
     bytes_append_cstr(h, ctype)
-    bytes_append_cstr(h, "\r\nContent-Length: ")
+    let __lit4: string = "\r\nContent-Length: "
+    bytes_append_cstr(h, __lit4.utf8)
     bytes_append_int(h, sz)
     if cc != 0 {
-        bytes_append_cstr(h, "\r\nCache-Control: ")
+        let __lit5: string = "\r\nCache-Control: "
+        bytes_append_cstr(h, __lit5.utf8)
         bytes_append_cstr(h, cc)
     }
-    bytes_append_cstr(h, "\r\nConnection: keep-alive\r\n\r\n")
+    let __lit6: string = "\r\nConnection: keep-alive\r\n\r\n"
+    bytes_append_cstr(h, __lit6.utf8)
     write_buf(afd, peek64(h), bytes_len(h))
     let buf[2048]
     for {

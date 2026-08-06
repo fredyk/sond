@@ -33,7 +33,7 @@ fn srv_send_cmdcomplete(fd: i64, tag: i64) {
     poke8(b, 67)                                    // 'C'
     let n = strlen(tag)
     let mut i = 0
-    for i < n { poke8(b + 5 + i, peek8(tag + i)); i = i + 1 }
+    for i < n { poke8(b + 5 + i, tag[i]); i = i + 1 }
     poke8(b + 5 + n, 0)
     pg_put_u32be(b + 1, 4 + n + 1)
     write_buf(fd, b, 1 + 4 + n + 1)
@@ -118,9 +118,10 @@ fn srv_send_sasl_offer(fd: i64) {
     let b[64]
     poke8(b, 82)                                    // 'R'
     pg_put_u32be(b + 5, 10)                         // AuthenticationSASL
-    let mech = "SCRAM-SHA-256"
+    let mech_text: string = "SCRAM-SHA-256"
+    let mech = mech_text.utf8
     let mut i = 0
-    for i < 13 { poke8(b + 9 + i, peek8(mech + i)); i = i + 1 }
+    for i < 13 { poke8(b + 9 + i, mech[i]); i = i + 1 }
     poke8(b + 9 + 13, 0)                            // mechanism name NUL
     poke8(b + 9 + 14, 0)                            // empty name ends the list
     pg_put_u32be(b + 1, 23)                         // 4 self + 4 code + 14 mech + 1
@@ -140,11 +141,15 @@ fn srv_send_sasl_data(fd: i64, code: i64, data: i64, datalen: i64) {
 
 // The whole server side of a SCRAM-SHA-256 exchange for password "pencil". Returns 1 if the
 // client proof verified (and it answered AuthenticationSASLFinal + Ok + ReadyForQuery), 0 not.
+let __q0_147: string = "n,,n=<user>,r=<client nonce>"
+let __q1_171: string = "r=<client+server nonce>,s=<salt b64>,i=4096"
+let __q2_185: string = "4096"
+let __q3_190: string = "c=biws,r=<full nonce>,p=<proof b64>"
 fn srv_scram(fd: i64) -> i64 {
     srv_send_sasl_offer(fd)
 
     // SASLInitialResponse: mechanism cstr, then int32 initial-response length, then the
-    // client-first-message "n,,n=<user>,r=<client nonce>".
+    // client-first-message __q0_147.utf8.
     let m = heap_alloc(4096)
     if pg_read_msg(pg_conn_plain(fd), m, 4096) <= 0 { return 0 }
     let mut q = 5
@@ -163,24 +168,28 @@ fn srv_scram(fd: i64) -> i64 {
     for i < 16 { poke8(salt + i, i + 1); i = i + 1 }
     let saltb64[32]
     let saltb64len = b64_encode(salt, 16, saltb64)
-    let snonce = "SscramServerNonce01"              // fixed 19-char server nonce
+    let snonce_text: string = "SscramServerNonce01"              // fixed 19-char server nonce
+    let snonce = snonce_text.utf8
     let snoncelen = 19
 
-    // server-first = "r=<client+server nonce>,s=<salt b64>,i=4096"
+    // server-first = __q1_171.utf8
     let sf[256]
     let mut s = 0
-    poke8(sf + 0, 114); poke8(sf + 1, 61); s = 2    // "r="
+    let __lit0: string = "r="
+    poke8(sf + 0, 114); poke8(sf + 1, 61); s = 2    // __lit0.utf8
     s = scram_app(sf, s, cnonce, cnoncelen)
     s = scram_app(sf, s, snonce, snoncelen)
-    poke8(sf + s, 44); poke8(sf + s + 1, 115); poke8(sf + s + 2, 61); s = s + 3   // ",s="
+    let __lit1: string = ",s="
+    poke8(sf + s, 44); poke8(sf + s + 1, 115); poke8(sf + s + 2, 61); s = s + 3   // __lit1.utf8
     s = scram_app(sf, s, saltb64, saltb64len)
-    poke8(sf + s, 44); poke8(sf + s + 1, 105); poke8(sf + s + 2, 61); s = s + 3   // ",i="
+    let __lit2: string = ",i="
+    poke8(sf + s, 44); poke8(sf + s + 1, 105); poke8(sf + s + 2, 61); s = s + 3   // __lit2.utf8
     poke8(sf + s, 52); poke8(sf + s + 1, 48); poke8(sf + s + 2, 57); poke8(sf + s + 3, 54)
-    s = s + 4                                       // "4096"
+    s = s + 4                                       // __q2_185.utf8
     let sflen = s
     srv_send_sasl_data(fd, 11, sf, sflen)           // AuthenticationSASLContinue
 
-    // SASLResponse: the client-final "c=biws,r=<full nonce>,p=<proof b64>". Read it into a
+    // SASLResponse: the client-final __q3_190.utf8. Read it into a
     // SEPARATE buffer: cfbare still points into `m` (the initial response) and the AuthMessage
     // needs it, so reusing `m` here would clobber it.
     let m2 = heap_alloc(4096)
@@ -195,9 +204,12 @@ fn srv_scram(fd: i64) -> i64 {
     // client-final-without-proof, then AuthMessage, then the expected ClientProof.
     let cfwop[256]
     let mut w = 0
-    poke8(cfwop + 0, 99); poke8(cfwop + 1, 61); poke8(cfwop + 2, 98)     // "c=b"
-    poke8(cfwop + 3, 105); poke8(cfwop + 4, 119); poke8(cfwop + 5, 115)  // "iws"
-    poke8(cfwop + 6, 44); poke8(cfwop + 7, 114); poke8(cfwop + 8, 61)    // ",r="
+    let __lit3: string = "c=b"
+    poke8(cfwop + 0, 99); poke8(cfwop + 1, 61); poke8(cfwop + 2, 98)     // __lit3.utf8
+    let __lit4: string = "iws"
+    poke8(cfwop + 3, 105); poke8(cfwop + 4, 119); poke8(cfwop + 5, 115)  // __lit4.utf8
+    let __lit5: string = ",r="
+    poke8(cfwop + 6, 44); poke8(cfwop + 7, 114); poke8(cfwop + 8, 61)    // __lit5.utf8
     w = 9
     w = scram_app(cfwop, w, cnonce, cnoncelen)
     w = scram_app(cfwop, w, snonce, snoncelen)
@@ -212,7 +224,8 @@ fn srv_scram(fd: i64) -> i64 {
     let authlen = a
 
     let salted[32]
-    scram_salted_password("pencil", 6, salt, 16, 4096, salted)
+    let __lit6: string = "pencil"
+    scram_salted_password(__lit6.utf8, 6, salt, 16, 4096, salted)
     let ckey[32]
     scram_client_key(salted, ckey)
     let skey[32]
@@ -233,7 +246,8 @@ fn srv_scram(fd: i64) -> i64 {
     let ssig[32]
     scram_server_signature(serverkey, auth, authlen, ssig)
     let vbuf[64]
-    poke8(vbuf + 0, 118); poke8(vbuf + 1, 61)       // "v="
+    let __lit7: string = "v="
+    poke8(vbuf + 0, 118); poke8(vbuf + 1, 61)       // __lit7.utf8
     let vlen = 2 + b64_encode(ssig, 32, vbuf + 2)
     srv_send_sasl_data(fd, 12, vbuf, vlen)          // AuthenticationSASLFinal
     srv_send_auth(fd, 0)                            // AuthenticationOk
@@ -244,6 +258,7 @@ fn srv_scram(fd: i64) -> i64 {
 // Runs the SCRAM exchange far enough to answer the client-final, but replies with a WRONG
 // ServerSignature: the client must reject it (a server that cannot prove it holds the stored
 // key is not trusted). Does not verify the client proof; it only needs to reach the reply.
+let __q4_290: string = "v="
 fn srv_scram_bad_serversig(fd: i64) {
     srv_send_sasl_offer(fd)
     let m = heap_alloc(4096)
@@ -265,7 +280,8 @@ fn srv_scram_bad_serversig(fd: i64) {
     let mut s = 0
     poke8(sf + 0, 114); poke8(sf + 1, 61); s = 2
     s = scram_app(sf, s, cnonce, cnoncelen)
-    s = scram_app(sf, s, "SscramServerNonce01", 19)
+    let __lit8: string = "SscramServerNonce01"
+    s = scram_app(sf, s, __lit8.utf8, 19)
     poke8(sf + s, 44); poke8(sf + s + 1, 115); poke8(sf + s + 2, 61); s = s + 3
     s = scram_app(sf, s, saltb64, saltb64len)
     poke8(sf + s, 44); poke8(sf + s + 1, 105); poke8(sf + s + 2, 61); s = s + 3
@@ -273,7 +289,7 @@ fn srv_scram_bad_serversig(fd: i64) {
     srv_send_sasl_data(fd, 11, sf, s)
     let m2 = heap_alloc(4096)
     if pg_read_msg(pg_conn_plain(fd), m2, 4096) <= 0 { return }
-    // SASLFinal with a bogus "v=" (base64 of 32 zero bytes): a signature the client cannot match.
+    // SASLFinal with a bogus __q4_290.utf8 (base64 of 32 zero bytes): a signature the client cannot match.
     let z[32]
     i = 0
     for i < 32 { poke8(z + i, 0); i = i + 1 }
@@ -303,7 +319,11 @@ test "pg client: SCRAM-SHA-256 authentication over loopback" {
         syscall(SYS_exit, 1 - ok)                   // exit 0 on a verified proof
     }
 
-    let conn = pgx_connect("127.0.0.1", port, "user", "pencil", "db")
+    let __z0_316: string = "127.0.0.1"
+    let __z1_316: string = "user"
+    let __z2_316: string = "pencil"
+    let __z3_316: string = "db"
+    let conn = pgx_connect(__z0_316.utf8, port, __z1_316.utf8, __z2_316.utf8, __z3_316.utf8)
     assert_ne(conn, 0)
     assert_eq(pgx_ok(conn), 1)                       // authenticated via SCRAM
     pgx_close(conn)
@@ -335,7 +355,11 @@ test "pg client: SASL offered then hung up fails the connection" {
         syscall(SYS_exit, 0)
     }
 
-    assert_eq(pgx_connect("127.0.0.1", port, "user", "pencil", "db"), 0)
+    let __z4_352: string = "127.0.0.1"
+    let __z5_352: string = "user"
+    let __z6_352: string = "pencil"
+    let __z7_352: string = "db"
+    assert_eq(pgx_connect(__z4_352.utf8, port, __z5_352.utf8, __z6_352.utf8, __z7_352.utf8), 0)
     close_fd(sfd)
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
@@ -363,12 +387,18 @@ test "pg client: a bad SCRAM ServerSignature fails the connection" {
         syscall(SYS_exit, 0)
     }
 
-    assert_eq(pgx_connect("127.0.0.1", port, "user", "pencil", "db"), 0)
+    let __z8_384: string = "127.0.0.1"
+    let __z9_384: string = "user"
+    let __z10_384: string = "pencil"
+    let __z11_384: string = "db"
+    assert_eq(pgx_connect(__z8_384.utf8, port, __z9_384.utf8, __z10_384.utf8, __z11_384.utf8), 0)
     close_fd(sfd)
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
 }
 
+let __q5_451: string = "bob"
+let __q6_455: string = "SELECT 2"
 test "pg client: connect (cleartext), query, and read rows over loopback" {
     let port = 54329
     let ip = 0x7f000001
@@ -390,29 +420,41 @@ test "pg client: connect (cleartext), query, and read rows over loopback" {
         srv_send_auth(afd, 0)                       // AuthenticationOk
         srv_send_ready(afd)                         // ReadyForQuery
         srv_drain_msg(afd)                          // the Query
-        srv_send_rowdesc2(afd, "id", "name")
-        srv_send_datarow2(afd, "7", 1, "bob", 3)
-        srv_send_datarow2(afd, "8", 1, "bob", 0 - 1)   // second col is NULL
-        srv_send_cmdcomplete(afd, "SELECT 2")
+        let __lit9: string = "id"
+        let __lit10: string = "name"
+        srv_send_rowdesc2(afd, __lit9.utf8, __lit10.utf8)
+        let __lit11: string = "7"
+        let __lit12: string = "bob"
+        srv_send_datarow2(afd, __lit11.utf8, 1, __lit12.utf8, 3)
+        let __lit13: string = "8"
+        let __lit14: string = "bob"
+        srv_send_datarow2(afd, __lit13.utf8, 1, __lit14.utf8, 0 - 1)   // second col is NULL
+        let __lit15: string = "SELECT 2"
+        srv_send_cmdcomplete(afd, __lit15.utf8)
         srv_send_ready(afd)
         close_fd(afd)
         syscall(SYS_exit, 0)
     }
 
     // PARENT: the client under test.
-    let conn = pgx_connect("127.0.0.1", port, "u", "secret", "db")
+    let __z12_432: string = "127.0.0.1"
+    let __z13_432: string = "u"
+    let __z14_432: string = "secret"
+    let __z15_432: string = "db"
+    let conn = pgx_connect(__z12_432.utf8, port, __z13_432.utf8, __z14_432.utf8, __z15_432.utf8)
     assert_ne(conn, 0)
     assert_eq(pgx_ok(conn), 1)
 
-    let r = pgx_query(conn, "SELECT id,name FROM t")
+    let __z0_440: string = "SELECT id,name FROM t"
+    let r = pgx_query(conn, __z0_440.utf8)
     assert_eq(pgx_res_ok(r), 1)
     assert_eq(pgx_ncols(r), 2)
     assert_eq(pgx_nrows(r), 2)
     assert_eq(peek8(pgx_val(r, 0, 0)), 55)          // '7'
-    assert_eq(peek8(pgx_val(r, 0, 1)), 98)          // 'b' of "bob"
+    assert_eq(peek8(pgx_val(r, 0, 1)), 98)          // 'b' of __q5_451.utf8
     assert_eq(peek8(pgx_val(r, 1, 0)), 56)          // '8'
     assert_eq(pgx_val(r, 1, 1), 0)                  // SQL NULL
-    assert_eq(peek8(pgx_res_cmd(r)), 83)            // 'S' of "SELECT 2"
+    assert_eq(peek8(pgx_res_cmd(r)), 83)            // 'S' of __q6_455.utf8
 
     pgx_close(conn)
     close_fd(sfd)
@@ -443,7 +485,11 @@ test "pg client: an unsupported auth method fails the connection" {
         syscall(SYS_exit, 0)
     }
 
-    let conn = pgx_connect("127.0.0.1", port, "u", "secret", "db")
+    let __z16_479: string = "127.0.0.1"
+    let __z17_479: string = "u"
+    let __z18_479: string = "secret"
+    let __z19_479: string = "db"
+    let conn = pgx_connect(__z16_479.utf8, port, __z17_479.utf8, __z18_479.utf8, __z19_479.utf8)
     assert_eq(conn, 0)                              // hard failure, no unauthenticated session
 
     close_fd(sfd)
@@ -453,7 +499,11 @@ test "pg client: an unsupported auth method fails the connection" {
 
 // A refused connection (nothing listening) yields a null handle, no crash.
 test "pg client: a refused connection returns a null handle" {
-    assert_eq(pgx_connect("127.0.0.1", 54331, "u", "", "db"), 0)
+    let __z20_493: string = "127.0.0.1"
+    let __z21_493: string = "u"
+    let __z22_493: string = ""
+    let __z23_493: string = "db"
+    assert_eq(pgx_connect(__z20_493.utf8, 54331, __z21_493.utf8, __z22_493.utf8, __z23_493.utf8), 0)
 }
 
 // A server that hangs up mid-startup must surface as a failed connect, not a hang.
@@ -476,7 +526,11 @@ test "pg client: a server that hangs up during startup fails cleanly" {
         syscall(SYS_exit, 0)
     }
 
-    assert_eq(pgx_connect("127.0.0.1", port, "u", "secret", "db"), 0)
+    let __z24_520: string = "127.0.0.1"
+    let __z25_520: string = "u"
+    let __z26_520: string = "secret"
+    let __z27_520: string = "db"
+    assert_eq(pgx_connect(__z24_520.utf8, port, __z25_520.utf8, __z26_520.utf8, __z27_520.utf8), 0)
     close_fd(sfd)
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
@@ -498,12 +552,17 @@ test "pg client: an ErrorResponse during startup fails the connection" {
         let afd = accept_sock(sfd, 0, 0)
         if afd < 0 { syscall(SYS_exit, 2) }
         srv_drain_startup(afd)
-        srv_send_error(afd, "database \"db\" does not exist")
+        let __lit16: string = "database \"db\" does not exist"
+        srv_send_error(afd, __lit16.utf8)
         close_fd(afd)
         syscall(SYS_exit, 0)
     }
 
-    assert_eq(pgx_connect("127.0.0.1", port, "u", "secret", "db"), 0)
+    let __z28_552: string = "127.0.0.1"
+    let __z29_552: string = "u"
+    let __z30_552: string = "secret"
+    let __z31_552: string = "db"
+    assert_eq(pgx_connect(__z28_552.utf8, port, __z29_552.utf8, __z30_552.utf8, __z31_552.utf8), 0)
     close_fd(sfd)
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
@@ -652,9 +711,10 @@ fn pt_handshake(afd: i64, certlen: i64) -> i64 {
     sha256_hash(pt_tr, trlen + fl, th)
     z = 0
     for z < 64 { poke8(pt_content + z, 0x20); z = z + 1 }
-    let lbl = "TLS 1.3, server CertificateVerify"
+    let lbl_text: string = "TLS 1.3, server CertificateVerify"
+    let lbl = lbl_text.utf8
     z = 0
-    for z < 33 { poke8(pt_content + 64 + z, peek8(lbl + z)); z = z + 1 }
+    for z < 33 { poke8(pt_content + 64 + z, lbl[z]); z = z + 1 }
     poke8(pt_content + 97, 0)
     z = 0
     for z < 32 { poke8(pt_content + 98 + z, peek8(th + z)); z = z + 1 }
@@ -681,7 +741,8 @@ fn pt_handshake(afd: i64, certlen: i64) -> i64 {
     sha256_hash(pt_tr, trlen + fl, thcv)
     let empty[1]
     let sfk[32]
-    hkdf_expand_label(s_hs, "finished", 8, empty, 0, sfk, 32)
+    let __lit17: string = "finished"
+    hkdf_expand_label(s_hs, __lit17.utf8, 8, empty, 0, sfk, 32)
     let sfin[32]
     hmac_sha256(sfk, 32, thcv, 32, sfin)
     poke8(pt_flight + fl, 20); poke8(pt_flight + fl + 1, 0); poke8(pt_flight + fl + 2, 0); poke8(pt_flight + fl + 3, 32)
@@ -694,9 +755,11 @@ fn pt_handshake(afd: i64, certlen: i64) -> i64 {
     let master[32]
     tls_derive_master_secret(hs, master)
     let s_ap[32]
-    derive_secret(master, "s ap traffic", 12, pt_tr, trlen + fl, s_ap)
+    let __lit18: string = "s ap traffic"
+    derive_secret(master, __lit18.utf8, 12, pt_tr, trlen + fl, s_ap)
     let c_ap[32]
-    derive_secret(master, "c ap traffic", 12, pt_tr, trlen + fl, c_ap)
+    let __lit19: string = "c ap traffic"
+    derive_secret(master, __lit19.utf8, 12, pt_tr, trlen + fl, c_ap)
     tls_traffic_key_iv(s_ap, pt_sakey, pt_saiv)
     tls_traffic_key_iv(c_ap, pt_cakey, pt_caiv)
     // read the client's CCS then encrypted Finished (client handshake key); we only need to
@@ -731,6 +794,7 @@ fn pt_send(afd: i64, msg: i64, len: i64) {
 
 // The whole server side over TLS: handshake, then a minimal trust-auth PostgreSQL flow. If
 // `sslrequest` is 1, it first consumes the 8-byte SSLRequest and answers 'S' in the clear.
+let __q7_815: string = "1"
 fn pt_serve(afd: i64, sslrequest: i64) {
     if sslrequest == 1 {
         let sr[8]
@@ -750,25 +814,29 @@ fn pt_serve(afd: i64, sslrequest: i64) {
     let rdy[6]
     poke8(rdy, 90); pg_put_u32be(rdy + 1, 5); poke8(rdy + 5, 73)      // 'Z' ReadyForQuery 'I'
     pt_send(afd, rdy, 6)
-    // one Simple Query: read it, then reply RowDescription(1 col) + DataRow("1") + CmdComplete + Ready
+    // one Simple Query: read it, then reply RowDescription(1 col) + DataRow(__q7_815.utf8) + CmdComplete + Ready
     if pt_recv(afd, m) < 0 { return }
     let rd[64]
-    poke8(rd, 84); pg_put_u16be(rd + 5, 1)                            // 'T' one column "n"
+    let __lit20: string = "n"
+    poke8(rd, 84); pg_put_u16be(rd + 5, 1)                            // 'T' one column __lit20.utf8
     poke8(rd + 7, 110); poke8(rd + 8, 0)
     let mut z = 0
     for z < 18 { poke8(rd + 9 + z, 0); z = z + 1 }
     pg_put_u32be(rd + 1, 27 - 1 + 6)                                  // length excludes type byte
     pt_send(afd, rd, 27 + 6)
     let dr[16]
-    poke8(dr, 68); pg_put_u16be(dr + 5, 1)                            // 'D' one field "1"
+    let __lit21: string = "1"
+    poke8(dr, 68); pg_put_u16be(dr + 5, 1)                            // 'D' one field __lit21.utf8
     pg_put_u32be(dr + 7, 1); poke8(dr + 11, 49)
     pg_put_u32be(dr + 1, 11)                                          // 4 + 2 + 4 + 1 excl type
     pt_send(afd, dr, 12)
     let cc[16]
-    poke8(cc, 67)                                                    // 'C' "SELECT 1"
-    let tag = "SELECT 1"
+    let __lit22: string = "SELECT 1"
+    poke8(cc, 67)                                                    // 'C' __lit22.utf8
+    let tag_text: string = "SELECT 1"
+    let tag = tag_text.utf8
     z = 0
-    for z < 8 { poke8(cc + 5 + z, peek8(tag + z)); z = z + 1 }
+    for z < 8 { poke8(cc + 5 + z, tag[z]); z = z + 1 }
     poke8(cc + 13, 0)
     pg_put_u32be(cc + 1, 4 + 8 + 1)
     pt_send(afd, cc, 14)
@@ -800,11 +868,18 @@ test "pg client: direct-TLS connect + SCRAM-transport (trust auth) + query over 
     let roots[4]
     roots[0] = pt_cert                                   // self-signed leaf is its own anchor
     pt_load(PT_CERT_HEX, pt_cert)
-    let conn = pgx_connect_direct("127.0.0.1", port, "user", "pw", "db",
-                                  "sond.test", 9, roots, 1, "20270101000000")
+    let __z0_862: string = "127.0.0.1"
+    let __z1_862: string = "user"
+    let __z2_862: string = "pw"
+    let __z3_862: string = "db"
+    let __q8_875: string = "sond.test"
+    let __q9_875: string = "20270101000000"
+    let conn = pgx_connect_direct(__z0_862.utf8, port, __z1_862.utf8, __z2_862.utf8, __z3_862.utf8,
+                                  __q8_875.utf8, 9, roots, 1, __q9_875.utf8)
     assert_ne(conn, 0)
     assert_eq(pgx_ok(conn), 1)                           // authenticated inside TLS
-    let r = pgx_query(conn, "SELECT 1")
+    let __z1_866: string = "SELECT 1"
+    let r = pgx_query(conn, __z1_866.utf8)
     assert_eq(pgx_res_ok(r), 1)
     assert_eq(pgx_nrows(r), 1)
     assert_eq(peek8(pgx_val(r, 0, 0)), 49)               // '1'
@@ -839,8 +914,14 @@ test "pg client: SSLRequest-negotiated TLS connect authenticates" {
     let roots[4]
     pt_load(PT_CERT_HEX, pt_cert)
     roots[0] = pt_cert
-    let conn = pgx_connect_ssl("127.0.0.1", port, "user", "pw", "db",
-                               "sond.test", 9, roots, 1, "20270101000000")
+    let __q10_917: string = "sond.test"
+    let __q11_917: string = "20270101000000"
+    let __s0_918: string = "127.0.0.1"
+    let __s1_918: string = "user"
+    let __s2_918: string = "pw"
+    let __s3_918: string = "db"
+    let conn = pgx_connect_ssl(__s0_918.utf8, port, __s1_918.utf8, __s2_918.utf8, __s3_918.utf8,
+                               __q10_917.utf8, 9, roots, 1, __q11_917.utf8)
     assert_ne(conn, 0)
     assert_eq(pgx_ok(conn), 1)
     pgx_close(conn)
@@ -862,6 +943,12 @@ test "pg tls: ecdsa_sign pubkey derivation and a zero nonce (server-side helpers
     assert_eq(ecdsa_sign(pt_d, pt_d, pt_k, sr, ss), 0)   // k=0 -> failure
 }
 
+let __q12_964: string = "127.0.0.1"
+let __q13_964: string = "u"
+let __q14_964: string = "p"
+let __q15_964: string = "db"
+let __q16_964: string = "sond.test"
+let __q17_964: string = "20270101000000"
 test "pg client: SSLRequest refused (server answers 'N') fails the connection" {
     let port = 54342
     let sfd = sock(AF_INET, SOCK_STREAM, 0)
@@ -885,7 +972,7 @@ test "pg client: SSLRequest refused (server answers 'N') fails the connection" {
     let roots[4]
     pt_load(PT_CERT_HEX, pt_cert)
     roots[0] = pt_cert
-    assert_eq(pgx_connect_ssl("127.0.0.1", port, "u", "p", "db", "sond.test", 9, roots, 1, "20270101000000"), 0)
+    assert_eq(pgx_connect_ssl(__q12_964.utf8, port, __q13_964.utf8, __q14_964.utf8, __q15_964.utf8, __q16_964.utf8, 9, roots, 1, __q17_964.utf8), 0)
     close_fd(sfd)
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
@@ -914,7 +1001,13 @@ test "pg client: direct-TLS with a mismatched host is rejected" {
     pt_load(PT_CERT_HEX, pt_cert)
     roots[0] = pt_cert
     // the certificate names sond.test, not wrong.host: chain validation fails, connect returns 0
-    assert_eq(pgx_connect_direct("127.0.0.1", port, "u", "p", "db", "wrong.host", 10, roots, 1, "20270101000000"), 0)
+    let __z4_981: string = "127.0.0.1"
+    let __z5_981: string = "u"
+    let __z6_981: string = "p"
+    let __z7_981: string = "db"
+    let __z8_981: string = "wrong.host"
+    let __z9_981: string = "20270101000000"
+    assert_eq(pgx_connect_direct(__z4_981.utf8, port, __z5_981.utf8, __z6_981.utf8, __z7_981.utf8, __z8_981.utf8, 10, roots, 1, __z9_981.utf8), 0)
     close_fd(sfd)
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
@@ -944,12 +1037,24 @@ test "pg client: a TLS server that hangs up after the handshake fails the connec
     pt_load(PT_CERT_HEX, pt_cert)
     roots[0] = pt_cert
     // TLS + chain succeed, but startup gets EOF: the connection fails and the TLS transport is dropped
-    assert_eq(pgx_connect_direct("127.0.0.1", port, "u", "p", "db", "sond.test", 9, roots, 1, "20270101000000"), 0)
+    let __z10_1017: string = "127.0.0.1"
+    let __z11_1017: string = "u"
+    let __z12_1017: string = "p"
+    let __z13_1017: string = "db"
+    let __z14_1017: string = "sond.test"
+    let __z15_1017: string = "20270101000000"
+    assert_eq(pgx_connect_direct(__z10_1017.utf8, port, __z11_1017.utf8, __z12_1017.utf8, __z13_1017.utf8, __z14_1017.utf8, 9, roots, 1, __z15_1017.utf8), 0)
     close_fd(sfd)
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
 }
 
+let __q18_1067: string = "127.0.0.1"
+let __q19_1067: string = "u"
+let __q20_1067: string = "p"
+let __q21_1067: string = "db"
+let __q22_1067: string = "sond.test"
+let __q23_1067: string = "20270101000000"
 test "pg client: SSLRequest with no reply (server hangs up) fails the connection" {
     let port = 54345
     let sfd = sock(AF_INET, SOCK_STREAM, 0)
@@ -970,7 +1075,7 @@ test "pg client: SSLRequest with no reply (server hangs up) fails the connection
     let roots[4]
     pt_load(PT_CERT_HEX, pt_cert)
     roots[0] = pt_cert
-    assert_eq(pgx_connect_ssl("127.0.0.1", port, "u", "p", "db", "sond.test", 9, roots, 1, "20270101000000"), 0)
+    assert_eq(pgx_connect_ssl(__q18_1067.utf8, port, __q19_1067.utf8, __q20_1067.utf8, __q21_1067.utf8, __q22_1067.utf8, 9, roots, 1, __q23_1067.utf8), 0)
     close_fd(sfd)
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
@@ -984,12 +1089,13 @@ test "pg_random reports a permanent failure instead of spinning" {
     assert_eq(pg_random(0, 18), 0)
 }
 
+let __q24_1092: string = "it wrote"
 test "pg_random fills the buffer and reports success" {
     let buf[3]
     let mut i = 0
     for i < 18 { poke8(buf + i, 0); i = i + 1 }
     assert_eq(pg_random(buf, 18), 1)
-    // 18 random bytes all zero has probability 2^-144, so this reads as "it wrote".
+    // 18 random bytes all zero has probability 2^-144, so this reads as __q24_1092.utf8.
     let mut any = 0
     i = 0
     for i < 18 { any = any | peek8(buf + i); i = i + 1 }

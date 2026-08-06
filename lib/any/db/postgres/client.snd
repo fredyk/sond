@@ -139,12 +139,14 @@ fn pg_sasl_scram(conn: i64, user: i64, pass: i64) -> i64 {
     let cfbare[256]
     let cfbarelen = scram_client_first_bare(user, strlen(user), nonce, noncelen, cfbare)
     let ir[300]
-    poke8(ir + 0, 110); poke8(ir + 1, 44); poke8(ir + 2, 44)   // "n,,"
+    let __lit0: string = "n,,"
+    poke8(ir + 0, 110); poke8(ir + 1, 44); poke8(ir + 2, 44)   // __lit0.utf8
     let mut i = 0
     for i < cfbarelen { poke8(ir + 3 + i, peek8(cfbare + i)); i = i + 1 }
     let irlen = 3 + cfbarelen
     let ib = heap_alloc(512)
-    let iblen = pg_sasl_initial(ib, "SCRAM-SHA-256", ir, irlen)
+    let __s0_147: string = "SCRAM-SHA-256"
+    let iblen = pg_sasl_initial(ib, __s0_147.utf8, ir, irlen)
     pg_send(conn, ib, iblen)
 
     let m = heap_alloc(4096)
@@ -251,7 +253,8 @@ fn pgx_connect_ssl(host: i64, port: i64, user: i64, pass: i64, db: i64,
     let resp[1]
     if pg_read_exact_fd(fd, resp, 1) <= 0 { close_fd(fd); return 0 }
     if peek8(resp) != 83 { close_fd(fd); return 0 }   // 'S' = SSL supported; anything else: refuse
-    let sess = tls_connect_fd(fd, sni, snilen, "postgresql", 10, roots, nroots, now14)
+    let __s0_255: string = "postgresql"
+    let sess = tls_connect_fd(fd, sni, snilen, __s0_255.utf8, 10, roots, nroots, now14)
     if sess == 0 { return 0 }                          // tls_connect_fd closed fd on failure
     let conn = heap_alloc(64)
     conn[0] = fd; conn[1] = 0; conn[2] = 1
@@ -271,7 +274,8 @@ fn pgx_connect_direct(host: i64, port: i64, user: i64, pass: i64, db: i64,
     let sa[2]
     sockaddr_in_build(sa, pg_parse_ipv4(host), port)
     if connect_sock(fd, sa, 16) < 0 { close_fd(fd); return 0 }
-    let sess = tls_connect_fd(fd, sni, snilen, "postgresql", 10, roots, nroots, now14)
+    let __s1_276: string = "postgresql"
+    let sess = tls_connect_fd(fd, sni, snilen, __s1_276.utf8, 10, roots, nroots, now14)
     if sess == 0 { return 0 }                          // tls_connect_fd closed fd on failure
     let conn = heap_alloc(64)
     conn[0] = fd; conn[1] = 0; conn[2] = 1

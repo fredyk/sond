@@ -108,7 +108,8 @@ fn run_roundtrip_check() -> i64 {
     for i < 12 { poke8(nonce + i, 0); i = i + 1 }
     poke8(nonce + 7, 74)   // 0x4a
 
-    let pt = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+    let pt_text: string = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+    let pt = pt_text.utf8
     let n = 114
 
     let ct[65]
@@ -135,7 +136,8 @@ fn run_roundtrip_check() -> i64 {
 
 // Test with counter=0 (different from official §2.3.2 which uses counter=1).
 fn run_counter_zero_check() -> i64 {
-    let exp_keystream = "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4ed2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e"
+    let exp_keystream_text: string = "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4ed2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e"
+    let exp_keystream = exp_keystream_text.utf8
 
     let key[32]
     let mut i = 0

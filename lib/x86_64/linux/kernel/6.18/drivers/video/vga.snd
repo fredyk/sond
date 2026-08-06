@@ -198,10 +198,13 @@ pub fn vgacon_puts(s: i64) {
 fn efi_main() -> i64 {
     vgacon_init(1)
 
-    vgacon_puts("=== VGA Console Demo ===\n")
-    vgacon_puts("Hello from VGA text mode in Sond!\n")
+    let __lit0: string = "=== VGA Console Demo ===\n"
+    vgacon_puts(__lit0.utf8)
+    let __lit1: string = "Hello from VGA text mode in Sond!\n"
+    vgacon_puts(__lit1.utf8)
 
-    vgacon_puts("Row/Col: ")
+    let __lit2: string = "Row/Col: "
+    vgacon_puts(__lit2.utf8)
     let col = vgacon_get_col()
     let row = vgacon_get_row()
 
@@ -214,7 +217,8 @@ fn efi_main() -> i64 {
     print_int(row)
     print("\n")
 
-    vgacon_puts("\n--- End of VGA demo ---\n")
+    let __lit3: string = "\n--- End of VGA demo ---\n"
+    vgacon_puts(__lit3.utf8)
 
     0
 }

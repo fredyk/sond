@@ -45,7 +45,8 @@ fn fill_salt() {
 
 // SaltedPassword := PBKDF2-HMAC-SHA256(pw, salt, iters, 32).
 test "scram: salted_password equals PBKDF2 with dkLen=32" {
-    let pw = "pencil"
+    let pw_text: string = "pencil"
+    let pw = pw_text.utf8
     fill_salt()
     scram_salted_password(pw, 6, t_salt, 16, 512, t_got)
     pbkdf2_sha256(pw, 6, t_salt, 16, 512, t_exp, 32)   // by hand
@@ -55,18 +56,21 @@ test "scram: salted_password equals PBKDF2 with dkLen=32" {
 
 // ClientKey := HMAC(SaltedPassword, "Client Key").
 test "scram: client_key equals HMAC(salted, \"Client Key\")" {
-    let pw = "pencil"
+    let pw_text: string = "pencil"
+    let pw = pw_text.utf8
     fill_salt()
     scram_salted_password(pw, 6, t_salt, 16, 512, t_salted)
     scram_client_key(t_salted, t_got)
-    hmac_sha256(t_salted, 32, "Client Key", 10, t_exp)   // by hand
+    let __lit0: string = "Client Key"
+    hmac_sha256(t_salted, 32, __lit0.utf8, 10, t_exp)   // by hand
     let mut i = 0
     for i < 32 { assert_eq(peek8(t_got + i), peek8(t_exp + i)); i = i + 1 }
 }
 
 // StoredKey := SHA256(ClientKey).
 test "scram: stored_key equals SHA256(client_key)" {
-    let pw = "pencil"
+    let pw_text: string = "pencil"
+    let pw = pw_text.utf8
     fill_salt()
     scram_salted_password(pw, 6, t_salt, 16, 512, t_salted)
     scram_client_key(t_salted, t_ck)
@@ -78,7 +82,8 @@ test "scram: stored_key equals SHA256(client_key)" {
 
 // ClientSignature := HMAC(StoredKey, AuthMessage).
 test "scram: client_signature equals HMAC(stored_key, AuthMessage)" {
-    let pw = "pencil"
+    let pw_text: string = "pencil"
+    let pw = pw_text.utf8
     fill_salt()
     scram_salted_password(pw, 6, t_salt, 16, 512, t_salted)
     scram_client_key(t_salted, t_ck)
@@ -93,7 +98,8 @@ test "scram: client_signature equals HMAC(stored_key, AuthMessage)" {
 // ClientProof := ClientKey XOR ClientSignature, and the XOR is invertible: a client that
 // keeps ClientProof and ClientSignature recovers ClientKey exactly.
 test "scram: client_proof is ClientKey XOR ClientSignature and is invertible" {
-    let pw = "pencil"
+    let pw_text: string = "pencil"
+    let pw = pw_text.utf8
     fill_salt()
     scram_salted_password(pw, 6, t_salt, 16, 512, t_salted)
     scram_client_key(t_salted, t_ck)
@@ -113,11 +119,13 @@ test "scram: client_proof is ClientKey XOR ClientSignature and is invertible" {
 
 // ServerKey := HMAC(SaltedPassword, "Server Key").
 test "scram: server_key equals HMAC(salted, \"Server Key\")" {
-    let pw = "pencil"
+    let pw_text: string = "pencil"
+    let pw = pw_text.utf8
     fill_salt()
     scram_salted_password(pw, 6, t_salt, 16, 512, t_salted)
     scram_server_key(t_salted, t_got)
-    hmac_sha256(t_salted, 32, "Server Key", 10, t_exp)   // by hand
+    let __lit1: string = "Server Key"
+    hmac_sha256(t_salted, 32, __lit1.utf8, 10, t_exp)   // by hand
     let mut i = 0
     for i < 32 { assert_eq(peek8(t_got + i), peek8(t_exp + i)); i = i + 1 }
     // ServerKey and ClientKey are derived from the same salted password but differ.
@@ -130,7 +138,8 @@ test "scram: server_key equals HMAC(salted, \"Server Key\")" {
 
 // ServerSignature := HMAC(ServerKey, AuthMessage).
 test "scram: server_signature equals HMAC(server_key, AuthMessage)" {
-    let pw = "pencil"
+    let pw_text: string = "pencil"
+    let pw = pw_text.utf8
     fill_salt()
     scram_salted_password(pw, 6, t_salt, 16, 512, t_salted)
     scram_server_key(t_salted, t_serverkey)

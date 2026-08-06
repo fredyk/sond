@@ -102,7 +102,8 @@ fn tls_handshake_probe(host: i64, port: i64, sni: i64, snilen: i64, out: i64) ->
     let random[32]
     if tls_random(random, 32) == 0 { close_fd(fd); return 0 - 1 }
     let ch = heap_alloc(1024)
-    let chlen = tls_build_client_hello(random, cpub, sni, snilen, "http/1.1", 8, ch)
+    let __s0_104: string = "http/1.1"
+    let chlen = tls_build_client_hello(random, cpub, sni, snilen, __s0_104.utf8, 8, ch)
     let scratch = heap_alloc(4096)
     tls_send_plain_handshake(fd, ch, chlen, scratch)
 

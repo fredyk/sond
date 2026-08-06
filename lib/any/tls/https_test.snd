@@ -153,9 +153,10 @@ fn h_serve(afd: i64, certlen: i64) {
     sha256_hash(h_tr, trlen + fl, th)
     z = 0
     for z < 64 { poke8(h_content + z, 0x20); z = z + 1 }
-    let lbl = "TLS 1.3, server CertificateVerify"
+    let lbl_text: string = "TLS 1.3, server CertificateVerify"
+    let lbl = lbl_text.utf8
     z = 0
-    for z < 33 { poke8(h_content + 64 + z, peek8(lbl + z)); z = z + 1 }
+    for z < 33 { poke8(h_content + 64 + z, lbl[z]); z = z + 1 }
     poke8(h_content + 97, 0)
     z = 0
     for z < 32 { poke8(h_content + 98 + z, peek8(th + z)); z = z + 1 }
@@ -183,7 +184,8 @@ fn h_serve(afd: i64, certlen: i64) {
     sha256_hash(h_tr, trlen + fl, thcv)
     let empty[1]
     let sfk[32]
-    hkdf_expand_label(s_hs, "finished", 8, empty, 0, sfk, 32)
+    let __lit0: string = "finished"
+    hkdf_expand_label(s_hs, __lit0.utf8, 8, empty, 0, sfk, 32)
     let sfin[32]
     hmac_sha256(sfk, 32, thcv, 32, sfin)
     poke8(h_flight + fl, 20); poke8(h_flight + fl + 1, 0); poke8(h_flight + fl + 2, 0); poke8(h_flight + fl + 3, 32)
@@ -198,9 +200,11 @@ fn h_serve(afd: i64, certlen: i64) {
     let master[32]
     tls_derive_master_secret(hs, master)
     let s_ap[32]
-    derive_secret(master, "s ap traffic", 12, h_tr, trlen + fl, s_ap)
+    let __lit1: string = "s ap traffic"
+    derive_secret(master, __lit1.utf8, 12, h_tr, trlen + fl, s_ap)
     let c_ap[32]
-    derive_secret(master, "c ap traffic", 12, h_tr, trlen + fl, c_ap)
+    let __lit2: string = "c ap traffic"
+    derive_secret(master, __lit2.utf8, 12, h_tr, trlen + fl, c_ap)
     let sakey[32]
     let saiv[12]
     tls_traffic_key_iv(s_ap, sakey, saiv)
@@ -212,7 +216,8 @@ fn h_serve(afd: i64, certlen: i64) {
     // produces would never be verified by anything, here or on the wire, and that is exactly how
     // a broken Finished reaches production looking green.
     let c_hs2[32]
-    derive_secret(hs, "c hs traffic", 12, h_tr, trlen, c_hs2)
+    let __lit3: string = "c hs traffic"
+    derive_secret(hs, __lit3.utf8, 12, h_tr, trlen, c_hs2)
     let chkey[32]
     let chiv[12]
     tls_traffic_key_iv(c_hs2, chkey, chiv)
@@ -231,7 +236,8 @@ fn h_serve(afd: i64, certlen: i64) {
     let cm = tls_open(chkey, chiv, 0, rb, rr, cfdec)
     if cm < 0 { return }
     let cfk2[32]
-    hkdf_expand_label(c_hs2, "finished", 8, cfk2, 0, cfk2, 32)
+    let __lit4: string = "finished"
+    hkdf_expand_label(c_hs2, __lit4.utf8, 8, cfk2, 0, cfk2, 32)
     let thc[32]
     sha256_hash(h_tr, trlen + fl, thc)
     let want[32]
@@ -248,10 +254,11 @@ fn h_serve(afd: i64, certlen: i64) {
     let gdec[2048]
     tls_open(cakey, caiv, 0, rb, rr, gdec)
     // serve an HTTP response (application_data, server app seq 1, after a NewSessionTicket)
-    let http = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+    let http_text: string = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+    let http = http_text.utf8
     let hbuf[64]
     z = 0
-    for z < 39 { poke8(hbuf + z, peek8(http + z)); z = z + 1 }
+    for z < 39 { poke8(hbuf + z, http[z]); z = z + 1 }
     let nst[6]
     poke8(nst + 0, 4); poke8(nst + 1, 0); poke8(nst + 2, 0); poke8(nst + 3, 2); poke8(nst + 4, 0); poke8(nst + 5, 0)
     let ns[128]
@@ -293,7 +300,11 @@ test "tls https: a full verified GET against a minimal Sond TLS server returns t
     }
 
     // PARENT: the client validates the chain (leaf names sond.test, anchors to h_roots) and GETs.
-    let n = tls_get("127.0.0.1", port, "sond.test", 9, "/", 1, h_resp, 20000, h_roots, 1, "20270101000000")
+    let __s0_302: string = "127.0.0.1"
+    let __s1_302: string = "sond.test"
+    let __s2_302: string = "/"
+    let __s3_302: string = "20270101000000"
+    let n = tls_get(__s0_302.utf8, port, __s1_302.utf8, 9, __s2_302.utf8, 1, h_resp, 20000, h_roots, 1, __s3_302.utf8)
     assert_eq(n, 39)
     assert_eq(peek8(h_resp + 0), 72)                  // 'H'
     assert_eq(peek8(h_resp + 9), 50)                  // '2' of 200
@@ -328,7 +339,11 @@ test "tls https: an untrusted server (certificate names another host) is rejecte
 
     // the certificate names sond.test, not wrong.host: the client must reject the chain and
     // return an error (-4) without sending the GET.
-    let n = tls_get("127.0.0.1", port, "wrong.host", 10, "/", 1, h_resp, 20000, h_roots, 1, "20270101000000")
+    let __s4_341: string = "127.0.0.1"
+    let __s5_341: string = "wrong.host"
+    let __s6_341: string = "/"
+    let __s7_341: string = "20270101000000"
+    let n = tls_get(__s4_341.utf8, port, __s5_341.utf8, 10, __s6_341.utf8, 1, h_resp, 20000, h_roots, 1, __s7_341.utf8)
     assert(n < 0)
     close_fd(sfd)
     let st[1]
@@ -338,7 +353,11 @@ test "tls https: an untrusted server (certificate names another host) is rejecte
 let mut h_eb[128]
 
 test "tls https: a refused connection returns a failure" {
-    assert(tls_get("127.0.0.1", 55491, "h", 1, "/", 1, h_eb, 128, h_roots, 1, "20270101000000") <= 0)
+    let __s8_355: string = "127.0.0.1"
+    let __s9_355: string = "h"
+    let __s10_355: string = "/"
+    let __s11_355: string = "20270101000000"
+    assert(tls_get(__s8_355.utf8, 55491, __s9_355.utf8, 1, __s10_355.utf8, 1, h_eb, 128, h_roots, 1, __s11_355.utf8) <= 0)
 }
 test "tls https: a server that hangs up before ServerHello returns a failure" {
     let sfd = sock(AF_INET, SOCK_STREAM, 0)
@@ -353,7 +372,11 @@ test "tls https: a server that hangs up before ServerHello returns a failure" {
         close_fd(a)
         syscall(SYS_exit, 0)
     }
-    assert(tls_get("127.0.0.1", 55492, "h", 1, "/", 1, h_eb, 128, h_roots, 1, "20270101000000") <= 0)
+    let __s12_374: string = "127.0.0.1"
+    let __s13_374: string = "h"
+    let __s14_374: string = "/"
+    let __s15_374: string = "20270101000000"
+    assert(tls_get(__s12_374.utf8, 55492, __s13_374.utf8, 1, __s14_374.utf8, 1, h_eb, 128, h_roots, 1, __s15_374.utf8) <= 0)
     close_fd(sfd)
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
@@ -377,7 +400,11 @@ test "tls https: a non-handshake first record returns a failure" {
         close_fd(a)
         syscall(SYS_exit, 0)
     }
-    assert(tls_get("127.0.0.1", 55493, "h", 1, "/", 1, h_eb, 128, h_roots, 1, "20270101000000") <= 0)
+    let __s16_402: string = "127.0.0.1"
+    let __s17_402: string = "h"
+    let __s18_402: string = "/"
+    let __s19_402: string = "20270101000000"
+    assert(tls_get(__s16_402.utf8, 55493, __s17_402.utf8, 1, __s18_402.utf8, 1, h_eb, 128, h_roots, 1, __s19_402.utf8) <= 0)
     close_fd(sfd)
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
@@ -426,7 +453,11 @@ test "tls https: a non-application record in the flight returns a failure" {
         close_fd(a)
         syscall(SYS_exit, 0)
     }
-    assert(tls_get("127.0.0.1", 55494, "sondtest", 8, "/", 1, h_eb, 128, h_roots, 1, "20270101000000") <= 0)
+    let __s20_455: string = "127.0.0.1"
+    let __s21_455: string = "sondtest"
+    let __s22_455: string = "/"
+    let __s23_455: string = "20270101000000"
+    assert(tls_get(__s20_455.utf8, 55494, __s21_455.utf8, 8, __s22_455.utf8, 1, h_eb, 128, h_roots, 1, __s23_455.utf8) <= 0)
     close_fd(sfd)
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
@@ -455,12 +486,15 @@ fn hr_eq(want: i64, got: i64, n: i64) -> i64 {
 }
 
 test "tls https: the GET request is a complete, terminated HTTP request" {
-    let n = tls_http_req("example.com", 11, "/a", 2, hr_buf)
-    let want = "GET /a HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+    let __s0_488: string = "example.com"
+    let __s1_488: string = "/a"
+    let n = tls_http_req(__s0_488.utf8, 11, __s1_488.utf8, 2, hr_buf)
+    let want_text: string = "GET /a HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n"
+    let want = want_text.utf8
     // The length is taken FROM the literal, not counted by hand: writing 56 here instead of 57
     // is the very mistake under test, and I made it on the first try.
-    let mut i = 0
-    for peek8(want + i) != 0 { poke8(hr_want + i, peek8(want + i)); i = i + 1 }
+    for k in 0..want.len { poke8(hr_want + k, want[k]) }
+    let i = want.len
     assert_eq(n, i)
     assert_eq(hr_eq(hr_want, hr_buf, i), 1)
     // and it ends with the blank line that terminates the headers
@@ -498,11 +532,17 @@ test "tls https: a close_notify is distinguishable from a bare end of data" {
         syscall(SYS_exit, 0)
     }
 
-    let sess = tls_connect("127.0.0.1", port, "sond.test", 9, "http/1.1", 8, h_roots, 1, "20270101000000")
+    let __s0_508: string = "127.0.0.1"
+    let __s1_508: string = "sond.test"
+    let __s2_508: string = "http/1.1"
+    let __s3_508: string = "20270101000000"
+    let sess = tls_connect(__s0_508.utf8, port, __s1_508.utf8, 9, __s2_508.utf8, 8, h_roots, 1, __s3_508.utf8)
     assert_eq(sess != 0, 1)
     assert_eq(tls_sess_alert(sess), 0 - 1)            // nothing has gone wrong yet
     let req[512]
-    let rq = tls_http_req("sond.test", 9, "/", 1, req)
+    let __s2_542: string = "sond.test"
+    let __s3_542: string = "/"
+    let rq = tls_http_req(__s2_542.utf8, 9, __s3_542.utf8, 1, req)
     tls_write(sess, req, rq)
     let rbuf[4096]
     let mut n = tls_read(sess, rbuf, 20000)
@@ -540,13 +580,20 @@ fn r_is(buf: i64, n: i64, want: i64) -> i64 {
 }
 
 test "http request: a GET carries the request line, Host and the terminating blank line" {
-    let n = tls_req_end(r_buf, tls_req_start(r_buf, "GET", "/alive", "example.test"), 0, 0)
+    let __s0_582: string = "GET"
+    let __s1_582: string = "/alive"
+    let __s2_582: string = "example.test"
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, __s0_582.utf8, __s1_582.utf8, __s2_582.utf8), 0, 0)
+    let __q0_587: string = "GET /alive HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"
     assert_eq(r_is(r_buf, n,
-        "GET /alive HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"), 1)
+        __q0_587.utf8), 1)
 }
 
 test "http request: the header block ends with a blank line, not with one CRLF" {
-    let n = tls_req_end(r_buf, tls_req_start(r_buf, "GET", "/", "h"), 0, 0)
+    let __s3_591: string = "GET"
+    let __s4_591: string = "/"
+    let __s5_591: string = "h"
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, __s3_591.utf8, __s4_591.utf8, __s5_591.utf8), 0, 0)
     assert_eq(peek8(r_buf + n - 4), 13)
     assert_eq(peek8(r_buf + n - 3), 10)
     assert_eq(peek8(r_buf + n - 2), 13)
@@ -554,27 +601,44 @@ test "http request: the header block ends with a blank line, not with one CRLF" 
 }
 
 test "http request: headers are appended in order, each on its own line" {
-    let mut o = tls_req_start(r_buf, "GET", "/x", "api.test")
-    o = tls_req_header(r_buf, o, "Accept", "application/json")
-    o = tls_req_header(r_buf, o, "Authorization", "Basic dXNlcjpwYXNz")
+    let __s6_602: string = "GET"
+    let __s7_602: string = "/x"
+    let __s8_602: string = "api.test"
+    let mut o = tls_req_start(r_buf, __s6_602.utf8, __s7_602.utf8, __s8_602.utf8)
+    let __lit5: string = "Accept"
+    let __lit6: string = "application/json"
+    o = tls_req_header(r_buf, o, __lit5.utf8, __lit6.utf8)
+    let __lit7: string = "Authorization"
+    let __lit8: string = "Basic dXNlcjpwYXNz"
+    o = tls_req_header(r_buf, o, __lit7.utf8, __lit8.utf8)
     let n = tls_req_end(r_buf, o, 0, 0)
+    let __q1_615: string = "GET /x HTTP/1.1\r\nHost: api.test\r\nAccept: application/json\r\nAuthorization: Basic dXNlcjpwYXNz\r\nConnection: close\r\n\r\n"
     assert_eq(r_is(r_buf, n,
-        "GET /x HTTP/1.1\r\nHost: api.test\r\nAccept: application/json\r\nAuthorization: Basic dXNlcjpwYXNz\r\nConnection: close\r\n\r\n"), 1)
+        __q1_615.utf8), 1)
 }
 
 test "http request: a body gets a computed Content-Length, never one the caller supplies" {
-    let n = tls_req_end(r_buf, tls_req_start(r_buf, "POST", "/set", "api.test"), "{\"a\":1}", 7)
+    let __s9_618: string = "POST"
+    let __s10_618: string = "/set"
+    let __s11_618: string = "api.test"
+    let __s12_618: string = "{\"a\":1}"
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, __s9_618.utf8, __s10_618.utf8, __s11_618.utf8), __s12_618.utf8, 7)
+    let __q2_626: string = "POST /set HTTP/1.1\r\nHost: api.test\r\nContent-Length: 7\r\nConnection: close\r\n\r\n{\"a\":1}"
     assert_eq(r_is(r_buf, n,
-        "POST /set HTTP/1.1\r\nHost: api.test\r\nContent-Length: 7\r\nConnection: close\r\n\r\n{\"a\":1}"), 1)
+        __q2_626.utf8), 1)
 }
 
 test "http request: Content-Length counts the bytes given, not the text of the body" {
     // 128 bytes of body would be three digits; the length must follow bodylen, not a guess.
     let mut i = 0
     for i < 40 { poke8(r_body + i, 65); i = i + 1 }
-    let n = tls_req_end(r_buf, tls_req_start(r_buf, "PUT", "/f", "h"), r_body, 40)
+    let __s13_631: string = "PUT"
+    let __s14_631: string = "/f"
+    let __s15_631: string = "h"
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, __s13_631.utf8, __s14_631.utf8, __s15_631.utf8), r_body, 40)
+    let __q3_639: string = "PUT /f HTTP/1.1\r\nHost: h\r\nContent-Length: 40\r\nConnection: close\r\n\r\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     assert_eq(r_is(r_buf, n,
-        "PUT /f HTTP/1.1\r\nHost: h\r\nContent-Length: 40\r\nConnection: close\r\n\r\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), 1)
+        __q3_639.utf8), 1)
 }
 
 test "http request: the body may hold arbitrary bytes, NUL included" {
@@ -582,30 +646,41 @@ test "http request: the body may hold arbitrary bytes, NUL included" {
     poke8(r_body + 0, 37)                            // '%'
     poke8(r_body + 1, 0)                             // NUL in the middle
     poke8(r_body + 2, 80)                            // 'P'
-    let start = tls_req_start(r_buf, "PUT", "/u", "h")
+    let __s16_644: string = "PUT"
+    let __s17_644: string = "/u"
+    let __s18_644: string = "h"
+    let start = tls_req_start(r_buf, __s16_644.utf8, __s17_644.utf8, __s18_644.utf8)
     let n = tls_req_end(r_buf, start, r_body, 3)
     assert_eq(peek8(r_buf + n - 3), 37)
     assert_eq(peek8(r_buf + n - 2), 0)
     assert_eq(peek8(r_buf + n - 1), 80)
     // ...and the length announced is the one that was passed, so the peer reads all three.
-    assert_eq(r_is(r_buf, n - 3, "PUT /u HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nConnection: close\r\n\r\n"), 1)
+    let __s0_653: string = "PUT /u HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\nConnection: close\r\n\r\n"
+    assert_eq(r_is(r_buf, n - 3, __s0_653.utf8), 1)
 }
 
 test "http request: an empty body carries no Content-Length at all" {
-    let n = tls_req_end(r_buf, tls_req_start(r_buf, "GET", "/", "h"), r_body, 0)
-    assert_eq(r_is(r_buf, n, "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"), 1)
+    let __s19_657: string = "GET"
+    let __s20_657: string = "/"
+    let __s21_657: string = "h"
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, __s19_657.utf8, __s20_657.utf8, __s21_657.utf8), r_body, 0)
+    let __s1_662: string = "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"
+    assert_eq(r_is(r_buf, n, __s1_662.utf8), 1)
 }
 
 test "http request: a long body announces every digit of its length" {
-    let n = tls_req_end(r_buf, tls_req_start(r_buf, "POST", "/", "h"), r_body, 1024)
+    let __s22_665: string = "POST"
+    let __s23_665: string = "/"
+    let __s24_665: string = "h"
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, __s22_665.utf8, __s23_665.utf8, __s24_665.utf8), r_body, 1024)
     // Only the header block is checked here; the body bytes come from r_body's 64 bytes.
     let mut i = 0
-    let want = "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n"
-    for peek8(want + i) != 0 {
-        assert_eq(peek8(r_buf + i), peek8(want + i))
-        i = i + 1
+    let want_text: string = "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n"
+    let want = want_text.utf8
+    for k in 0..want.len {
+        assert_eq(peek8(r_buf + k), want[k])
     }
-    assert_eq(n, i + 1024)
+    assert_eq(n, want.len + 1024)
 }
 
 test "http request: the decimal writer handles zero and a many-digit value" {
@@ -616,34 +691,61 @@ test "http request: the decimal writer handles zero and a many-digit value" {
     assert_eq(peek8(r_buf), 48)
     let n1 = tls_put_uint(r_buf, 0, 1048576)
     assert_eq(n1, 7)
-    assert_eq(r_is(r_buf, n1, "1048576"), 1)
+    let __s2_689: string = "1048576"
+    assert_eq(r_is(r_buf, n1, __s2_689.utf8), 1)
 }
 
+let __q4_704: string = "X"
+let __q5_704: string = "a\r\nX-Injected: yes"
 test "http request: a CRLF in a header value is refused, not smuggled through" {
     // The value of Authorization is computed at run time from a config file, so a stray
     // newline in that file would otherwise decide which headers go out on the wire.
-    let o = tls_req_start(r_buf, "GET", "/", "h")
-    assert_eq(tls_req_header(r_buf, o, "X", "a\r\nX-Injected: yes") < 0, true)
+    let __s25_693: string = "GET"
+    let __s26_693: string = "/"
+    let __s27_693: string = "h"
+    let o = tls_req_start(r_buf, __s25_693.utf8, __s26_693.utf8, __s27_693.utf8)
+    assert_eq(tls_req_header(r_buf, o, __q4_704.utf8, __q5_704.utf8) < 0, true)
 }
 
+let __q6_714: string = "X"
+let __q7_714: string = "a\rb"
+let __q8_717: string = "X\nY"
+let __q9_717: string = "ok"
 test "http request: a lone CR is refused too, since some servers split on it" {
-    let o = tls_req_start(r_buf, "GET", "/", "h")
-    assert_eq(tls_req_header(r_buf, o, "X", "a\rb") < 0, true)
-    assert_eq(tls_req_header(r_buf, o, "X\nY", "ok") < 0, true)
+    let __s28_701: string = "GET"
+    let __s29_701: string = "/"
+    let __s30_701: string = "h"
+    let o = tls_req_start(r_buf, __s28_701.utf8, __s29_701.utf8, __s30_701.utf8)
+    assert_eq(tls_req_header(r_buf, o, __q6_714.utf8, __q7_714.utf8) < 0, true)
+    assert_eq(tls_req_header(r_buf, o, __q8_717.utf8, __q9_717.utf8) < 0, true)
 }
 
 test "http request: the method and the host are checked too, not only the path" {
-    assert_eq(tls_req_start(r_buf, "GET\r\nX: y", "/", "h") < 0, true)
-    assert_eq(tls_req_start(r_buf, "GET", "/", "h\r\nX: y") < 0, true)
-    assert_eq(tls_req_start(r_buf, "GET", "/", "h") > 0, true)
+    let __s31_710: string = "GET\r\nX: y"
+    let __s32_710: string = "/"
+    let __s33_710: string = "h"
+    assert_eq(tls_req_start(r_buf, __s31_710.utf8, __s32_710.utf8, __s33_710.utf8) < 0, true)
+    let __s34_714: string = "GET"
+    let __s35_714: string = "/"
+    let __s36_714: string = "h\r\nX: y"
+    assert_eq(tls_req_start(r_buf, __s34_714.utf8, __s35_714.utf8, __s36_714.utf8) < 0, true)
+    let __s37_718: string = "GET"
+    let __s38_718: string = "/"
+    let __s39_718: string = "h"
+    assert_eq(tls_req_start(r_buf, __s37_718.utf8, __s38_718.utf8, __s39_718.utf8) > 0, true)
 }
 
+let __q10_745: string = "Accept"
+let __q11_745: string = "text/plain"
 test "http request: a refusal is refused all the way out, and writes nothing" {
     poke8(r_buf + 0, 90)                             // a sentinel where the request starts
-    assert_eq(tls_req_start(r_buf, "GET", "/bad\r\n", "h") < 0, true)
+    let __s40_726: string = "GET"
+    let __s41_726: string = "/bad\r\n"
+    let __s42_726: string = "h"
+    assert_eq(tls_req_start(r_buf, __s40_726.utf8, __s41_726.utf8, __s42_726.utf8) < 0, true)
     assert_eq(peek8(r_buf), 90)                      // the buffer was left untouched
     assert_eq(tls_req_end(r_buf, 0 - 1, 0, 0), 0 - 1)
-    assert_eq(tls_req_header(r_buf, 0 - 1, "Accept", "text/plain"), 0 - 1)
+    assert_eq(tls_req_header(r_buf, 0 - 1, __q10_745.utf8, __q11_745.utf8), 0 - 1)
 }
 
 test "http request: a negative body length is refused, not turned into no body at all" {
@@ -651,41 +753,57 @@ test "http request: a negative body length is refused, not turned into no body a
     // valid-looking request without the body it asked for is the CRLF mistake again, doing
     // something other than what was asked without saying so.
     poke8(r_buf + 0, 90)
-    let o = tls_req_start(r_buf, "PUT", "/f", "h")
+    let __s43_740: string = "PUT"
+    let __s44_740: string = "/f"
+    let __s45_740: string = "h"
+    let o = tls_req_start(r_buf, __s43_740.utf8, __s44_740.utf8, __s45_740.utf8)
     assert_eq(tls_req_end(r_buf, o, r_body, 0 - 5), 0 - 1)
 }
 
 test "http request: the body is NOT checked, because a body may hold anything" {
     // CRLF is data inside a body; only header lines are structure.
-    let n = tls_req_end(r_buf, tls_req_start(r_buf, "POST", "/", "h"), "a\r\nb", 4)
-    assert_eq(r_is(r_buf, n, "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\nConnection: close\r\n\r\na\r\nb"), 1)
+    let __s46_749: string = "POST"
+    let __s47_749: string = "/"
+    let __s48_749: string = "h"
+    let __s49_749: string = "a\r\nb"
+    let n = tls_req_end(r_buf, tls_req_start(r_buf, __s46_749.utf8, __s47_749.utf8, __s48_749.utf8), __s49_749.utf8, 4)
+    let __s3_757: string = "POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 4\r\nConnection: close\r\n\r\na\r\nb"
+    assert_eq(r_is(r_buf, n, __s3_757.utf8), 1)
 }
 
+let __q12_774: string = "Wiki"
+let __q13_774: string = "pedia"
 test "chunked: a body split across chunks is joined back exactly" {
-    // "Wiki" + "pedia" in two chunks, then the zero chunk that ends the body.
-    let n = tls_put_str(r_buf, 0, "4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n")
+    // __q12_774.utf8 + __q13_774.utf8 in two chunks, then the zero chunk that ends the body.
+    let __s0_681: string = "4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n"
+    let n = tls_put_str(r_buf, 0, __s0_681.utf8)
     let len = tls_dechunk(r_buf, 0, n)
     assert_eq(len, 9)
-    assert_eq(r_is(r_buf, len, "Wikipedia"), 1)
+    let __s4_767: string = "Wikipedia"
+    assert_eq(r_is(r_buf, len, __s4_767.utf8), 1)
 }
 
 test "chunked: the size is hexadecimal, not decimal" {
     // 0x10 is sixteen bytes; reading it as ten would truncate the body.
-    let n = tls_put_str(r_buf, 0, "10\r\n0123456789abcdef\r\n0\r\n\r\n")
+    let __s1_690: string = "10\r\n0123456789abcdef\r\n0\r\n\r\n"
+    let n = tls_put_str(r_buf, 0, __s1_690.utf8)
     assert_eq(tls_dechunk(r_buf, 0, n), 16)
-    assert_eq(r_is(r_buf, 16, "0123456789abcdef"), 1)
+    let __s5_776: string = "0123456789abcdef"
+    assert_eq(r_is(r_buf, 16, __s5_776.utf8), 1)
 }
 
 test "chunked: a chunk may carry arbitrary bytes, NUL included" {
     poke8(r_body + 0, 65)
     poke8(r_body + 1, 0)
     poke8(r_body + 2, 66)
-    let mut o = tls_put_str(r_buf, 0, "3\r\n")
+    let __s2_700: string = "3\r\n"
+    let mut o = tls_put_str(r_buf, 0, __s2_700.utf8)
     o = o + 0
     poke8(r_buf + o, 65)
     poke8(r_buf + o + 1, 0)
     poke8(r_buf + o + 2, 66)
-    let n = tls_put_str(r_buf, o + 3, "\r\n0\r\n\r\n")
+    let __s3_706: string = "\r\n0\r\n\r\n"
+    let n = tls_put_str(r_buf, o + 3, __s3_706.utf8)
     assert_eq(tls_dechunk(r_buf, 0, n), 3)
     assert_eq(peek8(r_buf + 0), 65)
     assert_eq(peek8(r_buf + 1), 0)
@@ -693,91 +811,113 @@ test "chunked: a chunk may carry arbitrary bytes, NUL included" {
 }
 
 test "chunked: chunk extensions after the size are ignored" {
-    let n = tls_put_str(r_buf, 0, "4;name=value\r\nWiki\r\n0\r\n\r\n")
+    let __s4_715: string = "4;name=value\r\nWiki\r\n0\r\n\r\n"
+    let n = tls_put_str(r_buf, 0, __s4_715.utf8)
     assert_eq(tls_dechunk(r_buf, 0, n), 4)
-    assert_eq(r_is(r_buf, 4, "Wiki"), 1)
+    let __s6_802: string = "Wiki"
+    assert_eq(r_is(r_buf, 4, __s6_802.utf8), 1)
 }
 
 test "chunked: decoding starts where the caller says, leaving the headers alone" {
-    let head = tls_put_str(r_buf, 0, "HTTP/1.1 200 OK\r\n\r\n")
-    let n = tls_put_str(r_buf, head, "4\r\nWiki\r\n0\r\n\r\n")
+    let __s5_722: string = "HTTP/1.1 200 OK\r\n\r\n"
+    let head = tls_put_str(r_buf, 0, __s5_722.utf8)
+    let __s6_724: string = "4\r\nWiki\r\n0\r\n\r\n"
+    let n = tls_put_str(r_buf, head, __s6_724.utf8)
     let len = tls_dechunk(r_buf, head, n)
     assert_eq(len, 4)
-    assert_eq(r_is(r_buf, head, "HTTP/1.1 200 OK\r\n\r\n"), 1)   // cabeceras intactas
+    let __s7_813: string = "HTTP/1.1 200 OK\r\n\r\n"
+    assert_eq(r_is(r_buf, head, __s7_813.utf8), 1)   // cabeceras intactas
     assert_eq(peek8(r_buf + head), 87)                           // 'W'
 }
 
 test "chunked: a truncated body yields what actually arrived, not past the end" {
     // The peer announced eight bytes and sent four before dying.
-    let n = tls_put_str(r_buf, 0, "8\r\nWiki")
+    let __s7_734: string = "8\r\nWiki"
+    let n = tls_put_str(r_buf, 0, __s7_734.utf8)
     assert_eq(tls_dechunk(r_buf, 0, n), 4)
 }
 
 test "chunked: an empty body decodes to nothing" {
-    let n = tls_put_str(r_buf, 0, "0\r\n\r\n")
+    let __s8_740: string = "0\r\n\r\n"
+    let n = tls_put_str(r_buf, 0, __s8_740.utf8)
     assert_eq(tls_dechunk(r_buf, 0, n), 0)
 }
 
 test "chunked: a chunked body is recognised from the headers, a plain one is not" {
-    let h1 = tls_put_str(r_buf, 0, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+    let __s9_746: string = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+    let h1 = tls_put_str(r_buf, 0, __s9_746.utf8)
     assert_eq(tls_is_chunked(r_buf, h1), 1)
-    let h2 = tls_put_str(r_buf, 0, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n")
+    let __s10_749: string = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n"
+    let h2 = tls_put_str(r_buf, 0, __s10_749.utf8)
     assert_eq(tls_is_chunked(r_buf, h2), 0)
 }
 
 test "chunked: an upper-case hex size is read the same as a lower-case one" {
-    let n = tls_put_str(r_buf, 0, "A\r\n0123456789\r\n0\r\n\r\n")
+    let __s11_755: string = "A\r\n0123456789\r\n0\r\n\r\n"
+    let n = tls_put_str(r_buf, 0, __s11_755.utf8)
     assert_eq(tls_dechunk(r_buf, 0, n), 10)
-    assert_eq(r_is(r_buf, 10, "0123456789"), 1)
+    let __s8_844: string = "0123456789"
+    assert_eq(r_is(r_buf, 10, __s8_844.utf8), 1)
 }
 
 test "chunked: a body with no size line at all decodes to nothing" {
-    let n = tls_put_str(r_buf, 0, "\r\nWiki")
+    let __s12_762: string = "\r\nWiki"
+    let n = tls_put_str(r_buf, 0, __s12_762.utf8)
     assert_eq(tls_dechunk(r_buf, 0, n), 0)
 }
 
+let __q14_870: string = "chunked"
 test "chunked: a filename that merely contains the word is NOT a chunked body" {
     // An API delivering a document sends Content-Disposition with a filename, and reading
-    // "chunked" there would decode a body that was never chunked: tls_dechunk returns 0 on
+    // __q14_870.utf8 there would decode a body that was never chunked: tls_dechunk returns 0 on
     // it, so the caller writes an EMPTY file and nothing complains.
+    let __m0: string = "HTTP/1.1 200 OK\r\nContent-Disposition: attachment; filename=informe-chunked.pdf\r\nContent-Length: 9\r\n\r\n"
     let h = tls_put_str(r_buf, 0,
-        "HTTP/1.1 200 OK\r\nContent-Disposition: attachment; filename=informe-chunked.pdf\r\nContent-Length: 9\r\n\r\n")
+        __m0.utf8)
     assert_eq(tls_is_chunked(r_buf, h), 0)
 }
 
 test "chunked: the header name is matched without regard to case, anywhere in the block" {
+    let __m1: string = "HTTP/1.1 200 OK\r\nServer: x\r\nTrAnSfEr-EnCoDiNg: Chunked\r\nDate: today\r\n\r\n"
     let h = tls_put_str(r_buf, 0,
-        "HTTP/1.1 200 OK\r\nServer: x\r\nTrAnSfEr-EnCoDiNg: Chunked\r\nDate: today\r\n\r\n")
+        __m1.utf8)
     assert_eq(tls_is_chunked(r_buf, h), 1)
 }
 
 test "chunked: a list of encodings ending in chunked still counts" {
-    let h = tls_put_str(r_buf, 0, "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n")
+    let __s13_783: string = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"
+    let h = tls_put_str(r_buf, 0, __s13_783.utf8)
     assert_eq(tls_is_chunked(r_buf, h), 1)
 }
 
 test "chunked: the search stops at the end of the Transfer-Encoding line" {
     // The word sits in a LATER header, so a search that runs past the end of the line it
     // belongs to would find it and decode a body that is not chunked.
+    let __m2: string = "HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\nX-Note: chunked\r\n\r\n"
     let h = tls_put_str(r_buf, 0,
-        "HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\nX-Note: chunked\r\n\r\n")
+        __m2.utf8)
     assert_eq(tls_is_chunked(r_buf, h), 0)
     // ...and the reverse order too: the word before the header must not count either.
+    let __m3: string = "HTTP/1.1 200 OK\r\nX-Note: chunked\r\nTransfer-Encoding: identity\r\n\r\n"
     let h2 = tls_put_str(r_buf, 0,
-        "HTTP/1.1 200 OK\r\nX-Note: chunked\r\nTransfer-Encoding: identity\r\n\r\n")
+        __m3.utf8)
     assert_eq(tls_is_chunked(r_buf, h2), 0)
 }
 
+let __q15_907: string = "chunked"
+let __q16_914: string = "chunked"
 test "chunked: nothing is read past the end of the header block" {
-    // hdrend falls INSIDE the word "chunked": what comes after it is the next response in
+    // hdrend falls INSIDE the word __q15_907.utf8: what comes after it is the next response in
     // the buffer, not this one's headers, and comparing into it would answer with somebody
     // else's data.
-    let full = tls_put_str(r_buf, 0, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+    let __s14_804: string = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+    let full = tls_put_str(r_buf, 0, __s14_804.utf8)
     assert_eq(tls_is_chunked(r_buf, full), 1)
-    assert_eq(tls_is_chunked(r_buf, 40), 0)          // corta a mitad de "chunked"
+    assert_eq(tls_is_chunked(r_buf, 40), 0)          // corta a mitad de __q16_914.utf8
 }
 
 test "chunked: an upper-case hex letter is a digit too" {
-    let n = tls_put_str(r_buf, 0, "F\r\n123456789012345\r\n0\r\n\r\n")
+    let __s15_811: string = "F\r\n123456789012345\r\n0\r\n\r\n"
+    let n = tls_put_str(r_buf, 0, __s15_811.utf8)
     assert_eq(tls_dechunk(r_buf, 0, n), 15)
 }

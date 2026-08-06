@@ -20,7 +20,8 @@ fn main() -> i64 {
     let p3r = peek32(p3)
     let p3w = peek32(p3 + 4)
 
-    let msg = "splice-moves-these-bytes-0123456789"
+    let msg_text: string = "splice-moves-these-bytes-0123456789"
+    let msg = msg_text.utf8
     let mlen = strlen(msg)
     write_buf(p1w, msg, mlen)
     close_fd(p1w)   // EOF at source

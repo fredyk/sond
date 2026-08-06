@@ -24,7 +24,9 @@ test "pg wire: u32 big-endian round-trips" {
 //   int32 len | int32 196608 | "user\0me\0database\0db\0\0"
 // payload = 5 + 3 + 9 + 3 + 1 = 21 bytes; total = 8 + 21 = 29.
 test "pg wire: StartupMessage layout (protocol 3.0, user/database params)" {
-    let total = pg_startup(w_buf, "me", "db")
+    let __s0_26: string = "me"
+    let __s1_26: string = "db"
+    let total = pg_startup(w_buf, __s0_26.utf8, __s1_26.utf8)
     assert_eq(total, 29)
     assert_eq(pg_get_u32be(w_buf), 29)             // length field carries the total
     assert_eq(pg_get_u32be(w_buf + 4), 196608)     // protocol version 3.0
@@ -41,7 +43,8 @@ test "pg wire: StartupMessage layout (protocol 3.0, user/database params)" {
 
 // Query "SELECT 1": 'Q' | int32 13 | "SELECT 1\0"; length excludes the type byte.
 test "pg wire: Simple Query layout" {
-    let total = pg_query(w_buf, "SELECT 1")
+    let __s0_45: string = "SELECT 1"
+    let total = pg_query(w_buf, __s0_45.utf8)
     assert_eq(total, 14)                           // 1 type byte + 13 length
     assert_eq(peek8(w_buf + 0), 81)                // 'Q'
     assert_eq(pg_get_u32be(w_buf + 1), 13)         // 4 + 8 sql + 1 NUL
@@ -106,7 +109,8 @@ test "pg wire: DataRow fields including NULL" {
     poke8(w_msg, 68)                               // 'D'
     pg_put_u16be(w_msg + 5, 2)                      // field count
     pg_put_u32be(w_msg + 7, 2)                      // field 0 length = 2
-    poke8(w_msg + 11, 52); poke8(w_msg + 12, 50)   // "42"
+    let __lit0: string = "42"
+    poke8(w_msg + 11, 52); poke8(w_msg + 12, 50)   // __lit0.utf8
     pg_put_u32be(w_msg + 13, 0xffffffff)           // field 1 length = -1 (NULL)
 
     assert_eq(pg_datarow_nfields(w_msg), 2)
@@ -125,9 +129,10 @@ test "pg wire: DataRow fields including NULL" {
 test "pg wire: CommandComplete tag" {
     poke8(w_msg, 67)                               // 'C'
     // tag "SELECT 1\0" at payload
-    let tag = "SELECT 1"
+    let tag_text: string = "SELECT 1"
+    let tag = tag_text.utf8
     let mut i = 0
-    for i < 8 { poke8(w_msg + 5 + i, peek8(tag + i)); i = i + 1 }
+    for i < 8 { poke8(w_msg + 5 + i, tag[i]); i = i + 1 }
     poke8(w_msg + 13, 0)
     let t = pg_cmdcomplete_tag(w_msg)
     assert_eq(peek8(t), 83)                        // 'S'
@@ -142,12 +147,14 @@ test "pg wire: ErrorResponse field lookup" {
     poke8(w_msg + p, 83)                           // 'S'
     p = p + 1
     poke8(w_msg + p, 69); poke8(w_msg + p + 1, 82); poke8(w_msg + p + 2, 82)
-    poke8(w_msg + p + 3, 79); poke8(w_msg + p + 4, 82); poke8(w_msg + p + 5, 0)   // "ERROR\0"
+    let __lit1: string = "ERROR\0"
+    poke8(w_msg + p + 3, 79); poke8(w_msg + p + 4, 82); poke8(w_msg + p + 5, 0)   // __lit1.utf8
     p = p + 6
     poke8(w_msg + p, 77)                           // 'M'
     p = p + 1
     poke8(w_msg + p, 98); poke8(w_msg + p + 1, 111); poke8(w_msg + p + 2, 111)
-    poke8(w_msg + p + 3, 109); poke8(w_msg + p + 4, 0)   // "boom\0"
+    let __lit2: string = "boom\0"
+    poke8(w_msg + p + 3, 109); poke8(w_msg + p + 4, 0)   // __lit2.utf8
     p = p + 5
     poke8(w_msg + p, 0)                            // terminator
 
@@ -163,7 +170,9 @@ test "pg wire: ErrorResponse field lookup" {
 //   'p' | int32 len | "SCRAM-SHA-256\0" | int32 2 | "xy"
 //   len = 4(self) + 14(mech cstr) + 4(resp len) + 2 = 24; total = 1 + 24 = 25.
 test "pg wire: SASLInitialResponse layout (mechanism + initial response)" {
-    let total = pg_sasl_initial(w_buf, "SCRAM-SHA-256", "xy", 2)
+    let __s0_172: string = "SCRAM-SHA-256"
+    let __s1_172: string = "xy"
+    let total = pg_sasl_initial(w_buf, __s0_172.utf8, __s1_172.utf8, 2)
     assert_eq(total, 25)
     assert_eq(peek8(w_buf + 0), 112)               // 'p'
     assert_eq(pg_get_u32be(w_buf + 1), 24)         // length carries everything after the type byte
@@ -177,7 +186,8 @@ test "pg wire: SASLInitialResponse layout (mechanism + initial response)" {
 // SASLResponse ('p'): just the client-final message bytes, no mechanism, no inner length.
 //   'p' | int32 len | data ; len = 4(self) + datalen.
 test "pg wire: SASLResponse layout (client-final message)" {
-    let total = pg_sasl_response(w_buf, "abc", 3)
+    let __s0_188: string = "abc"
+    let total = pg_sasl_response(w_buf, __s0_188.utf8, 3)
     assert_eq(total, 8)                            // 1 type + 7 length
     assert_eq(peek8(w_buf + 0), 112)               // 'p'
     assert_eq(pg_get_u32be(w_buf + 1), 7)          // 4 + 3
@@ -192,8 +202,10 @@ test "pg wire: SASL continue/final data pointer and length" {
     poke8(w_msg, 82)                               // 'R'
     pg_put_u32be(w_msg + 1, 13)                    // 4(self) + 4(code) + 5(data)
     pg_put_u32be(w_msg + 5, 11)                    // AuthenticationSASLContinue
-    poke8(w_msg + 9, 114); poke8(w_msg + 10, 61)   // "r="
-    poke8(w_msg + 11, 102); poke8(w_msg + 12, 111); poke8(w_msg + 13, 111)   // "foo"
+    let __lit3: string = "r="
+    poke8(w_msg + 9, 114); poke8(w_msg + 10, 61)   // __lit3.utf8
+    let __lit4: string = "foo"
+    poke8(w_msg + 11, 102); poke8(w_msg + 12, 111); poke8(w_msg + 13, 111)   // __lit4.utf8
     assert_eq(pg_sasl_data_len(w_msg), 5)          // 13 - 8
     assert_eq(pg_sasl_data_ptr(w_msg) - w_msg, 9)  // past type, length, code
     assert_eq(peek8(pg_sasl_data_ptr(w_msg)), 114) // 'r'

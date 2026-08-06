@@ -101,7 +101,8 @@ fn ns_decrypt_and_hash(st: i64, in_ptr: i64, clen: i64, out: i64) -> i64 {
 
 // InitializeSymmetric + MixHash(empty prologue).
 fn ns_init(st: i64) {
-    let name = "Noise_IK_25519_ChaChaPoly_SHA256"   // 32 bytes exactly
+    let name_text: string = "Noise_IK_25519_ChaChaPoly_SHA256"   // 32 bytes exactly
+    let name = name_text.utf8
     memcpy(st + NS_H, name, 32)
     memcpy(st + NS_CK, name, 32)
     poke64(st + NS_N, 0)

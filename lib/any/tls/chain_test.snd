@@ -70,14 +70,22 @@ test "tls chain: validate the server's cloudflare chain up to GTS Root R4" {
     let n = build_certmsg(t_leaf, ll, t_we1, wl)
     t_roots[0] = t_gtsr4
     // the flight is just this Certificate message; the verifier finds it and validates the chain
-    assert_eq(tls_verify_server_chain(t_msg, n, t_roots, 1, t_host, tseth("cloudflare.com"), "20260901000000"), 1)
+    let __s0_72: string = "cloudflare.com"
+    let __s1_72: string = "20260901000000"
+    assert_eq(tls_verify_server_chain(t_msg, n, t_roots, 1, t_host, tseth(__s0_72.utf8), __s1_72.utf8), 1)
     // a host the leaf does not name is rejected
-    assert_eq(tls_verify_server_chain(t_msg, n, t_roots, 1, t_host, tseth("evil.example"), "20260901000000"), 0)
+    let __s2_76: string = "evil.example"
+    let __s3_76: string = "20260901000000"
+    assert_eq(tls_verify_server_chain(t_msg, n, t_roots, 1, t_host, tseth(__s2_76.utf8), __s3_76.utf8), 0)
     // an empty trust store anchors to nothing trusted
-    assert_eq(tls_verify_server_chain(t_msg, n, t_roots, 0, t_host, tseth("cloudflare.com"), "20260901000000"), 0)
+    let __s4_80: string = "cloudflare.com"
+    let __s5_80: string = "20260901000000"
+    assert_eq(tls_verify_server_chain(t_msg, n, t_roots, 0, t_host, tseth(__s4_80.utf8), __s5_80.utf8), 0)
     // a flight without a Certificate message (a lone Finished, type 20) yields 0
     let mut fin[4]
     poke8(fin + 0, 20); poke8(fin + 1, 0); poke8(fin + 2, 0); poke8(fin + 3, 4)
     poke8(fin + 4, 0); poke8(fin + 5, 0); poke8(fin + 6, 0); poke8(fin + 7, 0)
-    assert_eq(tls_verify_server_chain(fin, 8, t_roots, 1, t_host, tseth("cloudflare.com"), "20260901000000"), 0)
+    let __s6_87: string = "cloudflare.com"
+    let __s7_87: string = "20260901000000"
+    assert_eq(tls_verify_server_chain(fin, 8, t_roots, 1, t_host, tseth(__s6_87.utf8), __s7_87.utf8), 0)
 }

@@ -42,7 +42,8 @@ fn main() -> i64 {
     syscall(SYS_wait4, pid, st, 0, 0)
 
     if n != 22 { puts("FAIL recv len\n") return 1 }
-    let exp = "hola-tcp-loopback-1234"
+    let exp_text: string = "hola-tcp-loopback-1234"
+    let exp = exp_text.utf8
     let mut i = 0
     for i < 22 {
         if peek8(buf + i) != peek8(exp + i) { puts("FAIL data\n") return 1 }
