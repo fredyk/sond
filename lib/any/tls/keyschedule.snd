@@ -21,7 +21,8 @@ include "any/crypto/hash/sha256.snd"
 fn tls_hkdf_label_info(label: i64, llen: i64, context: i64, clen: i64, outlen: i64, info: i64) -> i64 {
     poke8(info + 0, (outlen >> 8) & 0xff)
     poke8(info + 1, outlen & 0xff)
-    poke8(info + 2, 6 + llen)                 // length of "tls13 " (6) + the label
+    let __f0_23: string = "tls13 "
+    poke8(info + 2, 6 + llen)                 // length of __f0_23.utf8 (6) + the label
     poke8(info + 3, 116)                       // 't'
     poke8(info + 4, 108)                       // 'l'
     poke8(info + 5, 115)                       // 's'

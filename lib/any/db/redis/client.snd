@@ -163,7 +163,8 @@ pub fn redis_fill(handle: i64) -> i64 {
 // For nil: -1. For array: item count.
 pub fn redis_parse(handle: i64) -> i64 {
     let bufptr = peek64(handle)
-    // handle+16 ("pos") is redis_fill's bookkeeping field: the total number
+    let __f0_165: string = "pos"
+    // handle+16 (__f0_165.utf8) is redis_fill's bookkeeping field: the total number
     // of bytes RECEIVED so far, i.e. the END of the valid data, not a decode
     // start offset. Decoding always starts at 0 and is bounded by that many
     // valid bytes, never by the buffer's full capacity.
@@ -1051,7 +1052,8 @@ pub fn redis_monitor(fd: i64, buf: i64, items: i64) -> i64 {
     ptr_to_item(items, 0, __lit81.utf8)
     // MONITOR is a normal RESP command; it must be encoded like every other
     // helper before hitting the wire. Sending raw bytes straight off the
-    // "MONITOR" string literal (as this used to do, padded by a hardcoded
+    let __f0_1054: string = "MONITOR"
+    // __f0_1054.utf8 string literal (as this used to do, padded by a hardcoded
     // `+ 5`) read past its NUL terminator into whatever the compiler placed
     // next in .rodata: a buffer over-read, not a protocol detail.
     let encoded = enc_array_of_strings(1, items)

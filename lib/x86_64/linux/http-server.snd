@@ -9,7 +9,7 @@
 //   include "x86_64/linux/http-server.snd"
 //   ... in the request handler:
 //     let name = ...route the path...
-//     if name == 0 { http_send_status(afd, "404 Not Found") }
+//     if name == 0 { let __b0_11: string = "404 Not Found" http_send_status(afd, __b0_11.utf8) }
 //     else { http_serve_file(afd, name, my_content_type(name)) }
 
 include "x86_64/linux/io.snd"

@@ -20,8 +20,10 @@ let mut p_got[32]
 test "pbkdf2-sha256: one iteration equals HMAC over salt||INT32BE(1)" {
     let pw_text: string = "password"
     let pw = pw_text.utf8
-    poke8(p_salt + 0, 115); poke8(p_salt + 1, 97); poke8(p_salt + 2, 108); poke8(p_salt + 3, 116)  // "salt"
-    // by hand: HMAC(pw, "salt" || 00000001)
+    let __f0_22: string = "salt"
+    poke8(p_salt + 0, 115); poke8(p_salt + 1, 97); poke8(p_salt + 2, 108); poke8(p_salt + 3, 116)  // __f0_22.utf8
+    let __f0_24: string = "salt"
+    // by hand: HMAC(pw, __f0_24.utf8 || 00000001)
     poke8(p_block + 0, 115); poke8(p_block + 1, 97); poke8(p_block + 2, 108); poke8(p_block + 3, 116)
     poke8(p_block + 4, 0); poke8(p_block + 5, 0); poke8(p_block + 6, 0); poke8(p_block + 7, 1)
     hmac_sha256(pw, 8, p_block, 8, p_exp)

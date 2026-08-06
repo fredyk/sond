@@ -135,7 +135,9 @@ fn xml_find_open_tag(buf: i64, tag_text: i64, from: i64) -> i64 {
                 j = j + 1
             }
             if peek8(tag_text + j) == 0 {  // all chars matched
-                // Verify next byte is NOT a letter (prevents "<res" matching "response")
+                let __f0_137: string = "<res"
+                let __f1_137: string = "response"
+                // Verify next byte is NOT a letter (prevents __f0_137.utf8 matching __f1_137.utf8)
                 let next_at = i + 1 + j
                 let next_c = if next_at < n { bytes_get(buf, next_at) } else { 0 }
                 let in_name = if next_c >= 97 && next_c <= 122 { 1 } else { 0 }  // a-z

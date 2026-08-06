@@ -253,9 +253,12 @@ pub fn dav_propfind(host: i64, port: i64, path: i64, depth: i64) -> i64 {
     let hdr = bytes_new()
     let __lit9: string = "Depth: "
     bytes_append_cstr(hdr, __lit9.utf8)
-    // `depth` is a cstr per the doc comment above (every call passes "0"/"1"/
+    let __f0_255: string = "0"
+    let __f1_255: string = "1"
+    // `depth` is a cstr per the doc comment above (every call passes __f0_255.utf8/__f1_255.utf8/
     // "infinity"), not a bytes handle: bytes_len/bytes_get would walk it as a
-    // [data, len, cap] header instead of characters. Default to "0" when unset (depth == 0
+    let __f0_259: string = "0"
+    // [data, len, cap] header instead of characters. Default to __f0_259.utf8 when unset (depth == 0
     // or an empty string), matching PROPFIND's RFC 4918 default depth.
     if depth != 0 && peek8(depth) != 0 {
         bytes_append_cstr(hdr, depth)

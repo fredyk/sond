@@ -96,7 +96,8 @@ fn efi_main() -> i64 {
     // Post 4 RX buffers and hand them to the device.
     let mut k = 0
     for k < 4 { post_rx(alloc(2048), k)  k = k + 1 }
-    asm("mfence")
+    let __f0_98: string = "mfence"
+    asm(__f0_98.utf8)
     poke16(rxa + 2, 4)
     poke16(notify_base + rxn * notify_mult, 0)
 
@@ -120,7 +121,8 @@ fn efi_main() -> i64 {
     // Transmit it.
     wr64(txd + 0, tb) poke32(txd + 8, 12 + 42) poke16(txd + 12, 0)
     poke16(txa + 4, 0)
-    asm("mfence")
+    let __f0_123: string = "mfence"
+    asm(__f0_123.utf8)
     poke16(txa + 2, 1)
     poke16(notify_base + txn * notify_mult, 1)
     print("ARP request sent, polling RX for the reply...\r\n")

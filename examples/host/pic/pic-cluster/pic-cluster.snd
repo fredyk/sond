@@ -24,7 +24,8 @@ fn puts(s: i64) { write_buf(1, s, strlen(s)) }
 
 // putdec prints an unsigned integer in base 10.
 fn putdec(n: i64) {
-    if n == 0 { puts("0"); return }
+    let __e0_26: string = "0"
+    if n == 0 { puts(__e0_26.utf8); return }
     let mut d = 0
     let mut t = n
     for t > 0 { d = d + 1; t = t / 10 }
@@ -60,8 +61,10 @@ fn call(fd: i64, node: i64, code: i64, pay: i64, plen: i64, rxbuf: i64) -> i64 {
 }
 
 fn main() -> i64 {
-    let fd = serial_open("/dev/ttyUSB0")
-    if fd < 0 { puts("open /dev/ttyUSB0 failed\n"); return 1 }
+    let __e0_63: string = "/dev/ttyUSB0"
+    let fd = serial_open(__e0_63.utf8)
+    let __e1_64: string = "open /dev/ttyUSB0 failed\n"
+    if fd < 0 { puts(__e1_64.utf8); return 1 }
     serial_config(fd, B9600, 0, 20)     // raw 8N1, 2.0s read timeout
 
     let rx[40]
@@ -69,11 +72,15 @@ fn main() -> i64 {
 
     // PING is addressed to the broadcast id 255; the node answers with its own id.
     let n = call(fd, 255, 0, pay, 0, rx)
-    if n <= 0 { puts("PING: no reply (timeout)\n"); serial_close(fd); return 2 }
-    if pic_frame_verify(rx, n) == 0 { puts("PING: bad frame/checksum\n"); serial_close(fd); return 3 }
+    let __e2_73: string = "PING: no reply (timeout)\n"
+    if n <= 0 { puts(__e2_73.utf8); serial_close(fd); return 2 }
+    let __e3_75: string = "PING: bad frame/checksum\n"
+    if pic_frame_verify(rx, n) == 0 { puts(__e3_75.utf8); serial_close(fd); return 3 }
 
     let node = pic_frame_node(rx)
-    puts("PING ok  node="); putdec(node); puts("\n")
+    let __e4_79: string = "PING ok  node="
+    let __e5_79: string = "\n"
+    puts(__e4_79.utf8); putdec(node); puts(__e5_79.utf8)
 
     // ADD8: ask the node to compute 5 + 7 on-chip.
     poke8(pay + 0, 5)
@@ -81,7 +88,9 @@ fn main() -> i64 {
     let m = call(fd, node, 1, pay, 2, rx)
     if m > 0 {
         if pic_frame_verify(rx, m) == 1 {
-            puts("ADD8 5+7 = "); putdec(peek8(pic_frame_payload(rx))); puts("\n")
+            let __e6_89: string = "ADD8 5+7 = "
+            let __e7_89: string = "\n"
+            puts(__e6_89.utf8); putdec(peek8(pic_frame_payload(rx))); puts(__e7_89.utf8)
         }
     }
 

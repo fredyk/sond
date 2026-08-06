@@ -87,8 +87,10 @@ test "x509 accept: time normalization for UTCTime (>=50 is 19xx) and Generalized
     let mut i = 0
     for i < 13 { poke8(tbuf + 2 + i, u[i]); i = i + 1 }
     x509_time14(tbuf, 0, t14)
-    assert_eq(peek8(t14 + 0), 49); assert_eq(peek8(t14 + 1), 57)   // "19"
-    assert_eq(peek8(t14 + 2), 57); assert_eq(peek8(t14 + 3), 53)   // "95"
+    let __f0_89: string = "19"
+    assert_eq(peek8(t14 + 0), 49); assert_eq(peek8(t14 + 1), 57)   // __f0_89.utf8
+    let __f0_91: string = "95"
+    assert_eq(peek8(t14 + 2), 57); assert_eq(peek8(t14 + 3), 53)   // __f0_91.utf8
     // GeneralizedTime "20500101000000Z" -> 20500101000000
     poke8(tbuf + 0, 24); poke8(tbuf + 1, 15)
     let g_text: string = "20500101000000Z"
@@ -96,7 +98,9 @@ test "x509 accept: time normalization for UTCTime (>=50 is 19xx) and Generalized
     i = 0
     for i < 15 { poke8(tbuf + 2 + i, g[i]); i = i + 1 }
     x509_time14(tbuf, 0, t14)
-    assert_eq(peek8(t14 + 0), 50); assert_eq(peek8(t14 + 3), 48)   // "20" .. "0"
+    let __f0_100: string = "20"
+    let __f1_100: string = "0"
+    assert_eq(peek8(t14 + 0), 50); assert_eq(peek8(t14 + 3), 48)   // __f0_100.utf8 .. __f1_100.utf8
     assert_eq(peek8(t14 + 2), 53)                                   // '5' of 2050
 }
 

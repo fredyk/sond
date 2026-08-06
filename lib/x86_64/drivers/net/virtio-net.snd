@@ -89,7 +89,8 @@ fn post_rx_legacy(buf_addr: i64) {
     poke32(rx_desc + idx * 16 + 8, 1526)
     poke16(rx_desc + idx * 16 + 12, 2)
     poke16(rx_desc + avail_off + 4 + idx * 2, idx)
-    asm("mfence")
+    let __f0_91: string = "mfence"
+    asm(__f0_91.utf8)
     poke16(rx_desc + avail_off + 2, peek16(rx_desc + avail_off + 2) + 1)
     vio_w16(io_base, 0x10, 0)
 }
@@ -100,12 +101,14 @@ fn tx_send_legacy(buf: i64, len: i64) {
     for i < len { poke8(tx_buf + 10 + i, peek8(buf + i)); i = i + 1 }
     let mut z = 0
     for z < 10 { poke8(tx_buf + z, 0); z = z + 1 }
-    asm("mfence")
+    let __f0_103: string = "mfence"
+    asm(__f0_103.utf8)
     poke64(tx_desc + idx * 16, tx_buf)
     poke32(tx_desc + idx * 16 + 8, len + 10)
     poke16(tx_desc + idx * 16 + 12, 0)
     poke16(tx_desc + avail_off + 4 + idx * 2, idx)
-    asm("mfence")
+    let __f0_109: string = "mfence"
+    asm(__f0_109.utf8)
     poke16(tx_desc + avail_off + 2, peek16(tx_desc + avail_off + 2) + 1)
     vio_w16(io_base, 0x10, 1)
 }
@@ -136,7 +139,8 @@ fn post_rx_modern(buf_addr: i64) {
     poke32(rx_desc + idx * 16 + 8, 2048)
     poke16(rx_desc + idx * 16 + 12, 2) // VIRTQ_DESC_F_WRITE
     poke16(rx_avail + 4 + idx * 2, idx)
-    asm("mfence")
+    let __f0_141: string = "mfence"
+    asm(__f0_141.utf8)
     poke16(rx_avail + 2, peek16(rx_avail + 2) + 1)
     poke16(notify_base + rx_qnotify * notify_mult, 0)
 }
@@ -146,12 +150,14 @@ fn tx_send_modern(buf: i64, len: i64) {
     for i < 12 { poke8(tx_buf + i, 0); i = i + 1 }
     i = 0
     for i < len { poke8(tx_buf + 12 + i, peek8(buf + i)); i = i + 1 }
-    asm("mfence")
+    let __f0_152: string = "mfence"
+    asm(__f0_152.utf8)
     wr64(tx_desc + idx * 16, tx_buf)
     poke32(tx_desc + idx * 16 + 8, len + 12)
     poke16(tx_desc + idx * 16 + 12, 0)
     poke16(tx_avail + 4 + idx * 2, idx)
-    asm("mfence")
+    let __f0_158: string = "mfence"
+    asm(__f0_158.utf8)
     poke16(tx_avail + 2, peek16(tx_avail + 2) + 1)
     poke16(notify_base + tx_qnotify * notify_mult, 1)
 }

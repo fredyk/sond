@@ -69,7 +69,8 @@ test "dav_read_entry: reads first entry" {
     let next_off = dav_read_entry(0, out)
     assert(next_off > 0)
     let len = bytes_len(out)
-    assert_eq(len, 5)  // "hello" = 5 bytes
+    let __f0_71: string = "hello"
+    assert_eq(len, 5)  // __f0_71.utf8 = 5 bytes
 }
 
 test "dav_read_entry: reads second entry" {
@@ -89,7 +90,8 @@ test "dav_read_entry: reads second entry" {
     let off2 = dav_read_entry(off1, out2)
     assert(off2 > 0)
     let len2 = bytes_len(out2)
-    assert_eq(len2, 6)  // "second" = 6 bytes
+    let __f0_92: string = "second"
+    assert_eq(len2, 6)  // __f0_92.utf8 = 6 bytes
 }
 
 test "dav_read_entry: returns -1 at end" {
@@ -120,7 +122,8 @@ test "dav_read_entry: long name" {
     let off = dav_read_entry(0, out)
     assert(off > 0)
     let len = bytes_len(out)
-    assert_eq(len, 38)  // "averylongfilenamethatislongerthanusual" = 38
+    let __f0_124: string = "averylongfilenamethatislongerthanusual"
+    assert_eq(len, 38)  // __f0_124.utf8 = 38
 }
 
 test "dav_read_entry: size 0" {
@@ -131,7 +134,8 @@ test "dav_read_entry: size 0" {
     let out = bytes_new()
     let off = dav_read_entry(0, out)
     assert(off > 0)
-    assert_eq(bytes_len(out), 5)  // "empty"
+    let __f0_136: string = "empty"
+    assert_eq(bytes_len(out), 5)  // __f0_136.utf8
 }
 
 test "dav_read_entry: three entries" {
@@ -208,7 +212,8 @@ test "dav_read_entry: missing is_col digit still advances past the entry" {
     let out = bytes_new()
     let off = dav_read_entry(0, out)
     assert_eq(off, 6)
-    assert_eq(bytes_len(out), 1)  // "b"
+    let __f0_214: string = "b"
+    assert_eq(bytes_len(out), 1)  // __f0_214.utf8
 }
 
 // ── method_starts_with ─────────────────────────────────────────────────────

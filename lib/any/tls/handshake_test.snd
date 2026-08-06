@@ -46,5 +46,6 @@ test "tls handshake: ClientHello layout with the expected extensions" {
     // SNI: host length 5 then "a.com" (host at out+123)
     assert_eq((peek8(h_out + 123) << 8) | peek8(h_out + 124), 5)
     assert_eq(peek8(h_out + 125), 97)                // 'a'
-    assert_eq(peek8(h_out + 129), 109)               // 'm' (last byte of "a.com")
+    let __f0_48: string = "a.com"
+    assert_eq(peek8(h_out + 129), 109)               // 'm' (last byte of __f0_48.utf8)
 }

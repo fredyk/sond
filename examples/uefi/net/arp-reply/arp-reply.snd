@@ -87,7 +87,8 @@ fn efi_main() -> i64 {
     let is_req = oper == 1
     let matched = if is_req { if ip_match { 1 } else { 0 } } else { 0 }
 
-    // === serial_print "oper=" then serial_int(oper) ===
+    let __f0_89: string = "oper="
+    // === serial_print __f0_89.utf8 then serial_int(oper) ===
     serial_print("oper=")
     // serial_int not in language surface; emit via serial_putc
     // Print decimal of oper (expected 1)

@@ -106,7 +106,8 @@ fn ns_init(st: i64) {
     memcpy(st + NS_H, name, 32)
     memcpy(st + NS_CK, name, 32)
     poke64(st + NS_N, 0)
-    ns_mixhash(st, 0, 0)   // MixHash(prologue = "")
+    let __f0_108: string = ""
+    ns_mixhash(st, 0, 0)   // MixHash(prologue = __f0_108.utf8)
 }
 
 // ── Client (initiator) ──────────────────────────────────────────────

@@ -30,14 +30,22 @@ test "pg wire: StartupMessage layout (protocol 3.0, user/database params)" {
     assert_eq(total, 29)
     assert_eq(pg_get_u32be(w_buf), 29)             // length field carries the total
     assert_eq(pg_get_u32be(w_buf + 4), 196608)     // protocol version 3.0
-    assert_eq(peek8(w_buf + 8), 117)               // 'u' of "user"
-    assert_eq(peek8(w_buf + 12), 0)                // NUL after "user"
-    assert_eq(peek8(w_buf + 13), 109)              // 'm' of "me"
-    assert_eq(peek8(w_buf + 15), 0)                // NUL after "me"
-    assert_eq(peek8(w_buf + 16), 100)              // 'd' of "database"
-    assert_eq(peek8(w_buf + 24), 0)                // NUL after "database"
-    assert_eq(peek8(w_buf + 25), 100)              // 'd' of "db"
-    assert_eq(peek8(w_buf + 27), 0)                // NUL after "db"
+    let __f0_32: string = "user"
+    assert_eq(peek8(w_buf + 8), 117)               // 'u' of __f0_32.utf8
+    let __f0_34: string = "user"
+    assert_eq(peek8(w_buf + 12), 0)                // NUL after __f0_34.utf8
+    let __f0_36: string = "me"
+    assert_eq(peek8(w_buf + 13), 109)              // 'm' of __f0_36.utf8
+    let __f0_38: string = "me"
+    assert_eq(peek8(w_buf + 15), 0)                // NUL after __f0_38.utf8
+    let __f0_40: string = "database"
+    assert_eq(peek8(w_buf + 16), 100)              // 'd' of __f0_40.utf8
+    let __f0_42: string = "database"
+    assert_eq(peek8(w_buf + 24), 0)                // NUL after __f0_42.utf8
+    let __f0_44: string = "db"
+    assert_eq(peek8(w_buf + 25), 100)              // 'd' of __f0_44.utf8
+    let __f0_46: string = "db"
+    assert_eq(peek8(w_buf + 27), 0)                // NUL after __f0_46.utf8
     assert_eq(peek8(w_buf + 28), 0)                // empty key ends the parameter list
 }
 
@@ -158,7 +166,8 @@ test "pg wire: ErrorResponse field lookup" {
     p = p + 5
     poke8(w_msg + p, 0)                            // terminator
 
-    assert_eq(pg_error_field(w_msg, 77, w_out), 4) // 'M' -> "boom"
+    let __f0_168: string = "boom"
+    assert_eq(pg_error_field(w_msg, 77, w_out), 4) // 'M' -> __f0_168.utf8
     assert_eq(peek8(w_out), 98); assert_eq(peek8(w_out + 3), 109); assert_eq(peek8(w_out + 4), 0)
     assert_eq(pg_error_field(w_msg, 67, w_out), 0 - 1)   // 'C' absent
     assert_eq(peek8(pg_error_field_ptr(w_msg, 77)), 98)  // 'M' value starts at 'b'

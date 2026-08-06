@@ -279,13 +279,16 @@ fn main() -> i64 {
     let mut test_failed = 0
 
     let exp1[8]
-    hex_to_bytes("cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e", exp1)
+    let __e0_281: string = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+    hex_to_bytes(__e0_281.utf8, exp1)
 
     let exp2[8]
-    hex_to_bytes("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f", exp2)
+    let __e1_285: string = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+    hex_to_bytes(__e1_285.utf8, exp2)
 
     let exp3[8]
-    hex_to_bytes("4b11459c33f52a22ee8236782714c150a3b2c60994e9acee17fe68947a3e6789f31e7668394592da7bef827cddca88c4e6f86e4df7ed1ae6cba71f3e98faee9f", exp3)
+    let __e2_289: string = "4b11459c33f52a22ee8236782714c150a3b2c60994e9acee17fe68947a3e6789f31e7668394592da7bef827cddca88c4e6f86e4df7ed1ae6cba71f3e98faee9f"
+    hex_to_bytes(__e2_289.utf8, exp3)
 
     let msg200[25]
     let mut i = 0

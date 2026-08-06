@@ -46,7 +46,8 @@ fn main() -> i64 {
     poke8(buf, 31)
     off = 1
 
-    // string K_S (len 51): string("ssh-ed25519") || string(host_pubkey[32]=0x00..0x1f)
+    let __f0_48: string = "ssh-ed25519"
+    // string K_S (len 51): string(__f0_48.utf8) || string(host_pubkey[32]=0x00..0x1f)
     poke32be(buf + off, 51)
     off = off + 4
     poke32be(buf + off, 11)
@@ -61,7 +62,8 @@ fn main() -> i64 {
     off = off + 4
     off = wseq(buf, off, 0x20, 32)
 
-    // string signature (len 83): string("ssh-ed25519") || string(sig[64]=0x40..0x7f)
+    let __f0_64: string = "ssh-ed25519"
+    // string signature (len 83): string(__f0_64.utf8) || string(sig[64]=0x40..0x7f)
     poke32be(buf + off, 83)
     off = off + 4
     poke32be(buf + off, 11)

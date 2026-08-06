@@ -43,12 +43,18 @@ fn print_hex8(n: i64) -> i64 {
 fn pci_cfg_read(bus: i64, dev: i64, func: i64, offset: i64) -> i64 {
     let addr = PCI_ENABLE | (bus << 16) | (dev << 11) | (func << 8) | (offset & 0xFC)
     poke64(0, addr)
-    asm("movl (0), %eax")
-    asm("movw $0xCF8, %dx")
-    asm("outl %eax, %dx")
-    asm("movw $0xCFC, %dx")
-    asm("inl %dx, %eax")
-    asm("movl %eax, (0)")
+    let __f0_45: string = "movl (0), %eax"
+    asm(__f0_45.utf8)
+    let __f0_47: string = "movw $0xCF8, %dx"
+    asm(__f0_47.utf8)
+    let __f0_49: string = "outl %eax, %dx"
+    asm(__f0_49.utf8)
+    let __f0_51: string = "movw $0xCFC, %dx"
+    asm(__f0_51.utf8)
+    let __f0_53: string = "inl %dx, %eax"
+    asm(__f0_53.utf8)
+    let __f0_55: string = "movl %eax, (0)"
+    asm(__f0_55.utf8)
     peek64(0)
 }
 

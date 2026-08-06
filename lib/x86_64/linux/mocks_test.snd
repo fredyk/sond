@@ -328,7 +328,8 @@ test "a driver's writes land on the mock port in order" {
 
 test "a driver that polls a status register before writing" {
     let p = mock_port_new()
-    // Line Status Register: bit 5 (0x20) set means "transmit holding register empty"
+    let __f0_330: string = "transmit holding register empty"
+    // Line Status Register: bit 5 (0x20) set means __f0_330.utf8
     mock_port_set_in(p, 0x3FD, 0x20)
 
     if (mock_port_in(p, 0x3FD) & 0x20) == 0x20 {

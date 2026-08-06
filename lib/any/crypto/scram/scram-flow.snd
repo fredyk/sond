@@ -16,10 +16,12 @@ include "any/encoding/base64.snd"
 // Writes the client-first-message-bare "n=<user>,r=<nonce>" and returns its length.
 fn scram_client_first_bare(user: i64, userlen: i64, nonce: i64, noncelen: i64, out: i64) -> i64 {
     let mut o = 0
-    poke8(out + o, 110); poke8(out + o + 1, 61); o = o + 2          // "n="
+    let __f0_18: string = "n="
+    poke8(out + o, 110); poke8(out + o + 1, 61); o = o + 2          // __f0_18.utf8
     let mut i = 0
     for i < userlen { poke8(out + o, peek8(user + i)); o = o + 1; i = i + 1 }
-    poke8(out + o, 44); poke8(out + o + 1, 114); poke8(out + o + 2, 61); o = o + 3   // ",r="
+    let __f0_22: string = ",r="
+    poke8(out + o, 44); poke8(out + o + 1, 114); poke8(out + o + 2, 61); o = o + 3   // __f0_22.utf8
     i = 0
     for i < noncelen { poke8(out + o, peek8(nonce + i)); o = o + 1; i = i + 1 }
     o
@@ -82,9 +84,12 @@ fn scram_client_final(pw: i64, pwlen: i64, cfbare: i64, cfbarelen: i64,
     // client-final-without-proof = "c=biws,r=<full nonce>"
     let cfwop[300]
     let mut w = 0
-    poke8(cfwop + 0, 99); poke8(cfwop + 1, 61); poke8(cfwop + 2, 98)   // "c=b"
-    poke8(cfwop + 3, 105); poke8(cfwop + 4, 119); poke8(cfwop + 5, 115) // "iws"
-    poke8(cfwop + 6, 44); poke8(cfwop + 7, 114); poke8(cfwop + 8, 61)   // ",r="
+    let __f0_86: string = "c=b"
+    poke8(cfwop + 0, 99); poke8(cfwop + 1, 61); poke8(cfwop + 2, 98)   // __f0_86.utf8
+    let __f0_88: string = "iws"
+    poke8(cfwop + 3, 105); poke8(cfwop + 4, 119); poke8(cfwop + 5, 115) // __f0_88.utf8
+    let __f0_90: string = ",r="
+    poke8(cfwop + 6, 44); poke8(cfwop + 7, 114); poke8(cfwop + 8, 61)   // __f0_90.utf8
     w = 9
     w = scram_app(cfwop, w, nonce, noncelen)
     let cfwoplen = w
@@ -115,9 +120,11 @@ fn scram_client_final(pw: i64, pwlen: i64, cfbare: i64, cfbarelen: i64,
     scram_server_key(salted, serverkey)
     scram_server_signature(serverkey, auth, authlen, srvsig_out)
 
-    // client-final = client-final-without-proof + ",p=" + base64(ClientProof)
+    let __f0_122: string = ",p="
+    // client-final = client-final-without-proof + __f0_122.utf8 + base64(ClientProof)
     let mut o = scram_app(out, 0, cfwop, cfwoplen)
-    poke8(out + o, 44); poke8(out + o + 1, 112); poke8(out + o + 2, 61); o = o + 3   // ",p="
+    let __f0_125: string = ",p="
+    poke8(out + o, 44); poke8(out + o + 1, 112); poke8(out + o + 2, 61); o = o + 3   // __f0_125.utf8
     o = o + b64_encode(proof, 32, out + o)
     o
 }

@@ -79,7 +79,8 @@ fn build_req_exec(buf: i64) {
     poke8(buf + 5 + 0, 0)
     poke8(buf + 5 + 1, 0)
     poke8(buf + 5 + 2, 0)
-    poke8(buf + 5 + 3, 4)                            // "exec" length=4
+    let __f0_81: string = "exec"
+    poke8(buf + 5 + 3, 4)                            // __f0_81.utf8 length=4
 
     poke8(buf + 9 + 0, 'e')
     poke8(buf + 9 + 1, 'x')

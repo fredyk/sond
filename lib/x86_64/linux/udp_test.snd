@@ -65,7 +65,8 @@ test "udp sendmsg/recvmsg round-trip over loopback" {
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        // CHILD: send one 4-byte datagram ("SOND") via sendmsg.
+        let __f0_67: string = "SOND"
+        // CHILD: send one 4-byte datagram (__f0_67.utf8) via sendmsg.
         let sfd = udp_socket()
         let da[2]
         sockaddr_in_build(da, ip, port)

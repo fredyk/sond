@@ -1,6 +1,7 @@
 fn main() -> i64 {
     let mut crc: i64 = 0xFFFFFFFF
-    let data = "123456789"
+    let data_text: string = "123456789"
+    let data = data_text.utf8
     let len = 9
 
     // We need to iterate over bytes. Since we can't index strings directly,

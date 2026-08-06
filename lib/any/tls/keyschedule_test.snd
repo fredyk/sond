@@ -25,12 +25,14 @@ let mut ks_th[32]
 //   00 20 | 09 | "tls13 key" | 00
 //   = length(u16=32) | labellen(6+3) | "tls13 "+label | contextlen(0)
 test "tls keyschedule: the HkdfLabel byte layout (RFC 8446 §7.1)" {
-    poke8(ks_label + 0, 107); poke8(ks_label + 1, 101); poke8(ks_label + 2, 121)   // "key"
+    let __f0_27: string = "key"
+    poke8(ks_label + 0, 107); poke8(ks_label + 1, 101); poke8(ks_label + 2, 121)   // __f0_27.utf8
     let n = tls_hkdf_label_info(ks_label, 3, ks_ctx, 0, 32, ks_info)
     assert_eq(n, 13)
     assert_eq(peek8(ks_info + 0), 0x00)   // length hi
     assert_eq(peek8(ks_info + 1), 0x20)   // length lo = 32
-    assert_eq(peek8(ks_info + 2), 9)      // len("tls13 key")
+    let __f0_33: string = "tls13 key"
+    assert_eq(peek8(ks_info + 2), 9)      // len(__f0_33.utf8)
     assert_eq(peek8(ks_info + 3), 116)    // 't'
     assert_eq(peek8(ks_info + 4), 108)    // 'l'
     assert_eq(peek8(ks_info + 5), 115)    // 's'
@@ -45,13 +47,16 @@ test "tls keyschedule: the HkdfLabel byte layout (RFC 8446 §7.1)" {
 
 // A non-empty context (a 4-byte transcript stand-in) appends after its length octet.
 test "tls keyschedule: the HkdfLabel carries a non-empty context" {
-    poke8(ks_label + 0, 105); poke8(ks_label + 1, 118)   // "iv"
+    let __f0_49: string = "iv"
+    poke8(ks_label + 0, 105); poke8(ks_label + 1, 118)   // __f0_49.utf8
     poke8(ks_ctx + 0, 0xde); poke8(ks_ctx + 1, 0xad); poke8(ks_ctx + 2, 0xbe); poke8(ks_ctx + 3, 0xef)
     let n = tls_hkdf_label_info(ks_label, 2, ks_ctx, 4, 12, ks_info)
-    // 2 length + 1 labellen + 8 ("tls13 iv") + 1 ctxlen + 4 ctx = 16
+    let __f0_53: string = "tls13 iv"
+    // 2 length + 1 labellen + 8 (__f0_53.utf8) + 1 ctxlen + 4 ctx = 16
     assert_eq(n, 16)
     assert_eq(peek8(ks_info + 1), 12)     // length lo
-    assert_eq(peek8(ks_info + 2), 8)      // len("tls13 iv")
+    let __f0_57: string = "tls13 iv"
+    assert_eq(peek8(ks_info + 2), 8)      // len(__f0_57.utf8)
     assert_eq(peek8(ks_info + 11), 0x04)  // context length
     assert_eq(peek8(ks_info + 12), 0xde)
     assert_eq(peek8(ks_info + 15), 0xef)
@@ -61,7 +66,8 @@ test "tls keyschedule: the HkdfLabel carries a non-empty context" {
 test "tls keyschedule: HKDF-Expand-Label delegates to HKDF with the HkdfLabel" {
     let mut i = 0
     for i < 32 { poke8(ks_secret + i, 0x0b); i = i + 1 }
-    poke8(ks_label + 0, 107); poke8(ks_label + 1, 101); poke8(ks_label + 2, 121)   // "key"
+    let __f0_68: string = "key"
+    poke8(ks_label + 0, 107); poke8(ks_label + 1, 101); poke8(ks_label + 2, 121)   // __f0_68.utf8
     // by hand: build the label, expand with the primitive
     let n = tls_hkdf_label_info(ks_label, 3, ks_ctx, 0, 32, ks_info)
     hkdf_expand(ks_secret, ks_info, n, ks_out_a, 32)
@@ -76,10 +82,13 @@ test "tls keyschedule: Derive-Secret hashes the transcript into the context" {
     let mut i = 0
     for i < 32 { poke8(ks_secret + i, 0x2a); i = i + 1 }
     poke8(ks_label + 0, 100); poke8(ks_label + 1, 101); poke8(ks_label + 2, 114); poke8(ks_label + 3, 105)
-    poke8(ks_label + 4, 118); poke8(ks_label + 5, 101); poke8(ks_label + 6, 100)   // "derived"
+    let __f0_84: string = "derived"
+    poke8(ks_label + 4, 118); poke8(ks_label + 5, 101); poke8(ks_label + 6, 100)   // __f0_84.utf8
     // messages = "abc"
     poke8(ks_ctx + 0, 97); poke8(ks_ctx + 1, 98); poke8(ks_ctx + 2, 99)
-    // by hand: th = sha256("abc"); expand-label(secret, "derived", th, 32)
+    let __f0_88: string = "abc"
+    let __f1_88: string = "derived"
+    // by hand: th = sha256(__f0_88.utf8); expand-label(secret, __f1_88.utf8, th, 32)
     sha256_hash(ks_ctx, 3, ks_th)
     hkdf_expand_label(ks_secret, ks_label, 7, ks_th, 32, ks_out_a, 32)
     // through the helper

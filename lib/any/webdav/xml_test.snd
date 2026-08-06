@@ -206,9 +206,11 @@ test "xml_extract_hrefs prepends base for relative hrefs" {
     assert(count >= 1)
     // First href should start with the base URL
     let pos1 = bytes_index_of(out, 0)
-    assert(pos1 > 17)  // "http://localhost/relative/path" > 17 chars
+    let __f0_208: string = "http://localhost/relative/path"
+    assert(pos1 > 17)  // __f0_208.utf8 > 17 chars
     let first_byte = bytes_get(out, 0)
-    assert_eq(first_byte, 104)  // 'h' from "http://"
+    let __f0_211: string = "http://"
+    assert_eq(first_byte, 104)  // 'h' from __f0_211.utf8
     let second_byte = bytes_get(out, 1)
     assert_eq(second_byte, 116)  // 't'
 }
@@ -400,7 +402,8 @@ test "buf_to_stack: copies bytes to stack array" {
     bytes_append_cstr(src, __lit35.utf8)
     let dst[32]
     let copied = buf_to_stack(src, dst, 32)
-    assert_eq(copied, 5)  // "hello" is 5 chars
+    let __f0_404: string = "hello"
+    assert_eq(copied, 5)  // __f0_404.utf8 is 5 chars
     // Verify content
     assert_eq(dst[0], 104)  // 'h'
     assert_eq(dst[1], 101)  // 'e'
@@ -437,7 +440,8 @@ test "buf_to_stack: truncates to max when the buffer is longer" {
 }
 
 test "xml_propfind_response: default href" {
-    // Test with "/" as href (common case)
+    let __f0_442: string = "/"
+    // Test with __f0_442.utf8 as href (common case)
     let buf = bytes_new()
     let __lit38: string = "/"
     let __lit39: string = "root"

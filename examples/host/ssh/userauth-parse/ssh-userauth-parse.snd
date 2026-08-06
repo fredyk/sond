@@ -51,7 +51,8 @@ fn main() -> i64 {
     let mut pass_fail = true
 
     // =========================================================
-    // TEST 1: SSH_MSG_SERVICE_REQUEST (5) for "ssh-userauth"
+    let __f0_53: string = "ssh-userauth"
+    // TEST 1: SSH_MSG_SERVICE_REQUEST (5) for __f0_53.utf8
     // =========================================================
     print("=== TEST 1: SSH_MSG_SERVICE_REQUEST ===")
     print("")
@@ -65,7 +66,8 @@ fn main() -> i64 {
     svc_req[0] = 0x05  // message type = 5
 
     // Build the string "ssh-userauth" starting at offset 5
-    let svc_str = "ssh-userauth"
+    let svc_str_text: string = "ssh-userauth"
+    let svc_str = svc_str_text.utf8
     let mut si = 0
     for si < 12 {
         poke8(svc_req + 5 + si, svc_str[si])
@@ -136,7 +138,10 @@ fn main() -> i64 {
     print("")
 
     // =========================================================
-    // TEST 2: SSH_MSG_USERAUTH_REQUEST (50) method="none", user="user", service="ssh-connection"
+    let __f0_140: string = "none"
+    let __f1_140: string = "user"
+    let __f2_140: string = "ssh-connection"
+    // TEST 2: SSH_MSG_USERAUTH_REQUEST (50) method=__f0_140.utf8, user=__f1_140.utf8, service=__f2_140.utf8
     // =========================================================
     print("=== TEST 2: SSH_MSG_USERAUTH_REQUEST method=none ===")
     print("")
@@ -267,7 +272,11 @@ fn main() -> i64 {
     print("")
 
     // =========================================================
-    // TEST 3: SSH_MSG_USERAUTH_REQUEST (50) method="password", user="user", service="ssh-connection", password="testpass"
+    let __f0_274: string = "password"
+    let __f1_274: string = "user"
+    let __f2_274: string = "ssh-connection"
+    let __f3_274: string = "testpass"
+    // TEST 3: SSH_MSG_USERAUTH_REQUEST (50) method=__f0_274.utf8, user=__f1_274.utf8, service=__f2_274.utf8, password=__f3_274.utf8
     // =========================================================
     print("=== TEST 3: SSH_MSG_USERAUTH_REQUEST method=password ===")
     print("")

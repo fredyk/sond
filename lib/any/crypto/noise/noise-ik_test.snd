@@ -47,16 +47,21 @@ fn main() -> i64 {
     // msg1: client -> server
     let m1[128]
     let l1 = noise_ik_client_msg1(cst, m1)
-    if l1 != 96 { puts("FAIL msg1 len\n") return 1 }
+    let __f0_49: string = "FAIL msg1 len\n"
+    if l1 != 96 { let __b0_49: string = __f0_49.utf8 puts(__b0_49.utf8) return 1 }
     let got_cs[32]
-    if noise_ik_server_msg1(sst, m1, l1, got_cs) != 0 { puts("FAIL server reads msg1\n") return 1 }
-    if eq32(got_cs, cs_pub) == 0 { puts("FAIL server recovers client static\n") return 1 }
+    let __f0_52: string = "FAIL server reads msg1\n"
+    if noise_ik_server_msg1(sst, m1, l1, got_cs) != 0 { let __b0_51: string = __f0_52.utf8 puts(__b0_51.utf8) return 1 }
+    let __f0_54: string = "FAIL server recovers client static\n"
+    if eq32(got_cs, cs_pub) == 0 { let __b0_52: string = __f0_54.utf8 puts(__b0_52.utf8) return 1 }
 
     // msg2: server -> client
     let m2[128]
     let l2 = noise_ik_server_msg2(sst, m2)
-    if l2 != 48 { puts("FAIL msg2 len\n") return 1 }
-    if noise_ik_client_msg2(cst, m2, l2) != 0 { puts("FAIL client reads msg2\n") return 1 }
+    let __f0_60: string = "FAIL msg2 len\n"
+    if l2 != 48 { let __b0_57: string = __f0_60.utf8 puts(__b0_57.utf8) return 1 }
+    let __f0_62: string = "FAIL client reads msg2\n"
+    if noise_ik_client_msg2(cst, m2, l2) != 0 { let __b0_58: string = __f0_62.utf8 puts(__b0_58.utf8) return 1 }
 
     // session keys: must match on both sides
     let ck1[32]
@@ -65,11 +70,15 @@ fn main() -> i64 {
     let sk2[32]
     noise_ik_session_keys(cst, ck1, ck2)
     noise_ik_session_keys(sst, sk1, sk2)
-    if eq32(ck1, sk1) == 0 { puts("FAIL k_c2s mismatch\n") return 1 }
-    if eq32(ck2, sk2) == 0 { puts("FAIL k_s2c mismatch\n") return 1 }
+    let __f0_72: string = "FAIL k_c2s mismatch\n"
+    if eq32(ck1, sk1) == 0 { let __b0_67: string = __f0_72.utf8 puts(__b0_67.utf8) return 1 }
+    let __f0_74: string = "FAIL k_s2c mismatch\n"
+    if eq32(ck2, sk2) == 0 { let __b0_68: string = __f0_74.utf8 puts(__b0_68.utf8) return 1 }
     // the two directions must be distinct keys
-    if eq32(ck1, ck2) == 1 { puts("FAIL keys not distinct\n") return 1 }
+    let __f0_77: string = "FAIL keys not distinct\n"
+    if eq32(ck1, ck2) == 1 { let __b0_70: string = __f0_77.utf8 puts(__b0_70.utf8) return 1 }
 
-    puts("OK noise-ik (handshake + session keys)\n")
+    let __f0_80: string = "OK noise-ik (handshake + session keys)\n"
+    puts(__f0_80.utf8)
     0
 }

@@ -10,7 +10,8 @@
 include "any/crypto/dh/x25519.snd"
 
 fn main() -> i64 {
-    // Server ephemeral private key (RFC 7748 §6.1 "Alice").
+    let __f0_12: string = "Alice"
+    // Server ephemeral private key (RFC 7748 §6.1 __f0_12.utf8).
     let sk[4]
     poke8(sk + 0, 0x77)  poke8(sk + 1, 0x07)  poke8(sk + 2, 0x6d)  poke8(sk + 3, 0x0a)
     poke8(sk + 4, 0x73)  poke8(sk + 5, 0x18)  poke8(sk + 6, 0xa5)  poke8(sk + 7, 0x7d)
@@ -31,7 +32,8 @@ fn main() -> i64 {
     let qs[4]
     x25519(sk, base, qs)
 
-    // Expected public key (RFC 7748 §6.1 "Alice's public").
+    let __f0_34: string = "Alice's public"
+    // Expected public key (RFC 7748 §6.1 __f0_34.utf8).
     let exp[4]
     poke8(exp + 0, 0x85)  poke8(exp + 1, 0x20)  poke8(exp + 2, 0xf0)  poke8(exp + 3, 0x09)
     poke8(exp + 4, 0x89)  poke8(exp + 5, 0x30)  poke8(exp + 6, 0xa7)  poke8(exp + 7, 0x54)

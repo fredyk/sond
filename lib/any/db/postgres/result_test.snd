@@ -38,7 +38,10 @@ fn mk_datarow2(buf: i64, a: i64, alen: i64, b: i64, blen: i64) {
 test "pg result: rows, columns, NULL, tag and end signal" {
     // RowDescription with 2 columns (only the count matters to the result model).
     poke8(m_rd, 84); pg_put_u16be(m_rd + 5, 2)
-    // two data rows: ("1","alice") and ("2", NULL)
+    let __f0_40: string = "1"
+    let __f1_40: string = "alice"
+    let __f2_40: string = "2"
+    // two data rows: (__f0_40.utf8,__f1_40.utf8) and (__f2_40.utf8, NULL)
     let __lit0: string = "1"
     let __lit1: string = "alice"
     mk_datarow2(m_r1, __lit0.utf8, 1, __lit1.utf8, 5)
@@ -68,7 +71,8 @@ test "pg result: rows, columns, NULL, tag and end signal" {
     // (0,0) = "1", (0,1) = "alice"
     assert_eq(peek8(pgx_val(r, 0, 0)), 49)
     assert_eq(peek8(pgx_val(r, 0, 1)), 97)          // 'a'
-    assert_eq(peek8(pgx_val(r, 0, 1) + 5), 0)       // "alice" NUL-terminated
+    let __f0_73: string = "alice"
+    assert_eq(peek8(pgx_val(r, 0, 1) + 5), 0)       // __f0_73.utf8 NUL-terminated
     // (1,0) = "2", (1,1) = NULL
     assert_eq(peek8(pgx_val(r, 1, 0)), 50)
     assert_eq(pgx_val(r, 1, 1), 0)                  // SQL NULL

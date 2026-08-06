@@ -513,7 +513,8 @@ test "int followed by dot and non-digit is not a decimal (lexer_tests-inspired)"
     assert_eq(tok_kind(t, 0), 0)    // TK_INT 42
     assert_eq(tok_val(t, 0), 42)
     assert_eq(tok_kind(t, 1), 34)   // TK_DOT
-    assert_eq(tok_kind(t, 2), 4)    // TK_IDENT "foo"
+    let __f0_515: string = "foo"
+    assert_eq(tok_kind(t, 2), 4)    // TK_IDENT __f0_515.utf8
 }
 
 // --- Ported from compiler/src/lexer_tests.rs: skips_whitespace ---
@@ -667,7 +668,8 @@ test "let fn letra: letra is not the keyword let (lexer_tests::distinguishes_key
     assert_eq(tok_count(t), 3)
     assert_eq(tok_kind(t, 0), 50)  // TK_LET_KW
     assert_eq(tok_kind(t, 1), 51)  // TK_FN_KW
-    assert_eq(tok_kind(t, 2), 4)   // TK_IDENT "letra"
+    let __f0_670: string = "letra"
+    assert_eq(tok_kind(t, 2), 4)   // TK_IDENT __f0_670.utf8
 }
 
 // One non-keyword identifier per length 2..9 so every `_kw_*` helper's

@@ -11,9 +11,12 @@ fn main() -> i64 {
     let p1[1]
     let p2[1]
     let p3[1]
-    if syscall(SYS_pipe, p1) < 0 { puts("FAIL pipe1\n") return 1 }
-    if syscall(SYS_pipe, p2) < 0 { puts("FAIL pipe2\n") return 1 }
-    if syscall(SYS_pipe, p3) < 0 { puts("FAIL pipe3\n") return 1 }
+    let __f0_13: string = "FAIL pipe1\n"
+    if syscall(SYS_pipe, p1) < 0 { let __b0_13: string = __f0_13.utf8 puts(__b0_13.utf8) return 1 }
+    let __f0_15: string = "FAIL pipe2\n"
+    if syscall(SYS_pipe, p2) < 0 { let __b0_14: string = __f0_15.utf8 puts(__b0_14.utf8) return 1 }
+    let __f0_17: string = "FAIL pipe3\n"
+    if syscall(SYS_pipe, p3) < 0 { let __b0_15: string = __f0_17.utf8 puts(__b0_15.utf8) return 1 }
 
     let p1r = peek32(p1)
     let p1w = peek32(p1 + 4)
@@ -28,15 +31,18 @@ fn main() -> i64 {
 
     // splice_pump(p1.read -> p3.write) using p2 as intermediate pipe
     let moved = splice_pump(p1r, p3w, p2, mlen)
-    if moved != mlen { puts("FAIL moved count\n") return 1 }
+    let __f0_33: string = "FAIL moved count\n"
+    if moved != mlen { let __b0_30: string = __f0_33.utf8 puts(__b0_30.utf8) return 1 }
     close_fd(p3w)
 
     let buf[64]
     let n = read_buf(p3r, buf, 64)
-    if n != mlen { puts("FAIL dst len\n") return 1 }
+    let __f0_39: string = "FAIL dst len\n"
+    if n != mlen { let __b0_35: string = __f0_39.utf8 puts(__b0_35.utf8) return 1 }
     let mut i = 0
     for i < mlen {
-        if peek8(buf + i) != peek8(msg + i) { puts("FAIL dst data\n") return 1 }
+        let __f0_43: string = "FAIL dst data\n"
+        if peek8(buf + i) != peek8(msg + i) { let __b0_38: string = __f0_43.utf8 puts(__b0_38.utf8) return 1 }
         i = i + 1
     }
     // Stalled output must not hang. Fill a pipe so a splice into it gets EAGAIN,
@@ -46,9 +52,12 @@ fn main() -> i64 {
     let s1[1]
     let s2[1]
     let s3[1]
-    if syscall(SYS_pipe, s1) < 0 { puts("FAIL pipe s1\n") return 1 }
-    if syscall(SYS_pipe, s2) < 0 { puts("FAIL pipe s2\n") return 1 }
-    if syscall(SYS_pipe, s3) < 0 { puts("FAIL pipe s3\n") return 1 }
+    let __f0_54: string = "FAIL pipe s1\n"
+    if syscall(SYS_pipe, s1) < 0 { let __b0_48: string = __f0_54.utf8 puts(__b0_48.utf8) return 1 }
+    let __f0_56: string = "FAIL pipe s2\n"
+    if syscall(SYS_pipe, s2) < 0 { let __b0_49: string = __f0_56.utf8 puts(__b0_49.utf8) return 1 }
+    let __f0_58: string = "FAIL pipe s3\n"
+    if syscall(SYS_pipe, s3) < 0 { let __b0_50: string = __f0_58.utf8 puts(__b0_50.utf8) return 1 }
     let s1r = peek32(s1)
     let s1w = peek32(s1 + 4)
     let s3w = peek32(s3 + 4)
@@ -59,9 +68,12 @@ fn main() -> i64 {
     write_buf(s1w, msg, mlen)
     io_splice_idle_ms = 100
     let stalled = splice_pump(s1r, s3w, s2, mlen)
-    if stalled != 0 - 1 { puts("FAIL stalled output should time out\n") return 1 }
-    puts("OK splice_pump stalled-output bounded\n")
+    let __f0_70: string = "FAIL stalled output should time out\n"
+    if stalled != 0 - 1 { let __b0_61: string = __f0_70.utf8 puts(__b0_61.utf8) return 1 }
+    let __f0_72: string = "OK splice_pump stalled-output bounded\n"
+    puts(__f0_72.utf8)
 
-    puts("OK splice_pump\n")
+    let __f0_75: string = "OK splice_pump\n"
+    puts(__f0_75.utf8)
     0
 }

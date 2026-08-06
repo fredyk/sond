@@ -147,7 +147,8 @@ pub fn gdt_init() {
     // Build the GDT pseudo-descriptor: limit (u16) + base (u64)
     poke16(gdt_ptr, 47)                        // limit = table_size - 1
     poke64(gdt_ptr + 2, gdt_table)            // base = gdt_table address
-    asm("lgdt gdt_ptr(%rip)")
+    let __f0_149: string = "lgdt gdt_ptr(%rip)"
+    asm(__f0_149.utf8)
     // Note: no far-jump needed here, the UEFI firmware already set up a valid
     // 64-bit flat GDT with segment 0x08 pointing to kernel code. The lgdt above
     // ensures the kernel owns the descriptor table; the existing segment selectors

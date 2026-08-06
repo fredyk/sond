@@ -103,14 +103,16 @@ fn build_dns_query(buf: i64, hostname: i64, query_id: i64) -> i64 {
 }
 
 fn efi_main() -> i64 {
-    // Allocate buffer for the DNS query (enough space for "example.com" query)
+    let __f0_105: string = "example.com"
+    // Allocate buffer for the DNS query (enough space for __f0_105.utf8 query)
     let buf = alloc(256)
 
     // Fixed hostname: "example.com" null-terminated
     let hostname = alloc(15)
     let mut host = hostname
     let mut i = 0
-    let mut chars = "example.com\0"
+    let chars_text: string = "example.com\0"
+    let mut chars = chars_text.utf8
     // sondc strings-as-values are NOT supported; only string literals in print/write.
     // We need to write the hostname byte by byte.
     // "example.com" = 11 chars + null = 12 bytes

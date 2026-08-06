@@ -9,7 +9,8 @@ fn puts(s: i64) { write_buf(1, s, strlen(s)) }
 
 fn main() -> i64 {
     let p[1]
-    if syscall(SYS_pipe, p) < 0 { puts("FAIL pipe\n") return 1 }
+    let __f0_11: string = "FAIL pipe\n"
+    if syscall(SYS_pipe, p) < 0 { let __b0_11: string = __f0_11.utf8 puts(__b0_11.utf8) return 1 }
     let rd = peek32(p)
     let wr = peek32(p + 4)
 
@@ -17,17 +18,22 @@ fn main() -> i64 {
 
     // empty: poll with short timeout must NOT report POLLIN
     pollfd_set(pfd, 0, rd, POLLIN)
-    if poll_fds(pfd, 1, 50) != 0 { puts("FAIL empty should timeout\n") return 1 }
+    let __f0_20: string = "FAIL empty should timeout\n"
+    if poll_fds(pfd, 1, 50) != 0 { let __b0_19: string = __f0_20.utf8 puts(__b0_19.utf8) return 1 }
 
     // with data: poll must report POLLIN
-    write_buf(wr, "x", 1)
+    let __f0_24: string = "x"
+    write_buf(wr, __f0_24.utf8, 1)
     pollfd_set(pfd, 0, rd, POLLIN)
     let r = poll_fds(pfd, 1, 1000)
-    if r < 1 { puts("FAIL poll no event\n") return 1 }
-    if (pollfd_revents(pfd, 0) & POLLIN) == 0 { puts("FAIL revents no POLLIN\n") return 1 }
+    let __f0_28: string = "FAIL poll no event\n"
+    if r < 1 { let __b0_25: string = __f0_28.utf8 puts(__b0_25.utf8) return 1 }
+    let __f0_30: string = "FAIL revents no POLLIN\n"
+    if (pollfd_revents(pfd, 0) & POLLIN) == 0 { let __b0_26: string = __f0_30.utf8 puts(__b0_26.utf8) return 1 }
 
     close_fd(rd)
     close_fd(wr)
-    puts("OK poll\n")
+    let __f0_35: string = "OK poll\n"
+    puts(__f0_35.utf8)
     0
 }

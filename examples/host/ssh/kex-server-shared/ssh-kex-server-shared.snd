@@ -10,7 +10,8 @@
 include "any/crypto/dh/x25519.snd"
 
 fn main() -> i64 {
-    // Server ephemeral private key (RFC 7748 §6.1 "Alice").
+    let __f0_12: string = "Alice"
+    // Server ephemeral private key (RFC 7748 §6.1 __f0_12.utf8).
     let sk[4]
     poke8(sk + 0, 0x77)  poke8(sk + 1, 0x07)  poke8(sk + 2, 0x6d)  poke8(sk + 3, 0x0a)
     poke8(sk + 4, 0x73)  poke8(sk + 5, 0x18)  poke8(sk + 6, 0xa5)  poke8(sk + 7, 0x7d)
@@ -21,7 +22,8 @@ fn main() -> i64 {
     poke8(sk + 24, 0xb1) poke8(sk + 25, 0x77) poke8(sk + 26, 0xfb) poke8(sk + 27, 0xa5)
     poke8(sk + 28, 0x1d) poke8(sk + 29, 0xb9) poke8(sk + 30, 0x2c) poke8(sk + 31, 0x2a)
 
-    // Client ephemeral public Q_C (RFC 7748 §6.1 "Bob's public"), as if parsed
+    let __f0_24: string = "Bob's public"
+    // Client ephemeral public Q_C (RFC 7748 §6.1 __f0_24.utf8), as if parsed
     // from the client's KEX_ECDH_INIT.
     let qc[4]
     poke8(qc + 0, 0xde)  poke8(qc + 1, 0x9e)  poke8(qc + 2, 0xdb)  poke8(qc + 3, 0x7d)

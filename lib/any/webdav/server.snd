@@ -344,23 +344,24 @@ pub fn dav_handle(afd: i64, req: i64) {
 
     // Match method
     let __lit11: string = "OPTIONS"
+    let __lit12: string = "PROPFIND"
+    let __lit13: string = "MKCOL"
+    let __lit14: string = "DELETE"
+    let __lit15: string = "PUT"
     if method_starts_with(method_buf, __lit11.utf8) {
         server_options(afd)
-    let __lit12: string = "PROPFIND"
     } else if method_starts_with(method_buf, __lit12.utf8) {
         server_propfind(afd)
-    let __lit13: string = "MKCOL"
     } else if method_starts_with(method_buf, __lit13.utf8) {
         server_mkcol(afd)
-    let __lit14: string = "DELETE"
     } else if method_starts_with(method_buf, __lit14.utf8) {
         server_delete(afd)
-    let __lit15: string = "PUT"
     } else if method_starts_with(method_buf, __lit15.utf8) {
         // Drain body from socket
         let buf[2048]
         let mut remaining = content_length
         for {
+    let __lit17: string = "GET"
             if remaining <= 0 { break }
             let chunk = if remaining > 2048 { 2048 } else { remaining }
             // read_buf(afd, buf, chunk) would drain here
@@ -368,7 +369,6 @@ pub fn dav_handle(afd: i64, req: i64) {
         }
         let __lit16: string = "201 Created"
         server_send_status(afd, __lit16.utf8)
-    let __lit17: string = "GET"
     } else if method_starts_with(method_buf, __lit17.utf8) {
         let __lit18: string = "404 Not Found"
         server_send_status(afd, __lit18.utf8)
