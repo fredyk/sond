@@ -540,11 +540,27 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
             // state, so an invariant a branch violates was spuriously "preserved". Its value is
             // discarded; a missing `else` is a no-op branch carrying only the negated guard.
             Stmt::Expr(e @ (Expr::If { .. } | Expr::Match { .. })) => eval_effect(e, live, ctx)?,
-            // Any other statement-position expression (a value, or an uncontracted call like
-            // `print_int`) has no effect on the scalar state the prover tracks (Sond has no
-            // reference-to-local, so a call cannot reassign a caller's local), and no contract to
-            // enforce, so it is soundly discarded.
-            Stmt::Expr(_) => live,
+            // Any other statement-position expression is EVALUATED for its obligations, and only
+            // its VALUE is discarded. It still cannot reassign a caller's local (Sond has no
+            // reference-to-local), so the scalar state carries through — but a call here may well
+            // carry a contract, and that contract has to be discharged.
+            //
+            // Discarding the whole statement was unsound. The rule used to read "an uncontracted
+            // call like `print_int` ... has no contract to enforce", which is true of `print_int`
+            // and false of every contracted call written as a statement — which is most of them:
+            // a procedure that writes into a buffer is called for its effect, never as a tail
+            // expression. So `f(-5)` against `requires { i >= 0 }` was rejected as the tail of a
+            // block and accepted one line higher, and the callee had already dropped its own
+            // bounds check because it trusted the contract.
+            Stmt::Expr(e) => {
+                let mut next = Vec::new();
+                for st in live {
+                    for (st2, _) in eval_expr_paths(e, st, ctx)? {
+                        next.push(st2);
+                    }
+                }
+                next
+            }
             // A spawned call runs concurrently; for effect analysis today it is treated like any
             // expression statement (its effect happens). Disjointness is a separate pass.
             Stmt::Spawn(_) => live,
@@ -2453,6 +2469,57 @@ mod tests {
         assert!(
             err.contains("precondition") && err.contains("only_positive"),
             "a violated precondition inside a loop must be refused, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_call_in_statement_position_still_has_to_satisfy_the_precondition() {
+        // The same vanishing as the test below, in the position where almost every real call
+        // lives. `f(-5)` as the tail of `main` was rejected; the identical call written as a
+        // STATEMENT, with anything at all after it, compiled clean.
+        //
+        // The reason is a comment that reasoned about `print_int` and then applied to every
+        // call: a statement-position expression "has no effect on the scalar state ... and no
+        // contract to enforce, so it is soundly discarded". True of `print_int`. False of a
+        // contracted call, and a procedure that writes into a buffer is exactly a contracted
+        // call in statement position — nobody writes `put(buf, n, i, v)` as a tail expression.
+        //
+        // What makes it worse than an unchecked call: the callee DROPS its own bounds check
+        // because it believes the contract. So migrating a real guard `if i >= 0 && i < n` to
+        // `requires` traded a check that runs for a promise nobody verifies, and the write went
+        // out of bounds in silence.
+        let funcs = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn main() -> i64 { f(-5)\n0 }",
+        );
+        verify(&funcs).expect_err("-5 cannot satisfy `i >= 0`, tail or not");
+    }
+
+    #[test]
+    fn a_contracted_call_in_an_uninvarianted_loop_is_now_checked() {
+        // This test used to pin the HOLE, with a note from its author saying that if it ever
+        // started failing, the hole had been closed and it should become the assertion that -5
+        // is rejected. It is, so it does.
+        //
+        // A `for` without an `invariant { .. }` still leaves the verifiable fragment — that part
+        // has not changed. What changed is that giving up on the LOOP no longer waives what the
+        // callees inside it require: a call whose arguments are constants is judged on the spot,
+        // which needs no loop reasoning and cannot be wrong. `for i in 0..n { put(buf, n, i, v) }`
+        // inside a plain `main` was exactly how a bounds contract would be used, and moving a
+        // real guard into a `requires` no longer weakens it in that shape.
+        //
+        // Still open, deliberately: an argument that DEPENDS on the loop (`f(i)`) is unknown
+        // rather than refuted, and is still given the benefit of the doubt. Closing that needs
+        // the invariant.
+        let funcs = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn main() -> i64 { for k in 0..2 { f(-5) }\n0 }",
+        );
+        let err = verify(&funcs).unwrap_err().message;
+        assert!(
+            err.contains("precondition") && err.contains("f"),
+            "a constant argument that violates the precondition is refused inside a loop too, \
+             got: {err}"
         );
     }
 
