@@ -2450,6 +2450,140 @@ fn elem_bytes(elem: &Type) -> i64 {
     }
 }
 
+/// The builtins that take a string LITERAL directly: the console primitives, which write the
+/// bytes they are given and never hand the address to anyone. A literal is text there too, but
+/// there is nothing it can decay into.
+const LITERAL_BUILTINS: [&str; 7] = [
+    "print",
+    "serial_print",
+    "print_kern",
+    "write",
+    "cstr",
+    "literal",
+    "include",
+];
+
+/// Text has a TYPE. A string literal binds to `string` (and to the console builtins, which take
+/// one directly); anywhere else it would decay into a bare address, which is precisely what made
+/// "walk it until a NUL turns up" the natural thing to write — with an address and no length
+/// there is nothing else you can do with it.
+///
+/// NOT WIRED IN YET, and the reason is worth writing down. Turning it on forces every function
+/// that takes text to declare `string`, and the standard library then hits the OTHER rule: raw
+/// `peek`/`poke` into a buffer the compiler knows the length of is refused, so those bodies must
+/// index instead — and a `string` today carries no length to index against. Measured: 47 files
+/// need the signature change, and 8 of them then need their bodies rewritten, which cannot be
+/// done until `string` carries its own length (a pointer AND a count, the way every language
+/// that got this right does it). The rule below is implemented and tested so that work has a
+/// finished target to land on; it starts rejecting the day `string` can answer `s.len` for a
+/// value it did not see created.
+#[allow(dead_code)]
+pub fn check_string_literal_types(funcs: &[Function]) -> Result<(), String> {
+    let sigs: HashMap<&str, &Function> = funcs.iter().map(|f| (f.name.as_str(), f)).collect();
+    for f in funcs {
+        literals_block(&f.body, &f.name, &sigs)?;
+    }
+    Ok(())
+}
+
+fn is_string_ty(ty: &Type) -> bool {
+    match ty {
+        Type::Named(n) => n == "string",
+        // `let s: string = ".."` is lowered to a byte view by the parser, so the lowered form
+        // counts as the same type.
+        Type::View(inner, _) => matches!(inner.as_ref(), Type::Named(n) if n == "u8"),
+        _ => false,
+    }
+}
+
+fn literals_block(
+    b: &Block,
+    fname: &str,
+    sigs: &HashMap<&str, &Function>,
+) -> Result<(), String> {
+    for st in &b.stmts {
+        match st {
+            Stmt::Let { name, ty, value, .. } => {
+                if matches!(value, Expr::Str(_))
+                    && !ty.as_ref().is_some_and(is_string_ty)
+                {
+                    return Err(format!(
+                        "function `{fname}`: `{name}` is given a string literal but is not \
+                         declared `string`; text has a type — write `let {name}: string = ..`"
+                    ));
+                }
+                literals_expr(value, fname, sigs)?;
+            }
+            Stmt::Assign { target, value } => {
+                literals_expr(target, fname, sigs)?;
+                literals_expr(value, fname, sigs)?;
+            }
+            Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Spawn(e) => {
+                literals_expr(e, fname, sigs)?
+            }
+            Stmt::For { cond, body, .. } => {
+                if let Some(c) = cond {
+                    literals_expr(c, fname, sigs)?;
+                }
+                literals_block(body, fname, sigs)?;
+            }
+            _ => {}
+        }
+    }
+    if let Some(t) = &b.tail {
+        literals_expr(t, fname, sigs)?;
+    }
+    Ok(())
+}
+
+fn literals_expr(e: &Expr, fname: &str, sigs: &HashMap<&str, &Function>) -> Result<(), String> {
+    if let Expr::Call(callee, args) = e
+        && let Expr::Var(name) = callee.as_ref()
+    {
+        if LITERAL_BUILTINS.contains(&name.as_str()) {
+            return Ok(());
+        }
+        if let Some(g) = sigs.get(name.as_str()) {
+            for (i, a) in args.iter().enumerate() {
+                if matches!(&a.value, Expr::Str(_)) {
+                    let ok = g.params.get(i).is_some_and(|p| is_string_ty(&p.ty));
+                    if !ok {
+                        let pname = g.params.get(i).map_or("?", |p| p.name.as_str());
+                        return Err(format!(
+                            "function `{fname}`: a string literal is passed to `{name}`, whose \
+                             parameter `{pname}` is not `string`; text has a type — declare it \
+                             `{pname}: string`"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    match e {
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            literals_expr(l, fname, sigs)?;
+            literals_expr(r, fname, sigs)
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => literals_expr(x, fname, sigs),
+        Expr::Call(c, args) => {
+            literals_expr(c, fname, sigs)?;
+            for a in args {
+                literals_expr(&a.value, fname, sigs)?;
+            }
+            Ok(())
+        }
+        Expr::If { cond, then_branch, else_branch } => {
+            literals_expr(cond, fname, sigs)?;
+            literals_block(then_branch, fname, sigs)?;
+            if let Some(eb) = else_branch {
+                literals_block(eb, fname, sigs)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Is `name` a parameter of VIEW type, and if so, which parameter carries its length? Returns
 /// `None` when `name` is not a view at all, `Some(None)` for a length-less `T[]` (nothing to
 /// prove an index against), and `Some(Some(n))` for `T[n]`.
@@ -3040,6 +3174,12 @@ mod tests {
         let funcs = p.parse_program();
         let enums = p.take_enums();
         check_enum_matches(&funcs, &enums)
+    }
+
+    fn literals(src: &str) -> Result<(), String> {
+        let mut p = Parser::new(tokenize(src));
+        let funcs = p.parse_program();
+        check_string_literal_types(&funcs)
     }
 
     fn bounds(src: &str) -> Result<(), String> {
@@ -3656,6 +3796,38 @@ mod tests {
             .is_ok(),
             "a local view that names its length must be checkable, not refused"
         );
+    }
+
+    #[test]
+    fn a_string_literal_cannot_be_taken_as_a_plain_integer() {
+        // A literal is TEXT, and text has a type. Letting one decay into `i64` is what made
+        // "walk it until a NUL turns up" the natural thing to write: with an address and no
+        // length there is nothing else to do. Binding one to anything but `string` is refused,
+        // and the message says which type it wanted.
+        let err = literals("fn main() -> i64 { let p: i64 = \"hola\"\np }").unwrap_err();
+        assert!(
+            err.contains("string"),
+            "the error must name the type a literal belongs to, got: {err}"
+        );
+        // The same through a call: a parameter that says `i64` does not accept text either.
+        let err = literals(
+            "fn takes(p: i64) -> i64 { p }\nfn main() -> i64 { takes(\"hola\") }",
+        )
+        .unwrap_err();
+        assert!(err.contains("string"), "a literal argument needs a `string` parameter: {err}");
+    }
+
+    #[test]
+    fn a_string_literal_is_fine_where_a_string_is_expected() {
+        // The other half, and the one that decides whether the rule is usable: a `string`
+        // binding, a `string` parameter, and the console builtins that take a literal directly
+        // all keep working.
+        assert!(literals("fn main() -> i64 { let s: string = \"hola\"\ns.len }").is_ok());
+        assert!(
+            literals("fn takes(s: string) -> i64 { s.len }\nfn main() -> i64 { takes(\"hola\") }")
+                .is_ok()
+        );
+        assert!(literals("fn main() -> i64 { print(\"hola\")\n0 }").is_ok());
     }
 
     #[test]
