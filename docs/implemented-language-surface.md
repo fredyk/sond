@@ -195,37 +195,13 @@ else (crypto, strings, drivers) is a `.snd` library you `include` (catalog above
   for BYTE buffers keep peek8/poke8. `a` is any address.
 - `write(fd, "literal") -> i64`: raw `write` syscall (hosted/freestanding only).
 
-### Port I/O (drivers), all targets, ring-0 (UEFI/kernel) at runtime
-- `outb(port, val)` / `outw(port, val)` / `outl(port, val)`: write a byte/word/dword to an I/O PORT.
-- `inb(port) -> i64` / `inw(port) -> i64` / `inl(port) -> i64`: read a byte/word/dword from an I/O PORT.
+### Platform builtins: port I/O, UEFI, kernel interrupts
 
-The 32-bit `outl`/`inl` are for PCI config space (address→0xCF8, datum at 0xCFC). I/O ports
-are a SEPARATE address space: for a device register use `inb`/`outb`, NOT `peek8`/`poke8`
-(those hit RAM). Hex literals allowed: `0x3F8`.
+Detailed per-target reference (`inb`/`outb`, UEFI boot services, `exit_boot_services`,
+interrupt handlers) is served in full at **<https://sond.dev/docs/builtins.md>** — fetch it
+when writing a driver, a UEFI app or a kernel. It is kept out of this quickref so the
+quickref stays small enough to hold in context.
 
-### UEFI target only (`--uefi`)
-- `print_char(c)`: print one character (its code point) via `ConOut`.
-- `readkey() -> i64`: block until a key is pressed, return its character code.
-- `alloc(size) -> i64`: allocate `size` bytes, return the address (use with
-  `peek*`/`poke*`). Firmware `AllocatePool` before `exit_boot_services()`, Sond's own
-  bump heap over the UEFI memory map after, so it keeps working in the kernel.
-- `serial_print("literal")` / `serial_putc(byte)`: write to the COM1 serial port
-  by direct hardware I/O. Works before and after `exit_boot_services()`.
-- `exit_boot_services()`: drop the UEFI firmware; Sond becomes a bare-metal kernel. Seeds
-  Sond's own heap from the memory map, so `alloc`/`print` KEEP WORKING (`print` falls back
-  to COM1). Only `readkey` stops.
-- `halt()`: stop the CPU forever (end a kernel).
-- `asm("instruction")`: inline assembly (AT&T), one instruction verbatim: `asm("cli")`,
-  `asm("int $0x20")`. You own the registers. The escape hatch when no builtin covers it.
-
-### Kernel: interrupts (`--uefi`, after `exit_boot_services`)
-- `interrupt fn name() { ... }`: interrupt handler: saves/restores GP regs, returns `iretq`.
-  A hardware IRQ must ack it (`outb(0x20, 0x20)`).
-- `addr_of(name) -> i64`: a function's address (IDT gates; function pointers).
-- `lidt(ptr)`: load the IDT register from a 10-byte pseudo-descriptor at `ptr`.
-- `read_cs() -> i64`: the current code-segment selector. ISR: `examples/uefi/kernel/timer-interrupt/`.
-- `swtch(old_ctx_ptr, new_ctx)`: context switch (save/restore callee regs + `%rsp`). From a
-  timer ISR → preemptive multitasking: `examples/uefi/kernel/preempt-two-tasks/`.
 
 ## Testing (MANDATORY: a program without tests does not build)
 
