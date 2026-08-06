@@ -23,6 +23,8 @@ pub struct Parser {
     enums: Vec<EnumDef>,
     /// Top-level `port` (interface) declarations collected while parsing the program.
     ports: Vec<PortDef>,
+    /// `extern fn` declarations collected while parsing the program.
+    externs: Vec<Signature>,
     /// Top-level `provides` (per-target implementations) collected while parsing.
     providers: Vec<ProviderDef>,
     /// Top-level `use Port` directives collected while parsing.
@@ -60,6 +62,7 @@ impl Parser {
             structs: Vec::new(),
             enums: Vec::new(),
             ports: Vec::new(),
+            externs: Vec::new(),
             providers: Vec::new(),
             uses: Vec::new(),
             no_struct_lit: false,
@@ -93,7 +96,9 @@ impl Parser {
                     | Token::Impl
                     | Token::Test
             )
-        ) {
+        ) || (matches!(self.peek(), Some(Token::Ident(k)) if k == "extern")
+            && self.tokens.get(self.pos + 1) == Some(&Token::Fn))
+        {
             // `impl` opens one of two blocks, told apart by a `for` after the name:
             //   `impl Iface for Target { fn .. }`  a per-target interface implementation
             //                                      (RFC-0014, the old `provides`), collected as
@@ -101,6 +106,18 @@ impl Parser {
             //   `impl Type { fn m(self, ..) .. }`  inherent methods: each becomes a free function
             //                                      `Type_m` with `self` typed as the struct;
             //                                      `p.m(a)` lowers to `Type_m(p, a)` by desugar.
+            // `extern fn name(params) -> T`: a function this program CALLS but does not define,
+            // resolved by the linker. `extern` is a contextual keyword (a plain identifier
+            // elsewhere), recognized only here, directly before `fn`.
+            if matches!(self.peek(), Some(Token::Ident(k)) if k == "extern")
+                && self.tokens.get(self.pos + 1) == Some(&Token::Fn)
+            {
+                self.advance(); // `extern`
+                let sig = self.parse_signature();
+                self.externs.push(sig);
+                self.skip_semicolons();
+                continue;
+            }
             if self.peek() == Some(&Token::Impl) {
                 if self.tokens.get(self.pos + 2) == Some(&Token::For) {
                     let p = self.parse_provides();
@@ -223,6 +240,12 @@ impl Parser {
     }
 
     /// The top-level `iface` (interface) declarations collected during `parse_program`.
+    /// The `extern fn` declarations collected while parsing: functions the program calls but
+    /// does not define, whose calls follow the platform's C ABI rather than Sond's own.
+    pub fn take_externs(&mut self) -> Vec<Signature> {
+        std::mem::take(&mut self.externs)
+    }
+
     pub fn take_ports(&mut self) -> Vec<PortDef> {
         std::mem::take(&mut self.ports)
     }

@@ -1,7 +1,7 @@
 //! Codegen for calls: user-function calls and the builtin operations
 //! (`print`, `print_int`, memory, UEFI console/keyboard/serial, boot services).
 
-use super::{ARG_REGS, Codegen};
+use super::{ARG_REGS, Codegen, MS_ARG_REGS};
 use crate::ast::{Arg, Expr};
 
 impl Codegen {
@@ -12,6 +12,33 @@ impl Codegen {
         let Expr::Var(name) = callee else {
             todo!("x64 codegen for call of {callee:?}");
         };
+        // A call to an `extern fn`: the platform's C ABI, not Sond's. On Windows that is the
+        // Microsoft x64 convention — first four arguments in %rcx/%rdx/%r8/%r9, the rest on the
+        // stack, and 32 bytes of SHADOW SPACE below them that the CALLER reserves for the callee
+        // to spill those four registers into. Skipping the shadow space does not fail loudly: the
+        // callee writes over whatever is there, which is the caller's own stack.
+        if self.extern_fns.contains(name) {
+            let n = args.len();
+            let reg = n.min(MS_ARG_REGS.len());
+            let stack_n = n - reg;
+            // Shadow space (32) + stack arguments, keeping %rsp 16-aligned at the call.
+            let bytes = 32 + stack_n as i64 * 8;
+            let bytes = bytes + (bytes % 16);
+            self.line(&format!("    subq ${bytes}, %rsp"));
+            // Stack arguments start ABOVE the shadow space, in order.
+            for (i, arg) in args[reg..].iter().enumerate() {
+                self.expr(&arg.value);
+                self.line(&format!("    movq %rax, {}(%rsp)", 32 + i * 8));
+            }
+            // Register arguments last, so evaluating them cannot clobber one another.
+            for (i, arg) in args[..reg].iter().enumerate() {
+                self.expr(&arg.value);
+                self.line(&format!("    movq %rax, {}", MS_ARG_REGS[i]));
+            }
+            self.line(&format!("    call {name}"));
+            self.line(&format!("    addq ${bytes}, %rsp"));
+            return;
+        }
         // A call to another user function: evaluate the arguments, load them into
         // the System V argument registers, and call. Result is left in %rax.
         if self.fn_names.contains(name) {

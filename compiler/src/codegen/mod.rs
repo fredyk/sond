@@ -10,13 +10,19 @@
 //! computed; locals live in the function's stack frame. Correct (if not yet
 //! optimal); a register allocator comes later.
 
-use crate::ast::{BinOp, Block, Expr, Function, Global, Stmt, StructDef, Type, UnOp, Visibility};
+use crate::ast::{
+    BinOp, Block, Expr, Function, Global, Signature, Stmt, StructDef, Type, UnOp, Visibility,
+};
 use std::collections::{HashMap, HashSet};
 
 /// System V AMD64 integer argument registers, in order.
 const ARG_REGS: [&str; 6] = ["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"];
 
 /// System V AMD64 SSE argument registers (`f64` params/returns live here), in order.
+/// The Microsoft x64 integer argument registers, in order. Used for `extern fn` calls on the
+/// Windows target; everything else in Sond uses System V.
+pub(crate) const MS_ARG_REGS: [&str; 4] = ["%rcx", "%rdx", "%r8", "%r9"];
+
 const SSE_ARG_REGS: [&str; 8] = [
     "%xmm0", "%xmm1", "%xmm2", "%xmm3", "%xmm4", "%xmm5", "%xmm6", "%xmm7",
 ];
@@ -240,6 +246,58 @@ fn emit_program_maybe_debug(
     cg.line("sond_argv: .quad 0");
     cg.line("sond_envp: .quad 0");
     cg.emit_gnu_stack_note();
+    cg.out
+}
+
+/// Emits a **Windows console** program: a PE32+ that the Windows loader accepts, linked with the
+/// mingw toolchain the UEFI target already uses. Same code generation as the hosted target — the
+/// instruction set is the same machine — but the platform differences are real and stated here:
+/// the entry receives its arguments under the Microsoft x64 ABI (`%rcx`/`%rdx`), not the System V
+/// one, and there is no `.note.GNU-stack` section in a PE.
+pub fn emit_windows_g(
+    globals: &[Global],
+    structs: &[StructDef],
+    funcs: &[Function],
+    externs: &[Signature],
+) -> String {
+    let mut cg = Codegen {
+        check_contracts: true,
+        windows: true,
+        ..Default::default()
+    };
+    cg.set_globals(globals);
+    cg.extern_fns = externs.iter().map(|e| e.name.clone()).collect();
+    cg.fn_ret_types
+        .extend(externs.iter().map(|e| (e.name.clone(), e.ret.as_ref().map_or(Ty::I64, kind_of_type))));
+    emit_all(&mut cg, structs, funcs, "main");
+    cg.line(".globl main");
+    cg.line("main:");
+    // Microsoft x64: argc in %rcx, argv in %rdx (System V puts them in %rdi/%rsi). The builtins
+    // read the same two cells either way, so the difference is confined to this handshake.
+    cg.line("    movq %rcx, sond_argc(%rip)");
+    cg.line("    movq %rdx, sond_argv(%rip)");
+    // %r15 is callee-saved in BOTH ABIs, and the C runtime that called us expects it back.
+    cg.line("    pushq %r15");
+    cg.line("    leaq sond_arena_tcb(%rip), %r15");
+    // The Microsoft ABI requires 32 bytes of SHADOW SPACE below the return address for any call,
+    // reserved by the CALLER, plus 16-byte stack alignment at the call. `sond_start` is Sond's
+    // own code and uses neither, but anything it calls into on this platform will, so the space
+    // is reserved here once rather than at every call site.
+    cg.line("    subq $40, %rsp");
+    cg.line("    call sond_start");
+    cg.line("    addq $40, %rsp");
+    cg.line("    popq %r15");
+    cg.line("    ret");
+    cg.emit_print_int_helper();
+    cg.emit_print_int_signed_helper();
+    cg.emit_view_alloc_helper();
+    cg.emit_globals();
+    cg.emit_rodata();
+    cg.line(".data");
+    cg.line(".p2align 3");
+    cg.line("sond_argc: .quad 0");
+    cg.line("sond_argv: .quad 0");
+    cg.line("sond_envp: .quad 0");
     cg.out
 }
 
@@ -885,6 +943,11 @@ struct Codegen {
     /// Whether the post-EBS heap is used (`alloc` after ExitBootServices, or the
     /// `exit_boot_services` call that seeds it). Emits the bump-allocator helpers.
     uses_heap: bool,
+    /// Whether this is the Windows target: a PE with the Microsoft x64 ABI at its boundaries.
+    windows: bool,
+    /// Names declared `extern fn`: called through the platform's C ABI and resolved by the
+    /// linker, never emitted.
+    extern_fns: HashSet<String>,
     /// Whether any declaration reserved its own storage (`let ar: i32[n]`), so the reservation
     /// helper is emitted. Off by default: a program that never declares one is byte-identical.
     uses_view_alloc: bool,

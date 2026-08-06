@@ -158,3 +158,39 @@ pub(crate) fn compile_and_run_freestanding(src: &str) -> (i32, bool) {
     let _ = std::fs::remove_file(&bin_path);
     (code, is_static)
 }
+
+/// Links an emitted Windows program with the mingw toolchain and runs it under wine,
+/// returning its exit code. The whole point of this target is a binary that runs on a machine
+/// none of us has, so the test runs it on the closest thing available rather than reading the
+/// assembly and hoping.
+pub(crate) fn compile_and_run_windows(src: &str) -> i32 {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let mut p = Parser::new(tokenize(src));
+    let funcs = p.parse_program();
+    let globals = p.take_globals();
+    let externs = p.take_externs();
+    let asm = emit_windows_g(&globals, &[], &funcs, &externs);
+    let dir = std::env::temp_dir();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stem = format!("sondc_win_{}_{}", std::process::id(), n);
+    let asm_path = dir.join(format!("{stem}.s"));
+    let exe_path = dir.join(format!("{stem}.exe"));
+    std::fs::write(&asm_path, asm).unwrap();
+    let linked = Command::new("x86_64-w64-mingw32-gcc")
+        .arg(&asm_path)
+        .arg("-o")
+        .arg(&exe_path)
+        .status()
+        .expect("the mingw toolchain should be available");
+    assert!(linked.success(), "the Windows link failed");
+    let code = Command::new("wine")
+        .arg(&exe_path)
+        .env("WINEDEBUG", "-all")
+        .status()
+        .expect("wine should be available")
+        .code()
+        .unwrap();
+    let _ = std::fs::remove_file(&asm_path);
+    let _ = std::fs::remove_file(&exe_path);
+    code
+}

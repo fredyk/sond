@@ -1,6 +1,6 @@
 use super::testutil::{
     compile_and_capture, compile_and_run, compile_and_run_freestanding,
-    freestanding_section_alignment, parse_function,
+    compile_and_run_windows, freestanding_section_alignment, parse_function,
 };
 use super::*;
 use crate::lexer::tokenize;
@@ -1513,6 +1513,47 @@ fn reserving_a_view_on_uefi_is_refused_rather_than_emitted_as_a_syscall() {
     assert!(
         msg.contains("alloc") && msg.contains("UEFI"),
         "the error must name the target and the way out, got: {msg}"
+    );
+}
+
+#[test]
+fn a_windows_program_links_as_a_console_pe_and_runs() {
+    // The fotomaton runs on Windows and has to talk to vendor DLLs, so Sond needs a PE that a
+    // Windows loader accepts. The compiler already emits PE for UEFI; this is the hosted-console
+    // side of it. Run under wine rather than eyeballed: a binary for a machine none of us has is
+    // exactly where reading the assembly and hoping goes wrong.
+    assert_eq!(compile_and_run_windows("fn main() -> i64 { 6 * 7 }"), 42);
+    // Control flow and locals, so the target is a real one and not just a `ret`.
+    assert_eq!(
+        compile_and_run_windows("fn main() -> i64 { let mut s = 0\nlet mut i = 0\nfor i < 10 { s = s + i\ni = i + 1 }\ns }"),
+        45
+    );
+}
+
+#[test]
+fn a_windows_program_calls_a_dll_under_the_microsoft_abi() {
+    // The reason this target exists: the fotomaton has to call vendor DLLs (a camera SDK, a
+    // printer SDK). `extern fn` declares one; the call has to follow the Microsoft x64 ABI, which
+    // is NOT the one Sond emits everywhere else — arguments in %rcx/%rdx/%r8/%r9, and 32 bytes of
+    // shadow space the CALLER reserves. Get either wrong and the callee reads rubbish.
+    //
+    // `GetTickCount` takes nothing and returns milliseconds since boot: any running machine
+    // answers above zero, so it proves the call reached the DLL and came back.
+    assert_eq!(
+        compile_and_run_windows(
+            "extern fn GetTickCount() -> i64\n\
+             fn main() -> i64 { if GetTickCount() > 0 { 7 } else { 0 } }"
+        ),
+        7
+    );
+    // `MulDiv(a, b, c)` computes a*b/c: three arguments, so it pins the register ORDER as well as
+    // the fact that a call happens at all. 100*3/2 = 150.
+    assert_eq!(
+        compile_and_run_windows(
+            "extern fn MulDiv(a: i64, b: i64, c: i64) -> i64\n\
+             fn main() -> i64 { MulDiv(100, 3, 2) }"
+        ),
+        150
     );
 }
 

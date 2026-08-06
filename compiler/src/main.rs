@@ -11,7 +11,7 @@
 
 use sondc::codegen::{
     emit_freestanding_g, emit_program_coverage_g, emit_program_debug_g, emit_program_g,
-    emit_shared_g, emit_uefi_g,
+    emit_shared_g, emit_uefi_g, emit_windows_g,
 };
 use sondc::lexer::tokenize_located;
 use sondc::parser::Parser;
@@ -22,7 +22,7 @@ use std::process::{Command, ExitCode};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: sondc <input.snd> [-o <output>] [--freestanding | --uefi | --shared | --object]");
+        eprintln!("usage: sondc <input.snd> [-o <output>] [--freestanding | --uefi | --windows | --shared | --object]");
         return ExitCode::from(2);
     }
 
@@ -46,12 +46,13 @@ fn main() -> ExitCode {
         break;
     }
     let Some(input) = input else {
-        eprintln!("usage: sondc <input.snd> [-o <output>] [--test | --freestanding | --uefi | --shared | --object]");
+        eprintln!("usage: sondc <input.snd> [-o <output>] [--test | --freestanding | --uefi | --windows | --shared | --object]");
         return ExitCode::from(2);
     };
     let output = parse_output_flag(&args).unwrap_or_else(|| default_output(input));
     let freestanding = args.iter().any(|a| a == "--freestanding");
     let uefi = args.iter().any(|a| a == "--uefi");
+    let windows = args.iter().any(|a| a == "--windows");
     let shared = args.iter().any(|a| a == "--shared");
     // A RELOCATABLE OBJECT with the same C ABI as `--shared`, for hosts that cannot load a shared
     // object at all: a Go binary for a distroless/static image has no dynamic loader, so the only
@@ -106,6 +107,8 @@ fn main() -> ExitCode {
     // skip the whole pipeline (parse/verify/codegen/link).
     let target_tag = if uefi {
         "uefi"
+    } else if windows {
+        "windows"
     } else if freestanding {
         "freestanding"
     } else if object {
@@ -145,7 +148,7 @@ fn main() -> ExitCode {
     // backtrace, a good oracle explains the rejection. (The hook is already
     // silenced above, before include resolution, which can panic too.)
     let src_for_parse = src.clone();
-    let (mut funcs, mut globals, mut structs, enums, ports, providers, uses) =
+    let (mut funcs, mut globals, mut structs, externs, enums, ports, providers, uses) =
         match std::panic::catch_unwind(move || {
             let (toks, lines) = tokenize_located(&src_for_parse);
             // Keep the token stream: it is the only count of `test` blocks the parser cannot
@@ -155,13 +158,14 @@ fn main() -> ExitCode {
             let funcs = p.parse_program();
             let globals = p.take_globals();
             let structs = p.take_structs();
+            let externs = p.take_externs();
             let enums = p.take_enums();
             let ports = p.take_ports();
             let providers = p.take_providers();
             let uses = p.take_uses();
             sondc::testing::check_all_tests_registered(&declared_tests, &funcs)
                 .unwrap_or_else(|e| panic!("{e}"));
-            (funcs, globals, structs, enums, ports, providers, uses)
+            (funcs, globals, structs, externs, enums, ports, providers, uses)
         }) {
             Ok(fg) => fg,
             Err(e) => {
@@ -344,6 +348,8 @@ fn main() -> ExitCode {
             sondc::codegen::pic16::emit_pic16(&funcs)
         } else if uefi {
             emit_uefi_g(&globals, &structs, &funcs)
+        } else if windows {
+            emit_windows_g(&globals, &structs, &funcs, &externs)
         } else if freestanding {
             emit_freestanding_g(&globals, &structs, &funcs)
         } else if shared || object {
@@ -403,7 +409,15 @@ fn main() -> ExitCode {
 
     // UEFI apps are PE32+/EFI (Microsoft ABI), linked with a PE toolchain;
     // everything else is a native ELF via `cc`.
-    let status = if uefi {
+    let status = if windows {
+        // A console PE, linked by the same mingw toolchain the UEFI target uses. No `--subsystem`
+        // flag: console is mingw's default, and it is what a tool that prints wants.
+        Command::new("x86_64-w64-mingw32-gcc")
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&output)
+            .status()
+    } else if uefi {
         Command::new("x86_64-w64-mingw32-gcc")
             .args(["-nostdlib", "-ffreestanding", "-e", "efi_main"])
             .args(["-Wl,--subsystem,10"])
