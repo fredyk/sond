@@ -93,6 +93,26 @@ fn set_rcvtimeo(fd: i64, secs: i64) -> i64 {
     setsockopt_sock(fd, SOL_SOCKET, SO_RCVTIMEO, tv, 16)
 }
 
+let SO_MARK = 36
+
+// Stamps this socket's packets with `mark`, the number the routing layer matches on to pick a
+// table (`ip rule ... fwmark`) and nftables matches with `meta mark`. Returns 0, or -errno --
+// -EPERM without CAP_NET_ADMIN, which is the usual answer and worth checking: a socket that
+// believes it is marked but is not takes the DEFAULT route, so the traffic leaves by the very
+// interface the mark existed to avoid, and nothing about the send looks wrong.
+//
+// The mark is what separates two connections that are identical on the wire. A proxy that
+// classifies by SNI cannot tell its own measurement request to a host apart from the traffic it
+// is there to intercept for that same host: same name, same destination. Marking its own socket
+// is the only discriminator, and without it the request is caught by its own diversion.
+//
+// `mark` is a u32; the kernel reads four bytes.
+fn set_mark(fd: i64, mark: i64) -> i64 {
+    let v[1]
+    poke32(v, mark)
+    setsockopt_sock(fd, SOL_SOCKET, SO_MARK, v, 4)
+}
+
 // Recovers the original destination of a redirected connection (nftables REDIRECT):
 // writes a sockaddr_in (16B) to `sa`. Returns 0 on success, <0 -errno.
 fn get_original_dst(fd: i64, sa: i64) -> i64 {
