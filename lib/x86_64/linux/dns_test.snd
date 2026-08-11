@@ -142,6 +142,37 @@ test "a truncated packet is refused instead of read past its end" {
     assert_eq(dns_parse_a(pkt, 0, 0x72b3), DNS_EFORMAT)
 }
 
+// The header systemd-resolved puts in front of the nameserver line: 19 comment lines, 920
+// bytes on a stock Ubuntu, before anything useful. Written out here rather than kept short,
+// because a three-line fixture passes while the bug this pins is still there.
+let STUB_COMMENT: string = "# This is a comment line of the sort systemd-resolved writes above the nameserver.\n"
+let STUB_NS: string = "nameserver 192.168.1.53\n"
+
+fn write_stub_resolv(path: i64) -> i64 {
+    let fd = open_file(path, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    if fd < 0 { return fd }
+    for k in 0..19 {
+        write_buf(fd, STUB_COMMENT.utf8, strlen_(STUB_COMMENT.utf8))
+    }
+    let w = write_buf(fd, STUB_NS.utf8, strlen_(STUB_NS.utf8))
+    close_fd(fd)
+    w
+}
+
+test "a resolv.conf with a long header is read to the end, not given up on" {
+    // On any machine running systemd-resolved -- Ubuntu, Debian and Fedora by default --
+    // /etc/resolv.conf is a symlink to a stub file whose nameserver line comes after 19 lines
+    // of explanation. The first version of this module read it into a buffer of 192 BYTES
+    // while declaring `let mut dns_scratch[192]`, which is 192 WORDS: it was using an eighth of
+    // its own buffer, the read failed with EFBIG, and DNS did not work at all on the default
+    // configuration of the three most common distributions.
+    //
+    // `stat -c%s /etc/resolv.conf` says 39 on such a machine, because it measures the SYMLINK.
+    assert(write_stub_resolv(RESOLV_PATH.utf8) > 0)
+    assert_eq(resolv_nameserver(RESOLV_PATH.utf8), 0xc0a80135)
+    remove_file(RESOLV_PATH.utf8)
+}
+
 test "the nameserver is read from a resolv.conf, comments and all" {
     assert(write_fixture(RESOLV_PATH.utf8, RESOLV_BODY.utf8, strlen_(RESOLV_BODY.utf8)) > 0)
     assert_eq(resolv_nameserver(RESOLV_PATH.utf8), 0xc0a80135)

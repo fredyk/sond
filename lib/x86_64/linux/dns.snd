@@ -41,7 +41,19 @@ let mut dns_timeout_secs = 5
 let RESOLV_CONF_PATH: string = "/etc/resolv.conf"
 let NAMESERVER_KEY: string = "nameserver"
 
-let mut dns_scratch[192]
+// Two buffers, sized in BYTES and named so, because mixing the two units is exactly how this
+// module shipped broken: `let mut dns_scratch[192]` reserves 192 WORDS (1536 bytes) and the
+// read was given 192 as a byte cap, so it used an eighth of its own buffer. On any machine
+// running systemd-resolved -- the default on Ubuntu, Debian and Fedora -- /etc/resolv.conf is
+// a stub file with 19 lines of comments before the nameserver, and the read failed outright.
+//
+// A `let x[N]` is N WORDS. Whenever one of these is handed to something that counts bytes, the
+// number that goes with it is the _BYTES constant, never the declaration's N.
+let DNS_PKT_BYTES = 512        // the classic maximum size of a DNS message over UDP
+let RESOLV_BYTES = 4096        // room for a stub header plus several search and nameserver lines
+
+let mut dns_pkt[64]            // 512 bytes
+let mut resolv_buf[512]        // 4096 bytes
 
 // Writes a big-endian 16-bit value.
 fn dns_be16(buf: i64, off: i64, val: i64) {
@@ -194,7 +206,7 @@ fn dns_parse_ipv4(p: i64) -> i64 {
 // after a timeout, which this module does not do. Pretending otherwise would mean silently
 // asking a server the caller did not choose.
 fn resolv_nameserver(path: i64) -> i64 {
-    let n = read_file(path, dns_scratch, 192)
+    let n = read_file(path, resolv_buf, RESOLV_BYTES)
     if n < 0 { return n }
     let mut i = 0
     for i < n {
@@ -202,25 +214,25 @@ fn resolv_nameserver(path: i64) -> i64 {
         let mut k = 0
         for k < 10 {
             if i + k >= n { break }
-            if peek8(dns_scratch + i + k) != peek8(NAMESERVER_KEY.utf8 + k) { break }
+            if peek8(resolv_buf + i + k) != peek8(NAMESERVER_KEY.utf8 + k) { break }
             k = k + 1
         }
         if k == 10 {
             let mut j = i + 10
             for j < n {
-                if peek8(dns_scratch + j) != 32 {
-                    if peek8(dns_scratch + j) != 9 { break }
+                if peek8(resolv_buf + j) != 32 {
+                    if peek8(resolv_buf + j) != 9 { break }
                 }
                 j = j + 1
             }
             if j > i + 10 {
-                let ip = dns_parse_ipv4(dns_scratch + j)
+                let ip = dns_parse_ipv4(resolv_buf + j)
                 if ip >= 0 { return ip }
             }
         }
         // Skip to the start of the next line.
         for i < n {
-            if peek8(dns_scratch + i) == 10 { break }
+            if peek8(resolv_buf + i) == 10 { break }
             i = i + 1
         }
         i = i + 1
@@ -267,7 +279,7 @@ fn dns_resolve_from(path: i64, host: i64) -> i64 {
     let fd = udp_socket()
     if fd < 0 { return fd }
     let id = syscall(SYS_time, 0, 0, 0) & 0xffff
-    let ip = dns_query_fd(fd, server, 53, host, id, dns_scratch, 192)
+    let ip = dns_query_fd(fd, server, 53, host, id, dns_pkt, DNS_PKT_BYTES)
     close_fd(fd)
     ip
 }
