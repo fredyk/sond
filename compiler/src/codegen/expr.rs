@@ -280,13 +280,25 @@ impl Codegen {
 
     /// Interns an `f64` literal by its bit pattern, returning its `.rodata` label.
     pub(crate) fn intern_float(&mut self, bits: u64) -> String {
+        if let Some((label, _)) = self.float_consts.iter().find(|(_, b)| *b == bits) {
+            return label.clone();
+        }
         let label = format!(".Lflt{}", self.float_consts.len());
         self.float_consts.push((label.clone(), bits));
         label
     }
 
-    /// Interns a string literal, returning its `.rodata` label.
+    /// Interns a string literal, returning its `.rodata` label. Equal contents share one label,
+    /// which is what "intern" means and what callers assume: `S.utf8` used twice has to be the
+    /// same address, or an equality against it is false while looking true.
+    ///
+    /// Merging is safe precisely because these live in `.rodata`: a program that writes through
+    /// the pointer already faults today, so aliasing two literals cannot turn a working mutation
+    /// into a silently shared one. On UEFI the same table becomes UTF-16 data, equally constant.
     pub(crate) fn intern_string(&mut self, s: &str) -> String {
+        if let Some((label, _)) = self.strings.iter().find(|(_, t)| t == s) {
+            return label.clone();
+        }
         let label = format!(".Lstr{}", self.strings.len());
         self.strings.push((label.clone(), s.to_string()));
         label

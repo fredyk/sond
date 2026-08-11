@@ -1075,6 +1075,53 @@ fn a_string_literal_lowers_to_the_address_of_null_terminated_bytes() {
 }
 
 #[test]
+fn the_same_literal_used_twice_has_one_address() {
+    // Two uses of the same `string` global gave two DIFFERENT pointers, ten bytes apart --
+    // one `.rodata` copy per use -- because `intern_string` interned nothing: it appended a
+    // fresh label every call. The name said one thing and the body did another.
+    //
+    // It reads as a waste of space, but it breaks a program: comparing a value returned by a
+    // lookup against the fallback it was given (`env_get_or(name, FALLBACK) == FALLBACK`)
+    // is false even when the fallback IS what came back, because the two `FALLBACK` are two
+    // addresses. The equality that everyone writes silently stops meaning what it says.
+    let asm = emit_program(
+        &Parser::new(tokenize(
+            "let S: string = \"dup\"\nfn f() -> i64 { S.utf8 - S.utf8 }",
+        ))
+        .parse_program(),
+    );
+    assert_eq!(
+        asm.matches(".asciz \"dup\"").count(),
+        1,
+        "the bytes must be emitted once, not once per use:\n{asm}"
+    );
+    assert_eq!(
+        compile_and_run("let S: string = \"dup\"\nfn f() -> i64 { S.utf8 - S.utf8 }"),
+        0,
+        "two uses of the same literal must be the same address"
+    );
+}
+
+#[test]
+fn the_same_float_used_twice_has_one_constant() {
+    // The same hole in intern_float. A duplicated f64 constant cannot break equality the way
+    // the string one does (the value is loaded, not its address), so this is only waste --
+    // but it is the same function shape, and half a fix is the half that rots.
+    let asm = emit_program(
+        &Parser::new(tokenize("fn f() -> f64 { 1.5 + 1.5 }")).parse_program(),
+    );
+    assert_eq!(
+        asm.matches(".Lflt0:").count(),
+        1,
+        "one label per distinct constant:\n{asm}"
+    );
+    assert!(
+        !asm.contains(".Lflt1:"),
+        "1.5 twice must not emit a second constant:\n{asm}"
+    );
+}
+
+#[test]
 fn a_string_literal_read_by_peek8_gives_its_first_byte() {
     // peek8("A") reads the byte 'A' = 65 at the literal's address.
     assert_eq!(compile_and_run("fn f() -> i64 { peek8(\"A\") }"), 65);
