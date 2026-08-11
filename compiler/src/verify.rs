@@ -582,13 +582,21 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
                 invariant,
                 body,
             } if !invariant.is_empty() => eval_loop(live, cond.as_ref(), invariant, body, ctx)?,
-            Stmt::For { body, .. } => {
+            Stmt::For { cond, body, .. } => {
                 // The prover cannot carry state through a loop it has no invariant for, and
                 // stops. But stopping must not WAIVE what the callees inside demand: a call
                 // whose arguments are constants can be judged here and now, and refusing it is
                 // the difference between a contract and a suggestion. `f(-5)` was rejected at
                 // the top level of a body and waved through one line deeper, inside a loop —
                 // which is where the work actually happens.
+                //
+                // The same goes for an argument built from the COUNTER, which is the shape a
+                // bounds contract actually takes: the first iteration is not a mystery even
+                // without an invariant, so it is run and its refutations reported.
+                if let Some(bad) = refuted_on_the_first_iteration(&live, cond.as_ref(), body, ctx)
+                {
+                    return ctx.refuse(bad);
+                }
                 if let Some(bad) = constant_call_violating_a_precondition(body, ctx.contracts) {
                     return ctx.refuse(bad);
                 }
@@ -2357,6 +2365,98 @@ fn counterexample_clause_alt(
 }
 
 
+/// An obligation inside a loop body that is REFUTED on the loop's first iteration, as a
+/// ready-made error, when that iteration is certain to run.
+///
+/// A `for` without an `invariant { .. }` leaves the verifiable fragment, and that is the right
+/// answer for the loop as a whole: nothing is known about what the counter becomes. But the
+/// FIRST iteration is not part of that mystery. `for i in 0..2` desugars to `i = 0` followed by
+/// a loop over `i < 2`, so on entry the counter has an exact value and the condition is
+/// provable -- that iteration definitely happens, with those values, and can simply be run.
+///
+/// Three things keep this from rejecting correct programs, which is the failure that matters:
+/// a prover that cries wolf gets its contracts deleted.
+///
+///  - The loop must be PROVEN to run: `for i in 0..n` with `n` unknown refutes nothing, because
+///    a call that never happens violates nothing.
+///  - Only a REFUTED obligation counts, never an unproven one. `f(x)` with `x` opaque stays
+///    unknown and is given the benefit of the doubt, exactly as outside a loop.
+///
+/// A refutation under a branch condition (`if x > 0 { f(-5) }`) IS reported, because that is
+/// what the verifier does with the same code outside a loop: it demands the precondition on
+/// every path, reachable or not. Making the loop the one place where a guard buys silence would
+/// mean the same two lines are an error until you wrap them in a `for`.
+///
+/// What it does NOT do is reason about later iterations: `f(3 - i)` is fine at `i = 0` and false
+/// from `i = 4`, and seeing that needs the invariant. Judging one certain iteration is not the
+/// whole loop; it is the part that needs no assumptions at all.
+fn refuted_on_the_first_iteration(
+    states: &[State],
+    cond: Option<&Expr>,
+    body: &Block,
+    ctx: &mut Ctx,
+) -> Option<String> {
+    let cond = cond?;
+    let int_types = ctx.int_types.clone();
+    // This evaluation is SPECULATIVE: whatever the body hits must not replace the diagnostic
+    // for the loop itself, so the bail reason and any refusal are put back before returning.
+    let saved_bail = ctx.bail.clone();
+    let saved_refusal = ctx.refusal.clone();
+    let mut found = None;
+    for st in states {
+        if found.is_some() {
+            break;
+        }
+        // Does this iteration certainly happen?
+        let Some(entry) = sym_prop(cond, &st.env) else {
+            continue;
+        };
+        if !matches!(prove(&entry, &st.cons, &int_types), Outcome::Proven) {
+            continue;
+        }
+        let mut first = st.clone();
+        first.cons.extend(cond_props(cond, &st.env).0);
+        first.obligations.clear(); // only what THIS iteration raises
+        let Some(ends) = eval_body(body, first, ctx) else {
+            continue; // the body leaves the fragment; nothing to judge, and nothing claimed
+        };
+        for end in &ends {
+            for ob in &end.obligations {
+                if !obligation_refuted(ob, &int_types) {
+                    continue;
+                }
+                found = Some(format!(
+                    "{} does not hold on the first iteration of this loop",
+                    ob.what
+                ));
+                break;
+            }
+        }
+    }
+    ctx.bail = saved_bail;
+    ctx.refusal = saved_refusal;
+    found
+}
+
+/// Is this obligation DISPROVEN -- shown false, not merely left unproven? A disjunctive one
+/// (`prop` or `alt`) is refuted only when both halves are, since proving either would discharge
+/// it.
+fn obligation_refuted(ob: &Obligation, int_types: &HashMap<String, (i128, i128)>) -> bool {
+    if !matches!(
+        prove(&ob.prop, &ob.assumptions, int_types),
+        Outcome::Disproven
+    ) {
+        return false;
+    }
+    match &ob.alt {
+        None => true,
+        Some(alt) => matches!(
+            prove(alt, &ob.assumptions, int_types),
+            Outcome::Disproven
+        ),
+    }
+}
+
 /// A call inside an unverifiable loop whose CONSTANT arguments already violate the callee's
 /// precondition, as a ready-made error. Constants need no loop reasoning: their value is the
 /// same on every iteration, so this judgement is exact and cannot produce a false positive.
@@ -2572,9 +2672,7 @@ mod tests {
         // inside a plain `main` was exactly how a bounds contract would be used, and moving a
         // real guard into a `requires` no longer weakens it in that shape.
         //
-        // Still open, deliberately: an argument that DEPENDS on the loop (`f(i)`) is unknown
-        // rather than refuted, and is still given the benefit of the doubt. Closing that needs
-        // the invariant.
+        // The argument that DEPENDS on the loop is covered too, one test down.
         let funcs = parse(
             "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
              fn main() -> i64 { for k in 0..2 { f(-5) }\n0 }",
@@ -2585,6 +2683,85 @@ mod tests {
             "a constant argument that violates the precondition is refused inside a loop too, \
              got: {err}"
         );
+    }
+
+    #[test]
+    fn an_argument_that_depends_on_the_loop_is_checked_on_the_first_iteration() {
+        // The half that was left open: `f(i - 5)` is not a constant, so the argument-is-constant
+        // judgement never saw it, and a `for` without an invariant left the fragment before
+        // anything else could. The contract was a suggestion again, in the one shape where a
+        // bounds contract is actually used -- indexing by a loop counter.
+        //
+        // What makes it decidable without an invariant: the FIRST iteration is not a mystery.
+        // `for i in 0..2` desugars to `i = 0` and a loop over `i < 2`, so on entry `i` is 0
+        // exactly, and `0 < 2` is provable, which means that iteration DEFINITELY runs. Running
+        // it symbolically gives `-5 >= 0`, and that is refuted, not merely unproven.
+        let funcs = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn main() -> i64 { for i in 0..2 { f(i - 5) }\n0 }",
+        );
+        let err = verify(&funcs).unwrap_err().message;
+        assert!(
+            err.contains("precondition") && err.contains("f") && err.contains("first iteration"),
+            "an argument built from the loop counter is judged on the iteration that certainly \
+             runs, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_loop_that_might_not_run_refutes_nothing() {
+        // `for i in 0..n` with `n` unknown may execute zero times, and a call that never happens
+        // cannot violate anything. Refuting here would reject a correct program -- the failure
+        // mode that matters most, because a prover that cries wolf gets its contracts deleted.
+        let funcs = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn g(n: i64) -> i64 { for i in 0..n { f(i - 5) }\n0 }",
+        );
+        verify(&funcs).expect("a loop whose trip count is unknown proves nothing about its body");
+    }
+
+    #[test]
+    fn an_argument_that_is_merely_unknown_keeps_the_benefit_of_the_doubt() {
+        // `f(x)` with `x` a parameter: the precondition is neither proven nor refuted, and the
+        // loop offers no way to learn more. Unknown must stay unknown -- only a REFUTED
+        // obligation is an error where the body cannot be analysed.
+        let funcs = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn h(x: i64) -> i64 { for i in 0..2 { f(x) }\n0 }",
+        );
+        verify(&funcs).expect("an unprovable precondition inside an uninvarianted loop is not a refutation");
+    }
+
+    #[test]
+    fn a_guard_does_not_buy_silence_inside_a_loop_that_it_would_not_buy_outside() {
+        // `if x > 0 { f(-5) }` is already an error on its own: the verifier demands the
+        // precondition on every path, and reports it "on the path where x > 0". Wrapping those
+        // same two lines in a `for` must not make them acceptable -- a rule that stops applying
+        // where the work happens is not a rule.
+        let outside = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn h(x: i64) -> i64 { if x > 0 { f(0 - 5) }\n0 }",
+        );
+        verify(&outside).expect_err("a guarded call with a refuted precondition is an error");
+        let inside = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn h(x: i64) -> i64 { for i in 0..2 { if x > 0 { f(0 - 5) } }\n0 }",
+        );
+        verify(&inside).expect_err("and it stays one inside a loop");
+    }
+
+    #[test]
+    fn only_the_first_iteration_is_judged_without_an_invariant() {
+        // A characterization test, pinning what this does NOT do. `f(3 - i)` is fine on the
+        // first iteration (3 >= 0) and false from the fourth on, and nothing here notices: the
+        // later iterations need to know what `i` becomes, which is what an `invariant { .. }`
+        // is for. If this ever starts failing, the prover learned to reason about the whole
+        // loop, and this test should become the assertion that `f(3 - i)` is rejected.
+        let funcs = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn h() -> i64 { for i in 0..9 { f(3 - i) }\n0 }",
+        );
+        verify(&funcs).expect("iterations past the first are still out of reach");
     }
 
     #[test]
