@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/tls-host.snd: connecting to a HOST NAME rather than to an address.
+//
+// Public API:
+//   tcp_connect_ip(ip, port) -> fd            connect to an address already known
+//   tcp_connect_host(host, port) -> fd        resolve the name, then connect
+//   tls_connect_host(host, port, alpn, alpnlen, roots, nroots, now14) -> session
+//
+// This is the last step of a chain that already existed in pieces: dns.snd turns a name into an
+// address, net.snd opens the socket, and tls_connect_fd does the handshake over a socket the
+// caller owns. What was missing was the one call that a program actually makes -- "talk to
+// api.example.com" -- so every program wrote the three steps itself, and the ones that did not
+// want to write them embedded a literal IP instead.
+//
+// It lives under x86_64/linux rather than next to the rest of TLS in any/ for one reason: name
+// resolution is where the portability stops. The TLS session code is arithmetic and bytes and
+// works anywhere; reading /etc/resolv.conf and opening a UDP socket is Linux.
+//
+// The SNI sent is the host name itself, which is what makes the certificate check mean
+// anything: the chain is validated against the name the caller ASKED for, not against whatever
+// name the address happens to answer to.
+
+include "x86_64/linux/dns.snd"
+include "any/tls/session.snd"
+include "any/strings.snd"
+
+// Connects to `ip`:`port` over TCP. Returns the fd, or a negative error, having closed the
+// socket if the connect failed -- an fd leaked on the error path is invisible until a long
+// running program runs out of them.
+fn tcp_connect_ip(ip: i64, port: i64) -> i64 {
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { return fd }
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    let r = connect_sock(fd, sa, 16)
+    if r < 0 {
+        close_fd(fd)
+        return r
+    }
+    fd
+}
+
+// Resolves `host` and connects to it. Returns the fd, or the negative error of whichever step
+// failed -- resolution errors are the DNS_E* values, connection errors are the kernel's.
+fn tcp_connect_host(host: i64, port: i64) -> i64 {
+    let ip = dns_resolve(host)
+    if ip < 0 { return ip }
+    tcp_connect_ip(ip, port)
+}
+
+// Resolves `host`, connects, and completes a TLS 1.3 handshake with `host` as the server name.
+// Returns a session handle for tls_write/tls_read, or 0 on any failure -- the same convention
+// as tls_connect, so a caller can swap one for the other without changing its error handling.
+fn tls_connect_host(host: i64, port: i64, alpn: i64, alpnlen: i64, roots: i64, nroots: i64, now14: i64) -> i64 {
+    let fd = tcp_connect_host(host, port)
+    if fd < 0 { return 0 }
+    tls_connect_fd(fd, host, strlen(host), alpn, alpnlen, roots, nroots, now14)
+}

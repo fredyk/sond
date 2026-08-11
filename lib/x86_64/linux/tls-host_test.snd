@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/x86_64/linux/tls-host.snd.
+//
+// Hermetic on purpose. The TCP connect is exercised against a listening socket opened by this
+// same process on loopback; the by-name paths are exercised through their FAILURE, which is the
+// half that can be checked without asking the outside world anything. A test that resolved a
+// real name would be testing the machine's DNS, and would go red on a train.
+
+include "x86_64/linux/tls-host.snd"
+include "x86_64/linux/testing.snd"
+
+let BAD_HOST: string = ""
+
+let mut sa[2]
+let mut salen[1]
+
+test "a TCP connection reaches a listener on loopback" {
+    let srv = sock(AF_INET, SOCK_STREAM, 0)
+    assert(srv >= 0)
+    set_reuseaddr(srv)
+    sockaddr_in_build(sa, 0x7f000001, 0)
+    assert(bind_sock(srv, sa, 16) >= 0)
+    assert(listen_sock(srv, 4) >= 0)
+    poke32(salen, 16)
+    assert(syscall(SYS_getsockname, srv, sa, salen) >= 0)
+    let port = sockaddr_in_port(sa)
+
+    // The connect completes against the listen backlog; nobody has to accept for it to succeed.
+    let fd = tcp_connect_ip(0x7f000001, port)
+    assert(fd >= 0)
+    close_fd(fd)
+    close_fd(srv)
+}
+
+test "a connection to a port nobody listens on fails, and leaks no descriptor" {
+    // Port 1 on loopback: the kernel answers with RST, so this is a real failed connect rather
+    // than a wait. The fd it opened has to be closed on the way out -- a leak here is invisible
+    // until a long-running program runs out of descriptors, which is far from the cause.
+    let before = sock(AF_INET, SOCK_STREAM, 0)
+    close_fd(before)
+    assert(tcp_connect_ip(0x7f000001, 1) < 0)
+    let after = sock(AF_INET, SOCK_STREAM, 0)
+    close_fd(after)
+    // Descriptors are handed out lowest-first: if the failed connect had kept its fd, this one
+    // would be higher than the one taken before it.
+    assert_eq(after, before)
+}
+
+test "a name that cannot be resolved fails before any socket is opened" {
+    assert(tcp_connect_host(BAD_HOST.utf8, 443) < 0)
+}
+
+test "a TLS session to an unresolvable name is 0, not a handle" {
+    // tls_connect_host reports failure the way tls_connect does -- 0, not a negative -- so that
+    // a caller can swap one for the other without changing how it checks.
+    assert_eq(tls_connect_host(BAD_HOST.utf8, 443, 0, 0, 0, 0, 0), 0)
+}
