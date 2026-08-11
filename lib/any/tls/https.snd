@@ -284,3 +284,188 @@ fn tls_http_req(hosthdr: i64, hosthdrlen: i64, path: i64, pathlen: i64, buf: i64
     let __lit11: string = "\r\nConnection: close\r\n\r\n"
     tls_put_str(buf, o, __lit11.utf8)
 }
+
+// ── Reading a response ───────────────────────────────────────────────────────────────────
+//
+// Everything below works on a response already sitting in a buffer, and takes the length that
+// actually ARRIVED rather than trusting what the headers claim. A caller that believed
+// Content-Length over the bytes in hand would hand back whatever the buffer happened to hold
+// past the end of a truncated body, and it would look like a complete document.
+
+// The offset just past the blank line that ends the header block, or -1 if the block never
+// ends inside the `n` bytes received. Every other reader here starts from this: a response
+// whose headers are incomplete has no headers to read and no body to point at, and saying so
+// once is what keeps each of them from inventing an answer.
+fn http_headers_end(buf: i64, n: i64) -> i64 {
+    let mut i = 0
+    for i + 3 < n {
+        if peek8(buf + i) == 13 {
+            if peek8(buf + i + 1) == 10 {
+                if peek8(buf + i + 2) == 13 {
+                    if peek8(buf + i + 3) == 10 { return i + 4 }
+                }
+            }
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// The three-digit status code of "HTTP/1.x NNN ...", or -1 if that is not what starts the
+// buffer. It is checked rather than assumed: a plaintext error page, a proxy's own reply or a
+// truncated read all produce something that is not a status line, and reading three bytes at a
+// fixed offset would turn any of them into a number.
+fn http_status(buf: i64, n: i64) -> i64 {
+    if n < 12 { return 0 - 1 }
+    let __p: string = "http/"
+    if tls_word_at(buf, 0, n, __p.utf8) == 0 { return 0 - 1 }
+    if peek8(buf + 8) != 32 { return 0 - 1 }
+    let mut v = 0
+    for k in 0..3 {
+        let c = peek8(buf + 9 + k)
+        if c < 48 { return 0 - 1 }
+        if c > 57 { return 0 - 1 }
+        v = v * 10 + (c - 48)
+    }
+    v
+}
+
+// A pointer to the value of header `name` (NUL-terminated, matched without regard to case),
+// with its length written as a u32 at `lenptr`; 0 if the response does not carry it.
+//
+// The name is matched only at the start of a line and only up to its colon, so "content-t"
+// does not find Content-Type and a name appearing inside another header's VALUE is not
+// mistaken for a header of its own. Leading spaces after the colon are skipped and the value
+// ends at its own CR: a header is one line.
+fn http_header(buf: i64, n: i64, name: i64, lenptr: i64) -> i64 {
+    let hdrend = http_headers_end(buf, n)
+    if hdrend < 0 { return 0 }
+    let mut i = 0
+    for i < hdrend {
+        let at_line = if i == 0 { 0 } else { peek8(buf + i - 1) == 10 }
+        if at_line == 1 {
+            if tls_word_at(buf, i, hdrend, name) == 1 {
+                let mut p = i
+                for peek8(name + (p - i)) != 0 { p = p + 1 }
+                // The whole name, and nothing but: what follows must be the colon.
+                if peek8(buf + p) == 58 {
+                    p = p + 1
+                    for p < hdrend {
+                        if peek8(buf + p) != 32 { break }
+                        p = p + 1
+                    }
+                    let mut e = p
+                    for e < hdrend {
+                        if peek8(buf + e) == 13 { break }
+                        e = e + 1
+                    }
+                    poke32(lenptr, e - p)
+                    return buf + p
+                }
+            }
+        }
+        i = i + 1
+    }
+    0
+}
+
+// The Content-Length the response declares, or -1 if it declares none (or something that is
+// not a number). This is what the sender PROMISED, not what arrived; http_body reports the
+// second.
+fn http_content_length(buf: i64, n: i64) -> i64 {
+    let lp[1]
+    let __cl: string = "content-length"
+    let v = http_header(buf, n, __cl.utf8, lp)
+    if v == 0 { return 0 - 1 }
+    let len = peek32(lp)
+    if len == 0 { return 0 - 1 }
+    let mut out = 0
+    for k in 0..len {
+        let c = peek8(v + k)
+        if c < 48 { return 0 - 1 }
+        if c > 57 { return 0 - 1 }
+        out = out * 10 + (c - 48)
+    }
+    out
+}
+
+// A POINTER to the body, with its length written as a u32 at `lenptr`; 0 if the header block
+// never ended. A chunked body is DECODED IN PLACE, so the pointer still marks where the body
+// started and the length is the decoded one.
+//
+// A pointer and not an offset, and 0 and not -1, to match http_header: two readers of the same
+// response returning different KINDS of thing is how a caller ends up passing one where the
+// other was expected, which the compiler cannot catch when both are i64.
+//
+// The length is always what arrived: a body cut short reports the bytes actually present, not
+// the Content-Length that promised more. The caller can compare the two -- http_content_length
+// is right there -- and decide whether a short body is an error; what it must not do is read
+// past what was received because a header said so.
+fn http_body(buf: i64, n: i64, lenptr: i64) -> i64 {
+    let hdrend = http_headers_end(buf, n)
+    if hdrend < 0 { return 0 }
+    let have = n - hdrend
+    if tls_is_chunked(buf, hdrend) == 1 {
+        poke32(lenptr, tls_dechunk(buf, hdrend, n))
+        return buf + hdrend
+    }
+    let declared = http_content_length(buf, n)
+    if declared >= 0 {
+        if declared < have {
+            poke32(lenptr, declared)
+            return buf + hdrend
+        }
+    }
+    poke32(lenptr, have)
+    buf + hdrend
+}
+
+// A whole request-response over a single TLS connection: connect to `host`:`port` with server
+// name `sni`, send the `reqlen` bytes at `req` verbatim, read the response into `out` (`cap`
+// bytes) and return the length of its BODY, leaving the body at the start of `out`. Negative
+// on any failure -- connection, handshake, an untrusted chain, or a response that does not fit.
+//
+// It takes a request the caller has already built, rather than a method and a path, because a
+// request with headers is what anybody talking to a real API needs: tls_get can only send a
+// bare GET, so every Bearer or Basic authentication ended up back at tls_req_start /
+// tls_req_header / tls_req_end plus a hand-written session loop. That builder is right there
+// and produces exactly what this takes.
+//
+// A response larger than `cap` is an ERROR and not a prefix. tls_get keeps what fits and
+// returns it, which means a caller cannot tell a complete document from a cut one -- and a
+// truncated JSON body does not fail to parse, it parses into something smaller.
+fn tls_send(host: i64, port: i64, sni: i64, snilen: i64, req: i64, reqlen: i64,
+            out: i64, cap: i64, roots: i64, nroots: i64, now14: i64) -> i64 {
+    let __alpn: string = "http/1.1"
+    let sess = tls_connect(host, port, sni, snilen, __alpn.utf8, 8, roots, nroots, now14)
+    if sess == 0 { return 0 - 1 }
+    if tls_write(sess, req, reqlen) < 0 {
+        tls_close(sess)
+        return 0 - 1
+    }
+    let mut olen = 0
+    let mut reads = 0
+    for reads < 64 {
+        let n = tls_read(sess, out + olen, cap - olen)
+        if n <= 0 { break }
+        olen = olen + n
+        if olen >= cap {
+            tls_close(sess)
+            return 0 - 2          // it did not fit: say so instead of handing back a prefix
+        }
+        reads = reads + 1
+    }
+    tls_close(sess)
+    if olen == 0 { return 0 - 1 }
+    let lp[1]
+    let body = http_body(out, olen, lp)
+    if body == 0 { return 0 - 1 }
+    let blen = peek32(lp)
+    // The body is moved to the front so the caller gets what it asked for at `out`, without
+    // having to be told where inside its own buffer the useful part begins.
+    let off = body - out
+    for i in 0..blen {
+        poke8(out + i, peek8(out + off + i))
+    }
+    blen
+}
