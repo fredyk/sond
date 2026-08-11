@@ -1558,6 +1558,54 @@ fn lin_of_sym(s: &Sym) -> Option<Lin> {
 /// that the constraints cannot all hold. Eliminates one variable per round by combining
 /// each positive/negative pair; a bare negative constant is the contradiction. Bails to
 /// `false` (conservatively "not shown unsat") if the system grows past a size cap.
+/// Every variable name appearing in a symbolic term.
+fn sym_vars(s: &Sym, out: &mut BTreeSet<String>) {
+    match s {
+        Sym::Const(_) => {}
+        Sym::Var(v) => {
+            out.insert(v.clone());
+        }
+        Sym::Add(a, b) | Sym::Sub(a, b) | Sym::Mul(a, b) => {
+            sym_vars(a, out);
+            sym_vars(b, out);
+        }
+    }
+}
+
+/// The assumptions reachable from the goal's variables by sharing a name, transitively.
+///
+/// `k == i + j` and `i < 10` are connected to a goal about `k`; `MAX_RETRIES == 3` is not, and
+/// no chain of facts can make it so. Dropping a fact is always sound -- fewer facts can only
+/// make proving harder, never wrongly succeed -- and dropping the disconnected ones is what
+/// keeps an unrelated part of the program from spending this proof's elimination budget.
+fn relevant_assumptions(goal: &SymProp, assumptions: &[SymProp]) -> Vec<SymProp> {
+    let mut vars = BTreeSet::new();
+    sym_vars(&goal.lhs, &mut vars);
+    sym_vars(&goal.rhs, &mut vars);
+    let mut kept: Vec<SymProp> = Vec::new();
+    let mut rest: Vec<&SymProp> = assumptions.iter().collect();
+    loop {
+        let mut touching: Vec<&SymProp> = Vec::new();
+        let mut others: Vec<&SymProp> = Vec::new();
+        for ap in rest {
+            let mut v = BTreeSet::new();
+            sym_vars(&ap.lhs, &mut v);
+            sym_vars(&ap.rhs, &mut v);
+            if v.iter().any(|n| vars.contains(n)) {
+                vars.extend(v);
+                touching.push(ap);
+            } else {
+                others.push(ap);
+            }
+        }
+        if touching.is_empty() {
+            return kept;
+        }
+        kept.extend(touching.into_iter().cloned());
+        rest = others;
+    }
+}
+
 fn unsat(mut cons: Vec<Lin>) -> bool {
     const CAP: usize = 600;
     loop {
@@ -1660,6 +1708,16 @@ fn prove(
     {
         return Outcome::Proven;
     }
+    // Only the facts CONNECTED to the goal are kept, from here on. A fact about a name the goal
+    // never mentions, directly or through a chain of other facts, cannot contribute to deciding
+    // it -- but it is not free: elimination is exponential in the number of constraints and
+    // gives up past a cap, and giving up is indistinguishable from "not proven". That turned a
+    // module-level constant declared elsewhere in the program into a bounds error inside an
+    // unrelated function, which is the kind of failure nobody can attribute to its cause.
+    //
+    // It happens BEFORE the overflow check below, because that check runs the same engine and
+    // pays the same price: filtering after it would leave the cliff exactly where it was.
+    let assumptions = &relevant_assumptions(p, assumptions);
     // The linear engine reasons over ℤ, but signed machine arithmetic WRAPS. Only trust it when
     // every `+`/`-`/`*` in the goal is proven not to overflow under the assumptions; otherwise a
     // ℤ-true relation may be false at runtime (`x + 1 > x` holds over ℤ but fails at i64::MAX).
@@ -1688,6 +1746,12 @@ fn prove(
     let (Some(l), Some(r)) = (lin_of_sym(&p.lhs), lin_of_sym(&p.rhs)) else {
         return Outcome::Unknown; // goal outside linear arithmetic
     };
+    // Only the facts CONNECTED to the goal are kept. A fact about a name the goal never
+    // mentions, directly or through a chain of other facts, cannot contribute to deciding it --
+    // but it is not free: elimination is exponential in the number of constraints and gives up
+    // past a cap, and giving up is indistinguishable from "not proven". That turned a
+    // module-level constant declared somewhere else in the program into a bounds error inside
+    // an unrelated function, which is the kind of failure nobody can attribute to its cause.
     // `!=` is the odd one out (its truth is a disjunction): the goal holds iff the two
     // sides are forced apart, i.e. equality is unsatisfiable under the assumptions.
     if p.op == BinOp::Ne {
@@ -2976,6 +3040,57 @@ mod tests {
             &asm,
             &params
         ));
+    }
+
+    #[test]
+    fn facts_about_unrelated_names_do_not_cost_a_proof() {
+        // Adding a module-level constant somewhere else in the program made a DIFFERENT
+        // function stop compiling: `x25_fe_mul` in the x25519 library, with the diagnostic
+        // pointing at its index and asking for a bound it already had. Nothing about that
+        // function had changed.
+        //
+        // Every global constant enters the proof as two assumptions (`g >= c` and `g <= c`),
+        // and the elimination that decides the goal is exponential in the constraint count, so
+        // past a cap it gives up -- and giving up reads exactly like "you did not prove your
+        // index". Measured on the real case: 602 constraints against a cap of 600.
+        //
+        // Facts about names the goal never mentions cannot help prove it, so they must not be
+        // able to break it either. The shape below is x25_fe_mul's: k = i + j with both in
+        // 0..10 and k >= 10, indexing at k - 10.
+        let v = |n: &str| Box::new(Expr::Var(n.to_string()));
+        let cmp = |op: BinOp, l: Box<Expr>, r: Box<Expr>| Expr::Binary(op, l, r);
+        let mut asm = vec![
+            cmp(
+                BinOp::Eq,
+                v("k"),
+                Box::new(Expr::Binary(BinOp::Add, v("i"), v("j"))),
+            ),
+            cmp(BinOp::Ge, v("i"), Box::new(Expr::Int(0))),
+            cmp(BinOp::Lt, v("i"), Box::new(Expr::Int(10))),
+            cmp(BinOp::Ge, v("j"), Box::new(Expr::Int(0))),
+            cmp(BinOp::Lt, v("j"), Box::new(Expr::Int(10))),
+            cmp(BinOp::Ge, v("k"), Box::new(Expr::Int(10))),
+        ];
+        // The noise: constants that share not one variable with the goal.
+        for n in 0..200 {
+            let name = format!("UNRELATED_{n}");
+            asm.push(cmp(
+                BinOp::Ge,
+                Box::new(Expr::Var(name.clone())),
+                Box::new(Expr::Int(n)),
+            ));
+            asm.push(cmp(
+                BinOp::Le,
+                Box::new(Expr::Var(name)),
+                Box::new(Expr::Int(n)),
+            ));
+        }
+        let idx = Expr::Binary(BinOp::Sub, v("k"), Box::new(Expr::Int(10)));
+        assert!(
+            index_proven_in_bounds(&idx, &Expr::Int(10), &asm, &[]),
+            "an index proven from i, j and k must stay proven however many unrelated \
+             constants the program declares"
+        );
     }
 
     #[test]
