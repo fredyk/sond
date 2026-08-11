@@ -2381,6 +2381,15 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
     let bounded = bounded_globals(funcs, globals, &global_consts);
     for f in funcs {
         let mut sizes = global_sizes.clone();
+        // A PARAMETER shadows a module-level array of the same name, as it does everywhere else
+        // in the language. Without this, a name chosen in one program reached into another: a
+        // caller declaring `let mut ptrs[8]` gave that size to the `ptrs` parameter of a library
+        // function, and indexing it was reported as unprovable -- in a file the programmer had
+        // not written, about a bound they could not add, and including the library was enough to
+        // trigger it. The only cure available to them was to rename their own variable.
+        for p in &f.params {
+            sizes.remove(&p.name);
+        }
         // The function's preconditions are the facts true on every path from entry.
         let mut flow = Flow {
             facts: f.requires.clone(),
@@ -3179,6 +3188,43 @@ mod tests {
         let funcs = p.parse_program();
         let globals = p.take_globals();
         check_constant_bounds(&funcs, &globals)
+    }
+
+    #[test]
+    fn a_parameter_hides_a_module_array_that_happens_to_share_its_name() {
+        // A program declared `let mut ptrs[8]` and a LIBRARY function it called had a parameter
+        // named `ptrs`. The checker keys array sizes by name and seeded them from the globals,
+        // so inside that function the parameter inherited the caller's size of 8, and indexing
+        // it was reported as unprovable -- in a file the programmer had not written, about a
+        // bound they could not add, suggesting a `where` on somebody else's signature.
+        //
+        // The only fix available was to rename their own variable, and merely INCLUDING the
+        // library was enough to trigger it. A parameter shadows a global in every other part of
+        // the language; it has to here too, or a name chosen in one program silently changes
+        // what can be proved in another.
+        let src = "let mut ptrs[8]\n\
+                   fn cargar(ptrs: i64, n: i64) -> i64 {\n\
+                       let mut i = 0\n\
+                       for i < n { ptrs[i] = i  i = i + 1 }\n\
+                       0\n\
+                   }";
+        assert!(
+            bounds(src).is_ok(),
+            "a parameter is not the module array of the same name"
+        );
+    }
+
+    #[test]
+    fn a_module_array_is_still_bounded_where_it_is_not_shadowed() {
+        // The other half: shadowing must not become a way to lose the check. A function with no
+        // parameter of that name still indexes the real array, and an index past its end is
+        // still an error.
+        let src = "let mut ptrs[8]\n\
+                   fn escribir() -> i64 { ptrs[9] = 1  0 }";
+        assert!(
+            bounds(src).is_err(),
+            "the real module array keeps its size where nothing shadows it"
+        );
     }
 
     #[test]
