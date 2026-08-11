@@ -1,0 +1,234 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/x86_64/linux/dns.snd.
+//
+// The response fixtures are REAL packets, captured off the wire from a recursive resolver by
+// proxying `dig` through a UDP socket, not written by hand from the same reading of RFC 1035
+// that produced the parser. That matters: the compression pointers, the CNAME sitting in front
+// of the A record and the SOA-in-authority answer are what the network actually sends, and each
+// of them breaks a parser that only ever saw its author's idea of a response.
+//
+// The transport test is hermetic: two loopback sockets, no name server, no network. Nothing
+// here depends on this machine resolving anything.
+
+include "x86_64/linux/dns.snd"
+include "x86_64/linux/testing.snd"
+
+// example.com A -- two answers, both behind the compression pointer c00c.
+let R_EXAMPLE: string = "72b381800001000200000001076578616d706c6503636f6d0000010001c00c00010001000000820004ac4293f3c00c000100010000008200046814179a000029ffd6000000000000"
+// www.github.com A -- a CNAME (type 5) comes FIRST, the A record second.
+let R_CNAME: string = "23d481800001000200000001037777770667697468756203636f6d0000010001c00c000500010000061e0002c010c010000100010000000a00048c527903000029ffd6000000000000"
+// A name that does not exist: RCODE is 0 and ANCOUNT is 0, with an SOA in the AUTHORITY
+// section. A parser that reads "the first record after the question" returns the SOA's bytes
+// as if they were an address.
+let R_NOANSWER: string = "dc0881800001000000010001136e6f2d737563682d686f73742d396633613262076578616d706c6503636f6d0000010001c0200006000100000708003207656c6c696f7474026e730a636c6f7564666c617265c02803646e73c0488fc0e48e000027100000096000093a8000000708000029ffd6000000000000"
+// The question section exactly as `dig` encoded it: 07 "example" 03 "com" 00, QTYPE 1, QCLASS 1.
+let Q_EXAMPLE: string = "076578616d706c6503636f6d0000010001"
+
+let HOST_EXAMPLE: string = "example.com"
+let HOST_GITHUB: string  = "www.github.com"
+let HOST_ROOT: string    = ""
+let HOST_LONGLABEL: string = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com"
+
+let RESOLV_PATH: string = "__dns_test_resolv.conf"
+let RESOLV_BODY: string = "# comment\nsearch lan\nnameserver 192.168.1.53\nnameserver 8.8.8.8\n"
+let RESOLV_NONE: string = "search lan\noptions edns0\n"
+let RESOLV_BAD1: string = "nameserver 999.1.1.1\n"
+let RESOLV_BAD2: string = "nameserver 1.2.3\n"
+let RESOLV_BAD3: string = "nameserver localhost\n"
+
+let mut pkt[128]
+let mut out[128]
+let mut sa[2]
+let mut salen[1]
+
+// Decodes a hex string into `dst`, returning the number of bytes.
+fn unhex(s: i64, dst: i64) -> i64 {
+    let mut i = 0
+    let mut n = 0
+    for peek8(s + i) != 0 {
+        let hi = hexval(peek8(s + i))
+        let lo = hexval(peek8(s + i + 1))
+        poke8(dst + n, hi * 16 + lo)
+        n = n + 1
+        i = i + 2
+    }
+    n
+}
+
+fn hexval(c: i64) -> i64 {
+    if c >= 97 { return c - 87 }
+    if c >= 65 { return c - 55 }
+    c - 48
+}
+
+fn bytes_eq(a: i64, b: i64, n: i64) -> i64 {
+    for i in 0..n {
+        if peek8(a + i) != peek8(b + i) { return 0 }
+    }
+    1
+}
+
+fn write_fixture(path: i64, src: i64, n: i64) -> i64 {
+    let fd = open_file(path, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    if fd < 0 { return fd }
+    let w = write_buf(fd, src, n)
+    close_fd(fd)
+    w
+}
+
+fn strlen_(p: i64) -> i64 {
+    let mut n = 0
+    for peek8(p + n) != 0 { n = n + 1 }
+    n
+}
+
+test "the question section is encoded the way a real resolver encodes it" {
+    let n = dns_build_query(pkt, HOST_EXAMPLE.utf8, 0x72b3)
+    assert_eq(n, 29)
+    let want = unhex(Q_EXAMPLE.utf8, out)
+    assert_eq(want, 17)
+    assert_eq(bytes_eq(pkt + 12, out, 17), 1)
+}
+
+test "the query header carries the id and asks for recursion" {
+    let n = dns_build_query(pkt, HOST_EXAMPLE.utf8, 0x1234)
+    assert(n > 0)
+    assert_eq(peek8(pkt + 0), 0x12)
+    assert_eq(peek8(pkt + 1), 0x34)
+    assert_eq(peek8(pkt + 2), 0x01) // RD
+    assert_eq(peek8(pkt + 3), 0x00)
+    assert_eq(peek8(pkt + 5), 1)    // QDCOUNT = 1
+    assert_eq(peek8(pkt + 7), 0)    // ANCOUNT = 0
+}
+
+test "an empty host and an over-long label are refused, not encoded" {
+    // A label may be 63 bytes at most (RFC 1035). Encoding a longer one would set the two top
+    // bits of the length byte, which is the COMPRESSION POINTER marker: the query would not be
+    // malformed, it would mean something else entirely.
+    assert(dns_build_query(pkt, HOST_ROOT.utf8, 1) < 0)
+    assert(dns_build_query(pkt, HOST_LONGLABEL.utf8, 1) < 0)
+}
+
+test "a real answer yields the address behind the compression pointer" {
+    let n = unhex(R_EXAMPLE.utf8, pkt)
+    assert_eq(n, 72)
+    assert_eq(dns_parse_a(pkt, n, 0x72b3), 0xac4293f3)
+}
+
+test "a CNAME in front of the A record is skipped, not returned" {
+    // The first answer is type 5 with a 2-byte rdata. A parser that takes the first record
+    // returns two bytes of a name as if they were half an address.
+    let n = unhex(R_CNAME.utf8, pkt)
+    assert_eq(dns_parse_a(pkt, n, 0x23d4), 0x8c527903)
+}
+
+test "an answer with no answers is a failure, not the SOA's bytes" {
+    let n = unhex(R_NOANSWER.utf8, pkt)
+    assert_eq(dns_parse_a(pkt, n, 0xdc08), DNS_ENOANSWER)
+}
+
+test "a reply for someone else's query is rejected" {
+    // The id is the only thing tying a UDP reply to the question that was asked.
+    let n = unhex(R_EXAMPLE.utf8, pkt)
+    assert_eq(dns_parse_a(pkt, n, 0x0001), DNS_EID)
+}
+
+test "a truncated packet is refused instead of read past its end" {
+    let n = unhex(R_EXAMPLE.utf8, pkt)
+    assert_eq(dns_parse_a(pkt, 30, 0x72b3), DNS_EFORMAT)
+    assert_eq(dns_parse_a(pkt, 4, 0x72b3), DNS_EFORMAT)
+    assert_eq(dns_parse_a(pkt, 0, 0x72b3), DNS_EFORMAT)
+}
+
+test "the nameserver is read from a resolv.conf, comments and all" {
+    assert(write_fixture(RESOLV_PATH.utf8, RESOLV_BODY.utf8, strlen_(RESOLV_BODY.utf8)) > 0)
+    assert_eq(resolv_nameserver(RESOLV_PATH.utf8), 0xc0a80135)
+    remove_file(RESOLV_PATH.utf8)
+}
+
+test "a resolv.conf with no nameserver line reports that, and a missing one too" {
+    assert(write_fixture(RESOLV_PATH.utf8, RESOLV_NONE.utf8, strlen_(RESOLV_NONE.utf8)) > 0)
+    assert(resolv_nameserver(RESOLV_PATH.utf8) < 0)
+    remove_file(RESOLV_PATH.utf8)
+    assert(resolv_nameserver(RESOLV_PATH.utf8) < 0)
+}
+
+test "a query and its answer travel over a socket, end to end" {
+    // Hermetic: the "server" is another loopback socket in this same process. The reply is
+    // queued to the client's port BEFORE the query is sent, which is legal for UDP and is what
+    // lets a single thread play both parts without a timeout race.
+    let srv = udp_socket()
+    assert(srv >= 0)
+    sockaddr_in_build(sa, 0x7f000001, 0)
+    assert(bind_sock(srv, sa, 16) >= 0)
+    poke32(salen, 16)
+    assert(syscall(SYS_getsockname, srv, sa, salen) >= 0)
+    let srv_port = sockaddr_in_port(sa)
+
+    let cli = udp_socket()
+    assert(cli >= 0)
+    sockaddr_in_build(sa, 0x7f000001, 0)
+    assert(bind_sock(cli, sa, 16) >= 0)
+    poke32(salen, 16)
+    assert(syscall(SYS_getsockname, cli, sa, salen) >= 0)
+    let cli_port = sockaddr_in_port(sa)
+
+    let n = unhex(R_EXAMPLE.utf8, pkt)
+    sockaddr_in_build(sa, 0x7f000001, cli_port)
+    assert_eq(sendto_sock(srv, pkt, n, 0, sa, 16), n)
+
+    assert_eq(dns_query_fd(cli, 0x7f000001, srv_port, HOST_EXAMPLE.utf8, 0x72b3, out, 128),
+              0xac4293f3)
+    close_fd(srv)
+    close_fd(cli)
+}
+
+test "a nameserver line that is not an address is not accepted as one" {
+    // Each of these has to be rejected rather than half-parsed: an octet over 255, a missing
+    // octet, and something that is not a number at all. A parser that took what it could would
+    // hand back an address the file never named.
+    assert(write_fixture(RESOLV_PATH.utf8, RESOLV_BAD1.utf8, strlen_(RESOLV_BAD1.utf8)) > 0)
+    assert(resolv_nameserver(RESOLV_PATH.utf8) < 0)
+    assert(write_fixture(RESOLV_PATH.utf8, RESOLV_BAD2.utf8, strlen_(RESOLV_BAD2.utf8)) > 0)
+    assert(resolv_nameserver(RESOLV_PATH.utf8) < 0)
+    assert(write_fixture(RESOLV_PATH.utf8, RESOLV_BAD3.utf8, strlen_(RESOLV_BAD3.utf8)) > 0)
+    assert(resolv_nameserver(RESOLV_PATH.utf8) < 0)
+    remove_file(RESOLV_PATH.utf8)
+}
+
+test "a whole resolution stops at the resolv.conf when there is no server in it" {
+    // Exercises dns_resolve_from end to end without a single packet leaving the process.
+    assert(write_fixture(RESOLV_PATH.utf8, RESOLV_NONE.utf8, strlen_(RESOLV_NONE.utf8)) > 0)
+    assert_eq(dns_resolve_from(RESOLV_PATH.utf8, HOST_EXAMPLE.utf8), DNS_ENOSERVER)
+    remove_file(RESOLV_PATH.utf8)
+}
+
+test "a name that cannot be encoded never reaches the socket" {
+    let cli = udp_socket()
+    assert(cli >= 0)
+    assert(dns_query_fd(cli, 0x7f000001, 53, HOST_ROOT.utf8, 1, out, 128) < 0)
+    // ... and neither does a query that does not fit in the buffer it was given.
+    assert(dns_query_fd(cli, 0x7f000001, 53, HOST_GITHUB.utf8, 1, out, 8) < 0)
+    close_fd(cli)
+}
+
+test "a length byte that is neither a label nor a pointer is refused" {
+    // 0x40 has one of the two top bits set: not a pointer (which needs both) and not a legal
+    // label length (max 63). Left unchecked it would be read as a 64-byte label and walk the
+    // parser off the end of the packet.
+    let n = unhex(R_EXAMPLE.utf8, pkt)
+    poke8(pkt + 12, 0x40)
+    assert_eq(dns_parse_a(pkt, n, 0x72b3), DNS_EFORMAT)
+}
+
+test "a query with nobody answering times out instead of blocking forever" {
+    let cli = udp_socket()
+    assert(cli >= 0)
+    dns_timeout_secs = 1
+    // Port 1 on loopback: no listener, and the client is unconnected, so the ICMP unreachable
+    // is not delivered as an error -- the recv simply waits and the deadline ends it.
+    assert(dns_query_fd(cli, 0x7f000001, 1, HOST_EXAMPLE.utf8, 7, out, 128) < 0)
+    close_fd(cli)
+}
