@@ -1,0 +1,112 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/civil.snd.
+//
+// The expected values are NOT derived from the same reasoning as the implementation: they come
+// from `date -u -d @<epoch> +%Y%m%d%H%M%S` (GNU coreutils), an independent oracle. A calendar
+// that is wrong in the same way as its test proves nothing, so every case below was read off
+// coreutils rather than computed by hand.
+//
+// The string literals are module-level `let`s passed with `.utf8`, which is the library idiom
+// after the string-literal migration -- and also a workaround: `.utf8` on a PARAMETER has no
+// x64 codegen yet.
+
+include "any/civil.snd"
+include "x86_64/linux/testing.snd"
+
+let E_EPOCH: string    = "19700101000000"
+let E_ONESEC: string   = "19700101000001"
+let E_LEAP2000: string = "20000229000000"
+let E_MAR2000: string  = "20000301000000"
+let E_LEAP2004: string = "20040229000000"
+let E_LEAP2024: string = "20240229000000"
+let E_END2025: string  = "20251231235959"
+let E_REAL2026: string = "20260811130004"
+let E_MAR2100: string  = "21000301000000"
+let E_Y2038: string    = "20380119031407"
+let E_NEG1: string     = "19691231235959"
+let E_NEGDAY: string   = "19691231000000"
+let E_PAD: string      = "0007"
+
+let mut buf14[4]
+
+// 1 if the first `n` bytes of `a` and `b` are equal. Local to the tests rather than pulled in
+// from `any/strings.snd`, whose unused functions would sink the coverage gate.
+fn bytes_eq(a: i64, b: i64, n: i64) -> i64 {
+    for i in 0..n {
+        if peek8(a + i) != peek8(b + i) { return 0 }
+    }
+    1
+}
+
+// Formats `epoch` and returns 1 if the 14 digits match `expected` exactly.
+fn fmt_is(epoch: i64, expected: i64) -> i64 {
+    let n = format_epoch14(epoch, buf14)
+    if n != 14 { return 0 }
+    bytes_eq(buf14, expected, 14)
+}
+
+test "epoch 0 is the Unix epoch itself" {
+    assert_eq(fmt_is(0, E_EPOCH.utf8), 1)
+}
+
+test "one second carries into the seconds field" {
+    assert_eq(fmt_is(1, E_ONESEC.utf8), 1)
+}
+
+test "29 February 2000: a century leap year, divisible by 400" {
+    assert_eq(fmt_is(951782400, E_LEAP2000.utf8), 1)
+}
+
+test "1 March 2000: the day after the century leap day" {
+    assert_eq(fmt_is(951868800, E_MAR2000.utf8), 1)
+}
+
+test "29 February 2004: an ordinary leap year" {
+    assert_eq(fmt_is(1078012800, E_LEAP2004.utf8), 1)
+}
+
+test "29 February 2024" {
+    assert_eq(fmt_is(1709164800, E_LEAP2024.utf8), 1)
+}
+
+test "the last second of 2025: every field carries at once" {
+    assert_eq(fmt_is(1767225599, E_END2025.utf8), 1)
+}
+
+test "a real 2026 date with distinct hour, minute and second" {
+    assert_eq(fmt_is(1786453204, E_REAL2026.utf8), 1)
+}
+
+test "2100 is NOT a leap year: divisible by 100 but not by 400" {
+    assert_eq(fmt_is(4107542400, E_MAR2100.utf8), 1)
+}
+
+test "the 32-bit boundary, year 2038" {
+    assert_eq(fmt_is(2147483647, E_Y2038.utf8), 1)
+}
+
+test "a negative epoch: one second before 1970" {
+    assert_eq(fmt_is(-1, E_NEG1.utf8), 1)
+}
+
+test "a negative epoch of a whole day" {
+    assert_eq(fmt_is(-86400, E_NEGDAY.utf8), 1)
+}
+
+test "zero padding honours the requested width" {
+    let p[2]
+    assert_eq(civil_put_pad(p, 0, 7, 4), 4)
+    assert_eq(bytes_eq(p, E_PAD.utf8, 4), 1)
+}
+
+test "a value wider than the field keeps its low digits" {
+    // 14 digits are a fixed-width field: a year of five digits (year 10000 and beyond) cannot
+    // widen it without breaking every caller that reads 14 bytes. Truncating from the left is
+    // the deliberate choice, and this pins it so the day it changes it changes on purpose.
+    let p[2]
+    assert_eq(civil_put_pad(p, 0, 12345, 4), 4)
+    assert_eq(peek8(p + 0), 50)
+    assert_eq(peek8(p + 3), 53)
+}

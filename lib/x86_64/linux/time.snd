@@ -1,0 +1,33 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/time.snd: the system clock, and the timestamp TLS asks for.
+//
+// Public API:
+//   now_epoch() -> i64            seconds since the Unix epoch, UTC
+//   format_now14(out) -> i64      "YYYYMMDDHHMMSS" + NUL into `out` (>= 15 bytes), returns 14
+//
+// Why this exists: `tls_connect` takes the current date as "YYYYMMDDHHMMSS" to check that the
+// server's certificate is inside its validity window. Programs used to pass a LITERAL date, so
+// the check silently stopped meaning anything as the binary aged -- a certificate expired a year
+// ago still looks valid to a binary that believes it is still 2026. Reading the clock on every
+// run is the fix, and it belongs here rather than in each program.
+//
+// The calendar arithmetic is in any/civil.snd, which has no syscalls: only the clock read is
+// platform work. `out` is caller-provided; this module never allocates.
+
+include "any/civil.snd"
+include "x86_64/linux/syscall-nums.snd"
+
+// Seconds since 1970-01-01 00:00:00 UTC. SYS_time returns the value directly, so there is no
+// buffer to check and no failure mode to report -- the kernel has no way to not know the time.
+fn now_epoch() -> i64 {
+    syscall(SYS_time, 0, 0, 0)
+}
+
+// Writes the current UTC date into `out` as "YYYYMMDDHHMMSS", NUL-terminated, and returns the
+// number of digits written (always 14). To format a date that is NOT now -- a certificate's
+// notBefore, a timestamp read off the wire -- call format_epoch14 from any/civil.snd instead.
+fn format_now14(out: i64) -> i64 {
+    format_epoch14(now_epoch(), out)
+}

@@ -1,0 +1,126 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/civil.snd: Unix epoch to civil (Gregorian) UTC date, and the fixed-width timestamp
+// TLS certificate validation asks for.
+//
+// Public API:
+//   format_epoch14(epoch, out) -> i64   "YYYYMMDDHHMMSS" + NUL into `out`, returns 14
+//   civil_year(z) / civil_month(z) / civil_day(z)   from a day number `z` (days since 1970-01-01)
+//   epoch_days(epoch) / epoch_secs_of_day(epoch)
+//   civil_put_pad(buf, off, value, width) -> i64    zero-padded decimal, returns off + width
+//
+// Why this lives in `any/`: it is pure integer arithmetic with no syscalls, so a UEFI or PIC16
+// program that gets its seconds from somewhere else (an RTC, a field in a protocol) formats them
+// with the same code. Only reading the clock is platform work; see x86_64/linux/time.snd.
+//
+// The conversion is Howard Hinnant's civil_from_days: it is exact over the whole range of i64
+// without month tables or leap-year special cases, because it counts from March inside a
+// 400-year era, where the leap pattern repeats exactly and February -- the irregular month --
+// falls at the END of the year instead of the middle.
+//
+// `out` is a caller-provided buffer of at least 15 bytes; this module never allocates. It takes
+// POINTERS rather than `string` on purpose: `.utf8` on a parameter has no x64 codegen yet, so a
+// `string` parameter could not be turned back into bytes inside the callee.
+
+// Days since 1970-01-01 for `epoch`, rounding DOWN for negative epochs too. Truncating division
+// would round towards zero and put the second before the epoch on the wrong day.
+fn epoch_days(epoch: i64) -> i64 {
+    if epoch >= 0 { return epoch / 86400 }
+    (epoch - 86399) / 86400
+}
+
+// Second within the day, always in 0..86400, negative epochs included.
+fn epoch_secs_of_day(epoch: i64) -> i64 {
+    epoch - epoch_days(epoch) * 86400
+}
+
+// Era: the 400-year cycle containing `z`, counted from the era that starts in year -400. The
+// shift by 719468 moves the origin from 1970-01-01 to 0000-03-01, the first day of an era.
+fn civil_era(z: i64) -> i64 {
+    let s = z + 719468
+    if s >= 0 { return s / 146097 }
+    (s - 146096) / 146097
+}
+
+// Day within the era, 0..146096 (146097 = days in 400 years, leap rules included).
+fn civil_doe(z: i64) -> i64 {
+    let s = z + 719468
+    s - civil_era(z) * 146097
+}
+
+// Year within the era, 0..399.
+fn civil_yoe(z: i64) -> i64 {
+    let doe = civil_doe(z)
+    (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+}
+
+// Day within the March-based year, 0..365.
+fn civil_doy(z: i64) -> i64 {
+    let yoe = civil_yoe(z)
+    civil_doe(z) - (365 * yoe + yoe / 4 - yoe / 100)
+}
+
+// Month in the March-based calendar, 0..11 (0 = March).
+fn civil_mp(z: i64) -> i64 {
+    (5 * civil_doy(z) + 2) / 153
+}
+
+// Gregorian year. January and February belong to the NEXT calendar year, which is what the
+// `mp >= 10` correction says.
+fn civil_year(z: i64) -> i64 {
+    let mp = civil_mp(z)
+    let y = civil_yoe(z) + civil_era(z) * 400
+    if mp < 10 { return y }
+    y + 1
+}
+
+// Gregorian month, 1..12.
+fn civil_month(z: i64) -> i64 {
+    let mp = civil_mp(z)
+    if mp < 10 { return mp + 3 }
+    mp - 9
+}
+
+// Day of the month, 1..31.
+fn civil_day(z: i64) -> i64 {
+    civil_doy(z) - (153 * civil_mp(z) + 2) / 5 + 1
+}
+
+// Writes `v` at `buf + off` as exactly `w` decimal digits, zero-padded on the left, and returns
+// the offset past them. A value that needs more than `w` digits keeps its LOW digits: the
+// timestamp is a fixed-width field and widening it would break every caller that reads 14 bytes.
+//
+// `itoa` in any/strings.snd is not reused here: it does not pad, and pulling that module in for
+// one function would drag its unused rest through the coverage gate of every dependent program.
+fn civil_put_pad(buf: i64, off: i64, v: i64, w: i64) -> i64 {
+    let mut i = w
+    for i > 0 {
+        i = i - 1
+        // Divide down to the digit this position needs. A running divisor would be fewer
+        // divisions, but this keeps the loop free of state that survives an iteration.
+        let mut d = v
+        let mut k = 0
+        for k < w - 1 - i {
+            d = d / 10
+            k = k + 1
+        }
+        poke8(buf + off + i, 48 + d % 10)
+    }
+    off + w
+}
+
+// Writes the UTC civil date of `epoch` into `out` as "YYYYMMDDHHMMSS", NUL-terminated, and
+// returns the number of digits written (always 14). `out` needs 15 bytes.
+fn format_epoch14(epoch: i64, out: i64) -> i64 {
+    let z = epoch_days(epoch)
+    let s = epoch_secs_of_day(epoch)
+    let mut o = civil_put_pad(out, 0, civil_year(z), 4)
+    o = civil_put_pad(out, o, civil_month(z), 2)
+    o = civil_put_pad(out, o, civil_day(z), 2)
+    o = civil_put_pad(out, o, s / 3600, 2)
+    o = civil_put_pad(out, o, s / 60 % 60, 2)
+    o = civil_put_pad(out, o, s % 60, 2)
+    poke8(out + o, 0)
+    o
+}

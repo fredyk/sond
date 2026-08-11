@@ -3,20 +3,16 @@
 //
 // lib/x86_64/linux/syscall-nums.snd: Linux x86-64 syscall numbers.
 //
-// Public API (globals, read-only):
-//   SYS_read, SYS_write, SYS_open, SYS_close, SYS_fstat, SYS_mmap,
-//   SYS_mprotect, SYS_munmap, SYS_brk, SYS_rt_sigaction, SYS_rt_sigprocmask,
-//   SYS_rt_sigreturn, SYS_ioctl, SYS_access, SYS_pipe, SYS_select,
-//   SYS_dup, SYS_getdents64, SYS_lseek, SYS_getpid, SYS_socket,
-//   SYS_connect, SYS_accept, SYS_sendto, SYS_recvfrom, SYS_sendmsg,
-//   SYS_recvmsg, SYS_shutdown, SYS_bind, SYS_listen, SYS_getsockname,
-//   SYS_getpeername, SYS_setsockopt, SYS_getsockopt, SYS_clone,
-//   SYS_fork, SYS_vfork, SYS_execve, SYS_exit, SYS_wait4, SYS_kill,
-//   SYS_uname, SYS_fcntl, SYS_truncate, SYS_getcwd, SYS_chdir,
-//   SYS_mkdir, SYS_rmdir, SYS_stat, SYS_lstat, SYS_poll, SYS_lseek,
-//   SYS_getuid, SYS_gid, SYS_geteuid, SYS_getgid, SYS_getegid,
-//   SYS_getrlimit, SYS_arch_prctl, SYS_set_tid_address, SYS_set_robust_list,
-//   SYS_futex, SYS_clock_gettime, SYS_nanosleep, SYS_splice, SYS_syscall (itself).
+// Public API (globals, read-only): the `let SYS_*` definitions below, and only those.
+//
+// There used to be a hand-written list of names here. It had drifted: it announced fifteen
+// constants that were never defined (SYS_clock_gettime, SYS_futex, SYS_getcwd, SYS_chdir,
+// SYS_mkdir, SYS_rmdir and friends), plus a SYS_gid that is not a Linux syscall at all. A
+// duplicated index of a file's own contents always ends up lying, so the file no longer keeps
+// one -- the definitions ARE the index. The ones that were announced and real were added.
+//
+// Values come from the kernel's own table (asm/unistd_64.h), never from memory: a wrong number
+// does not fail to compile, it calls a DIFFERENT syscall.
 
 let SYS_read = 0
 let SYS_write = 1
@@ -78,8 +74,25 @@ let SYS_kill = 62
 let SYS_uname = 63
 let SYS_fcntl = 72
 let SYS_truncate = 76
+let SYS_getcwd = 79
+let SYS_chdir = 80
+let SYS_mkdir = 83
+let SYS_rmdir = 84
 let SYS_unlink = 87
+let SYS_getrlimit = 97
+let SYS_getgid = 104
+let SYS_geteuid = 107
+let SYS_getegid = 108
 let SYS_setsid = 112
+let SYS_arch_prctl = 158
+// SYS_time returns whole seconds since the Unix epoch straight in the return value, with no
+// buffer to fill: syscall(SYS_time, 0, 0, 0). SYS_clock_gettime is the finer-grained one and
+// needs a `struct timespec` to write into, so a caller that only wants a date wants this one.
+let SYS_time = 201
+let SYS_futex = 202
 let SYS_getdents64 = 217
+let SYS_set_tid_address = 218
+let SYS_clock_gettime = 228
+let SYS_set_robust_list = 273
 let SYS_splice = 275
 let SYS_getrandom = 318
