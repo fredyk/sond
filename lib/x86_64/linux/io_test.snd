@@ -1,0 +1,147 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/x86_64/linux/io.snd -- specifically read_file, which is the piece every project
+// had been copying from the one next door.
+//
+// The test writes its own fixtures with the primitives of this same module, in the working
+// directory, and removes them at the end: a test that depends on a file someone else left
+// behind passes for the wrong reason the first time and fails for the wrong reason later.
+
+include "x86_64/linux/io.snd"
+include "x86_64/linux/testing.snd"
+
+let SMALL_PATH: string  = "__io_test_small.txt"
+let BIG_PATH: string    = "__io_test_big.txt"
+let EMPTY_PATH: string  = "__io_test_empty.txt"
+let ABSENT_PATH: string = "__io_test_definitely_absent_4b1c.txt"
+let DOT_PATH: string    = "."
+let CONTENT: string     = "hola\nmundo\n"
+
+let mut buf[64]
+
+// Writes `n` bytes from `src` to `path`, replacing it. Returns the fd result of the write.
+fn write_fixture(path: i64, src: i64, n: i64) -> i64 {
+    let fd = open_file(path, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    if fd < 0 { return fd }
+    let w = write_buf(fd, src, n)
+    close_fd(fd)
+    w
+}
+
+// Fills `buf` with a known byte so a short read cannot be mistaken for a correct one.
+fn poison(n: i64) {
+    for i in 0..n {
+        poke8(buf + i, 254)
+    }
+}
+
+fn bytes_eq(a: i64, b: i64, n: i64) -> i64 {
+    for i in 0..n {
+        if peek8(a + i) != peek8(b + i) { return 0 }
+    }
+    1
+}
+
+test "a file read whole comes back byte for byte" {
+    assert_eq(write_fixture(SMALL_PATH.utf8, CONTENT.utf8, 11), 11)
+    poison(64)
+    assert_eq(read_file(SMALL_PATH.utf8, buf, 64), 11)
+    assert_eq(bytes_eq(buf, CONTENT.utf8, 11), 1)
+    // Nothing was written past the end: the poison byte is still there.
+    assert_eq(peek8(buf + 11), 254)
+    remove_file(SMALL_PATH.utf8)
+}
+
+test "an empty file reads as zero bytes, not as a failure" {
+    assert_eq(write_fixture(EMPTY_PATH.utf8, CONTENT.utf8, 0), 0)
+    assert_eq(read_file(EMPTY_PATH.utf8, buf, 64), 0)
+    remove_file(EMPTY_PATH.utf8)
+}
+
+test "a file that does not exist reports the kernel's error, not zero" {
+    // -ENOENT. The version everyone had been copying returned 0 here, which is also what an
+    // empty file returns: "missing" and "empty" were the same answer.
+    assert_eq(read_file(ABSENT_PATH.utf8, buf, 64), -2)
+}
+
+test "a file too big for the buffer FAILS instead of silently truncating" {
+    // This is the whole reason this function belongs in the library. The copied version filled
+    // the buffer and returned its size, so the caller got a valid-looking prefix: a config file
+    // cut mid-line parses, and means something else. Here it is an error the caller cannot miss.
+    assert_eq(write_fixture(BIG_PATH.utf8, CONTENT.utf8, 11), 11)
+    assert_eq(read_file(BIG_PATH.utf8, buf, 5), -27)
+    remove_file(BIG_PATH.utf8)
+}
+
+test "a buffer with no room is an error, and nothing is written before it" {
+    // The probe that detects truncation reads into the LAST byte of the buffer. With cap = 0
+    // that byte is `dst - 1`: the check meant to protect the caller would corrupt the word in
+    // front of their buffer. The guard is pinned here, sentinel and all.
+    assert_eq(write_fixture(BIG_PATH.utf8, CONTENT.utf8, 11), 11)
+    poke8(buf, 111)
+    assert_eq(read_file(BIG_PATH.utf8, buf + 1, 0), -27)
+    assert_eq(peek8(buf), 111)
+    remove_file(BIG_PATH.utf8)
+}
+
+test "a directory is not a file, and says so" {
+    // open() succeeds on a directory opened read-only; it is read() that refuses, with EISDIR.
+    // Without this the error path of the read loop was never taken by any test.
+    assert_eq(read_file(DOT_PATH.utf8, buf, 64), -21)
+}
+
+test "splice_pump moves the bytes through a pipe unchanged" {
+    // This used to live in splice_test.snd as a `main` that printed FAIL and returned 1. The
+    // suite runner only picks up files containing `test "` blocks, so that program had stopped
+    // being run at all -- green because nobody looked. Rewritten as real assertions.
+    let p1[1]
+    let p2[1]
+    let p3[1]
+    assert(syscall(SYS_pipe, p1) >= 0)
+    assert(syscall(SYS_pipe, p2) >= 0)
+    assert(syscall(SYS_pipe, p3) >= 0)
+    let p1r = peek32(p1)
+    let p1w = peek32(p1 + 4)
+    let p3r = peek32(p3)
+    let p3w = peek32(p3 + 4)
+
+    write_buf(p1w, CONTENT.utf8, 11)
+    close_fd(p1w) // EOF at the source
+    assert_eq(splice_pump(p1r, p3w, p2, 11), 11)
+    close_fd(p3w)
+
+    poison(64)
+    assert_eq(read_buf(p3r, buf, 64), 11)
+    assert_eq(bytes_eq(buf, CONTENT.utf8, 11), 1)
+}
+
+test "a stalled output gives up instead of hanging forever" {
+    // Fills the destination pipe so a splice into it gets EAGAIN, then bounds the wait. Without
+    // the non-blocking splice plus bounded poll, this call never returns -- and a test that
+    // hangs is not a failing test, it is a suite that never finishes.
+    let s1[1]
+    let s2[1]
+    let s3[1]
+    assert(syscall(SYS_pipe, s1) >= 0)
+    assert(syscall(SYS_pipe, s2) >= 0)
+    assert(syscall(SYS_pipe, s3) >= 0)
+    let s1r = peek32(s1)
+    let s1w = peek32(s1 + 4)
+    let s3w = peek32(s3 + 4)
+    let big[8192]
+    write_buf(s3w, big, 65536) // 64 KiB: the pipe's whole capacity, and nobody is reading
+    write_buf(s1w, CONTENT.utf8, 11)
+    io_splice_idle_ms = 100
+    assert(splice_pump(s1r, s3w, s2, 11) < 0)
+}
+
+test "a file exactly the size of the buffer still fits" {
+    // The boundary the truncation check is most likely to get wrong: 11 bytes into 11 bytes is
+    // a complete read, not an overflow.
+    assert_eq(write_fixture(BIG_PATH.utf8, CONTENT.utf8, 11), 11)
+    poison(64)
+    assert_eq(read_file(BIG_PATH.utf8, buf, 11), 11)
+    assert_eq(bytes_eq(buf, CONTENT.utf8, 11), 1)
+    remove_file(BIG_PATH.utf8)
+}

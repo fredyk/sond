@@ -8,10 +8,6 @@
 include "x86_64/linux/http-server.snd"
 include "x86_64/linux/testing.snd"
 
-let O_WRONLY = 1
-let O_CREAT = 64
-let O_TRUNC = 512
-
 test "http_safe_path allows names and subdirs, rejects traversal and bad chars" {
     let __s0_15: string = "index.html"
     assert_eq(http_safe_path(bytes_from_cstr(__s0_15.utf8)), 1)

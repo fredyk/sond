@@ -2,10 +2,25 @@
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
 // lib/x86_64/linux/io.snd: file I/O on Linux syscalls. No allocator: caller provides buffers.
-// API: open_file(path,flags,mode)->fd|-errno ; read_buf(fd,buf,n) ; write_buf(fd,buf,n) ; close_fd(fd)
+// API: open_file(path,flags,mode)->fd|-errno ; read_buf(fd,buf,n) ; write_buf(fd,buf,n) ;
+//      close_fd(fd) ; read_file(path,dst,cap)->bytes|-errno ; remove_file(path)
+// Open flags: O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND.
 
 include "syscall-nums.snd"
 include "x86_64/linux/poll.snd"
+
+// The flags `open` takes. They live here, next to open_file, rather than being redeclared by
+// each caller: three modules had their own copy, and a wrong constant does not fail to compile,
+// it opens the file in a different mode.
+let O_RDONLY = 0
+let O_WRONLY = 1
+let O_RDWR = 2
+let O_CREAT = 64
+let O_TRUNC = 512
+let O_APPEND = 1024
+
+// A file bigger than the buffer offered for it. Reported by read_file instead of a short read.
+let EFBIG = 27
 
 fn open_file(path: i64, flags: i64, mode: i64) -> i64 {
     syscall(SYS_open, path, flags, mode)
@@ -21,6 +36,57 @@ fn write_buf(fd: i64, buf: i64, n: i64) -> i64 {
 
 fn close_fd(fd: i64) -> i64 {
     syscall(SYS_close, fd)
+}
+
+// Deletes `path`. Returns 0, or -errno.
+fn remove_file(path: i64) -> i64 {
+    syscall(SYS_unlink, path)
+}
+
+// Reads the WHOLE file at `path` into `dst`, and returns how many bytes that was.
+//
+// Errors are negative: -errno from the kernel (-2 for a path that is not there), and -EFBIG if
+// the file does not fit in `cap`. That last one is the reason this function exists. Every
+// project had its own copy of this loop, and every copy filled the buffer and returned `cap`
+// when the file was bigger -- handing back a valid-looking PREFIX. A configuration file cut
+// mid-line still parses; it just means something else. Truncation has to be an error, because
+// the caller has no other way to tell it happened.
+//
+// The trick for detecting it without a stat: ask for one byte MORE than the caller's buffer
+// holds, using the last byte twice. If that read comes back non-empty, there was more file.
+fn read_file(path: i64, dst: i64, cap: i64) -> i64 {
+    let fd = open_file(path, O_RDONLY, 0)
+    if fd < 0 { return fd }
+    // A buffer with no room cannot hold a file, not even an empty one -- and the probe below
+    // would write at `dst - 1`, OUTSIDE the caller's buffer, which is how a helpful check turns
+    // into the bug it was meant to catch.
+    if cap <= 0 {
+        close_fd(fd)
+        return 0 - EFBIG
+    }
+    let mut total = 0
+    for total < cap {
+        let n = read_buf(fd, dst + total, cap - total)
+        if n < 0 {
+            close_fd(fd)
+            return n
+        }
+        if n == 0 { break }
+        total = total + n
+    }
+    if total == cap {
+        // The buffer is full. Either the file ended exactly here, or it did not: read one more
+        // byte to find out. It goes over the last byte of `dst`, which is already accounted
+        // for -- on the truncation path the contents are discarded anyway, and on the exact-fit
+        // path this read returns 0 and writes nothing.
+        let extra = read_buf(fd, dst + cap - 1, 1)
+        if extra > 0 {
+            close_fd(fd)
+            return 0 - EFBIG
+        }
+    }
+    close_fd(fd)
+    total
 }
 
 // ── splice: zero-copy kernel forwarding (one fd must be a pipe) ──
