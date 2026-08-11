@@ -74,13 +74,92 @@ fn module_global_names(src: &str) -> HashSet<String> {
     names
 }
 
-/// Rewrites whole-identifier occurrences of each name in `map` to `name__f<id>` in one line,
-/// where `<id>` is the DEFINING file's id (map value), OUTSIDE string/char literals and line
-/// comments (so a helper's name inside a string is never touched). The map, keyed by the file
-/// being emitted, resolves each colliding private to the definition visible in THAT file's
-/// include closure, so a caller and the definition it includes get the same mangled name even
-/// across files. Preserves the line count, so source-line info stays accurate.
-fn mangle_line(line: &str, map: &std::collections::HashMap<String, u32>) -> String {
+/// The PUBLIC (`pub fn` / `pub let`) names a file exports: its module surface. These are what a
+/// `module::name` may reach, and what has to stay reachable unqualified while the tree migrates.
+fn public_names(src: &str) -> HashSet<String> {
+    let (toks, _) = tokenize_located(src);
+    let mut names = HashSet::new();
+    let mut depth: i32 = 0;
+    for (i, t) in toks.iter().enumerate() {
+        match t {
+            Token::LBrace => depth += 1,
+            Token::RBrace => depth -= 1,
+            Token::Fn if depth == 0 => {
+                let mut j = i;
+                while j > 0 && matches!(toks[j - 1], Token::Wrapping | Token::Interrupt) {
+                    j -= 1;
+                }
+                if j > 0
+                    && matches!(toks[j - 1], Token::Pub)
+                    && let Some(Token::Ident(n)) = toks.get(i + 1)
+                {
+                    names.insert(n.clone());
+                }
+            }
+            Token::Let if depth == 0 => {
+                if i > 0 && matches!(toks[i - 1], Token::Pub) {
+                    let mut j = i + 1;
+                    if let Some(Token::Ident(m)) = toks.get(j)
+                        && m == "mut"
+                    {
+                        j += 1;
+                    }
+                    if let Some(Token::Ident(n)) = toks.get(j) {
+                        names.insert(n.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// The module name a file goes by: its own name without the extension, with `-` written `_` so it
+/// is a legal identifier. `x86_64/linux/http-server.snd` is the module `http_server`. Deriving it
+/// from the file rather than declaring it inside keeps one source of truth -- a declared name can
+/// disagree with the file it is in, and then two things claim to be the same module.
+fn module_name(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .replace('-', "_")
+}
+
+/// What a single file's line rewriting needs to know: which colliding names bind to which file
+/// (`map`), which modules it can see, what each of those exports, and which names are ambiguous
+/// unqualified. Grouped rather than passed as six arguments, because every one of them is needed
+/// for a decision that must be made in one place: what does this identifier refer to?
+/// Everything the emit pass needs to turn names into symbols, gathered from the first pass and
+/// keyed by file. Each entry answers the same question for a different file: given a line of
+/// THIS file, what does each name in it refer to?
+struct Namespaces<'a> {
+    resolve_map: &'a std::collections::HashMap<PathBuf, std::collections::HashMap<String, u32>>,
+    module_maps: &'a std::collections::HashMap<PathBuf, std::collections::HashMap<String, PathBuf>>,
+    ambiguous_maps:
+        &'a std::collections::HashMap<PathBuf, std::collections::HashMap<String, Vec<String>>>,
+    exports: &'a std::collections::HashMap<PathBuf, HashSet<String>>,
+    ids: &'a std::collections::HashMap<PathBuf, u32>,
+}
+
+struct LineCtx<'a> {
+    map: &'a std::collections::HashMap<String, u32>,
+    modules: &'a std::collections::HashMap<String, PathBuf>,
+    exports: &'a std::collections::HashMap<PathBuf, HashSet<String>>,
+    ids: &'a std::collections::HashMap<PathBuf, u32>,
+    ambiguous: &'a std::collections::HashMap<String, Vec<String>>,
+}
+
+/// Rewrites one line: qualified `module::name` references into the symbol they denote, and
+/// whole-identifier occurrences of a colliding name into `name__f<id>` of the file that defines
+/// it. Strings, char literals and line comments are copied verbatim, so a name inside a message
+/// is never touched. Preserves the line count, so source-line info stays accurate.
+///
+/// `module::name` is resolved HERE, before the lexer, so nothing downstream ever sees a `::`:
+/// the parser, the type checker and the code generator keep working on the flat namespace they
+/// already understand, and the module system is a rewriting of names rather than a second
+/// meaning for them.
+fn rewrite_line(line: &str, ctx: &LineCtx) -> Result<String, String> {
     let chars: Vec<char> = line.chars().collect();
     let mut out = String::new();
     let mut i = 0;
@@ -88,7 +167,7 @@ fn mangle_line(line: &str, map: &std::collections::HashMap<String, u32>) -> Stri
         let c = chars[i];
         match c {
             '"' | '\'' => {
-                // Copy the literal verbatim (respecting `\` escapes) without mangling inside it.
+                // Copy the literal verbatim (respecting `\` escapes) without rewriting inside it.
                 let quote = c;
                 out.push(c);
                 i += 1;
@@ -116,7 +195,31 @@ fn mangle_line(line: &str, map: &std::collections::HashMap<String, u32>) -> Stri
                     i += 1;
                 }
                 let ident: String = chars[start..i].iter().collect();
-                if let Some(id) = map.get(&ident) {
+                // `module::name`?
+                if i + 2 < chars.len()
+                    && chars[i] == ':'
+                    && chars[i + 1] == ':'
+                    && (chars[i + 2].is_alphabetic() || chars[i + 2] == '_')
+                {
+                    let ns = i + 2;
+                    let mut j = ns;
+                    while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                        j += 1;
+                    }
+                    let name: String = chars[ns..j].iter().collect();
+                    out.push_str(&resolve_qualified(&ident, &name, ctx)?);
+                    i = j;
+                    continue;
+                }
+                if let Some(mods) = ctx.ambiguous.get(&ident) {
+                    return Err(format!(
+                        "`{ident}` is exported by more than one module ({}); say which one, \
+                         e.g. `{}::{ident}`",
+                        mods.join(", "),
+                        mods[0]
+                    ));
+                }
+                if let Some(id) = ctx.map.get(&ident) {
                     out.push_str(&format!("{ident}__f{id}"));
                 } else {
                     out.push_str(&ident);
@@ -128,7 +231,35 @@ fn mangle_line(line: &str, map: &std::collections::HashMap<String, u32>) -> Stri
             }
         }
     }
-    out
+    Ok(out)
+}
+
+/// The symbol `module::name` denotes, or why it denotes nothing.
+///
+/// A module has to be INCLUDED to be named -- qualifying is a way to say which of the things you
+/// already pulled in you meant, not a way to reach something you did not. And only its `pub`
+/// surface is reachable: if `::` could see a private helper, the visibility the language already
+/// has would stop meaning anything the moment somebody typed a colon.
+fn resolve_qualified(module: &str, name: &str, ctx: &LineCtx) -> Result<String, String> {
+    let Some(file) = ctx.modules.get(module) else {
+        return Err(format!(
+            "module `{module}` is not included here: `{module}::{name}` needs an \
+             `include` of the file that defines it"
+        ));
+    };
+    let exported = ctx.exports.get(file).is_some_and(|e| e.contains(name));
+    if !exported {
+        return Err(format!(
+            "`{name}` is not public in module `{module}`: only `pub` names can be reached \
+             from outside the file that defines them"
+        ));
+    }
+    match ctx.ids.get(file) {
+        Some(id) if ctx.map.contains_key(name) || ctx.ambiguous.contains_key(name) => {
+            Ok(format!("{name}__f{id}"))
+        }
+        _ => Ok(name.to_string()),
+    }
 }
 
 /// Reads `entry` and inlines every `include "..."` it (transitively) names, returning
@@ -162,10 +293,17 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
     let mut gseen = HashSet::new();
     build_graph(entry, 0, &mut gseen, &mut g);
 
-    // A private name is colliding if two or more DISTINCT files define it privately.
+    // A name is colliding if two or more DISTINCT files define it -- privately as before, and
+    // now publicly too: two modules are allowed to export the same name, and telling them apart
+    // is exactly what the mangling already does for privates.
     let mut name_files: std::collections::HashMap<&String, HashSet<&PathBuf>> =
         std::collections::HashMap::new();
     for (path, names) in &g.defines {
+        for n in names {
+            name_files.entry(n).or_default().insert(path);
+        }
+    }
+    for (path, names) in &g.exports {
         for n in names {
             name_files.entry(n).or_default().insert(path);
         }
@@ -181,23 +319,57 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
     // more than one definer, the name is genuinely ambiguous from that file and is left alone.
     let mut resolve_map: std::collections::HashMap<PathBuf, std::collections::HashMap<String, u32>> =
         std::collections::HashMap::new();
-    if !colliding.is_empty() {
-        for f in g.edges.keys() {
-            let closure = include_closure(f, &g.edges);
-            let mut map = std::collections::HashMap::new();
-            for name in &colliding {
-                let ids: HashSet<u32> = closure
-                    .iter()
-                    .filter(|c| g.defines.get(*c).is_some_and(|d| d.contains(name)))
-                    .filter_map(|c| g.ids.get(c).copied())
-                    .collect();
-                if ids.len() == 1 {
-                    map.insert(name.clone(), *ids.iter().next().unwrap());
-                }
+    // Per file, the modules it can NAME (its include closure, by module name) and the names that
+    // are genuinely ambiguous from there: exported by two of the modules it can see, so an
+    // unqualified use has to be turned back rather than guessed at.
+    let mut module_maps: std::collections::HashMap<PathBuf, std::collections::HashMap<String, PathBuf>> =
+        std::collections::HashMap::new();
+    let mut ambiguous_maps: std::collections::HashMap<PathBuf, std::collections::HashMap<String, Vec<String>>> =
+        std::collections::HashMap::new();
+    for f in g.edges.keys() {
+        let closure = include_closure(f, &g.edges);
+        let mut map = std::collections::HashMap::new();
+        let mut mods = std::collections::HashMap::new();
+        let mut amb: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        for name in &colliding {
+            let definers: Vec<&PathBuf> = closure
+                .iter()
+                .filter(|c| {
+                    g.defines.get(*c).is_some_and(|d| d.contains(name))
+                        || g.exports.get(*c).is_some_and(|e| e.contains(name))
+                })
+                .collect();
+            let ids: HashSet<u32> = definers.iter().filter_map(|c| g.ids.get(*c).copied()).collect();
+            if ids.len() == 1 {
+                map.insert(name.clone(), *ids.iter().next().unwrap());
+                continue;
             }
-            if !map.is_empty() {
-                resolve_map.insert(f.clone(), map);
+            // Ambiguity is only reported for a PUBLIC clash. Two files with a private helper or
+            // a private constant of the same name are not ambiguous to anybody: neither is
+            // visible outside its file, and that case is already file-scoped. Reporting it would
+            // turn a private name -- something the author is entitled to choose freely -- into a
+            // compile error caused by a file they may never have read.
+            let mut exporters: Vec<String> = definers
+                .iter()
+                .filter(|c| g.exports.get(**c).is_some_and(|e| e.contains(name)))
+                .filter_map(|c| g.modules.get(*c).cloned())
+                .collect();
+            if exporters.len() > 1 {
+                exporters.sort();
+                amb.insert(name.clone(), exporters);
             }
+        }
+        for c in &closure {
+            if let Some(m) = g.modules.get(c) {
+                mods.insert(m.clone(), c.clone());
+            }
+        }
+        if !map.is_empty() {
+            resolve_map.insert(f.clone(), map);
+        }
+        module_maps.insert(f.clone(), mods);
+        if !amb.is_empty() {
+            ambiguous_maps.insert(f.clone(), amb);
         }
     }
 
@@ -205,15 +377,14 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
     let mut out = String::new();
     let mut depth0 = HashSet::new();
     let mut depth1 = HashSet::new();
-    resolve_into(
-        entry,
-        &mut seen,
-        &mut out,
-        0,
-        &mut depth0,
-        &mut depth1,
-        &resolve_map,
-    )?;
+    let ns = Namespaces {
+        resolve_map: &resolve_map,
+        module_maps: &module_maps,
+        ambiguous_maps: &ambiguous_maps,
+        exports: &g.exports,
+        ids: &g.ids,
+    };
+    resolve_into(entry, &mut seen, &mut out, 0, &mut depth0, &mut depth1, &ns)?;
     // Which functions is this entry on the hook for covering?
     //
     // A file named `*_test.snd` exists to test what it includes, so the subject is its direct
@@ -246,6 +417,10 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
 struct IncludeGraph {
     ids: std::collections::HashMap<PathBuf, u32>,
     defines: std::collections::HashMap<PathBuf, HashSet<String>>,
+    /// Each file's `pub` surface: what `module::name` may reach.
+    exports: std::collections::HashMap<PathBuf, HashSet<String>>,
+    /// Each file's module name, taken from the file name itself.
+    modules: std::collections::HashMap<PathBuf, String>,
     edges: std::collections::HashMap<PathBuf, Vec<PathBuf>>,
     ctr: u32,
 }
@@ -266,11 +441,16 @@ fn build_graph(path: &Path, depth: usize, seen: &mut HashSet<PathBuf>, g: &mut I
     // Module-level private globals are file-scoped on collision too (e.g. two bignum modules
     // both defining `let BN_MASK16 = 0xFFFF`), so fold them into the same defined-name set.
     names.extend(module_global_names(&src));
-    // Only files that define private helpers/globals (below the entry) need a mangling id.
-    if depth >= 1 && !names.is_empty() {
+    let exports = public_names(&src);
+    // A file needs a mangling id if anything it defines might have to be told apart from
+    // somebody else's name of the same spelling -- which now includes its PUBLIC surface, since
+    // two modules are allowed to export the same name and be separated by qualification.
+    if depth >= 1 && !(names.is_empty() && exports.is_empty()) {
         g.ctr += 1;
         g.ids.insert(canon.clone(), g.ctr);
     }
+    g.modules.insert(canon.clone(), module_name(path));
+    g.exports.insert(canon.clone(), exports);
     g.defines.insert(canon.clone(), names);
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut es = Vec::new();
@@ -312,7 +492,7 @@ fn resolve_into(
     depth: usize,
     depth0: &mut HashSet<String>,
     depth1: &mut HashSet<String>,
-    resolve_map: &std::collections::HashMap<PathBuf, std::collections::HashMap<String, u32>>,
+    ns: &Namespaces,
 ) -> std::io::Result<()> {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !seen.insert(canon) {
@@ -334,7 +514,16 @@ fn resolve_into(
     // cross-file CALLER to the same mangled name as the definition it includes, not just the file
     // that defines the name. A unique private name is not in the map and is left alone. The entry
     // file (depth 0) has no id, so `main` and the program's own functions are never renamed.
-    let mangle = resolve_map.get(&canon);
+    let empty_map = std::collections::HashMap::new();
+    let empty_mods = std::collections::HashMap::new();
+    let empty_amb = std::collections::HashMap::new();
+    let ctx = LineCtx {
+        map: ns.resolve_map.get(&canon).unwrap_or(&empty_map),
+        modules: ns.module_maps.get(&canon).unwrap_or(&empty_mods),
+        exports: ns.exports,
+        ids: ns.ids,
+        ambiguous: ns.ambiguous_maps.get(&canon).unwrap_or(&empty_amb),
+    };
     for line in src.lines() {
         match parse_include(line.trim()) {
             Some(rel) => resolve_into(
@@ -344,17 +533,19 @@ fn resolve_into(
                 depth + 1,
                 depth0,
                 depth1,
-                resolve_map,
+                ns,
             )?,
             None => {
-                let owned;
-                let line: &str = match mangle {
-                    Some(map) => {
-                        owned = mangle_line(line, map);
-                        &owned
-                    }
-                    None => line,
-                };
+                // A name that cannot be resolved is reported HERE, naming the file it was
+                // written in. Left to the code generator it would surface as an undefined
+                // mangled symbol, which names nothing anybody typed.
+                let owned = rewrite_line(line, &ctx).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("{}: {e}", path.display()),
+                    )
+                })?;
+                let line: &str = &owned;
                 if let Some(name) = extract_fn_name(line) {
                     match depth {
                         0 => {
@@ -771,5 +962,94 @@ mod tests {
         assert_eq!(parse_include("included = 5"), None);
         assert_eq!(parse_include("let include_flag = 1"), None);
         assert_eq!(parse_include("include \"lib.snd\""), Some("lib.snd"));
+    }
+
+    #[test]
+    fn a_qualified_name_reaches_a_module_by_its_file_name() {
+        // The first step of RFC namespaces: every included file is a MODULE named after itself,
+        // and `module::name` says which one you mean. Resolved here, at include time, into the
+        // symbol that module actually defines -- so the lexer, the parser and the code generator
+        // never see a `::` and nothing downstream changes.
+        let root = std::env::temp_dir().join(format!("sond_ns1_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("dns.snd"), "pub fn resolve() -> i64 { 7 }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(&entry, "include \"dns.snd\"\nfn main() -> i64 { dns::resolve() }").unwrap();
+        let combined = resolve_includes(&entry).unwrap();
+        assert!(!combined.contains("::"), "no `::` survives resolution:\n{combined}");
+        assert!(combined.contains("resolve()"), "it binds to the module's function:\n{combined}");
+    }
+
+    #[test]
+    fn two_modules_may_export_the_same_name_when_each_use_says_which() {
+        // The point of the whole exercise. Today two libraries that both export `read` cannot be
+        // used by one program at all: it is a hard "defined more than once". Qualified, they can.
+        let root = std::env::temp_dir().join(format!("sond_ns2_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("disk.snd"), "pub fn read() -> i64 { 1 }").unwrap();
+        std::fs::write(root.join("net.snd"), "pub fn read() -> i64 { 2 }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"disk.snd\"\ninclude \"net.snd\"\nfn main() -> i64 { disk::read() + net::read() }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry).unwrap();
+        assert_eq!(
+            combined.matches("fn read(").count(),
+            0,
+            "both definitions are renamed apart:\n{combined}"
+        );
+        assert!(!combined.contains("::"), "and both uses are resolved:\n{combined}");
+    }
+
+    #[test]
+    fn an_unqualified_name_two_modules_export_says_which_two() {
+        // The diagnostic is the feature. Left alone, the ambiguous name would compile to
+        // something undefined and the error would land in the code generator, naming a mangled
+        // symbol nobody wrote.
+        let root = std::env::temp_dir().join(format!("sond_ns3_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("disk.snd"), "pub fn read() -> i64 { 1 }").unwrap();
+        std::fs::write(root.join("net.snd"), "pub fn read() -> i64 { 2 }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"disk.snd\"\ninclude \"net.snd\"\nfn main() -> i64 { read() }",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(err.contains("read"), "it names the ambiguous name, got: {err}");
+        assert!(
+            err.contains("disk") && err.contains("net"),
+            "and both modules that export it, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_qualified_name_cannot_reach_a_module_that_is_not_included() {
+        let root = std::env::temp_dir().join(format!("sond_ns4_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("dns.snd"), "pub fn resolve() -> i64 { 7 }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(&entry, "fn main() -> i64 { dns::resolve() }").unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(err.contains("dns"), "it names the module, got: {err}");
+    }
+
+    #[test]
+    fn a_qualified_name_cannot_reach_a_private_helper() {
+        // `pub` is what a module offers; qualifying must not be a way around it, or the
+        // visibility that already exists would stop meaning anything the moment `::` landed.
+        let root = std::env::temp_dir().join(format!("sond_ns5_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("dns.snd"), "fn helper() -> i64 { 7 }\npub fn resolve() -> i64 { helper() }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(&entry, "include \"dns.snd\"\nfn main() -> i64 { dns::helper() }").unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(
+            err.contains("helper") && err.contains("dns"),
+            "it says which name in which module, got: {err}"
+        );
     }
 }
