@@ -1,64 +1,86 @@
-// Test of chacha20.snd against RFC 8439 §2.4.2 encryption vector.
-// Returns 0 if ciphertext matches byte-for-byte, !=0 if not.
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/crypto/cipher/chacha20.snd, against the RFC 8439 §2.4.2 vector.
+//
+// This file used to be a `main` that printed FAIL and returned a code, which the suite runner
+// does not collect: it only picks up files containing `test "` blocks. It had also stopped
+// compiling -- `.utf8` applied twice, once to the literal and again to the pointer that produced
+// -- and nobody found out, because nothing was running it. A cipher whose only test is not being
+// asked is a cipher with no test at all.
+//
+// The expected ciphertext is the one printed in the RFC, not one this implementation produced:
+// a vector taken from the code it checks proves only that the code is consistent with itself.
 
-include "x86_64/linux/io.snd"
-include "any/strings.snd"
 include "any/crypto/cipher/chacha20.snd"
+include "x86_64/linux/testing.snd"
 
-fn puts(s: i64) { write_buf(1, s, strlen(s)) }
+let PT_TEXT: string = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+let CT_HEX: string = "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d"
+
+let mut key[4]      // 32 bytes
+let mut nonce[2]    // 12 bytes, rounded up to whole words
+let mut ct[15]      // 114 bytes
+let mut back[15]
 
 fn hexval(c: i64) -> i64 {
     if c >= 48 && c <= 57 { return c - 48 }
     if c >= 97 && c <= 102 { return c - 87 }
     c - 55
 }
+
+// 1 if the `n` bytes at `buf` are the ones `hexstr` spells out.
 fn eq_hex(buf: i64, n: i64, hexstr: i64) -> i64 {
-    let mut i = 0
-    for i < n {
+    for i in 0..n {
         let hi = hexval(peek8(hexstr + i * 2))
         let lo = hexval(peek8(hexstr + i * 2 + 1))
         if peek8(buf + i) != (hi * 16 + lo) { return 0 }
-        i = i + 1
     }
     1
 }
 
-fn main() -> i64 {
-    // key = 00 01 .. 1f
-    let key[32]
-    let mut i = 0
-    for i < 32 { poke8(key + i, i) i = i + 1 }
-    // nonce = 00 00 00 00 00 00 00 4a 00 00 00 00
-    let nonce[12]
-    i = 0
-    for i < 12 { poke8(nonce + i, 0) i = i + 1 }
+// key = 00 01 .. 1f, nonce = 00 00 00 00 00 00 00 4a 00 00 00 00, as the RFC sets them.
+fn setup() {
+    for i in 0..32 { poke8(key + i, i) }
+    for i in 0..12 { poke8(nonce + i, 0) }
     poke8(nonce + 7, 0x4a)
+}
 
-    let pt_text: string = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
-    let pt = pt_text.utf8
-    let n = strlen(pt)
-    let __f0_39: string = "FAIL plaintext len\n"
-    if n != 114 { let __b0_39: string = __f0_39.utf8 puts(__b0_39.utf8) return 2 }
+// Bytes up to the NUL. `.len` would say it more directly, but it does not work on a
+// module-level `string`: a global keeps no declared type (Global has no `ty` field), so the
+// length the parser counted for a local is not there. Reported separately.
+fn byte_len(p: i64) -> i64 {
+    let mut n = 0
+    for peek8(p + n) != 0 { n = n + 1 }
+    n
+}
 
-    let ct[114]
-    chacha20_xor(key, nonce, 1, pt, ct, n)
+test "the plaintext of the RFC vector is the length the RFC says" {
+    // Not ceremony: the vector is checked byte for byte over 114 bytes, so a plaintext of a
+    // different length would compare a different thing and still look like a pass.
+    assert_eq(byte_len(PT_TEXT.utf8), 114)
+}
 
-    let exp_text: string = "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d"
-    let exp = exp_text.utf8
-    let __f0_47: string = "FAIL ciphertext RFC8439 2.4.2\n"
-    if eq_hex(ct, 114, exp) == 0 { let __b0_46: string = __f0_47.utf8 puts(__b0_46.utf8) return 1 }
+test "the RFC 8439 vector encrypts to the ciphertext the RFC prints" {
+    setup()
+    chacha20_xor(key, nonce, 1, PT_TEXT.utf8, ct, 114)
+    assert_eq(eq_hex(ct, 114, CT_HEX.utf8), 1)
+}
 
-    // inverse decryption: XOR again must recover the plaintext
-    let back[114]
-    chacha20_xor(key, nonce, 1, ct, back, n)
-    i = 0
-    for i < n {
-        let __f0_55: string = "FAIL roundtrip\n"
-        if peek8(back + i) != peek8(pt + i) { let __b0_53: string = __f0_55.utf8 puts(__b0_53.utf8) return 1 }
-        i = i + 1
+test "encrypting the ciphertext again gives the plaintext back" {
+    setup()
+    chacha20_xor(key, nonce, 1, PT_TEXT.utf8, ct, 114)
+    chacha20_xor(key, nonce, 1, ct, back, 114)
+    for i in 0..114 {
+        assert_eq(peek8(back + i), peek8(PT_TEXT.utf8 + i))
     }
+}
 
-    let __f0_60: string = "OK chacha20 (RFC 8439 2.4.2)\n"
-    puts(__f0_60.utf8)
-    0
+test "a different counter gives a different keystream" {
+    // The block counter is what keeps two messages under the same key and nonce from sharing a
+    // keystream. If it were ignored, this would produce the RFC's ciphertext again -- and two
+    // messages XORed with the same keystream give away both.
+    setup()
+    chacha20_xor(key, nonce, 2, PT_TEXT.utf8, ct, 114)
+    assert_eq(eq_hex(ct, 114, CT_HEX.utf8), 0)
 }

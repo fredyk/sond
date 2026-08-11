@@ -1,84 +1,107 @@
-// Noise IK handshake test: client and server in the same process must
-// (a) complete the handshake, (b) derive the SAME session keys,
-// (c) the server recovers the client's real static public key.
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/crypto/noise/noise-ik.snd: a client and a server run the handshake inside
+// this one process and must agree on the keys.
+//
+// This file used to be a `main` that printed FAIL and returned a code, which the suite runner
+// does not collect: it only picks up files containing `test "` blocks. It had also stopped
+// compiling -- `.utf8` applied twice, once to the literal and again to the pointer that produced
+// -- so a key exchange had no test being run at all.
+//
+// A handshake test that only checks "both sides finished" is worth very little: two sides that
+// agree on the WRONG key agree just as neatly. What is checked here is that they agree, that the
+// two directions get DIFFERENT keys, and that the server recovers the client's real identity.
 
-include "x86_64/linux/io.snd"
-include "any/strings.snd"
 include "any/crypto/noise/noise-ik.snd"
+include "x86_64/linux/testing.snd"
 
-fn puts(s: i64) { write_buf(1, s, strlen(s)) }
+let mut cs_priv[4]
+let mut ce_priv[4]
+let mut ss_priv[4]
+let mut se_priv[4]
+let mut ss_pub[4]
+let mut cs_pub[4]
+let mut bp[4]
+let mut cst[40]
+let mut sst[40]
+let mut m1[16]
+let mut m2[16]
+let mut got_cs[4]
+let mut ck1[4]
+let mut ck2[4]
+let mut sk1[4]
+let mut sk2[4]
 
 fn eq32(a: i64, b: i64) -> i64 {
-    let mut i = 0
-    for i < 32 {
+    for i in 0..32 {
         if peek8(a + i) != peek8(b + i) { return 0 }
-        i = i + 1
     }
     1
 }
 
-fn main() -> i64 {
-    // test private keys (distinct from each other)
-    let cs_priv[32]
-    let ce_priv[32]
-    let ss_priv[32]
-    let se_priv[32]
-    let mut i = 0
-    for i < 32 { poke8(cs_priv + i, 0x11 + i) i = i + 1 }
-    i = 0
-    for i < 32 { poke8(ce_priv + i, 0x22 + i) i = i + 1 }
-    i = 0
-    for i < 32 { poke8(ss_priv + i, 0x33 + i) i = i + 1 }
-    i = 0
-    for i < 32 { poke8(se_priv + i, 0x44 + i) i = i + 1 }
-
-    let bp[32]
+// Four distinct private keys, and the public halves the parties are supposed to know in
+// advance: the relay's static key (the client has it) and the client's own (for comparison).
+fn setup() {
+    for i in 0..32 { poke8(cs_priv + i, 0x11 + i) }
+    for i in 0..32 { poke8(ce_priv + i, 0x22 + i) }
+    for i in 0..32 { poke8(ss_priv + i, 0x33 + i) }
+    for i in 0..32 { poke8(se_priv + i, 0x44 + i) }
     ns_basepoint(bp)
-    let ss_pub[32]
-    x25519(ss_priv, bp, ss_pub)   // relay's static key, known by the client
-    let cs_pub[32]
-    x25519(cs_priv, bp, cs_pub)   // client's static key (for comparison)
-
-    let cst[40]
-    let sst[40]
+    x25519(ss_priv, bp, ss_pub)
+    x25519(cs_priv, bp, cs_pub)
     noise_ik_client_init(cst, cs_priv, ss_pub, ce_priv)
     noise_ik_server_init(sst, ss_priv, se_priv)
+}
 
-    // msg1: client -> server
-    let m1[128]
+test "the first message is the size the pattern fixes, and the server reads it" {
+    setup()
     let l1 = noise_ik_client_msg1(cst, m1)
-    let __f0_49: string = "FAIL msg1 len\n"
-    if l1 != 96 { let __b0_49: string = __f0_49.utf8 puts(__b0_49.utf8) return 1 }
-    let got_cs[32]
-    let __f0_52: string = "FAIL server reads msg1\n"
-    if noise_ik_server_msg1(sst, m1, l1, got_cs) != 0 { let __b0_51: string = __f0_52.utf8 puts(__b0_51.utf8) return 1 }
-    let __f0_54: string = "FAIL server recovers client static\n"
-    if eq32(got_cs, cs_pub) == 0 { let __b0_52: string = __f0_54.utf8 puts(__b0_52.utf8) return 1 }
+    assert_eq(l1, 96)
+    assert_eq(noise_ik_server_msg1(sst, m1, l1, got_cs), 0)
+}
 
-    // msg2: server -> client
-    let m2[128]
+test "the server recovers the client's real static key from the first message" {
+    // This is what IK is for: the client's identity travels ENCRYPTED, and the server ends up
+    // holding the actual public key rather than a name it has to trust. If this ever returned
+    // something that merely looks like a key, an unauthenticated peer would pass for a known one.
+    setup()
+    let l1 = noise_ik_client_msg1(cst, m1)
+    assert_eq(noise_ik_server_msg1(sst, m1, l1, got_cs), 0)
+    assert_eq(eq32(got_cs, cs_pub), 1)
+}
+
+test "both sides derive the same pair of session keys" {
+    setup()
+    let l1 = noise_ik_client_msg1(cst, m1)
+    assert_eq(noise_ik_server_msg1(sst, m1, l1, got_cs), 0)
     let l2 = noise_ik_server_msg2(sst, m2)
-    let __f0_60: string = "FAIL msg2 len\n"
-    if l2 != 48 { let __b0_57: string = __f0_60.utf8 puts(__b0_57.utf8) return 1 }
-    let __f0_62: string = "FAIL client reads msg2\n"
-    if noise_ik_client_msg2(cst, m2, l2) != 0 { let __b0_58: string = __f0_62.utf8 puts(__b0_58.utf8) return 1 }
-
-    // session keys: must match on both sides
-    let ck1[32]
-    let ck2[32]
-    let sk1[32]
-    let sk2[32]
+    assert_eq(l2, 48)
+    assert_eq(noise_ik_client_msg2(cst, m2, l2), 0)
     noise_ik_session_keys(cst, ck1, ck2)
     noise_ik_session_keys(sst, sk1, sk2)
-    let __f0_72: string = "FAIL k_c2s mismatch\n"
-    if eq32(ck1, sk1) == 0 { let __b0_67: string = __f0_72.utf8 puts(__b0_67.utf8) return 1 }
-    let __f0_74: string = "FAIL k_s2c mismatch\n"
-    if eq32(ck2, sk2) == 0 { let __b0_68: string = __f0_74.utf8 puts(__b0_68.utf8) return 1 }
-    // the two directions must be distinct keys
-    let __f0_77: string = "FAIL keys not distinct\n"
-    if eq32(ck1, ck2) == 1 { let __b0_70: string = __f0_77.utf8 puts(__b0_70.utf8) return 1 }
+    assert_eq(eq32(ck1, sk1), 1)
+    assert_eq(eq32(ck2, sk2), 1)
+}
 
-    let __f0_80: string = "OK noise-ik (handshake + session keys)\n"
-    puts(__f0_80.utf8)
-    0
+test "the two directions get different keys" {
+    // One key for both directions is what lets a recorded message be replayed straight back at
+    // its sender, and it makes two streams share a keystream. Agreement is not enough; the
+    // agreement has to be on two distinct keys.
+    setup()
+    let l1 = noise_ik_client_msg1(cst, m1)
+    assert_eq(noise_ik_server_msg1(sst, m1, l1, got_cs), 0)
+    let l2 = noise_ik_server_msg2(sst, m2)
+    assert_eq(noise_ik_client_msg2(cst, m2, l2), 0)
+    noise_ik_session_keys(cst, ck1, ck2)
+    assert_eq(eq32(ck1, ck2), 0)
+}
+
+test "a first message with a byte changed does not complete" {
+    // Nothing in the old test covered a handshake that should FAIL, and a handshake that
+    // accepts anything still passes every "both sides agree" check -- they agree on garbage.
+    setup()
+    let l1 = noise_ik_client_msg1(cst, m1)
+    poke8(m1 + 40, peek8(m1 + 40) ^ 1)
+    assert(noise_ik_server_msg1(sst, m1, l1, got_cs) != 0)
 }
