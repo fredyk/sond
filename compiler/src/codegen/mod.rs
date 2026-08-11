@@ -1026,6 +1026,12 @@ struct Codegen {
     spawn_ctids: Vec<String>,
     /// Every ctid cell across the whole program, emitted as `.quad 0` in `.bss`.
     all_ctids: Vec<String>,
+    /// Slot TABLES for the `spawn` sites that sit inside a loop: `(label, slots)`. A looping site
+    /// cannot own a single join cell -- the next turn would overwrite the tid of a thread still
+    /// running -- so it owns a fixed ring of `(ctid, owner)` pairs instead, joined before reuse.
+    spawn_tables: Vec<(String, usize)>,
+    /// The same, for the function being emitted: joined at its return like the single cells.
+    fn_spawn_tables: Vec<(String, usize)>,
     /// One owner-pid cell per spawn site: the pid of the process that started that thread,
     /// stored just before the clone. `fork` copies the address space, so a forked child inherits
     /// every join cell of its parent while inheriting none of the threads; comparing this against
@@ -1122,6 +1128,7 @@ impl Codegen {
         let frame = layout.frame;
         self.ret_label = self.fresh_label("ret");
         self.spawn_ctids.clear();
+        self.fn_spawn_tables.clear();
 
         self.line(".text");
         self.line(&format!(".globl {label}"));
@@ -1233,10 +1240,14 @@ impl Codegen {
         // frame that started it. Emitted here at the single return label, so it covers early
         // `return`s too. The return value is in %rax and the futex syscall clobbers it, so it
         // is saved across the joins.
-        if !self.spawn_ctids.is_empty() {
+        if !self.spawn_ctids.is_empty() || !self.fn_spawn_tables.is_empty() {
             let ctids = std::mem::take(&mut self.spawn_ctids);
+            let tables = std::mem::take(&mut self.fn_spawn_tables);
             self.line("    pushq %rax"); // preserve the return value across the joins
             self.emit_join(&ctids);
+            for (tab, slots) in tables {
+                self.emit_join_table(&tab, slots);
+            }
             self.line("    popq %rax");
         }
         // Postconditions: checked at every exit, with the return value bound to
@@ -1496,6 +1507,71 @@ impl Codegen {
         }
     }
 
+    /// How many threads one looping `spawn` site can have in flight. The ring is what gives a
+    /// loop a CEILING: the 65th spawn waits for the oldest to finish instead of adding to an
+    /// unbounded pile. A fork per connection has no such limit, which is how a test VM reached
+    /// 2920 processes at load 3.43 on two cores without anybody meaning to.
+    const SPAWN_SLOTS: usize = 64;
+
+    /// Emits the futex-join for the cell whose ADDRESS is in `base`, with its owner pid at
+    /// `8(base)`. The register-addressed twin of [`emit_join`], for the ring slots, whose cell is
+    /// chosen at run time and so has no name to `leaq`. Clobbers %rax/%rcx/%rdx/%rdi/%rsi/%r10/%r11
+    /// and leaves `base` untouched.
+    fn emit_join_at(&mut self, base: &str) {
+        let wait = self.fresh_label("join_wait");
+        let done = self.fresh_label("join_done");
+        // Whose thread is this? A forked child inherited the cell but not the thread, so waiting
+        // on it would block on a wake that cannot come.
+        self.line("    movq $39, %rax"); // SYS_getpid
+        self.line("    syscall");
+        self.line(&format!("    cmpq 8({base}), %rax"));
+        self.line(&format!("    jne {done}"));
+        self.line(&format!("{wait}:"));
+        self.line(&format!("    movq ({base}), %rdx")); // expected tid
+        self.line("    testq %rdx, %rdx");
+        self.line(&format!("    jz {done}")); // never used, or already finished
+        self.line(&format!("    movq {base}, %rdi")); // uaddr
+        self.line("    xorq %rsi, %rsi"); // FUTEX_WAIT
+        self.line("    xorq %r10, %r10"); // timeout = NULL
+        self.line("    movq $202, %rax"); // SYS_futex
+        self.line("    syscall");
+        // A failing futex returns at once, so jumping back unconditionally would spin. Retry only
+        // on the answers that mean "try again" (EAGAIN, EINTR, or a genuine wake); anything else
+        // falls through to a sleeping poll, which is slow but never a burning core.
+        self.line("    cmpq $-11, %rax");
+        self.line(&format!("    je {wait}"));
+        self.line("    cmpq $-4, %rax");
+        self.line(&format!("    je {wait}"));
+        self.line("    testq %rax, %rax");
+        self.line(&format!("    jns {wait}"));
+        self.line("    pushq $1000000"); // 1 ms
+        self.line("    pushq $0");
+        self.line("    movq %rsp, %rdi");
+        self.line("    xorq %rsi, %rsi");
+        self.line("    movq $35, %rax"); // SYS_nanosleep
+        self.line("    syscall");
+        self.line("    addq $16, %rsp");
+        self.line(&format!("    jmp {wait}"));
+        self.line(&format!("{done}:"));
+    }
+
+    /// Joins every slot of a looping site's ring, at the spawning function's return. A loop over
+    /// the table rather than `slots` copies of the join: at 64 slots the unrolled form would add
+    /// some 1600 instructions per site, for code that runs once.
+    fn emit_join_table(&mut self, table: &str, slots: usize) {
+        let top = self.fresh_label("jointab");
+        self.line("    pushq %rbx"); // callee-saved: the cursor has to survive the syscalls
+        self.line(&format!("    leaq {table}(%rip), %rbx"));
+        self.line(&format!("    pushq ${slots}")); // the counter lives on the stack, out of the way
+        self.line(&format!("{top}:"));
+        self.emit_join_at("%rbx");
+        self.line("    addq $16, %rbx"); // next (ctid, owner) pair
+        self.line("    decq (%rsp)");
+        self.line(&format!("    jnz {top}"));
+        self.line("    addq $8, %rsp");
+        self.line("    popq %rbx");
+    }
+
     /// Emits `par a() ~~ b() ~~ c()` (RFC-0008 §5.1a): spawn every peer on its own thread, then
     /// join them ALL before the next statement. Reuses the Layer B `spawn` substrate: each peer
     /// is spawned (which records its ctid cell), then this par's cells are split off the enclosing
@@ -1677,17 +1753,55 @@ impl Codegen {
         const THREAD_STACK: i64 = 262144;
         let argspace = (n as i64 * 8 + 15) & !15;
         self.uses_spawn = true;
-        let cell = format!("sond_ctid_{}", self.all_ctids.len());
-        self.all_owner_cells.push(Self::owner_cell(&cell));
-        self.all_ctids.push(cell.clone());
-        self.spawn_ctids.push(cell.clone());
+        // Inside a loop the site cannot own ONE cell: the next turn would overwrite the tid of a
+        // thread still running, and that thread would never be joined -- a silent leak, which is
+        // why this used to be a compile error. It owns a ring of slots instead, rotating through
+        // them and joining the one it is about to reuse.
+        let in_loop = !self.loop_labels.is_empty();
+        let mut cell = String::new();
+        let mut table = String::new();
+        if in_loop {
+            table = format!("sond_ctidtab_{}", self.spawn_tables.len());
+            self.spawn_tables.push((table.clone(), Self::SPAWN_SLOTS));
+            self.fn_spawn_tables.push((table.clone(), Self::SPAWN_SLOTS));
+        } else {
+            cell = format!("sond_ctid_{}", self.all_ctids.len());
+            self.all_owner_cells.push(Self::owner_cell(&cell));
+            self.all_ctids.push(cell.clone());
+            self.spawn_ctids.push(cell.clone());
+        }
 
+        if in_loop {
+            // %rbx holds the chosen slot's address from here to the clone. It is callee-saved, so
+            // the syscalls in between leave it alone, and it is restored on the way out.
+            self.line("    pushq %rbx");
+        }
         // Evaluate the arguments and push them, so arg0 ends on top (at 0(%rsp), arg i at 8i).
         for arg in args.iter().rev() {
             self.expr(&arg.value); // -> %rax
             self.line("    pushq %rax");
         }
 
+        if in_loop {
+            // Rotate to the next slot and take its address. The index is per site and lives in
+            // `.data`; two threads running the SAME spawn site at once would race on it, which is
+            // the same single-writer assumption the static cell already made.
+            let idx = format!("{table}_i");
+            let wrap = self.fresh_label("slot_wrap");
+            self.line(&format!("    movq {idx}(%rip), %rax"));
+            self.line("    incq %rax");
+            self.line(&format!("    cmpq ${}, %rax", Self::SPAWN_SLOTS));
+            self.line(&format!("    jb {wrap}"));
+            self.line("    xorq %rax, %rax");
+            self.line(&format!("{wrap}:"));
+            self.line(&format!("    movq %rax, {idx}(%rip)"));
+            self.line("    shlq $4, %rax"); // 16 bytes per (ctid, owner) pair
+            self.line(&format!("    leaq {table}(%rip), %rbx"));
+            self.line("    addq %rax, %rbx");
+            // Wait for whoever had this slot before. On the first `SPAWN_SLOTS` turns the cell is
+            // zero and this returns at once; after that it is what puts a ceiling on the loop.
+            self.emit_join_at("%rbx");
+        }
         // mmap the child stack. The pushed arguments are untouched (a syscall does not use the
         // stack), so they are still there to copy across.
         self.line("    xorq %rdi, %rdi");
@@ -1721,7 +1835,11 @@ impl Codegen {
         // completed before the clone call returns in the parent" under CLONE_VM, so the parent could
         // read 0 and skip the wait entirely. A sentinel written before the clone is reliably 1 (set
         // by the parent) or 0 (cleared by the kernel), and depends on neither ordering.
-        self.line(&format!("    movq $1, {cell}(%rip)"));
+        if in_loop {
+            self.line("    movq $1, (%rbx)");
+        } else {
+            self.line(&format!("    movq $1, {cell}(%rip)"));
+        }
 
         // Record WHICH PROCESS owns this thread, for the join to check. `fork` copies the address
         // space but only the calling thread, so a forked child inherits this cell with the
@@ -1733,13 +1851,21 @@ impl Codegen {
         // here; %rsi (the child stack) is untouched.
         self.line("    movq $39, %rax"); // SYS_getpid
         self.line("    syscall");
-        self.line(&format!("    movq %rax, {}(%rip)", Self::owner_cell(&cell)));
+        if in_loop {
+            self.line("    movq %rax, 8(%rbx)");
+        } else {
+            self.line(&format!("    movq %rax, {}(%rip)", Self::owner_cell(&cell)));
+        }
 
         // clone(flags, child_stack, ptid=0, ctid=&cell, tls=0).
         // CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|CHILD_CLEARTID.
         self.line("    movq $0x250f00, %rdi");
         self.line("    xorq %rdx, %rdx"); // parent_tid = NULL
-        self.line(&format!("    leaq {cell}(%rip), %r10")); // child_tid cell
+        if in_loop {
+            self.line("    movq %rbx, %r10"); // child_tid cell: the slot chosen above
+        } else {
+            self.line(&format!("    leaq {cell}(%rip), %r10")); // child_tid cell
+        }
         self.line("    xorq %r8, %r8"); // tls = NULL
         self.line("    movq $56, %rax"); // SYS_clone
         self.line("    syscall");
@@ -1751,6 +1877,9 @@ impl Codegen {
         // nothing to record. Drop the pushed arguments and continue.
         if n > 0 {
             self.line(&format!("    addq ${}, %rsp", n * 8));
+        }
+        if in_loop {
+            self.line("    popq %rbx");
         }
         let after = self.fresh_label("thread_parent");
         self.line(&format!("    jmp {after}"));
@@ -1793,6 +1922,7 @@ impl Codegen {
         let data = std::mem::take(&mut self.global_data);
         let arrays = std::mem::take(&mut self.global_array_data);
         let ctids = std::mem::take(&mut self.all_ctids);
+        let tables = std::mem::take(&mut self.spawn_tables);
         self.line(".data");
         // DECLARE the section's alignment, do not hope for it. Without a directive the assembler
         // records AddrAlign 1 and the linker may start `.data` at any address, so whether an
@@ -1845,6 +1975,13 @@ impl Codegen {
         self.line(".p2align 3");
         for cell in ctids {
             self.line(&format!("{cell}: .quad 0"));
+        }
+        // The ring of a looping spawn site: `slots` pairs of (clear_child_tid, owner pid), plus
+        // the rotating index. All zero, which reads as "slot never used" everywhere it is
+        // checked, so the first turns of the loop join nothing and start immediately.
+        for (table, slots) in tables {
+            self.line(&format!("{table}: .quad {}", vec!["0"; slots * 2].join(", ")));
+            self.line(&format!("{table}_i: .quad {}", slots - 1)); // first rotation lands on 0
         }
         // The pid that started each of those threads. Zero until the spawn runs, which no real
         // pid ever is, so a join over a site that never executed skips instead of waiting.

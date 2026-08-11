@@ -1229,6 +1229,51 @@ fn a_pic16_serial_provider_replaces_the_backend_intrinsic() {
 }
 
 #[test]
+fn a_spawn_in_a_loop_runs_every_iteration_and_joins_them_all() {
+    // A `spawn` per turn of a loop -- one thread per accepted connection -- was a compile error:
+    // each spawn SITE owned one static join cell, so the next turn overwrote the tid of a thread
+    // still running and it was never joined. What people did instead was fork per connection,
+    // which is how a test VM reached 2920 processes at load 3.43 on two cores. A fork per
+    // connection has no ceiling; a fixed set of reusable slots has one by construction.
+    //
+    // Each worker writes its OWN slot rather than incrementing a shared counter, so this proves
+    // every thread ran without depending on an atomic the language does not have. The spawning
+    // function returns before main reads, and its structured join is what makes that read safe.
+    let src = "fn worker(out: i64, i: i64) -> i64 { poke64(out + i * 8, i + 1)\n0 }\n\
+               fn run(out: i64) -> i64 { let mut i = 0\nfor i < 8 { spawn worker(out, i)\ni = i + 1 }\n0 }\n\
+               fn main() -> i64 {\n\
+                 let slots[8]\n\
+                 let mut k = 0\n\
+                 for k < 8 { poke64(slots + k * 8, 0)\nk = k + 1 }\n\
+                 run(slots)\n\
+                 let mut sum = 0\n\
+                 k = 0\n\
+                 for k < 8 { sum = sum + peek64(slots + k * 8)\nk = k + 1 }\n\
+                 sum }";
+    assert_eq!(compile_and_run(src), 36, "1 + 2 + ... + 8: every spawned thread ran and was joined");
+}
+
+#[test]
+fn a_loop_with_more_turns_than_slots_reuses_them_without_losing_a_thread() {
+    // 100 turns over a ring of 64: from turn 65 on, each spawn must WAIT for the thread whose
+    // slot it is taking. That wait is the ceiling -- the property a fork per connection does not
+    // have -- and it is also where a thread would be silently dropped if the slot were reused
+    // without joining. Every worker writes its own slot, so a lost one shows up as a missing 1.
+    let src = "fn worker(out: i64, i: i64) -> i64 { poke64(out + i * 8, 1)\n0 }\n\
+               fn run(out: i64) -> i64 { let mut i = 0\nfor i < 100 { spawn worker(out, i)\ni = i + 1 }\n0 }\n\
+               fn main() -> i64 {\n\
+                 let slots[100]\n\
+                 let mut k = 0\n\
+                 for k < 100 { poke64(slots + k * 8, 0)\nk = k + 1 }\n\
+                 run(slots)\n\
+                 let mut n = 0\n\
+                 k = 0\n\
+                 for k < 100 { n = n + peek64(slots + k * 8)\nk = k + 1 }\n\
+                 n }";
+    assert_eq!(compile_and_run(src), 100, "all 100 threads ran and were joined");
+}
+
+#[test]
 fn the_data_section_declares_its_alignment() {
     // A futex uaddr must be 4-byte aligned or FUTEX_WAIT returns EINVAL WITHOUT EVER BLOCKING.
     // The join's cells live in `.data`, so if the emitter declares no alignment for that section

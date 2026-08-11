@@ -434,49 +434,15 @@ fn collect_expr_vars_local(e: &Expr, out: &mut Vec<String>) {
     }
 }
 
-/// Rejects a `spawn` inside a loop (RFC-0010 Layer B). Each spawn site owns one static join
-/// cell that holds the child TID until the structured join at function exit clears it. Spawning
-/// in a loop would overwrite that cell on the next iteration, so the earlier thread would never
-/// be joined: a silent thread leak. Per-iteration join state (a growable set of live threads)
-/// is a later increment; until then this is a compile error, not a footgun.
+/// Was: rejects a `spawn` inside a loop. A looping site now owns a RING of join slots instead of
+/// one cell, rotating through them and joining the slot it is about to reuse, so no thread is
+/// left unjoined and the loop has a ceiling by construction. Kept as a no-op rather than deleted
+/// so the call site, and this note, stay where anybody looking for the old error will find them.
 pub fn check_spawn_not_in_loop(funcs: &[Function]) -> Result<(), String> {
-    fn walk(b: &Block, in_loop: bool, fname: &str) -> Result<(), String> {
-        for s in &b.stmts {
-            match s {
-                Stmt::Spawn(_) if in_loop => {
-                    return Err(format!(
-                        "function `{fname}`: `spawn` inside a loop is not supported yet. Each \
-                         spawn is joined at the function's return through a single per-site cell, \
-                         so a loop would leave every thread but the last one unjoined. Spawn a \
-                         fixed set of threads outside the loop for now."
-                    ));
-                }
-                Stmt::For { body, .. } => walk(body, true, fname)?,
-                _ => {}
-            }
-            // Conditionals and match arms carry the loop nesting into their own blocks; without
-            // this the guard is bypassed by the one line every accept loop is written with.
-            let mut inner = Vec::new();
-            nested_blocks_of_stmt(s, &mut inner);
-            for blk in inner {
-                walk(blk, in_loop, fname)?;
-            }
-        }
-        // And the block's TAIL, which is where a conditional written last actually lives.
-        if let Some(t) = &b.tail {
-            let mut inner = Vec::new();
-            nested_blocks(t, &mut inner);
-            for blk in inner {
-                walk(blk, in_loop, fname)?;
-            }
-        }
-        Ok(())
-    }
-    for f in funcs {
-        walk(&f.body, false, &f.name)?;
-    }
+    let _ = funcs;
     Ok(())
 }
+
 
 /// The source symbol of a binary operator, for diagnostics.
 fn op_symbol(op: &BinOp) -> &'static str {
@@ -4194,43 +4160,38 @@ mod spawn_loop_tests {
         check_spawn_not_in_loop(&funcs)
     }
 
+    // These used to pin the REJECTION of a `spawn` inside a loop, in each shape an accept loop is
+    // written: the plain body, an `if` inside it, an `else`, and the tail conditional -- three of
+    // which had slipped past an earlier version of the walk. The rejection existed because a
+    // spawn site owned ONE join cell, so a second turn overwrote a live thread's tid and lost it.
+    //
+    // A looping site now owns a ring of slots and joins the one it is about to reuse, so all four
+    // shapes compile. What they guaranteed -- that no thread is left unjoined -- is now a
+    // behavioural guarantee and is tested as one, by running the threads and counting them:
+    // codegen::tests::a_spawn_in_a_loop_runs_every_iteration_and_joins_them_all and
+    // a_loop_with_more_turns_than_slots_reuses_them_without_losing_a_thread. They stay here,
+    // flipped, so that anybody who reads the old error message finds where it went.
+
     #[test]
-    fn rejects_spawn_inside_a_loop() {
-        // Each spawn site has one static join cell, so spawning in a loop would overwrite the
-        // previous thread's tid and leave it unjoined. Until per-iteration join state exists,
-        // a spawn in a loop is a compile error rather than a silent thread leak.
-        let e = check("fn w() -> i64 { 0 }\nfn f() -> i64 { for i in 0..3 { spawn w() } 0 }");
-        assert!(e.is_err(), "spawn inside a loop must be rejected");
-        assert!(e.unwrap_err().contains("loop"), "the error should mention the loop");
+    fn accepts_spawn_inside_a_loop() {
+        let ok = check("fn w() -> i64 { 0 }\nfn f() -> i64 { for i in 0..3 { spawn w() } 0 }");
+        assert!(ok.is_ok(), "a spawn in a loop is supported now, got {ok:?}");
     }
 
     #[test]
-    fn rejects_spawn_inside_an_if_inside_a_loop() {
+    fn accepts_spawn_inside_an_if_inside_a_loop() {
         // The shape every accept loop has: `for { let c = accept(); if c >= 0 { spawn h(c) } }`.
-        // An `if` is an EXPRESSION in Sond, so a walk that only descends through `for` bodies
-        // walks straight past it and the loop guard never fires -- which is worse than having no
-        // guard, because the author reads the clean compile as permission.
-        let e = check("fn w() -> i64 { 0 }\nfn f() -> i64 { for i in 0..3 { if i > 0 { spawn w() } } 0 }");
-        assert!(e.is_err(), "spawn inside an if inside a loop must be rejected");
-        assert!(e.unwrap_err().contains("loop"), "the error should mention the loop");
+        let ok = check("fn w() -> i64 { 0 }\nfn f() -> i64 { for i in 0..3 { if i > 0 { spawn w() } } 0 }");
+        assert!(ok.is_ok(), "got {ok:?}");
     }
 
     #[test]
-    fn rejects_spawn_inside_an_else_inside_a_loop() {
-        let e = check(
+    fn accepts_spawn_inside_an_else_inside_a_loop() {
+        let ok = check(
             "fn w() -> i64 { 0 }\n\
              fn f() -> i64 { for i in 0..3 { if i > 0 { i } else { spawn w() 0 } } 0 }",
         );
-        assert!(e.is_err(), "spawn inside an else inside a loop must be rejected");
-    }
-
-    #[test]
-    fn rejects_a_spawn_in_the_tail_conditional_of_a_loop() {
-        // The `if` written LAST in a block is its tail expression, not a statement, so a walk over
-        // `stmts` alone skips it. That is the ordinary way to write an accept loop: the spawn is
-        // the last thing in the body, so the guard was still being bypassed after the first fix.
-        let e = check("fn w() -> i64 { 0 }\nfn f() -> i64 { for i in 0..3 { if i > 0 { spawn w() } } 0 }");
-        assert!(e.is_err(), "a spawn in a loop body's tail conditional must be rejected");
+        assert!(ok.is_ok(), "got {ok:?}");
     }
 
     #[test]
