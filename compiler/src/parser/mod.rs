@@ -580,6 +580,7 @@ impl Parser {
                         };
                         let mut body = self.parse_block();
                         sink_tail(&mut body); // the step runs AFTER the body, not before
+                        step_before_continues(&mut body, &step); // ...and before every `continue`
                         body.stmts.push(step);
                         stmts.push(init);
                         stmts.push(Stmt::For {
@@ -628,7 +629,12 @@ impl Parser {
                                 array_len: None,
                             });
                             sink_tail(&mut body); // increment must run AFTER the body, not before
-                            body.stmts.push(assign_inc(&var));
+                            // ...and before every `continue`, which jumps past the end of the
+                            // body: without this the iteration that continues never advances `i`
+                            // and the loop spins for ever.
+                            let inc = assign_inc(&var);
+                            step_before_continues(&mut body, &inc);
+                            body.stmts.push(inc);
                             stmts.push(Stmt::For {
                                 cond: Some(Expr::Binary(
                                     BinOp::Lt,
@@ -1112,6 +1118,91 @@ fn assign_inc(name: &str) -> Stmt {
 /// Sinks a block's tail expression into its statement list (as a discarded expression), so a
 /// loop-counter increment appended afterwards runs AFTER the body's last expression, not before
 /// it (`for i in 0..3 { print(i) }` must print 0,1,2, the increment cannot precede the tail).
+/// Inserts `step` before every `continue` that belongs to THIS loop.
+///
+/// The counting and three-part `for` forms both desugar to a `for <cond>` whose body ENDS with
+/// the step (`i = i + 1`). That is right for a body that runs to its end, and wrong for one that
+/// jumps: `continue` goes straight to the condition, past the step, so the iteration that took it
+/// never advanced the counter and the loop spun for ever -- compiling clean, printing nothing,
+/// at 100% of a core.
+///
+/// The desugar owns the rule "the step runs on every path that leaves the body", so it has to
+/// fix up the paths that leave early too. Nested loops are skipped: a `continue` inside one
+/// belongs to that loop and stepping the outer counter as well would silently skip an iteration,
+/// which is a wrong answer rather than a hang, and harder to notice.
+fn step_before_continues(block: &mut Block, step: &Stmt) {
+    let mut i = 0;
+    while i < block.stmts.len() {
+        match &mut block.stmts[i] {
+            Stmt::Continue => {
+                block.stmts.insert(i, step.clone());
+                i += 1; // past the step just inserted
+            }
+            Stmt::For { .. } => {} // a nested loop owns its own `continue`
+            other => step_in_stmt(other, step),
+        }
+        i += 1;
+    }
+    if let Some(t) = block.tail.as_mut() {
+        step_in_expr(t, step);
+    }
+}
+
+/// Walks a statement's expressions looking for the blocks of an `if`/`match`, where a `continue`
+/// of the enclosing loop can also sit.
+fn step_in_stmt(s: &mut Stmt, step: &Stmt) {
+    match s {
+        Stmt::Let { value, .. } => step_in_expr(value, step),
+        Stmt::Assign { target, value } => {
+            step_in_expr(target, step);
+            step_in_expr(value, step);
+        }
+        Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => step_in_expr(e, step),
+        Stmt::Par(peers) | Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
+            for p in peers {
+                step_in_expr(p, step);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The same, through an expression: `if` and `match` carry blocks, and any expression can hold
+/// one deeper down (`f(if c { .. } else { .. })`).
+fn step_in_expr(e: &mut Expr, step: &Stmt) {
+    match e {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            step_in_expr(cond, step);
+            step_before_continues(then_branch, step);
+            if let Some(b) = else_branch.as_mut() {
+                step_before_continues(b, step);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            step_in_expr(scrutinee, step);
+            for a in arms {
+                step_before_continues(&mut a.body, step);
+            }
+        }
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            step_in_expr(l, step);
+            step_in_expr(r, step);
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => step_in_expr(x, step),
+        Expr::Call(c, args) => {
+            step_in_expr(c, step);
+            for a in args {
+                step_in_expr(&mut a.value, step);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn sink_tail(body: &mut Block) {
     if let Some(t) = body.tail.take() {
         body.stmts.push(Stmt::Expr(*t));

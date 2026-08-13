@@ -1229,6 +1229,36 @@ fn a_pic16_serial_provider_replaces_the_backend_intrinsic() {
 }
 
 #[test]
+fn continue_in_a_counting_range_advances_the_counter() {
+    // `for i in 0..10 { if i == 4 { continue } .. }` HUNG, at 100% of a core, for ever. The
+    // counting form desugars to `i = 0` plus a `for i < 10` whose body ends with `i = i + 1`, and
+    // `continue` jumps straight to the condition -- past the increment. So the one iteration that
+    // took the `continue` never advanced, and the loop spun on i == 4 with nothing to see: it
+    // compiled clean, printed nothing and burned the CPU.
+    //
+    // Nine iterations increment `v`, the tenth (i == 4) skips: 9.
+    let src = "fn main() -> i64 { let mut v = 0\nfor i in 0..10 { if i == 4 { continue }\nv = v + 1 }\nv }";
+    assert_eq!(compile_and_run(src), 9);
+}
+
+#[test]
+fn continue_in_a_three_part_for_advances_the_step() {
+    // The same hole in the C-style form, whose step is appended to the body in the same way.
+    let src = "fn main() -> i64 { let mut v = 0\nfor let mut i = 0; i < 10; i++ { if i == 4 { continue }\nv = v + 1 }\nv }";
+    assert_eq!(compile_and_run(src), 9);
+}
+
+#[test]
+fn a_continue_in_a_nested_loop_advances_only_its_own_counter() {
+    // The inner `continue` belongs to the inner loop: it must advance `j` and leave `i` alone.
+    // Stepping both would skip an outer iteration -- a wrong answer instead of a hang, which is
+    // harder to notice.
+    let src = "fn main() -> i64 { let mut v = 0\n\
+               for i in 0..3 { for j in 0..3 { if j == 1 { continue }\nv = v + 1 } }\nv }";
+    assert_eq!(compile_and_run(src), 6); // 3 outer x 2 inner
+}
+
+#[test]
 fn a_spawn_in_a_loop_runs_every_iteration_and_joins_them_all() {
     // A `spawn` per turn of a loop -- one thread per accepted connection -- was a compile error:
     // each spawn SITE owned one static join cell, so the next turn overwrote the tid of a thread
