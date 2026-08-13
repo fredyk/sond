@@ -316,7 +316,18 @@ fn eval_to_w(
                 crate::ast::BinOp::BitAnd => l!("        andwf   0x7E, w"),
                 crate::ast::BinOp::BitOr => l!("        iorwf   0x7E, w"),
                 crate::ast::BinOp::BitXor => l!("        xorwf   0x7E, w"),
-                _ => l!("        ; unsupported operator in Phase 1b"),
+                // LOUD, not a comment. This used to emit `; unsupported operator` into the
+                // assembly and carry on, so `sondc --pic16` exited 0 and produced a .hex with
+                // the operation MISSING -- a firmware that flashes, runs, and computes something
+                // else. On a microcontroller that is not a wrong number on a screen: it is a
+                // motor step that never happens. `*`, `/`, `%` and the ordered comparisons are
+                // the ones that land here today.
+                other => panic!(
+                    "PIC16 codegen does not implement the `{other:?}` operator yet. It is not \
+                     emitted, so a program using it would flash and compute the wrong thing; \
+                     write it with the operators the backend has (+ - & | ^ << >> == != <) or \
+                     keep that arithmetic on the host side."
+                ),
             }
         }
         _ => match as_call(e) {

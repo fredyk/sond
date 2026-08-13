@@ -1229,6 +1229,32 @@ fn a_pic16_serial_provider_replaces_the_backend_intrinsic() {
 }
 
 #[test]
+fn a_bare_bang_negates_instead_of_vanishing() {
+    // The lexer consumed a bare `!` and emitted NOTHING for it -- with a comment saying it was
+    // not a token yet, while the parser and this backend both understood `UnOp::Not` fine. So
+    // `!x` lexed as plain `x`: the negation disappeared before anything could complain. `if
+    // !ready { .. }` ran exactly when it must not, and `fn negar(b: bool) -> bool { !b }`
+    // returned its argument. Nothing failed to compile and nothing said a word.
+    //
+    // 1 + 0 + 10 + 0 + 100: the negations that must hold, and the ones that must not.
+    let src = "fn negar(b: bool) -> bool { !b }\n\
+               fn main() -> i64 { let mut n = 0\n\
+                 if !false { n = n + 1 }\n\
+                 if !true { n = n + 2 }\n\
+                 if negar(false) { n = n + 10 }\n\
+                 if negar(true) { n = n + 20 }\n\
+                 if !0 { n = n + 100 }\n\
+                 n }";
+    assert_eq!(compile_and_run(src), 111);
+}
+
+#[test]
+fn a_bang_equals_is_still_an_inequality() {
+    // The same character starts `!=`, so the fix must not turn `a != b` into a negation of `=`.
+    assert_eq!(compile_and_run("fn main() -> i64 { if 1 != 2 { 7 } else { 0 } }"), 7);
+}
+
+#[test]
 fn continue_in_a_counting_range_advances_the_counter() {
     // `for i in 0..10 { if i == 4 { continue } .. }` HUNG, at 100% of a core, for ever. The
     // counting form desugars to `i = 0` plus a `for i < 10` whose body ends with `i = i + 1`, and

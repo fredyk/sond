@@ -218,12 +218,21 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
                 }
             }
 
-            // `!=` (a bare `!` is not yet a token).
+            // `!=`, or a bare `!` for logical negation.
+            //
+            // The bare `!` used to be CONSUMED AND DROPPED here, with a comment saying it was
+            // not a token yet -- while the parser and the code generator both understood
+            // `UnOp::Not` perfectly well. The result was that `!x` lexed as plain `x`: the
+            // negation vanished before anything could complain, so `if !ready { .. }` ran
+            // exactly when it should not have, and `fn negar(b: bool) -> bool { !b }` returned
+            // its argument. Nothing failed to compile and nothing said a word.
             '!' => {
                 chars.next();
                 if chars.peek() == Some(&'=') {
                     chars.next();
                     tokens.push(Token::Ne);
+                } else {
+                    tokens.push(Token::Not);
                 }
             }
 
