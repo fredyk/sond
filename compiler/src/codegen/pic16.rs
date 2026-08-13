@@ -499,8 +499,67 @@ fn emit_if(
             emit_block(eb, out, lbl, locals, fnp, le);
         }
         l!("_endif{n}:");
+    } else if let Expr::Binary(
+        op @ (crate::ast::BinOp::Lt
+        | crate::ast::BinOp::Le
+        | crate::ast::BinOp::Gt
+        | crate::ast::BinOp::Ge),
+        lhs,
+        rhs,
+    ) = cond
+    {
+        // Ordered comparison, unsigned 8-bit. One subtraction answers all four: `subwf f, w`
+        // computes f - W, so with lhs stashed and rhs in W the carry is set iff lhs >= rhs (no
+        // borrow) and Z is set iff they are equal. `>` and `<=` need both flags, since they are
+        // the strict/non-strict halves that `>=` alone cannot tell apart.
+        eval_to_w(lhs, out, locals, fnp);
+        l!("        movwf   0x7D            ; lhs of the comparison");
+        eval_to_w(rhs, out, locals, fnp);
+        l!("        subwf   0x7D, w         ; lhs - rhs: C iff lhs >= rhs, Z iff equal");
+        match op {
+            // lhs < rhs: C clear. Skip the then-branch when C is set.
+            crate::ast::BinOp::Lt => {
+                l!("        btfsc   STATUS, 0");
+                l!("        goto    _else{n}");
+            }
+            // lhs >= rhs: C set.
+            crate::ast::BinOp::Ge => {
+                l!("        btfss   STATUS, 0");
+                l!("        goto    _else{n}");
+            }
+            // lhs > rhs: C set AND Z clear -- greater, and not equal.
+            crate::ast::BinOp::Gt => {
+                l!("        btfss   STATUS, 0");
+                l!("        goto    _else{n}");
+                l!("        btfsc   STATUS, 2       ; equal is not greater");
+                l!("        goto    _else{n}");
+            }
+            // lhs <= rhs: C clear OR Z set.
+            _ => {
+                l!("        btfsc   STATUS, 2       ; equal counts as <=");
+                l!("        goto    _then{n}");
+                l!("        btfsc   STATUS, 0");
+                l!("        goto    _else{n}");
+                l!("_then{n}:");
+            }
+        }
+        emit_block(then_b, out, lbl, locals, fnp, le);
+        l!("        goto    _endif{n}");
+        l!("_else{n}:");
+        if let Some(eb) = else_b {
+            emit_block(eb, out, lbl, locals, fnp, le);
+        }
+        l!("_endif{n}:");
     } else {
-        l!("        ; (unsupported condition in Phase 1b, only `==`/`!=`)");
+        // LOUD. This used to emit a comment and then NOTHING -- no then-branch, no else-branch:
+        // the whole `if` vanished from the .hex, and the compiler exited 0. `if temp > 80 {
+        // stop() }` compiled to a program that never stops. Silence about a condition is worse
+        // than silence about an operator, because what disappears is the decision itself.
+        panic!(
+            "PIC16 codegen cannot emit this condition yet: it supports `==`, `!=`, `<`, `<=`, \
+             `>` and `>=` between 8-bit values. Rewrite the condition with those, rather than \
+             have the `if` silently disappear."
+        );
     }
 }
 
@@ -567,6 +626,50 @@ mod tests {
     fn asm_for(src: &str) -> String {
         let funcs = Parser::new(tokenize(src)).parse_program();
         emit_pic16(&funcs)
+    }
+
+    // An `if` whose condition is not `==`/`!=` used to emit a COMMENT and then nothing: no
+    // then-branch, no else-branch. The whole decision vanished from the .hex and the compiler
+    // exited 0, so `if temp > 80 { stop() }` became a program that never stops -- in a chip
+    // that has already been flashed.
+    #[test]
+    fn an_ordered_comparison_emits_the_branch_instead_of_vanishing() {
+        for (src, _name) in [
+            ("fn main() { let t = peek8(0x20)  if t > 80 { poke8(0x21, 1) } }", ">"),
+            ("fn main() { let t = peek8(0x20)  if t < 80 { poke8(0x21, 1) } }", "<"),
+            ("fn main() { let t = peek8(0x20)  if t >= 80 { poke8(0x21, 1) } }", ">="),
+            ("fn main() { let t = peek8(0x20)  if t <= 80 { poke8(0x21, 1) } }", "<="),
+        ] {
+            let asm = asm_for(src);
+            assert!(
+                asm.contains("subwf   0x7D, w"),
+                "the comparison must be emitted, got:\n{asm}"
+            );
+            assert!(
+                asm.contains("movlw   0x01"),
+                "the then-branch must survive, got:\n{asm}"
+            );
+            assert!(
+                !asm.contains("unsupported condition"),
+                "no silent drop, got:\n{asm}"
+            );
+        }
+    }
+
+    // `>` and `<=` are the two that need BOTH flags: the carry alone cannot tell `>` from `>=`,
+    // so an implementation that used it on its own would make `if x > 80` fire at exactly 80.
+    #[test]
+    fn greater_than_is_not_greater_or_equal() {
+        let gt = asm_for("fn main() { let t = peek8(0x20)  if t > 80 { poke8(0x21, 1) } }");
+        let ge = asm_for("fn main() { let t = peek8(0x20)  if t >= 80 { poke8(0x21, 1) } }");
+        assert!(
+            gt.contains("STATUS, 2"),
+            "`>` must also test Z, or it accepts equality:\n{gt}"
+        );
+        assert!(
+            !ge.contains("equal is not greater"),
+            "`>=` needs no Z test:\n{ge}"
+        );
     }
 
     // The bit-bang RX must sample each data bit at its CENTER. After the start
