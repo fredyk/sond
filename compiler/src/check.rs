@@ -917,6 +917,107 @@ pub fn check_par_confluence(funcs: &[Function], globals: &[Global]) -> Result<()
 /// Rejects a `graph { .. }` block whose nodes form a dependency CYCLE (`node a = b  node b = a`):
 /// there is no order in which to evaluate them, so it cannot be scheduled (RFC-0008 §10 forbids
 /// pure data cycles in v1). A DFS with an in-progress mark finds a back edge.
+/// Rejects a call whose argument count does not match the callee's declaration.
+///
+/// Both directions compiled in silence. Too MANY arguments: the extras were evaluated and
+/// dropped, so a test written against a wider signature before widening it -- the ordinary
+/// red-first step -- came out green, and TDD stopped being able to fail. Too FEW: the callee
+/// reads a register nobody set, and its value is whatever the last call left there, which is
+/// worse for being repeatable enough to look deliberate.
+///
+/// Only calls to DECLARED functions are checked. A name that is not one is a builtin, and those
+/// have their own rules (`syscall` takes what it is given).
+pub fn check_call_arity(funcs: &[Function]) -> Result<(), String> {
+    let arity: HashMap<&str, usize> = funcs
+        .iter()
+        .map(|f| (f.name.as_str(), f.params.len()))
+        .collect();
+
+    fn walk_expr(e: &Expr, arity: &HashMap<&str, usize>, fname: &str) -> Result<(), String> {
+        if let Expr::Call(callee, args) = e
+            && let Expr::Var(name) = callee.as_ref()
+            && let Some(&want) = arity.get(name.as_str())
+            && args.len() != want
+        {
+            let got = args.len();
+            return Err(format!(
+                "function `{fname}`: `{name}` takes {want} argument(s), but this call passes \
+                 {got}"
+            ));
+        }
+        match e {
+            Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+                walk_expr(l, arity, fname)?;
+                walk_expr(r, arity, fname)
+            }
+            Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => walk_expr(x, arity, fname),
+            Expr::Call(c, args) => {
+                walk_expr(c, arity, fname)?;
+                for a in args {
+                    walk_expr(&a.value, arity, fname)?;
+                }
+                Ok(())
+            }
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                walk_expr(cond, arity, fname)?;
+                walk_block(then_branch, arity, fname)?;
+                match else_branch {
+                    Some(b) => walk_block(b, arity, fname),
+                    None => Ok(()),
+                }
+            }
+            Expr::Match { scrutinee, arms } => {
+                walk_expr(scrutinee, arity, fname)?;
+                for a in arms {
+                    walk_block(&a.body, arity, fname)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn walk_block(b: &Block, arity: &HashMap<&str, usize>, fname: &str) -> Result<(), String> {
+        for s in &b.stmts {
+            match s {
+                Stmt::Let { value, .. } => walk_expr(value, arity, fname)?,
+                Stmt::Assign { target, value } => {
+                    walk_expr(target, arity, fname)?;
+                    walk_expr(value, arity, fname)?;
+                }
+                Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => {
+                    walk_expr(e, arity, fname)?
+                }
+                Stmt::For { cond, body, .. } => {
+                    if let Some(c) = cond {
+                        walk_expr(c, arity, fname)?;
+                    }
+                    walk_block(body, arity, fname)?;
+                }
+                Stmt::Par(peers) | Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
+                    for p in peers {
+                        walk_expr(p, arity, fname)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match &b.tail {
+            Some(t) => walk_expr(t, arity, fname),
+            None => Ok(()),
+        }
+    }
+
+    for f in funcs {
+        walk_block(&f.body, &arity, &f.name)?;
+    }
+    Ok(())
+}
+
 pub fn check_graph_acyclic(funcs: &[Function]) -> Result<(), String> {
     fn check_nodes(nodes: &[(String, Expr)], fname: &str) -> Result<(), String> {
         let idx: HashMap<&str, usize> = nodes
@@ -4146,6 +4247,65 @@ mod syscall_retry_tests {
              i = i + 1 } }",
         );
         assert!(ok.is_ok(), "a bounded loop is fine, got {ok:?}");
+    }
+}
+
+#[cfg(test)]
+mod call_arity_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn check(src: &str) -> Result<(), String> {
+        check_call_arity(&Parser::new(tokenize(src)).parse_program())
+    }
+
+    #[test]
+    fn rejects_a_call_with_too_many_arguments() {
+        // This compiled and ran, dropping the extra. The cost is worst in the ordinary red-first
+        // step: a test written against a wider signature BEFORE widening it came out green, so
+        // the failure that was supposed to drive the change never arrived.
+        let e = check("fn f(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { f(1, 2, 99) }");
+        assert!(e.is_err(), "an extra argument must be an error");
+        let msg = e.unwrap_err();
+        assert!(msg.contains("2") && msg.contains("3"), "it says both counts, got: {msg}");
+    }
+
+    #[test]
+    fn rejects_a_call_with_too_few_arguments() {
+        // Worse than the extra: the callee reads a register nobody set, so it works on whatever
+        // the previous call left there -- repeatable enough to look deliberate.
+        let e = check("fn f(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { f(1) }");
+        assert!(e.is_err(), "a missing argument must be an error");
+    }
+
+    #[test]
+    fn accepts_a_call_that_matches() {
+        let ok = check("fn f(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { f(1, 2) }");
+        assert!(ok.is_ok(), "got {ok:?}");
+    }
+
+    #[test]
+    fn looks_inside_the_places_a_call_hides() {
+        // A call is rarely a whole statement: it sits in a condition, in another call's
+        // arguments, in a branch, in a loop body. A checker that only walked statements would
+        // pass every one of these.
+        for src in [
+            "fn f(a: i64) -> i64 { a }\nfn main() -> i64 { if f(1, 2) > 0 { 1 } else { 0 } }",
+            "fn f(a: i64) -> i64 { a }\nfn g(x: i64) -> i64 { x }\nfn main() -> i64 { g(f(1, 2)) }",
+            "fn f(a: i64) -> i64 { a }\nfn main() -> i64 { for i in 0..2 { f(i, i) }\n0 }",
+            "fn f(a: i64) -> i64 { a }\nfn main() -> i64 { let x = f(1, 2)\nx }",
+        ] {
+            assert!(check(src).is_err(), "not caught in: {src}");
+        }
+    }
+
+    #[test]
+    fn leaves_builtins_alone() {
+        // `syscall` and friends are not declared functions and take what they are given; a
+        // checker that treated every name as a function would reject the standard library.
+        let ok = check("fn main() -> i64 { syscall(60, 0) }");
+        assert!(ok.is_ok(), "got {ok:?}");
     }
 }
 
