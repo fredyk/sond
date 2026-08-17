@@ -628,6 +628,212 @@ mod tests {
         emit_pic16(&funcs)
     }
 
+    // Bug A: `b0 + (b1 << 1)` — both sides of `+` are computed expressions.
+    // The old code writes 0x7E twice (once for lhs, then the shift overwrites it),
+    // producing 3*b1 instead of b0 + 2*b1.
+    #[test]
+    fn binary_both_sides_computed_no_self_collision() {
+        let asm = asm_for(
+            "fn main() { let b0 = serial_getc() let b1 = serial_getc() serial_putc(b0 + (b1 << 1)) }",
+        );
+        // The correct sequence: b0 -> 0x7E, b1 -> 0x7E -> 0x7C (shifted), then 0x7E + 0x7C
+        // The bug: b0 -> 0x7E, b1 -> 0x7E (overwrites b0), then 0x7E + 0x7E = 2*b1
+        let movwf_7E_count = asm.matches("movwf   0x7E").count();
+        assert!(
+            movwf_7E_count <= 1,
+            "0x7E should be written at most once per expression; got {} writes:\n{asm}",
+            movwf_7E_count
+        );
+        // Must also use 0x7C for the nested shift result (depth 1 scratch)
+        assert!(
+            asm.contains("movwf   0x7C") || asm.matches("movwf   0x[7][BC]").count() <= 2,
+            "nested expression must use a different scratch address; got:\n{asm}"
+        );
+    }
+
+    // Bug A (continued): 3 levels of expression nesting must also work correctly.
+    #[test]
+    fn three_level_nesting_works() {
+        let asm = asm_for(
+            "fn main() { let a = serial_getc() let b = serial_getc() let c = serial_getc() \
+             serial_putc(a + (b + (c << 1))) }",
+        );
+        // With 3 levels of nesting, we need scratch at depth 0 (0x7E), depth 1 (0x7C),
+        // and depth 2 (0x7B). No single address should be written more than once per expression.
+        let count_7E = asm.matches("movwf   0x7E").count();
+        let count_7C = asm.matches("movwf   0x7C").count();
+        let count_7B = asm.matches("movwf   0x7B").count();
+        let total_scratch_writes = count_7E + count_7C + count_7B;
+        // The expression has 3 binary ops, each should write to scratch at most once for storage
+        // (not counting the addwf/subwf which reads from scratch). So at most 3 stores.
+        assert!(
+            total_scratch_writes <= 4,
+            "too many scratch stores for 3-level nesting; got {} writes in:\n{asm}",
+            total_scratch_writes
+        );
+    }
+
+    // Bug A: simple expression (one side is a variable, the other computed) must emit
+    // the same assembly as before — no code bloat for the common case.
+    #[test]
+    fn simple_expr_one_side_variable_unchanged() {
+        let asm = asm_for(
+            "fn main() { let a = serial_getc() let b = serial_getc() serial_putc(a + b) }",
+        );
+        // Simple binary: eval lhs -> 0x7E, eval rhs (in W), addwf 0x7E, W
+        assert!(
+            asm.contains("movwf   0x7E            ; lhs"),
+            "simple binary must still use 0x7E for lhs; got:\n{asm}"
+        );
+        assert!(
+            asm.contains("addwf   0x7E, w         ; lhs + rhs"),
+            "simple binary must add; got:\n{asm}"
+        );
+    }
+
+    // Bug B: too many locals causes RAM overflow — must be a compile error, not silent corruption.
+    #[test]
+    fn too_many_locals_gives_compile_error() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            asm_for(
+                "fn main() { let a0 = 1 let a1 = 2 let a2 = 3 let a3 = 4 let a4 = 5 let a5 = 6 \
+                 let a6 = 7 let a7 = 8 let a8 = 9 let a9 = 10 let a10 = 11 let a11 = 12 \
+                 let a12 = 13 let a13 = 14 let a14 = 15 let a15 = 16 let a16 = 17 let a17 = 18 \
+                 let a18 = 19 let a19 = 20 let a20 = 21 let a21 = 22 let a22 = 23 let a23 = 24 \
+                 let a24 = 25 let a25 = 26 let a26 = 27 let a27 = 28 let a28 = 29 let a29 = 30 \
+                 let a30 = 31 let a31 = 32 let a32 = 33 let a33 = 34 let a34 = 35 let a35 = 36 \
+                 let a36 = 37 let a37 = 38 let a38 = 39 let a39 = 40 let a40 = 41 let a41 = 42 \
+                 let a42 = 43 let a43 = 44 let a44 = 45 let a45 = 46 let a46 = 47 let a47 = 48 \
+                 let a48 = 49 let a49 = 50 let a50 = 51 let a51 = 52 let a52 = 53 let a53 = 54 \
+                 let a54 = 55 let a55 = 56 let a56 = 57 let a57 = 58 let a58 = 59 let a59 = 60 \
+                 let a60 = 61 let a61 = 62 let a62 = 63 let a63 = 64 let a64 = 65 }",
+            )
+        }));
+        assert!(
+            result.is_err(),
+            "too many locals must cause a compile error, not silently corrupt memory"
+        );
+    }
+
+    // Bug B (continued): a program that fits exactly at the boundary must still compile.
+    #[test]
+    fn max_locals_at_boundary_compiles() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            asm_for(
+                "fn main() { let a0 = 1 let a1 = 2 let a2 = 3 let a3 = 4 let a4 = 5 let a5 = 6 \
+                 let a6 = 7 let a7 = 8 let a8 = 9 let a9 = 10 let a10 = 11 let a11 = 12 \
+                 let a12 = 13 let a13 = 14 let a14 = 15 let a15 = 16 let a16 = 17 let a17 = 18 \
+                 let a18 = 19 let a19 = 20 let a20 = 21 let a21 = 22 let a22 = 23 let a23 = 24 \
+                 let a24 = 25 let a25 = 26 let a26 = 27 let a27 = 28 let a28 = 29 let a29 = 30 \
+                 let a30 = 31 let a31 = 32 let a32 = 33 let a33 = 34 let a34 = 35 let a35 = 36 \
+                 let a36 = 37 let a37 = 38 let a38 = 39 let a39 = 40 let a40 = 41 let a41 = 42 \
+                 let a42 = 43 let a43 = 44 let a44 = 45 let a45 = 46 let a46 = 47 let a47 = 48 \
+                 let a48 = 49 let a49 = 50 let a50 = 51 let a51 = 52 let a52 = 53 let a53 = 54 \
+                 let a54 = 55 let a55 = 56 let a56 = 57 let a57 = 58 let a58 = 59 let a59 = 60 \
+                 let a60 = 61 let a61 = 62 }",
+            )
+        }));
+        assert!(
+            result.is_ok(),
+            "locals that fit exactly at the boundary must compile"
+        );
+    }
+
+    // Bug C: `if a < 0` is always false for unsigned 8-bit — must be a compile error.
+    #[test]
+    fn comparison_less_than_zero_is_error() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            asm_for("fn main() { let a = serial_getc() if a < 0 { poke8(0x01, 1) } }")
+        }));
+        assert!(
+            result.is_err(),
+            "`a < 0` is always false for unsigned 8-bit; must be a compile error"
+        );
+    }
+
+    // Bug C: `if a >= 0` is always true for unsigned 8-bit — must be a compile error.
+    #[test]
+    fn comparison_greater_or_equal_zero_is_error() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            asm_for("fn main() { let a = serial_getc() if a >= 0 { poke8(0x01, 1) } }")
+        }));
+        assert!(
+            result.is_err(),
+            "`a >= 0` is always true for unsigned 8-bit; must be a compile error"
+        );
+    }
+
+    // Bug C: `a > 255` and `a <= 255` are also tautologies for unsigned 8-bit.
+    #[test]
+    fn comparison_greater_than_255_is_error() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            asm_for("fn main() { let a = serial_getc() if a > 255 { poke8(0x01, 1) } }")
+        }));
+        assert!(
+            result.is_err(),
+            "`a > 255` is always false for unsigned 8-bit; must be a compile error"
+        );
+    }
+
+    #[test]
+    fn comparison_less_or_equal_255_is_error() {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            asm_for("fn main() { let a = serial_getc() if a <= 255 { poke8(0x01, 1) } }")
+        }));
+        assert!(
+            result.is_err(),
+            "`a <= 255` is always true for unsigned 8-bit; must be a compile error"
+        );
+    }
+
+    // Valid comparisons must still compile.
+    #[test]
+    fn valid_comparations_still_compile() {
+        let gt = asm_for("fn main() { let a = serial_getc() let b = serial_getc() if a > b { poke8(0x01, 1) } }");
+        assert!(!gt.contains("unsupported condition"), "`a > b` must compile");
+        assert!(gt.contains("subwf"), "`a > b` must use subtraction for comparison");
+
+        let le = asm_for("fn main() { let a = serial_getc() let b = serial_getc() if a <= b { poke8(0x01, 1) } }");
+        assert!(!le.contains("unsupported condition"), "`a <= b` must compile");
+        assert!(le.contains("subwf"), "`a <= b` must use subtraction for comparison");
+
+        let lt = asm_for("fn main() { let a = serial_getc() let b = serial_getc() if a < b { poke8(0x01, 1) } }");
+        assert!(!lt.contains("unsupported condition"), "`a < b` must compile");
+
+        let ge = asm_for("fn main() { let a = serial_getc() let b = serial_getc() if a >= b { poke8(0x01, 1) } }");
+        assert!(!ge.contains("unsupported condition"), "`a >= b` must compile");
+    }
+
+    // `a > 0` and `a <= 0` are useful — must still compile.
+    #[test]
+    fn useful_comparations_still_compile() {
+        let gt0 = asm_for("fn main() { let a = serial_getc() if a > 0 { poke8(0x01, 1) } }");
+        assert!(!gt0.contains("unsupported condition"), "`a > 0` must compile");
+
+        let le0 = asm_for("fn main() { let a = serial_getc() if a <= 0 { poke8(0x01, 1) } }");
+        assert!(!le0.contains("unsupported condition"), "`a <= 0` must compile");
+
+        let lt255 = asm_for("fn main() { let a = serial_getc() if a < 255 { poke8(0x01, 1) } }");
+        assert!(!lt255.contains("unsupported condition"), "`a < 255` must compile");
+    }
+
+    // Scratch overflow: too much expression nesting must be a compile error.
+    #[test]
+    fn too_deep_expression_nesting_gives_error() {
+        // With only 2 scratch addresses available (0x7E and 0x7C), more than 2 levels of nesting should error.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            asm_for(
+                "fn main() { let a = serial_getc() let b = serial_getc() let c = serial_getc() \
+                 let d = serial_getc() let e = serial_getc() \
+                 serial_putc(a + (b + (c + (d + e)))) }",
+            )
+        }));
+        assert!(
+            result.is_err(),
+            "too deep expression nesting must be a compile error"
+        );
+    }
+
     // An `if` whose condition is not `==`/`!=` used to emit a COMMENT and then nothing: no
     // then-branch, no else-branch. The whole decision vanished from the .hex and the compiler
     // exited 0, so `if temp > 80 { stop() }` became a program that never stops -- in a chip
