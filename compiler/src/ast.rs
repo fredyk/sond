@@ -122,6 +122,7 @@ pub struct Global {
     /// `Some(N)` for a module-level array `let NAME[N] = [..]` (a constant table
     /// in `.data`); `None` for a scalar global.
     pub array_len: Option<i64>,
+    pub ty: Option<Type>,
     pub init: Expr,
 }
 

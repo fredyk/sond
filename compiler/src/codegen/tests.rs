@@ -602,6 +602,115 @@ fn a_bss_global_array_still_reads_and_writes_on_real_x64() {
 }
 
 #[test]
+fn module_level_byte_view_reserves_bytes_and_writes_in_bytes() {
+    // `let mut g: u8[32]` at module level must allocate exactly 32 bytes in .bss, resolve to
+    // the buffer address, index at byte granularitiy (two adjacent positions stay independent),
+    // and start zeroed.
+    let asm = emit_with_globals("let mut g: u8[32]\nfn main() -> i64 { g[0] }");
+    assert!(
+        asm.contains(".bss"),
+        "a byte view at module level must be reserved in .bss, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("g: .zero 32"),
+        "u8[32] must reserve exactly 32 bytes, not 256 words, got:\n{}",
+        &asm[..asm.len().min(3000)]
+    );
+    // The index must use byte-width stores (movb/movq %al) not 64-bit stores into word slots.
+    // With byte-width we get g[0]=65, g[1]=42 independently.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut g: u8[32]\nfn main() -> i64 { g[0] = 65\ng[0] }"
+        ),
+        65
+    );
+    // Two adjacent positions must be independent byte slots.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut g: u8[32]\nfn main() -> i64 {\n    g[0] = 65\n    g[1] = 42\n    g[0] + g[1]\n    }"
+        ),
+        107
+    );
+    // Byte-level independence via raw memory access: peek at g+0 and g+1 independently.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut g: u8[32]\nfn main() -> i64 {\n    g[0] = 65\n    g[1] = 42\n    peek8(g + 0)\n    }"
+        ),
+        65
+    );
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut g: u8[32]\nfn main() -> i64 {\n    g[0] = 65\n    g[1] = 42\n    peek8(g + 1)\n    }"
+        ),
+        42
+    );
+    // Must start at zero.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut g: u8[32]\nfn main() -> i64 { g[0] + g[31] }"
+        ),
+        0
+    );
+}
+
+#[test]
+fn module_level_u32_view_reserves_bytes_at_4_byte_granularity() {
+    // `let mut buf: u32[16]` must reserve 64 bytes (16 * 4), index at 4-byte boundaries.
+    let asm = emit_with_globals("let mut buf: u32[16]\nfn main() -> i64 { peek32(buf) }");
+    assert!(asm.contains(".bss"));
+    assert!(asm.contains("buf: .zero 64"));
+    // Write at element 0 and read it back. Value 0xaa = 170 fits in exit code.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut buf: u32[16]\nfn main() -> i64 {\n    buf[0] = 0xaa\n    peek32(buf)\n    }"
+        ),
+        0xaa
+    );
+    // Verify 4-byte granularity: write 1 to element 2 (byte offset 8).
+    // If the compiler mistakenly used 8-byte word granularity, writing 1 at offset 8
+    // would actually be element 1, not element 2. We verify by checking element 0 is still 0xaa.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut buf: u32[16]\nfn main() -> i64 {\n    buf[0] = 0xaa\n    buf[2] = 0xbb\n    peek32(buf)\n    }"
+        ),
+        0xaa  // element 0 unchanged by write to element 2
+    );
+    // Element 2 should be 0xbb = 187, fits in exit code.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut buf: u32[16]\nfn main() -> i64 {\n    buf[2] = 0xbb\n    peek32(buf + 8)\n    }"
+        ),
+        0xbb
+    );
+}
+
+#[test]
+fn module_level_view_large_does_not_expand_binary() {
+    // The binary size for a zeroed view must not grow proportionally to its capacity.
+    let asm_small = emit_with_globals("let mut g: u8[64]\nfn main() -> i64 { 0 }");
+    let asm_big = emit_with_globals("let mut g: u8[200000]\nfn main() -> i64 { 0 }");
+    let growth = asm_big.len() - asm_small.len();
+    assert!(
+        growth < 256,
+        "a zeroed view must NOT expand the binary: growth={growth} bytes (expected < 256)"
+    );
+}
+
+#[test]
+fn non_literal_view_length_is_a_compile_error() {
+    // If the length is not a literal (e.g. derived from a variable), compilation must fail.
+    let src = "let mut buf: u8[n]\nfn main(n: i64) -> i64 { 0 }";
+    let mut p = Parser::new(tokenize(src));
+    let funcs = p.parse_program();
+    let globals = p.take_globals();
+    // emit_program_g calls set_globals internally, which must panic for non-literal view lengths.
+    let result = std::panic::catch_unwind(|| {
+        emit_program_g(&globals, &[], &funcs);
+    });
+    assert!(result.is_err(), "set_globals must panic for non-literal view length");
+}
+
+#[test]
 fn logical_right_shift_zero_fills() {
     // `>>>` is LOGICAL (zero-fill), `>>` is arithmetic. -1 is all-ones; >>> 60 = 15.
     assert_eq!(
@@ -1969,4 +2078,112 @@ fn the_canonical_view_form_a_caller_writes_keeps_working() {
         "255 192",
         "the alpha of the first pixel and the blue of the last, through the form a caller writes"
     );
+}
+
+#[test]
+fn debug_parse_view() {
+    let src = "let mut g: u8[32]\nfn main() -> i64 { g[0] }";
+    let mut p = Parser::new(tokenize(src));
+    let _funcs = p.parse_program();
+    let globals = p.take_globals();
+    for g in &globals {
+        eprintln!("Global: name={}, array_len={:?}, ty={:?}", g.name, g.array_len, g.ty);
+    }
+    assert!(!globals.is_empty());
+}
+
+#[test]
+fn debug_view_codegen() {
+    let src = "let mut g: u8[32]\nfn main() -> i64 { g[0] }";
+    let asm = emit_with_globals(src);
+    eprintln!("=== ASM ===\n{}\n=== END ===", asm);
+    assert!(asm.contains(".bss"), "must have .bss section");
+}
+
+#[test]
+fn debug_view_codegen_full() {
+    let src = "let mut g: u8[32]\nfn main() -> i64 { g[0] }";
+    let asm = emit_with_globals(src);
+    eprintln!("=== FULL ASM ===\n{}", asm);
+}
+
+#[test]
+fn debug_view_run() {
+    let code = compile_and_run_with_globals("let mut g: u8[32]\nfn main() -> i64 { g[0] }");
+    eprintln!("Result: {}", code);
+    assert_eq!(code, 0, "default should be zero");
+}
+
+#[test]
+fn debug_view_write_read() {
+    let code = compile_and_run_with_globals(
+        "let mut g: u8[32]\nfn main() -> i64 { g[0] = 65\nprint_int(g[0])\n0 }"
+    );
+    eprintln!("Result: {}", code);
+    assert_eq!(code, 65);
+}
+
+#[test]
+fn debug_view_write_read_asm() {
+    let src = "let mut g: u8[32]\nfn main() -> i64 { g[0] = 65\nprint_int(g[0])\n0 }";
+    let asm = emit_with_globals(src);
+    eprintln!("=== FULL ASM ===\n{}", asm);
+}
+
+#[test]
+fn debug_view_write_read_capture() {
+    let out = compile_and_run_with_globals_capture(
+        "let mut g: u8[32]\nfn main() -> i64 { g[0] = 65\nprint_int(g[0])\n0 }"
+    );
+    eprintln!("stdout: '{}'", out);
+}
+
+// Helper: compile a program with globals and capture stdout.
+fn compile_and_run_with_globals_capture(src: &str) -> String {
+    use std::process::Command;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let mut p = Parser::new(tokenize(src));
+    let funcs = p.parse_program();
+    let globals = p.take_globals();
+    let asm = emit_program_g(&globals, &[], &funcs);
+    let dir = std::env::temp_dir();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stem = format!("sondc_vc_{}", std::process::id());
+    let asm_path = dir.join(format!("{}_{}.s", stem, n));
+    let bin_path = dir.join(format!("{}_{}", stem, n));
+    std::fs::write(&asm_path, asm).unwrap();
+    assert!(
+        Command::new("cc")
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .status()
+            .unwrap()
+            .success(),
+        "compile failed"
+    );
+    let output = Command::new(&bin_path).output().unwrap();
+    let _ = std::fs::remove_file(&asm_path);
+    let _ = std::fs::remove_file(&bin_path);
+    String::from_utf8_lossy(&output.stdout).trim_end().to_string()
+}
+
+#[test]
+fn debug_u32_view_codegen() {
+    let src = "let mut buf: u32[16]\nfn main() -> i64 { buf[0] = 0x12345678\npeek32(buf) }";
+    let asm = emit_with_globals(src);
+    // Check .bss section for view
+    assert!(asm.contains(".bss"), "must have .bss");
+    assert!(asm.contains("buf: .zero 64"), "must reserve 64 bytes");
+    
+    // Check the actual function code for proper 4-byte scaling
+    eprintln!("=== FULL ASM ===\n{}", asm);
+}
+
+#[test]
+fn debug_u32_view_full() {
+    let src = "let mut buf: u32[16]\nfn main() -> i64 {\n    buf[0] = 0x11111111\n    buf[1] = 0x22222222\n    peek32(buf) + peek32(buf + 4)\n}";
+    let code = compile_and_run_with_globals(src);
+    eprintln!("Exit code for 0x11111111 + 0x22222222 = {:x} => {}", code, code);
 }

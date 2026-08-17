@@ -182,7 +182,7 @@ impl Parser {
                         name,
                         value,
                         array_len,
-                        ..
+                        ty,
                     } = self.parse_let()
                     else {
                         unreachable!("parse_let returns a Let")
@@ -192,6 +192,7 @@ impl Parser {
                         mutable,
                         name,
                         array_len,
+                        ty,
                         init: value,
                     });
                 }

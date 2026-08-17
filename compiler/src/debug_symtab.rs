@@ -87,6 +87,7 @@ pub fn build_symtab_globals(funcs: &[Function]) -> Vec<Global> {
         mutable: false,
         name: name.to_string(),
         array_len: Some(words.len() as i64),
+        ty: None,
         init: Expr::List(words.into_iter().map(Expr::Int).collect()),
     };
 
@@ -96,6 +97,7 @@ pub fn build_symtab_globals(funcs: &[Function]) -> Vec<Global> {
             mutable: false,
             name: "__dbg_nfuncs".to_string(),
             array_len: None,
+            ty: None,
             init: Expr::Int(entries.len() as i64),
         },
         int_array("__dbg_fn", fn_words),
@@ -105,6 +107,7 @@ pub fn build_symtab_globals(funcs: &[Function]) -> Vec<Global> {
             mutable: false,
             name: "__dbg_names".to_string(),
             array_len: None,
+            ty: None,
             init: Expr::Str(names),
         },
     ]

@@ -999,6 +999,9 @@ struct Codegen {
     /// of zeros, which is RESERVED rather than written out (see `emit_globals`), so a buffer of
     /// millions of elements costs the compiler and the binary nothing per element.
     global_array_data: Vec<(String, Vec<GlobalWord>, usize)>,
+    /// `let NAME: T[N]` at module level — the element type and declared length, so
+    /// `emit_globals` can reserve the right number of BYTES (not words) in `.bss`.
+    global_view_lengths: HashMap<String, (Ty, i64)>,
     /// The value kind (`Int`/`Float`) of each in-scope local/parameter, so codegen
     /// knows to use the integer (`%rax`) or SSE (`%xmm0`) path for a `Var`. Reset per
     /// function alongside `locals`.
@@ -1081,6 +1084,10 @@ impl Codegen {
         self.locals.clear();
         self.var_types.clear();
         self.view_elem.clear();
+        // Register module-level view-typed globals so their element width is known.
+        for (name, (elem_kind, _byte_len)) in &self.global_view_lengths {
+            self.view_elem.insert(name.clone(), *elem_kind);
+        }
         // The debug agent itself must NOT be instrumented, or `__dbg_step` (and every helper it
         // calls to serve the socket) would re-enter the checkpoint at each statement: unbounded
         // recursion. The agent is the `__dbg_` namespace, so disable the checkpoint for all of it.
@@ -1349,6 +1356,30 @@ impl Codegen {
                 panic!("global `{}` is declared more than once", g.name);
             }
             self.global_names.insert(g.name.clone());
+            // A typed view at module level (`let NAME: T[N]`). Must have a literal length,
+            // reserves that many *bytes* (not words) in `.bss`, and the Var resolves to the
+            // buffer address; indexing scales by the element width.
+            if let Some(Type::View(elem, len_str)) = &g.ty {
+                let elem_kind = kind_of_type(elem);
+                let len: i64 = len_str.clone().unwrap_or_else(|| {
+                    panic!(
+                        "global `{}`: view length must be a literal (not a variable); \
+                         reserve it inside a function instead",
+                        g.name
+                    )
+                }).parse().unwrap_or_else(|_| {
+                    panic!(
+                        "global `{}`: view length must be a literal (not a variable); \
+                         reserve it inside a function instead",
+                        g.name
+                    )
+                });
+                let byte_len = len * elem_kind.bits() as i64 / 8;
+                assert_ne!(byte_len, 0, "global `{}`: view length must be > 0", g.name);
+                self.global_arrays.insert(g.name.clone());
+                self.global_view_lengths.insert(g.name.clone(), (elem_kind, byte_len));
+                continue;
+            }
             // An array global `let NAME[N] = [c0, c1, ...]` is a constant table in
             // `.data`; its `Var` resolves to the base ADDRESS so `NAME[i]` indexes.
             if let Some(n) = g.array_len {
@@ -1995,6 +2026,7 @@ impl Codegen {
             self.line(&format!("{cell}: .quad 0"));
         }
         self.emit_zeroed_arrays(zeroed);
+        self.emit_view_globals();
     }
 
     /// Reserves the ALL-ZERO module-level arrays in `.bss`, one `.zero <bytes>` each.
@@ -2014,6 +2046,20 @@ impl Codegen {
         self.line(".p2align 3");
         for (name, _, len) in zeroed {
             self.line(&format!("{name}: .zero {}", len * 8));
+        }
+    }
+
+    /// Reserves a typed view global (`let NAME: T[N]`) in `.bss` with the correct byte size.
+    /// A `u8[32]` reserves 32 BYTES; a `u32[16]` reserves 64 BYTES.
+    fn emit_view_globals(&mut self) {
+        let views = std::mem::take(&mut self.global_view_lengths);
+        if views.is_empty() {
+            return;
+        }
+        self.line(".bss");
+        self.line(".p2align 3");
+        for (name, (_, byte_len)) in views {
+            self.line(&format!("{name}: .zero {byte_len}"));
         }
     }
 
