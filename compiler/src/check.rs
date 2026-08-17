@@ -2547,7 +2547,15 @@ const LITERAL_BUILTINS: [&str; 7] = [
 pub fn check_string_literal_types(funcs: &[Function]) -> Result<(), String> {
     let sigs: HashMap<&str, &Function> = funcs.iter().map(|f| (f.name.as_str(), f)).collect();
     for f in funcs {
-        literals_block(&f.body, &f.name, &sigs)?;
+        // A parameter declared `string` carries code points just like a local one, so the
+        // body starts with them already known.
+        let strings: HashSet<String> = f
+            .params
+            .iter()
+            .filter(|p| holds_code_points(&p.ty))
+            .map(|p| p.name.clone())
+            .collect();
+        literals_block(&f.body, &f.name, &sigs, &strings)?;
     }
     Ok(())
 }
@@ -2564,11 +2572,25 @@ fn is_string_ty(ty: &Type) -> bool {
     }
 }
 
+/// Whether a type carries TEXT — code points four bytes wide. Narrower than [`is_string_ty`],
+/// and deliberately so: a byte view is a legitimate destination for `.utf8`, but it is also
+/// how every plain byte buffer is declared, and mistaking one for text rejects correct code.
+fn holds_code_points(ty: &Type) -> bool {
+    match ty {
+        Type::Named(n) => n == "string",
+        Type::View(inner, _) => matches!(inner.as_ref(), Type::Named(n) if n == "u32"),
+        _ => false,
+    }
+}
+
 fn literals_block(
     b: &Block,
     fname: &str,
     sigs: &HashMap<&str, &Function>,
+    outer_strings: &HashSet<String>,
 ) -> Result<(), String> {
+    // Names bound in an inner block die with it, so each block works on its own copy.
+    let mut strings: HashSet<String> = outer_strings.clone();
     for st in &b.stmts {
         match st {
             Stmt::Let { name, ty, value, .. } => {
@@ -2580,31 +2602,59 @@ fn literals_block(
                          declared `string`; text has a type — write `let {name}: string = ..`"
                     ));
                 }
-                literals_expr(value, fname, sigs)?;
+                // A variable declared `string` holds code points (UTF-32), not bytes.
+                // Binding it to anything else decays that address into a bare pointer and
+                // makes byte-level access look right at compile time when it is not.
+                if let Expr::Var(src) = value
+                    && strings.contains(src.as_str())
+                    && !ty.as_ref().is_some_and(holds_code_points)
+                {
+                    return Err(format!(
+                        "function `{fname}`: `{name}` is bound from `{src}`, which is a \
+                         `string` — code points four bytes wide, not bytes; text has a type — \
+                         write `let {name}: string = {src}` to keep the text, or \
+                         `let {name}: i64 = {src}.utf8` to get its bytes"
+                    ));
+                }
+                // Track what carries text. A bare `let q: string = l` arrives as
+                // `Type::Named("string")`; with a literal attached the parser has already
+                // lowered it to the view of code points. Rebinding the name to anything
+                // else drops it from the set — the new binding is what the name means now.
+                if ty.as_ref().is_some_and(holds_code_points) {
+                    strings.insert(name.clone());
+                } else {
+                    strings.remove(name);
+                }
+                literals_expr(value, fname, sigs, &strings)?;
             }
             Stmt::Assign { target, value } => {
-                literals_expr(target, fname, sigs)?;
-                literals_expr(value, fname, sigs)?;
+                literals_expr(target, fname, sigs, &strings)?;
+                literals_expr(value, fname, sigs, &strings)?;
             }
             Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Spawn(e) => {
-                literals_expr(e, fname, sigs)?
+                literals_expr(e, fname, sigs, &strings)?
             }
             Stmt::For { cond, body, .. } => {
                 if let Some(c) = cond {
-                    literals_expr(c, fname, sigs)?;
+                    literals_expr(c, fname, sigs, &strings)?;
                 }
-                literals_block(body, fname, sigs)?;
+                literals_block(body, fname, sigs, &strings)?;
             }
             _ => {}
         }
     }
     if let Some(t) = &b.tail {
-        literals_expr(t, fname, sigs)?;
+        literals_expr(t, fname, sigs, &strings)?;
     }
     Ok(())
 }
 
-fn literals_expr(e: &Expr, fname: &str, sigs: &HashMap<&str, &Function>) -> Result<(), String> {
+fn literals_expr(
+    e: &Expr,
+    fname: &str,
+    sigs: &HashMap<&str, &Function>,
+    strings: &HashSet<String>,
+) -> Result<(), String> {
     if let Expr::Call(callee, args) = e
         && let Expr::Var(name) = callee.as_ref()
     {
@@ -2629,22 +2679,24 @@ fn literals_expr(e: &Expr, fname: &str, sigs: &HashMap<&str, &Function>) -> Resu
     }
     match e {
         Expr::Binary(_, l, r) | Expr::Index(l, r) => {
-            literals_expr(l, fname, sigs)?;
-            literals_expr(r, fname, sigs)
+            literals_expr(l, fname, sigs, strings)?;
+            literals_expr(r, fname, sigs, strings)
         }
-        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => literals_expr(x, fname, sigs),
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
+            literals_expr(x, fname, sigs, strings)
+        }
         Expr::Call(c, args) => {
-            literals_expr(c, fname, sigs)?;
+            literals_expr(c, fname, sigs, strings)?;
             for a in args {
-                literals_expr(&a.value, fname, sigs)?;
+                literals_expr(&a.value, fname, sigs, strings)?;
             }
             Ok(())
         }
         Expr::If { cond, then_branch, else_branch } => {
-            literals_expr(cond, fname, sigs)?;
-            literals_block(then_branch, fname, sigs)?;
+            literals_expr(cond, fname, sigs, strings)?;
+            literals_block(then_branch, fname, sigs, strings)?;
             if let Some(eb) = else_branch {
-                literals_block(eb, fname, sigs)?;
+                literals_block(eb, fname, sigs, strings)?;
             }
             Ok(())
         }
@@ -3933,6 +3985,125 @@ mod tests {
                 .is_ok()
         );
         assert!(literals("fn main() -> i64 { print(\"hola\")\n0 }").is_ok());
+    }
+
+    #[test]
+    fn a_string_variable_cannot_be_rebound_as_an_integer() {
+        // The hole this closes: `l` is a string (code points, not bytes). Assigning it
+        // to `i64` makes byte-level access look correct at compile time when it's actually
+        // reading UTF-32 code points. The literal-level check already rejects `let p: i64 = "hola"`;
+        // this rejects `let p: i64 = l` where `l` was declared `string`.
+        let err = literals(
+            r#"fn main() -> i64 {
+                let l: string = "hello world"
+                let p: i64 = l
+                p
+            }"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("string"),
+            "a string variable cannot become a plain integer; error should mention 'string', got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_string_variable_can_be_bound_to_another_string() {
+        // Copying the reference while keeping the text type is fine.
+        assert!(
+            literals(
+                r#"fn main() -> i64 {
+                    let l: string = "hello"
+                    let q: string = l
+                    q.len
+                }"#,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_string_variable_can_be_bound_as_utf8_bytes() {
+        // `.utf8` asks explicitly for bytes; the parser substitutes the variable with the
+        // original literal, so the checker sees a Field(Str, "utf8"), not a plain Var.
+        assert!(
+            literals(
+                r#"fn main() -> i64 {
+                    let l: string = "hola"
+                    let p: i64 = l.utf8
+                    p
+                }"#,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_literal_utf8_is_fine_on_an_integer() {
+        // Same mechanism on a bare literal — the parser substitutes the underlying bytes.
+        assert!(literals("fn main() -> i64 { let p: i64 = \"hola\".utf8\np }").is_ok());
+    }
+
+    #[test]
+    fn a_string_variable_is_fine_as_a_string_parameter() {
+        // Passing a string variable to a function whose parameter is declared `string`.
+        assert!(
+            literals(
+                r#"fn takes(s: string) -> i64 { s.len }
+                fn main() -> i64 {
+                    let l: string = "hello"
+                    takes(l)
+                }"#,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_byte_buffer_is_not_text_and_can_become_a_pointer() {
+        // `u8[N]` is a buffer of bytes, not text: handing its base address to `i64` is the
+        // ordinary way to pass it to a syscall. The rule above must not mistake it for a
+        // `string` just because `.utf8` is also allowed to land in a byte view.
+        assert!(
+            literals(
+                r#"fn main() -> i64 {
+                    let mut buf: u8[16]
+                    let p: i64 = buf
+                    p
+                }"#,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_string_variable_cannot_be_rebound_as_a_byte_view() {
+        // The same lie in the other direction: `l` holds code points four bytes wide, so
+        // reading it through a byte view yields UTF-32 read as UTF-8.
+        assert!(
+            literals(
+                r#"fn main() -> i64 {
+                    let l: string = "hello"
+                    let b: u8[4] = l
+                    b[0]
+                }"#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_string_parameter_cannot_be_rebound_as_an_integer() {
+        // A parameter declared `string` holds code points exactly like a local one does.
+        assert!(
+            literals(
+                r#"fn first(s: string) -> i64 {
+                    let p: i64 = s
+                    p
+                }"#,
+            )
+            .is_err()
+        );
     }
 
     #[test]
