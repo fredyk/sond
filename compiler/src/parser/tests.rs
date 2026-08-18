@@ -46,7 +46,10 @@ fn parses_multiple_tests_with_distinct_names() {
     ));
     let funcs = p.parse_program();
     assert_eq!(funcs.len(), 2);
-    assert_ne!(funcs[0].name, funcs[1].name, "each test gets a distinct symbol");
+    assert_ne!(
+        funcs[0].name, funcs[1].name,
+        "each test gets a distinct symbol"
+    );
     assert!(funcs.iter().all(|f| f.is_test));
 }
 
@@ -490,8 +493,16 @@ fn parses_a_spawn_statement() {
     // `spawn f(a)` is a statement whose inner expression is the call to run on a
     // new thread.
     let f = parse_fn("fn run(a: i64) -> i64 { spawn work(a) 0 }");
-    let is_spawn_call = f.body.stmts.iter().any(|s| matches!(s, Stmt::Spawn(Expr::Call(_, _))));
-    assert!(is_spawn_call, "the body should hold a Spawn of a call, got {:?}", f.body);
+    let is_spawn_call = f
+        .body
+        .stmts
+        .iter()
+        .any(|s| matches!(s, Stmt::Spawn(Expr::Call(_, _))));
+    assert!(
+        is_spawn_call,
+        "the body should hold a Spawn of a call, got {:?}",
+        f.body
+    );
 }
 
 #[test]
@@ -552,12 +563,17 @@ fn parses_a_par_reduce() {
 #[test]
 fn parse_block_stamps_each_statement_with_its_source_line() {
     // Line 1: `fn f() {`; line 2: `let a = 1`; line 3: `let b = 2`; line 4: `a + b` (the tail).
-    let (toks, lines) = crate::lexer::tokenize_located("fn f() -> i64 {\nlet a = 1\nlet b = 2\na + b\n}");
+    let (toks, lines) =
+        crate::lexer::tokenize_located("fn f() -> i64 {\nlet a = 1\nlet b = 2\na + b\n}");
     let mut p = Parser::with_lines(toks, lines);
     let funcs = p.parse_program();
     let body = &funcs[0].body;
     assert_eq!(body.stmts.len(), 2, "two statements; `a + b` is the tail");
-    assert_eq!(body.stmt_lines, vec![2, 3], "each statement stamped with its line");
+    assert_eq!(
+        body.stmt_lines,
+        vec![2, 3],
+        "each statement stamped with its line"
+    );
 }
 
 #[test]
@@ -586,7 +602,10 @@ fn node_is_a_free_identifier_outside_a_graph() {
     // `node` is contextual: it must still work as an ordinary parameter/variable name (json.snd
     // uses `fn json_type(node: i64)`), so making it a keyword only inside `graph` matters.
     let f = parse_fn("fn json_type(node: i64) -> i64 { node }");
-    assert_eq!(f.params[0].name, "node", "`node` is a normal parameter name");
+    assert_eq!(
+        f.params[0].name, "node",
+        "`node` is a normal parameter name"
+    );
 }
 
 // --- RFC-0014: ports (interfaces implemented per target) ---
@@ -603,13 +622,20 @@ fn parses_a_port_with_bodyless_signatures() {
          }",
     ));
     let funcs = p.parse_program();
-    assert!(funcs.is_empty(), "a port declares no functions, got {funcs:?}");
+    assert!(
+        funcs.is_empty(),
+        "a port declares no functions, got {funcs:?}"
+    );
     let ports = p.take_ports();
     assert_eq!(ports.len(), 1, "one port parsed");
     assert_eq!(ports[0].name, "Serial");
     let names: Vec<&str> = ports[0].methods.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(names, vec!["serial_init", "serial_getc", "serial_putc"]);
-    assert_eq!(ports[0].methods[1].ret, Some(named("i64")), "keeps the return type");
+    assert_eq!(
+        ports[0].methods[1].ret,
+        Some(named("i64")),
+        "keeps the return type"
+    );
     assert_eq!(ports[0].methods[2].params[0].name, "b", "keeps the params");
 }
 
@@ -625,7 +651,11 @@ fn a_port_signature_keeps_its_contracts() {
     p.parse_program();
     let ports = p.take_ports();
     assert_eq!(ports[0].methods[0].ret_name.as_deref(), Some("b"));
-    assert_eq!(ports[0].methods[0].ensures.len(), 1, "the ensures clause is kept");
+    assert_eq!(
+        ports[0].methods[0].ensures.len(),
+        1,
+        "the ensures clause is kept"
+    );
 }
 
 #[test]
@@ -659,11 +689,17 @@ fn parses_a_provider_with_target_and_bodied_functions() {
          }",
     ));
     let funcs = p.parse_program();
-    assert!(funcs.is_empty(), "provider methods are not top-level functions, got {funcs:?}");
+    assert!(
+        funcs.is_empty(),
+        "provider methods are not top-level functions, got {funcs:?}"
+    );
     let provs = p.take_providers();
     assert_eq!(provs.len(), 1, "one provider parsed");
     assert_eq!(provs[0].port, "Serial", "names the port it implements");
-    assert_eq!(provs[0].target, "pic16", "names the target it implements for");
+    assert_eq!(
+        provs[0].target, "pic16",
+        "names the target it implements for"
+    );
     let names: Vec<&str> = provs[0].methods.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(names, vec!["serial_init", "serial_getc"]);
 }
@@ -783,5 +819,9 @@ fn a_struct_literal_still_parses_after_a_range_loop() {
          let p = P { a: 1, b: 2 }\np.a + s }",
     ))
     .parse_program();
-    assert_eq!(funcs.len(), 1, "a struct literal after a range loop must still parse");
+    assert_eq!(
+        funcs.len(),
+        1,
+        "a struct literal after a range loop must still parse"
+    );
 }

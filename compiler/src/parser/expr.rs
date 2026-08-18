@@ -187,7 +187,7 @@ impl Parser {
                         Some(Box::new(Block {
                             stmts: Vec::new(),
                             tail: Some(Box::new(nested)),
-                        stmt_lines: Vec::new(),
+                            stmt_lines: Vec::new(),
                         }))
                     } else {
                         Some(Box::new(self.parse_block()))
@@ -231,7 +231,7 @@ impl Parser {
                         Block {
                             stmts: Vec::new(),
                             tail: Some(Box::new(e)),
-                        stmt_lines: Vec::new(),
+                            stmt_lines: Vec::new(),
                         }
                     };
                     arms.push(MatchArm {

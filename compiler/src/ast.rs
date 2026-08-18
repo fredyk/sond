@@ -122,6 +122,8 @@ pub struct Global {
     /// `Some(N)` for a module-level array `let NAME[N] = [..]` (a constant table
     /// in `.data`); `None` for a scalar global.
     pub array_len: Option<i64>,
+    /// The declared type, when there is one. `Some(Type::View(..))` is a module-level
+    /// buffer (`let NAME: u8[32]`), which reserves its own storage in `.bss`.
     pub ty: Option<Type>,
     pub init: Expr,
 }

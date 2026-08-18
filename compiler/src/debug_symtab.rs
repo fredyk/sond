@@ -156,7 +156,11 @@ mod tests {
 
         // __dbg_loc is [offset, name_start, name_len] per local. Offsets match the prologue.
         let loc = ints(&global(&g, "__dbg_loc").init);
-        assert_eq!(loc, vec![-8, 0, 1, -16, 1, 1, -24, 2, 1], "x@-8, a@-16, b@-24");
+        assert_eq!(
+            loc,
+            vec![-8, 0, 1, -16, 1, 1, -24, 2, 1],
+            "x@-8, a@-16, b@-24"
+        );
 
         // __dbg_fn is [line_lo, line_hi, local_start, local_count]; the sole function owns 3 locals.
         let f = ints(&global(&g, "__dbg_fn").init);
@@ -172,11 +176,17 @@ mod tests {
                    fn __dbg_helper() -> i64 {\n  let q = 1\n  q\n}\n";
         let funcs = Parser::new(tokenize(src)).parse_program();
         let g = build_symtab_globals(&funcs);
-        assert!(matches!(global(&g, "__dbg_nfuncs").init, Expr::Int(1)), "only `f` counts");
+        assert!(
+            matches!(global(&g, "__dbg_nfuncs").init, Expr::Int(1)),
+            "only `f` counts"
+        );
         let names = match &global(&g, "__dbg_names").init {
             Expr::Str(s) => s.clone(),
             _ => panic!(),
         };
-        assert_eq!(names, "s", "the array `buf` and the agent's `q` are excluded");
+        assert_eq!(
+            names, "s",
+            "the array `buf` and the agent's `q` are excluded"
+        );
     }
 }

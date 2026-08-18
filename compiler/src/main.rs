@@ -22,7 +22,9 @@ use std::process::{Command, ExitCode};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: sondc <input.snd> [-o <output>] [--freestanding | --uefi | --windows | --shared | --object]");
+        eprintln!(
+            "usage: sondc <input.snd> [-o <output>] [--freestanding | --uefi | --windows | --shared | --object]"
+        );
         return ExitCode::from(2);
     }
 
@@ -46,7 +48,9 @@ fn main() -> ExitCode {
         break;
     }
     let Some(input) = input else {
-        eprintln!("usage: sondc <input.snd> [-o <output>] [--test | --freestanding | --uefi | --windows | --shared | --object]");
+        eprintln!(
+            "usage: sondc <input.snd> [-o <output>] [--test | --freestanding | --uefi | --windows | --shared | --object]"
+        );
         return ExitCode::from(2);
     };
     let output = parse_output_flag(&args).unwrap_or_else(|| default_output(input));
@@ -76,24 +80,23 @@ fn main() -> ExitCode {
     // the user's. The hook used to be set further down, after this phase.
     std::panic::set_hook(Box::new(|_| {}));
     let input_for_resolve = input.clone();
-    let (mut src, cov_scope) =
-        match std::panic::catch_unwind(move || {
-            sondc::resolve::resolve_includes_scoped(std::path::Path::new(&input_for_resolve))
-        })
-        .unwrap_or_else(|e| {
-            Err(std::io::Error::other(format!(
-                "lex error while reading {input}: {}",
-                panic_message(&e)
-            )))
-        }) {
-            Ok(s) => s,
-            Err(e) => {
-                // `e` already names the file that failed (the entry, or the nested include that
-                // could not be resolved), so it is not re-blamed on `input` here.
-                eprintln!("sondc: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let (mut src, cov_scope) = match std::panic::catch_unwind(move || {
+        sondc::resolve::resolve_includes_scoped(std::path::Path::new(&input_for_resolve))
+    })
+    .unwrap_or_else(|e| {
+        Err(std::io::Error::other(format!(
+            "lex error while reading {input}: {}",
+            panic_message(&e)
+        )))
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            // `e` already names the file that failed (the entry, or the nested include that
+            // could not be resolved), so it is not re-blamed on `input` here.
+            eprintln!("sondc: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     // RFC-0016: in a --debug build, append the debug agent, WRITTEN IN SOND (see `debug_agent`). The
     // per-statement checkpoint (emitted by codegen) calls `__dbg_step(line)`; the agent is the Sond
     // that serves the socket step protocol. Appended after include resolution, so it depends only on
@@ -165,7 +168,9 @@ fn main() -> ExitCode {
             let uses = p.take_uses();
             sondc::testing::check_all_tests_registered(&declared_tests, &funcs)
                 .unwrap_or_else(|e| panic!("{e}"));
-            (funcs, globals, structs, externs, enums, ports, providers, uses)
+            (
+                funcs, globals, structs, externs, enums, ports, providers, uses,
+            )
         }) {
             Ok(fg) => fg,
             Err(e) => {

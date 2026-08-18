@@ -687,7 +687,8 @@ impl Parser {
                     } else {
                         // No condition when the body (`{`) or an `invariant` clause follows `for`
                         // directly, an infinite loop, optionally carrying an invariant.
-                        let cond = if matches!(self.peek(), Some(Token::LBrace | Token::Invariant)) {
+                        let cond = if matches!(self.peek(), Some(Token::LBrace | Token::Invariant))
+                        {
                             None
                         } else {
                             let saved = self.no_struct_lit;
@@ -1083,14 +1084,18 @@ impl Parser {
                 }
                 // The length is either the NAME of the parameter/local carrying it, or a literal
                 // for a view over a store whose size is written down at the declaration.
-                Some(Token::Ident(len)) if self.tokens.get(self.pos + 2) == Some(&Token::RBracket) => {
+                Some(Token::Ident(len))
+                    if self.tokens.get(self.pos + 2) == Some(&Token::RBracket) =>
+                {
                     let len = len.clone();
                     self.expect(Token::LBracket);
                     self.advance();
                     self.expect(Token::RBracket);
                     return Type::View(Box::new(base), Some(len));
                 }
-                Some(Token::Int(len)) if self.tokens.get(self.pos + 2) == Some(&Token::RBracket) => {
+                Some(Token::Int(len))
+                    if self.tokens.get(self.pos + 2) == Some(&Token::RBracket) =>
+                {
                     let len = len.to_string();
                     self.expect(Token::LBracket);
                     self.advance();

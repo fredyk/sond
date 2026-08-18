@@ -138,7 +138,9 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
         l!("        banksel PORTA");
         l!("        btfsc   PORTA, 1");
         l!("        goto    _sg_wait");
-        l!("        call    _halfdly        ; half a bit -> middle of the start bit (center sampling)");
+        l!(
+            "        call    _halfdly        ; half a bit -> middle of the start bit (center sampling)"
+        );
         l!("_sg_bit:");
         l!("        call    _bitdly         ; advance ~one bit to the middle of this data bit");
         l!("        banksel PORTA");
@@ -208,7 +210,11 @@ fn as_call(e: &Expr) -> Option<(&str, &[crate::ast::Arg])> {
 /// bodies and `if` branches. Phase-1b locals are STATIC (no data stack), apt for a small,
 /// non-reentrant MCU program.
 fn collect_locals(b: &crate::ast::Block, map: &mut HashMap<String, u8>, next: &mut u8) {
-    let scan_if = |cond: &Expr, t: &crate::ast::Block, e: Option<&crate::ast::Block>, map: &mut HashMap<String, u8>, next: &mut u8| {
+    let scan_if = |cond: &Expr,
+                   t: &crate::ast::Block,
+                   e: Option<&crate::ast::Block>,
+                   map: &mut HashMap<String, u8>,
+                   next: &mut u8| {
         let _ = cond;
         collect_locals(t, map, next);
         if let Some(eb) = e {
@@ -369,7 +375,16 @@ fn emit_block(
                 cond,
                 then_branch,
                 else_branch,
-            } => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals, fnp, le),
+            } => emit_if(
+                cond,
+                then_branch,
+                else_branch.as_deref(),
+                out,
+                lbl,
+                locals,
+                fnp,
+                le,
+            ),
             e if as_call(e).is_some() => emit_call(e, out, locals, fnp),
             // A value tail is the block's result — for a function body it is the
             // return value, left in W.
@@ -446,7 +461,16 @@ fn emit_stmt(
             cond,
             then_branch,
             else_branch,
-        }) => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals, fnp, le),
+        }) => emit_if(
+            cond,
+            then_branch,
+            else_branch.as_deref(),
+            out,
+            lbl,
+            locals,
+            fnp,
+            le,
+        ),
         Stmt::Expr(e) => emit_call(e, out, locals, fnp),
         _ => l!("        ; (unsupported statement omitted in Phase 1b)"),
     }
@@ -476,7 +500,10 @@ fn emit_if(
         // Leave W = lhs XOR rhs, so the Z flag is set iff the two are equal.
         if let Some(c) = const8(rhs) {
             eval_to_w(lhs, out, locals, fnp);
-            l!("        xorlw   0x{:02X}            ; Z set iff equal", c & 0xFF);
+            l!(
+                "        xorlw   0x{:02X}            ; Z set iff equal",
+                c & 0xFF
+            );
         } else {
             // General comparison of two runtime values (e.g. a frame checksum
             // `calc == chk`): stash rhs in a scratch register, then XOR lhs in.
@@ -635,10 +662,22 @@ mod tests {
     #[test]
     fn an_ordered_comparison_emits_the_branch_instead_of_vanishing() {
         for (src, _name) in [
-            ("fn main() { let t = peek8(0x20)  if t > 80 { poke8(0x21, 1) } }", ">"),
-            ("fn main() { let t = peek8(0x20)  if t < 80 { poke8(0x21, 1) } }", "<"),
-            ("fn main() { let t = peek8(0x20)  if t >= 80 { poke8(0x21, 1) } }", ">="),
-            ("fn main() { let t = peek8(0x20)  if t <= 80 { poke8(0x21, 1) } }", "<="),
+            (
+                "fn main() { let t = peek8(0x20)  if t > 80 { poke8(0x21, 1) } }",
+                ">",
+            ),
+            (
+                "fn main() { let t = peek8(0x20)  if t < 80 { poke8(0x21, 1) } }",
+                "<",
+            ),
+            (
+                "fn main() { let t = peek8(0x20)  if t >= 80 { poke8(0x21, 1) } }",
+                ">=",
+            ),
+            (
+                "fn main() { let t = peek8(0x20)  if t <= 80 { poke8(0x21, 1) } }",
+                "<=",
+            ),
         ] {
             let asm = asm_for(src);
             assert!(
@@ -680,10 +719,16 @@ mod tests {
     #[test]
     fn rx_samples_at_bit_center_not_edge() {
         let asm = asm_for("fn main() { serial_init() }");
-        assert!(asm.contains("_halfdly:"), "expected a half-bit delay routine _halfdly");
+        assert!(
+            asm.contains("_halfdly:"),
+            "expected a half-bit delay routine _halfdly"
+        );
 
         let wait = asm.find("_sg_wait:").expect("serial_getc start-bit wait");
-        let sg_bit = asm[wait..].find("_sg_bit:").expect("serial_getc sample loop") + wait;
+        let sg_bit = asm[wait..]
+            .find("_sg_bit:")
+            .expect("serial_getc sample loop")
+            + wait;
         let intro = &asm[wait..sg_bit];
         assert!(
             intro.contains("call    _halfdly"),
@@ -710,9 +755,18 @@ mod tests {
     fn serial_init_makes_rx_pin_digital() {
         let asm = asm_for("fn main() { serial_init() }");
         // 111 = comparators off, CxIN pins digital I/O (0x00 would be an ANALOG mode).
-        assert!(asm.contains("movlw   0x07"), "serial_init must load CM<2:0>=111 to disable comparators");
-        assert!(asm.contains("movwf   CMCON0"), "serial_init must write CMCON0 to make RA1 digital");
-        assert!(asm.contains("clrf    VRCON"), "serial_init must disable CVref (also on RA1)");
+        assert!(
+            asm.contains("movlw   0x07"),
+            "serial_init must load CM<2:0>=111 to disable comparators"
+        );
+        assert!(
+            asm.contains("movwf   CMCON0"),
+            "serial_init must write CMCON0 to make RA1 digital"
+        );
+        assert!(
+            asm.contains("clrf    VRCON"),
+            "serial_init must disable CVref (also on RA1)"
+        );
     }
 
     // Reading an input register (peek8) must load it into W under a bank select,
@@ -735,10 +789,21 @@ mod tests {
     // needs for rrf-style byte assembly.
     #[test]
     fn shift_by_a_constant() {
-        let asm = asm_for("fn main() { serial_init() let x = serial_getc() serial_putc(x << 1) serial_putc(x >> 1) }");
-        assert!(!asm.contains("unsupported operator"), "a constant shift must be supported:\n{asm}");
-        assert!(asm.contains("addwf   0x7E, w         ; << 1"), "<< 1 doubles via addwf");
-        assert!(asm.contains("rrf     0x7E, w         ; >> 1"), ">> 1 uses rrf");
+        let asm = asm_for(
+            "fn main() { serial_init() let x = serial_getc() serial_putc(x << 1) serial_putc(x >> 1) }",
+        );
+        assert!(
+            !asm.contains("unsupported operator"),
+            "a constant shift must be supported:\n{asm}"
+        );
+        assert!(
+            asm.contains("addwf   0x7E, w         ; << 1"),
+            "<< 1 doubles via addwf"
+        );
+        assert!(
+            asm.contains("rrf     0x7E, w         ; >> 1"),
+            ">> 1 uses rrf"
+        );
     }
 
     // `break` exits the enclosing loop — the construct the serial start-bit wait
@@ -746,12 +811,17 @@ mod tests {
     // loop's end label, and an infinite `for { }` must grow one.
     #[test]
     fn break_exits_the_enclosing_loop() {
-        let asm = asm_for("fn main() { serial_init() for { let b = serial_getc() if b == 0 { break } } }");
+        let asm = asm_for(
+            "fn main() { serial_init() for { let b = serial_getc() if b == 0 { break } } }",
+        );
         assert!(
             !asm.contains("(unsupported statement"),
             "break must be compiled, not dropped:\n{asm}"
         );
-        assert!(asm.contains("goto    _end"), "break must jump to the loop end label:\n{asm}");
+        assert!(
+            asm.contains("goto    _end"),
+            "break must jump to the loop end label:\n{asm}"
+        );
     }
 
     // When the source defines a function whose name is a backend intrinsic
@@ -765,7 +835,10 @@ mod tests {
             !asm.contains("receive one byte from RA1"),
             "the backend must cede its serial_getc intrinsic to the user's definition:\n{asm}"
         );
-        assert!(asm.contains("serial_getc:"), "the user's serial_getc subroutine must be emitted");
+        assert!(
+            asm.contains("serial_getc:"),
+            "the user's serial_getc subroutine must be emitted"
+        );
     }
 
     // User-defined functions must be compiled (emitted as subroutines) and
@@ -777,16 +850,28 @@ mod tests {
         let asm = asm_for(
             "fn add1(x: i64) -> i64 { x + 1 } fn main() { serial_init() let y = add1(5) serial_putc(y) }",
         );
-        assert!(asm.contains("add1:"), "the user function must be emitted as a subroutine:\n{asm}");
-        assert!(asm.contains("call    add1"), "main must call the user function");
+        assert!(
+            asm.contains("add1:"),
+            "the user function must be emitted as a subroutine:\n{asm}"
+        );
+        assert!(
+            asm.contains("call    add1"),
+            "main must call the user function"
+        );
         assert!(
             asm.contains("arg 0 -> param"),
             "the argument must be passed into the callee's parameter slot:\n{asm}"
         );
         // The call is in value position (`let y = add1(5)`); it must not fall
         // through to either unsupported arm.
-        assert!(!asm.contains("unsupported call"), "a user-function call must not be rejected");
-        assert!(!asm.contains("unsupported expression"), "a user call as a value must be compiled");
+        assert!(
+            !asm.contains("unsupported call"),
+            "a user-function call must not be rejected"
+        );
+        assert!(
+            !asm.contains("unsupported expression"),
+            "a user call as a value must be compiled"
+        );
     }
 
     // delay_loop(n) is a calibrated busy-loop — the timing primitive a bit-bang
@@ -795,16 +880,26 @@ mod tests {
     #[test]
     fn delay_loop_emits_a_calibrated_busy_loop() {
         let asm = asm_for("fn main() { serial_init() delay_loop(20) }");
-        assert!(asm.contains("_delayw:"), "a parameterized delay subroutine must exist:\n{asm}");
-        assert!(asm.contains("movlw   0x14"), "delay_loop(20) must load the count 20");
-        assert!(asm.contains("call    _delayw"), "delay_loop must call the delay subroutine");
+        assert!(
+            asm.contains("_delayw:"),
+            "a parameterized delay subroutine must exist:\n{asm}"
+        );
+        assert!(
+            asm.contains("movlw   0x14"),
+            "delay_loop(20) must load the count 20"
+        );
+        assert!(
+            asm.contains("call    _delayw"),
+            "delay_loop must call the delay subroutine"
+        );
     }
 
     // poke8 must accept a runtime VALUE (not just a constant) into a fixed
     // register — e.g. CCPR1L = a received PWM duty, or a computed pin pattern.
     #[test]
     fn poke8_writes_a_variable_value() {
-        let asm = asm_for("fn main() { serial_init() let speed = serial_getc() poke8(0x15, speed) }");
+        let asm =
+            asm_for("fn main() { serial_init() let speed = serial_getc() poke8(0x15, speed) }");
         assert!(
             asm.contains("movwf   0x15"),
             "poke8(reg, var) must write the evaluated value to the register:\n{asm}"
@@ -820,11 +915,16 @@ mod tests {
     // (the ADD8 node validated its checksum and never answered).
     #[test]
     fn if_compares_two_variables() {
-        let asm = asm_for("fn main() { let a = serial_getc() let b = serial_getc() if a == b { serial_putc(1) } }");
+        let asm = asm_for(
+            "fn main() { let a = serial_getc() let b = serial_getc() if a == b { serial_putc(1) } }",
+        );
         assert!(
             !asm.contains("unsupported condition"),
             "a var == var condition must be supported, got:\n{asm}"
         );
-        assert!(asm.contains("xorwf"), "var == var equality should XOR the two operands (xorwf)");
+        assert!(
+            asm.contains("xorwf"),
+            "var == var equality should XOR the two operands (xorwf)"
+        );
     }
 }
