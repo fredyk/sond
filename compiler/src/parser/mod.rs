@@ -269,6 +269,13 @@ impl Parser {
         std::mem::take(&mut self.uses)
     }
 
+    /// The source text of each `string` binding, collected while parsing. The desugar
+    /// pass uses this map to convert string-to-string argument passes into byte-pointer
+    /// passes (replacing the variable argument with the original string literal).
+    pub fn take_string_bytes(&mut self) -> HashMap<String, String> {
+        std::mem::take(&mut self.string_bytes)
+    }
+
     /// Parses `enum Name { A, B(T), C }`: a sum type; each variant is a bare tag or
     /// carries a single payload type in parentheses (`Some(i64)`). Trailing comma allowed.
     fn parse_enum(&mut self) -> EnumDef {

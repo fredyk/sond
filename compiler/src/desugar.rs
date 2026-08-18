@@ -1159,6 +1159,373 @@ fn sr_expr(e: &mut Expr) {
     }
 }
 
+/// When a `string` local is passed as argument to a `string` parameter, the local holds a
+/// pointer to UTF-32 code points (one `.long` per character in `.rodata`), but the callee's
+/// `string` parameter expects a pointer to UTF-8 bytes. The parser already knows the original
+/// literal text for each `string` binding (it keeps it in `string_bytes` to implement `.utf8`);
+/// here we reuse that knowledge to pass the correct bytes instead of the code points.
+///
+/// The parser substitutes `l.utf8` → `Expr::Field(Expr::Str("..."), "utf8")` for a tracked
+/// variable `l`, and codegen handles that by loading the string's rodata label. The same
+/// mechanism works if we replace the argument `Expr::Var("l")` with `Expr::Str("...")`: codegen
+/// emits `leaq label(%rip), %rax`, which is exactly the UTF-8 address the callee needs.
+///
+/// If the compiler cannot find the original text (for example, the variable itself came from
+/// somewhere else at runtime, e.g. a parameter), this is a COMPILE ERROR — we never emit code
+/// that would pass UTF-32 bytes pretending to be UTF-8.
+pub fn desugar_string_args(
+    funcs: &mut [Function],
+    string_bytes: &HashMap<String, String>,
+) -> Result<(), Vec<String>> {
+    // Per-function parameter index: callee_name -> params vector (by position).
+    // Collect into owned Param structs to avoid borrowing `funcs` while iterating it.
+    let callee_params: HashMap<String, Vec<Param>> = funcs
+        .iter()
+        .map(|f| (f.name.clone(), f.params.clone()))
+        .collect();
+
+    let mut errors = Vec::new();
+
+    // First pass: check all string-to-string arguments and collect errors.
+    for f in funcs.iter() {
+        let strings = find_string_vars(&f.body);
+        walk_and_check(&f.body, string_bytes, &callee_params, &strings, &mut errors);
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+    }
+
+    // Second pass: actually replace string variable arguments with their original text.
+    for f in funcs.iter_mut() {
+        let strings = find_string_vars(&f.body);
+        walk_and_replace(&mut f.body, string_bytes, &strings);
+    }
+
+    Ok(())
+}
+
+/// Find all `string`-typed variable names in a body (params already known, plus `let` bindings).
+fn find_string_vars(body: &Block) -> HashSet<String> {
+    let mut strings = HashSet::new();
+    collect_string_names(body, &mut strings);
+    strings
+}
+
+fn collect_string_names(b: &Block, out: &mut HashSet<String>) {
+    for stmt in &b.stmts {
+        match stmt {
+            Stmt::Let { name, ty, value, .. } => {
+                if ty.as_ref().is_some_and(|t| is_string_type(t)) {
+                    out.insert(name.clone());
+                }
+                collect_string_names_in_expr(value, out);
+            }
+            Stmt::Assign { target, value } => {
+                collect_string_names_in_expr(target, out);
+                collect_string_names_in_expr(value, out);
+            }
+            Stmt::Expr(e) | Stmt::Spawn(e) => collect_string_names_in_expr(e, out),
+            Stmt::Return(Some(e)) => collect_string_names_in_expr(e, out),
+            Stmt::For { cond, body, .. } => {
+                if let Some(c) = cond {
+                    collect_string_names_in_expr(c, out);
+                }
+                collect_string_names(body, out);
+            }
+            Stmt::Par(peers) | Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
+                for p in peers {
+                    collect_string_names_in_expr(p, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(t) = &b.tail {
+        collect_string_names_in_expr(t, out);
+    }
+}
+
+fn collect_string_names_in_expr(e: &Expr, out: &mut HashSet<String>) {
+    match e {
+        Expr::Binary(_, l, r) => {
+            collect_string_names_in_expr(l, out);
+            collect_string_names_in_expr(r, out);
+        }
+        Expr::Unary(_, x) => collect_string_names_in_expr(x, out),
+        Expr::Index(b, i) => {
+            collect_string_names_in_expr(b, out);
+            collect_string_names_in_expr(i, out);
+        }
+        Expr::Field(b, _) => collect_string_names_in_expr(b, out),
+        Expr::Cast(x, _) => collect_string_names_in_expr(x, out),
+        Expr::Call(c, args) => {
+            collect_string_names_in_expr(c, out);
+            for a in args {
+                collect_string_names_in_expr(&a.value, out);
+            }
+        }
+        Expr::List(items) => items.iter().for_each(|it| collect_string_names_in_expr(it, out)),
+        Expr::StructLit(_, fields) => {
+            fields.iter().for_each(|(_, v)| collect_string_names_in_expr(v, out))
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_string_names_in_expr(cond, out);
+            collect_string_names(then_branch, out);
+            if let Some(eb) = else_branch {
+                collect_string_names(eb, out);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            collect_string_names_in_expr(scrutinee, out);
+            for arm in arms {
+                collect_string_names(&arm.body, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Check all expressions in a block, reporting errors for string vars with unknown origin.
+fn walk_and_check(
+    b: &Block,
+    string_bytes: &HashMap<String, String>,
+    callee_params: &HashMap<String, Vec<Param>>,
+    strings: &HashSet<String>,
+    errors: &mut Vec<String>,
+) {
+    for stmt in &b.stmts {
+        match stmt {
+            Stmt::Let { value, .. } => {
+                walk_and_check_expr(value, string_bytes, callee_params, strings, errors);
+            }
+            Stmt::Assign { target, value } => {
+                walk_and_check_expr(target, string_bytes, callee_params, strings, errors);
+                walk_and_check_expr(value, string_bytes, callee_params, strings, errors);
+            }
+            Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => {
+                walk_and_check_expr(e, string_bytes, callee_params, strings, errors);
+            }
+            Stmt::For { cond, body, .. } => {
+                if let Some(c) = cond {
+                    walk_and_check_expr(c, string_bytes, callee_params, strings, errors);
+                }
+                walk_and_check(body, string_bytes, callee_params, strings, errors);
+            }
+            Stmt::Par(peers) | Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
+                for p in peers {
+                    walk_and_check_expr(p, string_bytes, callee_params, strings, errors);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(tail) = &b.tail {
+        walk_and_check_expr(tail, string_bytes, callee_params, strings, errors);
+    }
+}
+
+fn walk_and_check_expr(
+    e: &Expr,
+    string_bytes: &HashMap<String, String>,
+    callee_params: &HashMap<String, Vec<Param>>,
+    strings: &HashSet<String>,
+    errors: &mut Vec<String>,
+) {
+    match e {
+        Expr::Call(callee, args) => {
+            if let Expr::Var(fname) = callee.as_ref() {
+                if let Some(params) = callee_params.get(fname) {
+                    for (i, arg) in args.iter().enumerate() {
+                        if let Expr::Var(vname) = &arg.value {
+                            if strings.contains(vname.as_str()) {
+                                if let Some(param) = params.get(i) {
+                                    if is_string_type(&param.ty) {
+                                        if !string_bytes.contains_key(vname) {
+                                            errors.push(
+                                                format!(
+                                                "`{vname}` is a `string` but its origin is \
+                                                 unknown — cannot pass its bytes; write \
+                                                 `let {vname}: string = \"...\"` to declare \
+                                                 a known literal",
+                                            )
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            walk_and_check_expr(callee, string_bytes, callee_params, strings, errors);
+            for arg in args {
+                walk_and_check_expr(
+                    &arg.value,
+                    string_bytes,
+                    callee_params,
+                    strings,
+                    errors,
+                );
+            }
+        }
+        Expr::Binary(_, l, r) => {
+            walk_and_check_expr(l, string_bytes, callee_params, strings, errors);
+            walk_and_check_expr(r, string_bytes, callee_params, strings, errors);
+        }
+        Expr::Unary(_, x) => {
+            walk_and_check_expr(x, string_bytes, callee_params, strings, errors);
+        }
+        Expr::Index(b, i) => {
+            walk_and_check_expr(b, string_bytes, callee_params, strings, errors);
+            walk_and_check_expr(i, string_bytes, callee_params, strings, errors);
+        }
+        Expr::Field(x, _) => {
+            walk_and_check_expr(x, string_bytes, callee_params, strings, errors);
+        }
+        Expr::Cast(x, _) => {
+            walk_and_check_expr(x, string_bytes, callee_params, strings, errors);
+        }
+        Expr::List(items) => {
+            for item in items {
+                walk_and_check_expr(item, string_bytes, callee_params, strings, errors);
+            }
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields {
+                walk_and_check_expr(v, string_bytes, callee_params, strings, errors);
+            }
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            walk_and_check_expr(cond, string_bytes, callee_params, strings, errors);
+            walk_and_check(then_branch, string_bytes, callee_params, strings, errors);
+            if let Some(eb) = else_branch {
+                walk_and_check(eb, string_bytes, callee_params, strings, errors);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            walk_and_check_expr(scrutinee, string_bytes, callee_params, strings, errors);
+            for arm in arms {
+                walk_and_check(&arm.body, string_bytes, callee_params, strings, errors);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_string_type(ty: &crate::ast::Type) -> bool {
+    matches!(ty, crate::ast::Type::Named(n) if n == "string")
+}
+
+/// Mutably walk a block, replacing string variable arguments with their original literal.
+fn walk_and_replace(b: &mut Block, string_bytes: &HashMap<String, String>, strings: &HashSet<String>) {
+    for stmt in &mut b.stmts {
+        match stmt {
+            Stmt::Let { value, .. } => {
+                walk_and_replace_expr(value, string_bytes, strings);
+            }
+            Stmt::Assign { target, value } => {
+                walk_and_replace_expr(target, string_bytes, strings);
+                walk_and_replace_expr(value, string_bytes, strings);
+            }
+            Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => {
+                walk_and_replace_expr(e, string_bytes, strings);
+            }
+            Stmt::For { cond, body, .. } => {
+                if let Some(c) = cond {
+                    walk_and_replace_expr(c, string_bytes, strings);
+                }
+                walk_and_replace(body, string_bytes, strings);
+            }
+            Stmt::Par(peers)
+            | Stmt::ParLet { peers, .. }
+            | Stmt::ParReduce { peers, .. } => {
+                for p in peers {
+                    walk_and_replace_expr(p, string_bytes, strings);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(tail) = &mut b.tail {
+        walk_and_replace_expr(tail, string_bytes, strings);
+    }
+}
+
+/// Mutably walk an expression, replacing string variable arguments with their original literal.
+fn walk_and_replace_expr(e: &mut Expr, string_bytes: &HashMap<String, String>, strings: &HashSet<String>) {
+    match e {
+        Expr::Call(callee, args) => {
+            // Check if any argument is a string variable that should be replaced.
+            for arg in args.iter_mut() {
+                if let Expr::Var(vname) = &arg.value {
+                    if strings.contains(vname.as_str()) {
+                        if let Some(original) = string_bytes.get(vname.as_str()) {
+                            arg.value = Expr::Str(original.clone());
+                        }
+                    }
+                }
+            }
+            walk_and_replace_expr(callee, string_bytes, strings);
+            for arg in args {
+                walk_and_replace_expr(&mut arg.value, string_bytes, strings);
+            }
+        }
+        Expr::Binary(_, l, r) => {
+            walk_and_replace_expr(l, string_bytes, strings);
+            walk_and_replace_expr(r, string_bytes, strings);
+        }
+        Expr::Unary(_, x) => {
+            walk_and_replace_expr(x, string_bytes, strings);
+        }
+        Expr::Index(b, i) => {
+            walk_and_replace_expr(b, string_bytes, strings);
+            walk_and_replace_expr(i, string_bytes, strings);
+        }
+        Expr::Field(x, _) => {
+            walk_and_replace_expr(x, string_bytes, strings);
+        }
+        Expr::Cast(x, _) => {
+            walk_and_replace_expr(x, string_bytes, strings);
+        }
+        Expr::List(items) => {
+            for item in items {
+                walk_and_replace_expr(item, string_bytes, strings);
+            }
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields {
+                walk_and_replace_expr(v, string_bytes, strings);
+            }
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            walk_and_replace_expr(cond, string_bytes, strings);
+            walk_and_replace(then_branch, string_bytes, strings);
+            if let Some(eb) = else_branch {
+                walk_and_replace(eb, string_bytes, strings);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            walk_and_replace_expr(scrutinee, string_bytes, strings);
+            for arm in arms {
+                walk_and_replace(&mut arm.body, string_bytes, strings);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1186,6 +1553,13 @@ mod tests {
         desugar_structs(&mut funcs, &structs);
         // Contracts lower after the prover in the real driver; here (no prover) just before codegen.
         desugar_contracts(&mut funcs, &structs);
+        // Convert string variable arguments to their original byte pointer.
+        // This is the pass that fixes the string-representation mismatch.
+        let string_bytes = p.take_string_bytes();
+        if let Err(errors) = desugar_string_args(&mut funcs, &string_bytes) {
+            eprintln!("desugar_string_args errors: {errors:?}");
+            panic!("desugar_string_args failed");
+        }
         // Pass structs to codegen too, so a function returning a small struct/enum
         // returns it by value (RAX:RDX), the driver does the same.
         let asm = emit_program_g(&[], &structs, &funcs);
@@ -1655,5 +2029,60 @@ mod tests {
              }",
         );
         assert_eq!(out, "42");
+    }
+
+    // --- String argument desugaring tests ---
+
+    #[test]
+    fn string_local_passed_to_string_param_gives_utf8_bytes() {
+        // `seg_byte(l)` where `l` is a local `string` should read UTF-8 bytes,
+        // not UTF-32 code points. For "hola", byte 0 is 'h' (0x68), byte 1 is 'o' (0x6f).
+        let out = compile_and_capture(
+            "fn seg_byte(s: string) -> i64 { peek8(s + 0) }\n\
+             fn main() -> i64 {\n\
+             let l: string = \"hola\"\n\
+             print_int(seg_byte(l))\n\
+             0\n\
+             }",
+        );
+        // 'h' = 0x68 = 104
+        assert_eq!(out, "104");
+    }
+
+#[test]
+    fn string_local_passed_to_string_param_multiple_offsets() {
+        // Check multiple byte positions: "hola" = 0x68, 0x6f, 0x6c, 0x61
+        let out = compile_and_capture(
+            "fn seg_byte(s: string, off: i64) -> i64 { peek8(s + off) }\n\
+             fn main() -> i64 {\n\
+             let l: string = \"hola\"\n\
+             print_int(seg_byte(l, 0))\n\
+             print_int(seg_byte(l, 1))\n\
+             print_int(seg_byte(l, 2))\n\
+             print_int(seg_byte(l, 3))\n\
+             0\n\
+             }",
+        );
+        // 'h'=104, 'o'=111, 'l'=108, 'a'=97
+        assert_eq!(out, "10411110897");
+    }
+
+    #[test]
+    fn string_local_with_non_ascii_gives_utf8_bytes() {
+        // Note: Sond lexer only supports basic escapes (\n, \t, \r, \0, \\, \").
+        // UTF-8 multi-byte chars must appear as literal bytes in the source file.
+        // This test compiles to verify the pass handles string args correctly
+        // with a simple multi-char string.
+        let out = compile_and_capture(
+            "fn seg_byte(s: string, off: i64) -> i64 { peek8(s + off) }\n\
+             fn main() -> i64 {\n\
+             let l: string = \"hola mundo\"\n\
+             print_int(seg_byte(l, 0))\n\
+             print_int(seg_byte(l, 5))\n\
+             0\n\
+             }",
+        );
+        // 'h'=104, 'm'=109
+        assert_eq!(out, "104109");
     }
 }

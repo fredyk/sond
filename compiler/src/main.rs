@@ -15,6 +15,8 @@ use sondc::codegen::{
 };
 use sondc::lexer::tokenize_located;
 use sondc::parser::Parser;
+use std::collections::HashMap;
+use std::panic::set_hook;
 use sondc::verify::verify_with_globals;
 use std::path::Path;
 use std::process::{Command, ExitCode};
@@ -148,7 +150,7 @@ fn main() -> ExitCode {
     // backtrace, a good oracle explains the rejection. (The hook is already
     // silenced above, before include resolution, which can panic too.)
     let src_for_parse = src.clone();
-    let (mut funcs, mut globals, mut structs, externs, enums, ports, providers, uses) =
+    let (mut funcs, mut globals, mut structs, externs, enums, ports, providers, uses, string_bytes) =
         match std::panic::catch_unwind(move || {
             let (toks, lines) = tokenize_located(&src_for_parse);
             // Keep the token stream: it is the only count of `test` blocks the parser cannot
@@ -163,9 +165,10 @@ fn main() -> ExitCode {
             let ports = p.take_ports();
             let providers = p.take_providers();
             let uses = p.take_uses();
+            let string_bytes = p.take_string_bytes();
             sondc::testing::check_all_tests_registered(&declared_tests, &funcs)
                 .unwrap_or_else(|e| panic!("{e}"));
-            (funcs, globals, structs, externs, enums, ports, providers, uses)
+            (funcs, globals, structs, externs, enums, ports, providers, uses, string_bytes)
         }) {
             Ok(fg) => fg,
             Err(e) => {
@@ -307,6 +310,15 @@ fn main() -> ExitCode {
     // Text has a type: a string literal binds to `string`, never to a bare address.
     if let Err(msg) = sondc::check::check_string_literal_types(&funcs) {
         eprintln!("sondc: {msg}");
+        return ExitCode::FAILURE;
+    }
+    // Convert string variable arguments to their original UTF-8 bytes so the callee's
+    // `string` parameter receives the correct representation. Fails if a string variable's
+    // origin is unknown (e.g. from a function parameter at runtime).
+    if let Err(errors) = sondc::desugar::desugar_string_args(&mut funcs, &string_bytes) {
+        for msg in errors {
+            eprintln!("sondc: {msg}");
+        }
         return ExitCode::FAILURE;
     }
     if let Err(msg) = sondc::check::check_constant_bounds(&funcs, &globals) {
