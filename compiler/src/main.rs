@@ -313,6 +313,11 @@ fn main() -> ExitCode {
         eprintln!("sondc: {msg}");
         return ExitCode::FAILURE;
     }
+    // Reject inverted range loops: `for i in a..b` where a > b means the body never executes.
+    if let Err(msg) = sondc::check::check_for_range_bounds(&funcs) {
+        eprintln!("sondc: {msg}");
+        return ExitCode::FAILURE;
+    }
 
     // `--emit-header`: print the module's public interface (contract, no bodies)
     // and stop. This is the `.snd` header for ~/.local/include/sond and dist/include.
