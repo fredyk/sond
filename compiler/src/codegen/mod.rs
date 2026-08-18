@@ -174,6 +174,16 @@ fn emit_all(cg: &mut Codegen, structs: &[StructDef], funcs: &[Function], entry: 
         .iter()
         .map(|f| (f.name.clone(), ret_kind(f)))
         .collect();
+    // Track functions returning `string` so their call results are recognized as strings.
+    cg.string_returning_fns = funcs
+        .iter()
+        .filter(|f| {
+            f.ret
+                .as_ref()
+                .is_some_and(|t| crate::ast::Type::Named("string".to_string()) == *t)
+        })
+        .map(|f| f.name.clone())
+        .collect();
     cg.set_struct_sizes(structs);
     // Per-function effect footprints, so a `graph` can serialize two same-level nodes that would
     // race on a mutable global (RFC-0008 §5.2). Only needed when there is shared mutable state.
@@ -1032,6 +1042,16 @@ struct Codegen {
     /// address (an i64), so `var_types` says i64 for it; this is what `v[i]` needs, so the index
     /// scales by the element's width instead of assuming a 64-bit word. Reset per function.
     view_elem: HashMap<String, Ty>,
+    /// The rodata label for each local `string` variable whose value the compiler
+    /// can trace to a literal. When a tracked variable is passed as a `string` argument, emit
+    /// `leaq label(%rip), %rax` (UTF-8 bytes) instead of loading the code-point pointer.
+    /// Reset per function.
+    string_rodata_cur: HashMap<String, String>,
+    /// Functions whose return type is `string` (a view of code points). Populated in `emit_all`,
+    /// used in lowering to track call results as string variables.
+    string_returning_fns: HashSet<String>,
+    /// Local variables known to be of `string` type (vs. an arbitrary view type). Reset per function.
+    string_vars: HashSet<String>,
     /// The return kind of every user function, to type a call expression.
     fn_ret_types: HashMap<String, Ty>,
     /// Word count of each struct type (its by-value size), so a function returning a
@@ -1106,6 +1126,8 @@ impl Codegen {
         self.locals.clear();
         self.var_types.clear();
         self.view_elem.clear();
+        self.string_rodata_cur.clear();
+        self.string_vars.clear();
         // Register module-level view-typed globals so their element width is known.
         for (name, (elem_kind, _byte_len)) in &self.global_view_lengths {
             self.view_elem.insert(name.clone(), *elem_kind);
@@ -2221,6 +2243,12 @@ impl Codegen {
                             self.line(&format!("    movq %rax, {off}(%rbp)"));
                             self.var_types.insert(name.clone(), Ty::I64);
                             self.view_elem.insert(name.clone(), Ty::U32);
+                            // Also record the UTF-8 rodata label so passing this
+                            // variable as a `string` argument sends the real
+                            // source bytes, not the code-point array.
+                            let utflabel = self.intern_string(text);
+                            self.string_rodata_cur.insert(name.clone(), utflabel);
+                            self.string_vars.insert(name.clone());
                             if let Some(crate::ast::Type::View(_, Some(l))) = ty.as_ref()
                                 && let Ok(n) = l.parse::<i64>()
                             {
@@ -2317,6 +2345,30 @@ impl Codegen {
                             if let Some(&k) = self.view_elem.get(src_name) {
                                 self.view_elem.insert(name.clone(), k);
                             }
+                            // Propagate the UTF-8 rodata label too, so `q` can be passed
+                            // as a `string` argument (even when the source was itself a
+                            // copy of a string literal).
+                            if let Some(label) = self.string_rodata_cur.get(src_name) {
+                                self.string_rodata_cur.insert(name.clone(), label.clone());
+                            }
+                            // Only mark as a string if the source IS a string variable.
+                            if self.string_vars.contains(src_name) {
+                                self.string_vars.insert(name.clone());
+                            }
+                        }
+                        // `let l = f()`: if `f` returns `string`, treat `l` as a string
+                        // variable so the call site can know the variable's representation.
+                        if let Expr::Call(callee, _) = value {
+                            let callee_name = match callee.as_ref() {
+                                Expr::Var(n) => n.as_str(),
+                                _ => "",
+                            };
+                            if self.string_returning_fns.contains(callee_name) {
+                                // It is a string, but we don't know its rodata label
+                                // (the function parameter is untraceable). It will
+                                // still enter the `string_vars` check at call sites.
+                                self.string_vars.insert(name.clone());
+                            }
                         }
                     }
                 }
@@ -2326,6 +2378,26 @@ impl Codegen {
                 } => {
                     let kind = self.ty_of(value);
                     self.expr(value);
+                    // When assigning a string literal to a string variable,
+                    // update the tracked rodata label so future uses of the
+                    // variable in a `string` argument send the correct bytes.
+                    let label = if let Expr::Str(text) = value
+                        && self.view_elem.contains_key(name)
+                    {
+                        Some(self.intern_string(text))
+                    } else {
+                        None
+                    };
+                    if let Some(l) = label {
+                        self.string_rodata_cur.insert(name.clone(), l);
+                    }
+                    // When assigning one tracked string to another, copy the rodata key.
+                    if let Expr::Var(src) = value
+                        && let Some(label) = self.string_rodata_cur.get(src)
+                    {
+                        let label = label.clone();
+                        self.string_rodata_cur.insert(name.clone(), label);
+                    }
                     if let Some(&off) = self.locals.get(name) {
                         if kind.is_float() {
                             self.line(&format!("    movsd %xmm0, {off}(%rbp)"));

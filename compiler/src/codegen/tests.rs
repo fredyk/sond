@@ -2167,7 +2167,9 @@ fn module_string_with_type_annotation_returns_pointer_to_bytes() {
     // `let saludo: string = "ax"` must return the address of the interned bytes,
     // so peek8(saludo + 0) == 97 ('a'). Before the fix it returned 0 (bss buffer).
     assert_eq!(
-        compile_and_run_with_globals("let saludo: string = \"ax\"\nfn main() -> i64 { peek8(saludo + 0) }"),
+        compile_and_run_with_globals(
+            "let saludo: string = \"ax\"\nfn main() -> i64 { peek8(saludo + 0) }"
+        ),
         97,
         "typed module-level string: the first byte of 'ax' is 97"
     );
@@ -2191,14 +2193,24 @@ fn module_string_annotated_and_unannotated_produce_identical_result() {
     let funcs1 = p1.parse_program();
     let globals1 = p1.take_globals();
     let asm1 = emit_shared_g(&globals1, &[], &funcs1);
-    let mut p2 = Parser::new(tokenize("let b: string = \"dup-test\"\nfn f() -> i64 { 0 }"));
+    let mut p2 = Parser::new(tokenize(
+        "let b: string = \"dup-test\"\nfn f() -> i64 { 0 }",
+    ));
     let funcs2 = p2.parse_program();
     let globals2 = p2.take_globals();
     let asm2 = emit_shared_g(&globals2, &[], &funcs2);
     // Each form interns the literal exactly once, and both emit the SAME label for it:
     // comparing `asm1` with itself would pass no matter what the annotated form does.
-    assert_eq!(asm1.matches(".asciz \"dup-test\"").count(), 1, "unannotated interns once: {asm1}");
-    assert_eq!(asm2.matches(".asciz \"dup-test\"").count(), 1, "annotated interns once: {asm2}");
+    assert_eq!(
+        asm1.matches(".asciz \"dup-test\"").count(),
+        1,
+        "unannotated interns once: {asm1}"
+    );
+    assert_eq!(
+        asm2.matches(".asciz \"dup-test\"").count(),
+        1,
+        "annotated interns once: {asm2}"
+    );
     let label_of = |asm: &str| {
         asm.lines()
             .position(|l| l.contains(".asciz \"dup-test\""))
@@ -2209,7 +2221,10 @@ fn module_string_annotated_and_unannotated_produce_identical_result() {
         l1.as_deref().is_some_and(|l| l.contains(':')),
         "the literal must be preceded by a label, got {l1:?}"
     );
-    assert_eq!(l1, l2, "both forms must reach the literal through the same label");
+    assert_eq!(
+        l1, l2,
+        "both forms must reach the literal through the same label"
+    );
 }
 
 #[test]
@@ -2259,7 +2274,9 @@ fn module_level_u32_view_still_works() {
     assert!(asm.contains(".bss"));
     assert!(asm.contains("v: .zero 64"));
     assert_eq!(
-        compile_and_run_with_globals("let mut v: u32[16]\nfn main() -> i64 { v[0] = 42\npeek32(v) }"),
+        compile_and_run_with_globals(
+            "let mut v: u32[16]\nfn main() -> i64 { v[0] = 42\npeek32(v) }"
+        ),
         42
     );
 }
@@ -2269,42 +2286,50 @@ fn local_string_codepoints_work() {
     // Local string: `l[i]` accesses code points, and `l.len == 3`.
     // With "añb": code points are 97, 241(ñ), 98; len=3.
     assert_eq!(
-        compile_and_run(
-            concat!("fn f() -> i64 {\n            \
-                 let l: string = \"a", "\u{00f1}", "b\"\n\
+        compile_and_run(concat!(
+            "fn f() -> i64 {\n            \
+                 let l: string = \"a",
+            "\u{00f1}",
+            "b\"\n\
                  l.len\n\
-             }")
-        ),
+             }"
+        )),
         3,
         "local string .len counts code points"
     );
     assert_eq!(
-        compile_and_run(
-            concat!("fn f() -> i64 {\n            \
-                 let l: string = \"a", "\u{00f1}", "b\"\n\
+        compile_and_run(concat!(
+            "fn f() -> i64 {\n            \
+                 let l: string = \"a",
+            "\u{00f1}",
+            "b\"\n\
                  l[0]\n\
-             }")
-        ),
+             }"
+        )),
         97,
         "l[0] is the code point for 'a'"
     );
     assert_eq!(
-        compile_and_run(
-            concat!("fn f() -> i64 {\n            \
-                 let l: string = \"a", "\u{00f1}", "b\"\n\
+        compile_and_run(concat!(
+            "fn f() -> i64 {\n            \
+                 let l: string = \"a",
+            "\u{00f1}",
+            "b\"\n\
                  l[1]\n\
-             }")
-        ),
+             }"
+        )),
         241,
         "l[1] is the code point for 'ñ'"
     );
     assert_eq!(
-        compile_and_run(
-            concat!("fn f() -> i64 {\n            \
-                 let l: string = \"a", "\u{00f1}", "b\"\n\
+        compile_and_run(concat!(
+            "fn f() -> i64 {\n            \
+                 let l: string = \"a",
+            "\u{00f1}",
+            "b\"\n\
                  l[2]\n\
-             }")
-        ),
+             }"
+        )),
         98,
         "l[2] is the code point for 'b'"
     );
@@ -2332,5 +2357,141 @@ fn a_copied_byte_view_still_indexes_in_bytes() {
         ),
         2,
         "a copy of a u8 view indexes in bytes, like the view it copies"
+    );
+}
+
+// ── String variable passed as a `string` parameter ──────────────────────────
+
+#[test]
+fn a_local_string_variable_passed_to_string_param_gives_utf8_bytes() {
+    // seg_byte extracts one byte: s + 1 of "hola" is 'o' = 0x6F.
+    // With the bug, `l` is a pointer to UTF-32LE code-point array, so
+    // peek8(l + 1) reads the zero-padding byte → 0 instead of 0x6F.
+    assert_eq!(
+        compile_and_run(
+            "fn seg_byte(s: string) -> i64 { peek8(s + 1) }\n\
+             fn f() -> i64 {\
+             let l: string = \"hola\"\n\
+             seg_byte(l) }"
+        ),
+        0x6F,
+        "seg_byte with local string variable: second byte is 'o'"
+    );
+}
+
+#[test]
+fn a_local_string_variable_passed_to_string_param_all_bytes_and_nul() {
+    // "hola": h(0)=0x68, o(1)=0x6F, l(2)=0x6C, a(3)=0x61, NUL(4)=0.
+    for (i, expected) in [0x68, 0x6F, 0x6C, 0x61, 0].iter().enumerate() {
+        let idx = i;
+        let exp = *expected;
+        assert_eq!(
+            compile_and_run(&format!(
+                "fn seg_byte(s: string) -> i64 {{ peek8(s + {idx}) }}\n\
+                     fn f() -> i64 {{\
+                     let l: string = \"hola\"\n\
+                     seg_byte(l) }}"
+            )),
+            exp,
+            "seg_byte(l) byte at offset {idx}: expected 0x{:02X}",
+            exp
+        );
+    }
+}
+
+#[test]
+fn a_local_string_variable_non_ascii_gives_utf8_bytes() {
+    // "añ": 'a'=0x61, 'ñ' in UTF-8 = C3B1 (two bytes), so offsets are:
+    // 0→'a'=0x61, 1→C3, 2→B1, 3→NUL=0x00.  Total 4 bytes.
+    let src = concat!(
+        "fn seg_byte(s: string) -> i64 { peek8(s + 0) }\n\
+         fn f() -> i64 {\
+         let l: string = \"a",
+        "\u{00f1}",
+        "\"\n\
+         seg_byte(l) }"
+    );
+    assert_eq!(compile_and_run(src), 0x61, "byte 0 = ASCII 'a'");
+
+    let src = concat!(
+        "fn seg_byte(s: string) -> i64 { peek8(s + 1) }\n\
+         fn f() -> i64 {\
+         let l: string = \"a",
+        "\u{00f1}",
+        "\"\n\
+         seg_byte(l) }"
+    );
+    assert_eq!(compile_and_run(src), 0xC3, "byte 1 = UTF-8 lead byte of ñ");
+
+    let src = concat!(
+        "fn seg_byte(s: string) -> i64 { peek8(s + 2) }\n\
+         fn f() -> i64 {\
+         let l: string = \"a",
+        "\u{00f1}",
+        "\"\n\
+         seg_byte(l) }"
+    );
+    assert_eq!(compile_and_run(src), 0xB1, "byte 2 = UTF-8 trail byte of ñ");
+
+    let src = concat!(
+        "fn seg_byte(s: string) -> i64 { peek8(s + 3) }\n\
+         fn f() -> i64 {\
+         let l: string = \"a",
+        "\u{00f1}",
+        "\"\n\
+         seg_byte(l) }"
+    );
+    assert_eq!(compile_and_run(src), 0, "byte 3 = NUL terminator");
+}
+
+#[test]
+fn passing_literal_directly_still_works() {
+    // The fix must not break the literal case which already works.
+    assert_eq!(
+        compile_and_run(
+            "fn seg_byte(s: string) -> i64 { peek8(s + 1) }\n\
+             fn f() -> i64 { seg_byte(\"hola\") }"
+        ),
+        0x6F,
+        "literal still works"
+    );
+}
+
+#[test]
+fn string_variable_source_unknown_must_not_compile() {
+    // A parameter of type string cannot be propagated — the compiler has no
+    // trace of its source text, so using it as an argument to another string
+    // parameter must be a compile error, not a silent wrong answer.
+    let src = concat!(
+        "fn copy_hello() -> string { \"hello\" }\n\
+         fn from_param(s: string) -> i64 { peek8(s + 0) }\n\
+         fn f() -> i64 {\
+         let l = copy_hello()\n\
+         from_param(l) }"
+    );
+    let result: Result<(), Box<dyn std::any::Any + Send>> = std::panic::catch_unwind(|| {
+        let funcs = Parser::new(tokenize(src)).parse_program();
+        let _ = emit_program_g(&[], &[], &funcs);
+    });
+    let err_msg = match &result {
+        Ok(_) => panic!(
+            "passing a string whose origin the compiler cannot trace \
+             must be a compile error, not a silent wrong answer"
+        ),
+        Err(e) => e
+            .downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| e.downcast_ref::<&str>().copied())
+            .expect("panic should carry a string message")
+            .to_string(),
+    };
+    assert!(
+        err_msg.contains("string") && err_msg.contains("unknown"),
+        "passing a string whose origin the compiler cannot trace \
+         must be a compile error, not a silent wrong answer"
+    );
+    assert!(
+        err_msg.contains("string") && err_msg.contains("unknown"),
+        "error message should mention string and unknown: {err_msg}"
     );
 }

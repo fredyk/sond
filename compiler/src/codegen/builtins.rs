@@ -52,11 +52,51 @@ impl Codegen {
             }
             // Stack args pushed high-to-low so arg7 sits at the lowest address.
             for arg in args[reg..].iter().rev() {
+                if let Expr::Var(vname) = &arg.value {
+                    if let Some(label) = self.string_rodata_cur.get(vname) {
+                        self.line(&format!("    leaq {label}(%rip), %rax"));
+                        self.line("    pushq %rax");
+                        continue;
+                    } else if self.string_vars.contains(vname) {
+                        panic!(
+                            "passing `{vname}`: its value as a `string` is unknown \
+                             because {vname} was not initialized from a literal or \
+                             another traceable string variable. Assign a literal to \
+                             {vname} before passing it, or restructure the code \
+                             so the compiler can see which text flows."
+                        );
+                    }
+                }
                 self.expr(&arg.value);
                 self.line("    pushq %rax");
             }
             // Register args: evaluate, stage on the stack, then pop into registers.
             for arg in &args[..reg] {
+                // A tracked local `string` variable → use its UTF-8 rodata
+                // label directly, so the callee receives the same bytes it
+                // would get from a literal.  An untracked string variable is
+                // a compile error: the compiler cannot know what text it
+                // holds at runtime.
+                if let Expr::Var(vname) = &arg.value {
+                    if let Some(label) = self.string_rodata_cur.get(vname) {
+                        // Tracked string variable: emit rodata load.
+                        self.line(&format!("    leaq {label}(%rip), %rax"));
+                        self.line("    pushq %rax");
+                        continue;
+                    } else if self.string_vars.contains(vname) {
+                        // The variable is tracked as a `string` but has no rodata
+                        // label in the trace — it came from a function parameter or
+                        // some path the compiler cannot prove.  This must be a
+                        // compile error.
+                        panic!(
+                            "passing `{vname}`: its value as a `string` is unknown \
+                             because {vname} was not initialized from a literal or \
+                             another traceable string variable. Assign a literal to \
+                             {vname} before passing it, or restructure the code \
+                             so the compiler can see which text flows."
+                        );
+                    }
+                }
                 self.expr(&arg.value);
                 self.line("    pushq %rax");
             }
