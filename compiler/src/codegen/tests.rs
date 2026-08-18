@@ -2195,11 +2195,21 @@ fn module_string_annotated_and_unannotated_produce_identical_result() {
     let funcs2 = p2.parse_program();
     let globals2 = p2.take_globals();
     let asm2 = emit_shared_g(&globals2, &[], &funcs2);
-    assert_eq!(
-        asm1.matches(".asciz \"dup-test\"").count(),
-        1,
-        "both forms intern to the same label: {asm1}"
+    // Each form interns the literal exactly once, and both emit the SAME label for it:
+    // comparing `asm1` with itself would pass no matter what the annotated form does.
+    assert_eq!(asm1.matches(".asciz \"dup-test\"").count(), 1, "unannotated interns once: {asm1}");
+    assert_eq!(asm2.matches(".asciz \"dup-test\"").count(), 1, "annotated interns once: {asm2}");
+    let label_of = |asm: &str| {
+        asm.lines()
+            .position(|l| l.contains(".asciz \"dup-test\""))
+            .and_then(|i| asm.lines().nth(i.wrapping_sub(1)).map(str::to_string))
+    };
+    let (l1, l2) = (label_of(&asm1), label_of(&asm2));
+    assert!(
+        l1.as_deref().is_some_and(|l| l.contains(':')),
+        "the literal must be preceded by a label, got {l1:?}"
     );
+    assert_eq!(l1, l2, "both forms must reach the literal through the same label");
 }
 
 #[test]

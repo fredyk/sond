@@ -393,25 +393,37 @@ fn main() -> ExitCode {
             eprintln!("sondc: cannot write {asm_path}: {e}");
             return ExitCode::FAILURE;
         }
-        return match Command::new("gpasm")
+        // gpasm chooses output format from the last dot in the FULL output path
+        // (directories included), so a dot in the directory name (e.g. worktree
+        // `foo.bar`) silently prevents .hex creation even with exit 0.
+        // Always pass a path whose *file* ends in `.hex` so gpasm has no other
+        // choice, and verify afterward that the file is actually on disk.
+        let hex_path = ensure_pic16_output(&output);
+        let pic16_status = Command::new("gpasm")
             .args(["-p", "p16f684"])
             .arg(&asm_path)
-            .args(["-o", output.as_str()])
-            .status()
-        {
+            .args(["-o", &hex_path])
+            .status();
+        match pic16_status {
             Ok(s) if s.success() => {
-                println!("sondc: wrote PIC16F684 Intel HEX `{output}` (flash it to the chip)");
-                ExitCode::SUCCESS
+                if !Path::new(&hex_path).exists() {
+                    eprintln!(
+                        "sondc: gpasm returned success but `{hex_path}` does not exist",
+                    );
+                    return ExitCode::FAILURE;
+                }
             }
             Ok(_) => {
                 eprintln!("sondc: gpasm failed to assemble {asm_path}");
-                ExitCode::FAILURE
+                return ExitCode::FAILURE;
             }
             Err(e) => {
                 eprintln!("sondc: cannot run gpasm (install gputils): {e}");
-                ExitCode::FAILURE
+                return ExitCode::FAILURE;
             }
-        };
+        }
+        println!("sondc: wrote PIC16F684 Intel HEX `{hex_path}` (flash it to the chip)");
+        return ExitCode::SUCCESS;
     }
 
     let asm_path = format!("{output}.s");
@@ -542,4 +554,66 @@ fn default_output(input: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("a")
         .to_string()
+}
+
+/// Pic16/gpasm always produces Intel HEX.  gpasm decides the output extension by looking at the
+/// last dot in the *full* output path (directory components included), so a dot in the directory
+/// name (e.g. worktree `foo.bar`) can silently prevent `.hex` creation.  We always pass a path
+/// whose **file** ends in `.hex` so gpasm has no other option.  If the user already asked for
+/// `.hex` we do not double it.
+fn ensure_pic16_output(user_output: &str) -> String {
+    if user_output.to_lowercase().ends_with(".hex") {
+        user_output.to_string()
+    } else {
+        format!("{user_output}.hex")
+    }
+}
+
+#[cfg(test)]
+mod pic16_output_tests {
+    use super::*;
+
+    #[test]
+    fn no_dot_in_name_becomes_hex() {
+        let out = ensure_pic16_output("myprog");
+        assert_eq!(out, "myprog.hex");
+    }
+
+    #[test]
+    fn dot_in_directory_does_not_clobber_extension() {
+        // Worktree name "the-ai-language.oc-gpasm-hex" has a dot but the file has none.
+        let out = ensure_pic16_output("/work/pic/build/x");
+        assert_eq!(out, "/work/pic/build/x.hex");
+    }
+
+    #[test]
+    fn user_already_provided_hex_no_double() {
+        let out = ensure_pic16_output("output.hex");
+        assert_eq!(out, "output.hex");
+    }
+
+    #[test]
+    fn user_already_provided_uppercase_hex_no_double() {
+        let out = ensure_pic16_output("output.HEX");
+        assert_eq!(out, "output.HEX");
+    }
+
+    #[test]
+    fn dot_in_directory_with_different_extension_requested() {
+        // User asked for .cod but pic16 always writes .hex.
+        let out = ensure_pic16_output("/path/to/dir.with.dots/output.cod");
+        assert_eq!(out, "/path/to/dir.with.dots/output.cod.hex");
+    }
+
+    #[test]
+    fn only_filename_no_extension() {
+        let out = ensure_pic16_output("blink");
+        assert_eq!(out, "blink.hex");
+    }
+
+    #[test]
+    fn relative_path_with_dir_dot() {
+        let out = ensure_pic16_output("adir.oc/x");
+        assert_eq!(out, "adir.oc/x.hex");
+    }
 }

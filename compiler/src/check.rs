@@ -5038,7 +5038,7 @@ pub fn check_no_raw_access_to_declared_buffers(
         let mut declared = declared.clone();
         for s in &b.stmts {
             // A name is only protected from the point it is declared with a length.
-            if let Stmt::Let { name, array_len, ty, value, .. } = s {
+            if let Stmt::Let { name, ty, value, .. } = s {
                 walk_expr(value, &declared, fname)?;
                 let is_view = matches!(ty.as_ref(), Some(Type::View(..)));
                 if is_view {
