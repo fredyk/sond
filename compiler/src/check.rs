@@ -1639,6 +1639,7 @@ fn overflow_block(b: &Block, fname: &str) -> Result<(), String> {
                 cond,
                 invariant,
                 body,
+                ..
             } => {
                 if let Some(c) = cond {
                     overflow_expr(c, fname)?;
@@ -3009,6 +3010,7 @@ fn bounds_block(
                 cond,
                 invariant,
                 body,
+                ..
             } => {
                 // The loop's SOUND facts are derived below (counter floors/ceilings, the
                 // condition). A user `invariant` clause is trusted ONLY if the prover VERIFIES it
@@ -5097,6 +5099,299 @@ pub fn check_no_raw_access_to_declared_buffers(
     Ok(())
 }
 
+/// Checks all range-based `for` loops (`for i in a..b`) for inverted/empty ranges.
+///
+/// Two cases:
+/// 1. Both bounds are constants → if `start > end`, compile error (inverted range).
+///    `start == end` (e.g. `5..5`) compiles: it is the idiomatic zero-element range,
+///    not an inversion.
+/// 2. At least one bound is variable → require that `start > end` is NOT provable.
+///
+/// Wrapping functions are skipped: their arithmetic wraps by specification (crypto
+/// substrate), so overflow-based range checks are meaningless there.
+pub fn check_for_range_bounds(funcs: &[Function]) -> Result<(), String> {
+    for f in funcs {
+        let mut flow = Vec::new();
+        flow.extend(f.requires.iter().cloned());
+        if f.is_wrapping {
+            continue;
+        }
+        range_bounds_walk_block(&f.body, &f.name, &f.params, &flow)?;
+    }
+    Ok(())
+}
+
+/// Find the range start value for a loop variable: the `let mut i = ...` statement
+/// that precedes a range-based for loop. Returns `Some(value)` where `value` is the
+/// expression assigned to the counter, or `None` if not found.
+///
+/// `loop_idx` is the index of the `Stmt::For` statement that triggered this lookup.
+/// We scan backwards only from `loop_idx` to avoid finding a later `let mut i = ...`
+/// that belongs to a different loop reusing the same counter variable.
+fn find_range_start<'a>(block: &'a Block, var: &str, loop_idx: usize) -> Option<&'a Expr> {
+    for i in (0..loop_idx).rev() {
+        if let Stmt::Let {
+            mutable: true,
+            name,
+            value,
+            ..
+        } = &block.stmts[i]
+            && name == var {
+                return Some(value);
+            }
+    }
+    None
+}
+
+fn range_bounds_const_fold(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Int(n) => Some(*n),
+        Expr::Unary(UnOp::Neg, inner) => range_bounds_const_fold(inner).and_then(|v| v.checked_neg()),
+        Expr::Binary(op, l, r) => {
+            let a = range_bounds_const_fold(l)?;
+            let b = range_bounds_const_fold(r)?;
+            match op {
+                BinOp::Add => a.checked_add(b),
+                BinOp::Sub => a.checked_sub(b),
+                BinOp::Mul => a.checked_mul(b),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+#[allow(clippy::collapsible_if)]
+fn range_bounds_walk_block(
+    b: &Block,
+    fname: &str,
+    params: &[Param],
+    flow: &[Expr],
+) -> Result<(), String> {
+    for (stmt_idx, stmt) in b.stmts.iter().enumerate() {
+        match stmt {
+            // Range-based for loop: detected by the `is_range_for` flag set by the parser.
+            Stmt::For {
+                cond: Some(cond_expr),
+                body,
+                is_range_for: true,
+                ..
+            } => {
+                // `cond_expr` is `i < bound` where `i` is the loop variable.
+                // The lower bound is the value from the preceding `let mut i = <value>`
+                // desugaring (always a mutable binding since the parser created it).
+                if let Expr::Binary(BinOp::Lt, lhs, rhs) = cond_expr {
+                    if let Expr::Var(var) = lhs.as_ref() {
+                        // Find the preceding `let mut` that sets this variable.
+                        // Since the parser always emits `let mut i = value` immediately before
+                        // `for i < bound`, scan backwards from the position of the current stmt.
+                        let start_expr = find_range_start(b, var, stmt_idx);
+
+                        if let Some(start) = start_expr {
+                            if let (Some(start_val), Some(end_val)) = (
+                                range_bounds_const_fold(start),
+                                range_bounds_const_fold(rhs.as_ref()),
+                            ) {
+                                // Both bounds constant: reject if inverted.
+                                // 5..5 (start == end) is accepted: it is the normal zero-element range.
+                                if start_val > end_val {
+                                    return Err(format!(
+                                        "function `{fname}`: the range \
+                                         `{s}..{e}` \
+                                         is inverted (goes from greater to lesser), so the loop body \
+                                         never executes. Did you mean `{e}..{s}`?",
+                                        s = start_val,
+                                        e = end_val,
+                                    ));
+                                }
+                            } else {
+                                // At least one bound is variable: check if `start > end` is provable
+                                // (rejection) or if `start <= end` is provable (acceptance).
+                                // If BOTH bounds are constants and not provably inverted: accept.
+                                // If only one bound is variable: accept the range (the programmer
+                                // using `0..n` or `n..10` doesn't need to write a contract).
+                                // If BOTH bounds are variable: require a contract.
+                                let start_has_var = !matches!(start, Expr::Int(_));
+                                let end_has_var = !matches!(rhs.as_ref(), Expr::Int(_));
+                                let start_expr_str = range_bounds_expr_short(start);
+                                let end_expr_str = range_bounds_expr_short(rhs.as_ref());
+                                if start_has_var && end_has_var {
+                                    if crate::verify::proves_gt_for_bounds(
+                                        start,
+                                        rhs.as_ref(),
+                                        flow,
+                                        params,
+                                    ) {
+                                        // `start > end` is provably true: reject.
+                                        return Err(format!(
+                                            "function `{fname}`: the range \
+                                             `{start_expr_str}..{end_expr_str}` \
+                                             is provably empty: `{start_expr_str}` is provably greater \
+                                             than `{end_expr_str}`, so the loop body never executes. \
+                                             Provide a precondition `requires {{ {start_expr_str} <= {end_expr_str} }}`.",
+                                        ));
+                                    }
+                                    // Check if a contract/guard guarantees `start <= end`.
+                                    if crate::verify::proves_le_for_bounds(
+                                        start,
+                                        rhs.as_ref(),
+                                        flow,
+                                        params,
+                                    ) {
+                                        // Flow guarantees the range is non-empty.
+                                    } else {
+                                        // No guarantee found: reject.
+                                        return Err(format!(
+                                            "function `{fname}`: the range \
+                                             `{start_expr_str}..{end_expr_str}` \
+                                             has variable bounds that are not provably ordered. \
+                                             Provide a precondition `requires {{ {start_expr_str} <= {end_expr_str} }}` \
+                                             or guard the loop body with `if {start_expr_str} <= {end_expr_str}`.",
+                                        ));
+                                    }
+                                }
+                                // Only one bound is variable: accept (common idiom like `0..n`).
+                            }
+                        }
+                        // Walk inside loop body, extending flow with `var < bound` fact.
+                        let mut block_flow = flow.to_vec();
+                        if let Some(vval) = range_bounds_const_fold(rhs.as_ref()) {
+                            block_flow.push(Expr::Binary(
+                                BinOp::Lt,
+                                Box::new(Expr::Var(var.clone())),
+                                Box::new(Expr::Int(vval)),
+                            ));
+                        }
+                        range_bounds_walk_block(body, fname, params, &block_flow)?;
+                    }
+                }
+            }
+            // Condition-based or foreach for loop: always visit the body.
+            Stmt::For { cond, body, .. } => {
+                // Propagate flow into the body: if the loop body is entered,
+                // it means `cond` was true on this iteration.
+                let mut block_flow = flow.to_vec();
+                if let Some(c) = cond {
+                    block_flow.push((*c).clone());
+                }
+                range_bounds_walk_block(body, fname, params, &block_flow)?;
+            }
+            // Walk expressions within this statement (for variable assignments that might
+            // become range bounds in a following for loop).
+            _ => {
+                range_bounds_walk_expr_for_stmt(stmt, fname, params, flow)?;
+            }
+        }
+    }
+    if let Some(tail) = &b.tail {
+        range_bounds_walk_expr(tail, fname, params, flow)?;
+    }
+    Ok(())
+}
+
+/// Extract and walk all expressions from a statement.
+fn range_bounds_walk_expr_for_stmt(s: &Stmt, fname: &str, params: &[Param], flow: &[Expr]) -> Result<(), String> {
+    match s {
+        Stmt::Let { value, .. } => range_bounds_walk_expr(value, fname, params, flow),
+        Stmt::Expr(v) => range_bounds_walk_expr(v, fname, params, flow),
+        Stmt::Return(Some(v)) => range_bounds_walk_expr(v, fname, params, flow),
+        Stmt::Spawn(v) => range_bounds_walk_expr(v, fname, params, flow),
+        Stmt::Assign { target, value } => {
+            range_bounds_walk_expr(target, fname, params, flow)?;
+            range_bounds_walk_expr(value, fname, params, flow)
+        }
+        Stmt::Par(peers) | Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
+            let mut ok = Ok(());
+            for p in peers {
+                ok = range_bounds_walk_expr(p, fname, params, flow);
+                if ok.is_err() { break; }
+            }
+            ok
+        }
+        Stmt::GraphLet { nodes, yield_expr, .. } => {
+            for (_, e) in nodes {
+                range_bounds_walk_expr(e, fname, params, flow)?;
+            }
+            range_bounds_walk_expr(yield_expr, fname, params, flow)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn range_bounds_walk_expr(e: &Expr, fname: &str, params: &[Param], flow: &[Expr]) -> Result<(), String> {
+    match e {
+        Expr::Binary(_, l, r) => {
+            range_bounds_walk_expr(l, fname, params, flow)?;
+            range_bounds_walk_expr(r, fname, params, flow)
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
+            range_bounds_walk_expr(x, fname, params, flow)
+        }
+        Expr::Index(a, b) => {
+            range_bounds_walk_expr(a, fname, params, flow)?;
+            range_bounds_walk_expr(b, fname, params, flow)
+        }
+        Expr::Call(c, args) => {
+            range_bounds_walk_expr(c, fname, params, flow)?;
+            for a in args {
+                range_bounds_walk_expr(&a.value, fname, params, flow)?;
+            }
+            Ok(())
+        }
+        Expr::List(items) => {
+            for it in items {
+                range_bounds_walk_expr(it, fname, params, flow)?;
+            }
+            Ok(())
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields {
+                range_bounds_walk_expr(v, fname, params, flow)?;
+            }
+            Ok(())
+        }
+        Expr::If { cond, then_branch, else_branch } => {
+            range_bounds_walk_expr(cond, fname, params, flow)?;
+            let mut then_flow = flow.to_vec();
+            then_flow.push((**cond).clone());
+            range_bounds_walk_block(then_branch, fname, params, &then_flow)?;
+            if let Some(eb) = else_branch {
+                range_bounds_walk_block(eb, fname, params, flow)?;
+            }
+            Ok(())
+        }
+        Expr::Match { scrutinee, arms } => {
+            range_bounds_walk_expr(scrutinee, fname, params, flow)?;
+            for a in arms {
+                range_bounds_walk_block(&a.body, fname, params, flow)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Render an expression to a short string.
+fn range_bounds_expr_short(e: &Expr) -> String {
+    match e {
+        Expr::Int(n) => n.to_string(),
+        Expr::Var(n) => n.clone(),
+        Expr::Unary(UnOp::Neg, inner) => format!("-({})", range_bounds_expr_short(inner)),
+        Expr::Binary(op, l, r) => {
+            let sym = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                _ => "?",
+            };
+            format!("{} {} {}", range_bounds_expr_short(l), sym, range_bounds_expr_short(r))
+        }
+        Expr::Field(base, field) => format!("{}.{}", range_bounds_expr_short(base), field),
+        Expr::Index(base, idx) => format!("{}[{}]", range_bounds_expr_short(base), range_bounds_expr_short(idx)),
+        _ => "<expr>".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod raw_access_tests {
     use super::*;
@@ -5215,4 +5510,413 @@ mod raw_access_tests {
             "a module string literal is a pointer, not a buffer with a length; got {ok:?}"
         );
     }
+}
+
+/// Tests for inverted/empty range bounds in range-based for loops.
+mod range_bounds_checks {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    #[allow(dead_code)]
+fn check_for(src: &str) -> Result<(), String> {
+        let mut p = Parser::new(tokenize(src));
+        let funcs = p.parse_program();
+        check_for_range_bounds(&funcs)
+    }
+
+    #[test]
+    fn constant_inverted_range_is_rejected() {
+        // `3..0` is inverted and must be rejected with a clear message.
+        let err = check_for(
+            "fn main() -> i64 { let mut n = 0\nfor i in 3..0 { n = n + 1 }\nn }",
+        )
+        .unwrap_err();
+        assert!(err.contains("3..0"), "error should mention the inverted range");
+        assert!(err.contains("inverted"), "error should say it is inverted");
+        assert!(err.contains("0..3"), "error should suggest the fix");
+    }
+
+    #[test]
+    fn constant_empty_range_55_compiles() {
+        // `5..5` is not inverted (start == end), it is the idiomatic zero-element range.
+        let ok = check_for("fn main() -> i64 { let mut n = 0\nfor i in 5..5 { n = n + 1 }\nn }");
+        assert!(ok.is_ok(), "5..5 (empty zero-element range) should compile: {ok:?}");
+    }
+
+    #[test]
+    fn both_bounds_variable_requires_contract() {
+        // `a..b` where both are parameters requires a contract or guard.
+        let err = check_for(
+            "fn cuenta(a: i64, b: i64) { let mut n = 0\nfor i in a..b { n = n + 1 }\nn }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("a..b"),
+            "error should mention the variable bounds: {err}"
+        );
+        assert!(
+            err.contains("requires"),
+            "error should suggest a precondition: {err}"
+        );
+    }
+
+    #[test]
+    fn one_constant_bound_compiles_freely() {
+        // `0..n` where only `n` is variable: accepted as common idiom.
+        let ok = check_for(
+            "fn main() -> i64 { let n = 5\nlet mut i = 0\nfor i in 0..n { i = i + 1 }\ni }",
+        );
+        assert!(ok.is_ok(), "0..n should compile without contract: {ok:?}");
+    }
+
+    #[test]
+    fn provable_empty_range_is_rejected() {
+        // `n+1..n` is provably empty (n+1 > n always).
+        let err = check_for(
+            "fn main() -> i64 { let n = 5\nlet mut i = 0\nfor i in n + 1..n { i = i + 1 }\ni }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("provably"),
+            "provable empty range should say provably: {err}"
+        );
+    }
+
+    #[test]
+    fn requires_guarantee_allows_variable_bounds() {
+        // `requires { a <= b }` discharges the obligation.
+        let ok = check_for(
+            "fn cuenta(a: i64, b: i64) { let mut n = 0\nfor i in a..b { n = n + 1 }\nn }",
+        );
+        // Without requires, this should fail.
+        assert!(ok.is_err(), "a..b without requires should fail");
+
+        let ok_with_contract = check_for(
+            "fn cuenta(a: i64, b: i64) requires { a <= b } { let mut n = 0\nfor i in a..b { n = n + 1 }\nn }",
+        );
+        assert!(
+            ok_with_contract.is_ok(),
+            "a..b with requires should compile: {ok_with_contract:?}"
+        );
+    }
+
+    #[test]
+    fn nested_inverted_range_is_detected() {
+        // An inverted range inside another loop should still be caught.
+        let err = check_for(
+            "fn main() -> i64 { let mut n = 0\nfor i in 0..5 { let mut j = 0\nfor j in 3..0 { n = n + 1 } }\nn }",
+        )
+        .unwrap_err();
+        assert!(err.contains("3..0"), "nested inverted range should be caught: {err}");
+    }
+
+    #[test]
+    fn wrapping_function_is_skipped() {
+        // Wrapping functions are skipped (crypto substrate).
+        let ok = check_for(
+            "wrapping fn crypto() -> i64 { let mut n = 0\nfor i in 3..0 { n = n + 1 }\nn }",
+        );
+        assert!(ok.is_ok(), "wrapping functions should be skipped");
+    }
+
+    #[test]
+    fn two_consecutive_loops_same_var_both_valid() {
+        // Two loops in the same block reusing `i`, both with valid ranges.
+        let ok = check_for(
+            "fn main() -> i64 {\n\
+             let mut s = 0\n\
+             for i in 0..3 { s = s + 1 }\n\
+             for i in 5..9 { s = s + 1 }\n\
+             s\n\
+             }",
+        );
+        assert!(ok.is_ok(), "two consecutive valid loops should compile: {ok:?}");
+    }
+
+    #[test]
+    fn two_loops_second_inverted() {
+        // Two loops, the second one has an inverted range.
+        let err = check_for(
+            "fn main() -> i64 {\n\
+             let mut s = 0\n\
+             for i in 0..3 { s = s + 1 }\n\
+             for i in 9..5 { s = s + 1 }\n\
+             s\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(err.contains("9..5"), "error should mention the second loop's range: {err}");
+        assert!(!err.contains("0..3"), "error must not mention the first loop's range: {err}");
+    }
+
+    #[test]
+    fn three_loops_middle_inverted() {
+        // Three loops with the same variable, the middle one is inverted.
+        let err = check_for(
+            "fn main() -> i64 {\n\
+             let mut s = 0\n\
+             for i in 0..3 { s = s + 1 }\n\
+             for i in 5..2 { s = s + 1 }\n\
+             for i in 7..10 { s = s + 1 }\n\
+             s\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(err.contains("5..2"), "error should mention the middle loop: {err}");
+        assert!(!err.contains("0..3"), "must not mention first loop: {err}");
+        assert!(!err.contains("7..10"), "must not mention third loop: {err}");
+    }
+
+    #[test]
+    fn nested_loop_reused_var_inverted_inner() {
+        // A loop inside another loop, both reusing `i`, the inner one is inverted.
+        let err = check_for(
+            "fn main() -> i64 {\n\
+             let mut s = 0\n\
+             for i in 0..5 {\n\
+                 for i in 3..0 { s = s + 1 }\n\
+             }\n\
+             s\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(err.contains("3..0"), "nested inverted range should be caught: {err}");
+    }
+
+    #[test]
+    fn hand_written_while_does_not_trigger_range_check() {
+        // A hand-written while loop using `let mut i = 0` + `for i < 3`
+        // does NOT have the `is_range_for` flag, so it should not enter
+        // the range-bounds check.
+        let ok = check_for(
+            "fn main() -> i64 {\n\
+             let mut i = 0\n\
+             for i < 3 { i = i + 1 }\n\
+             i\n\
+             }",
+        );
+        assert!(ok.is_ok(), "hand-written while should not trigger range check: {ok:?}");
+    }
+}
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Module-level string indexing → compile error
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Indexing a module-level `string` variable is a compile error.
+pub fn check_module_string_indexing(
+    funcs: &[Function],
+    string_globals: &HashSet<String>,
+) -> Result<(), String> {
+    for f in funcs {
+        let mut alive: HashSet<&str> = string_globals.iter().map(|s| s.as_str()).collect();
+        walk_stmt_list(&f.body.stmts, &f.name, &mut alive)?;
+        if let Some(ref t) = f.body.tail {
+            expr_string_index(t, &f.name, &alive)?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_stmt_list(stmts: &[Stmt], fname: &str, alive: &mut HashSet<&str>) -> Result<(), String> {
+    for st in stmts {
+        match st {
+            Stmt::Let { name, value, .. } => {
+                // Shadowing: remove from alive.
+                alive.remove(name.as_str());
+                // Check the initializer.
+                expr_string_index(value, fname, alive)?;
+            }
+            Stmt::Assign { target, value } => {
+                // S = ... drops S.
+                if let Expr::Var(ref n) = *target {
+                    alive.remove(n.as_str());
+                }
+                expr_string_index(target, fname, alive)?;
+                expr_string_index(value, fname, alive)?;
+            }
+            Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => {
+                expr_string_index(e, fname, alive)?
+            }
+            Stmt::For { cond, body, .. } => {
+                if let Some(c) = cond {
+                    expr_string_index(c, fname, alive)?
+                }
+                walk_stmt_list(&body.stmts, fname, alive)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn expr_string_index_with_name<'a>(
+    e: &'a Expr,
+    alive: &'a HashSet<&'a str>,
+    rebased: Option<&str>,
+    fname: &str,
+) -> Result<(), String> {
+    let is_alive_string = |name: &str| {
+        rebased.map_or(true, |r| name != r)
+            && alive.contains(name)
+    };
+
+    match e {
+        Expr::Index(base, idx) => {
+            if let Expr::Var(ref name) = **base {
+                if is_alive_string(name) {
+                    if let Some(k) = const_index(idx) {
+                        return Err(format!(
+                            "function `{fname}`: indexing `{name}` with `{k}` — `{name}` is a \
+                             `string` declared at module level, which holds the ADDRESS of its \
+                             UTF-8 bytes, not a code-point view; the compiler multiplies by 4 and \
+                             reads garbage. Use `peek8({name} + {k})` to read the raw UTF-8 byte \
+                             at offset {k} (those are UTF-8 bytes, not characters)."
+                        ));
+                    }
+                    return Err(format!(
+                        "function `{fname}`: indexing `{name}` — `{name}` is a `string` \
+                         declared at module level, which holds the ADDRESS of its UTF-8 bytes, \
+                         not a code-point view; the compiler multiplies the index by 4 and reads \
+                         garbage. Use `peek8({name} + i)` to read the raw UTF-8 byte at offset \
+                         `i` (those are UTF-8 bytes, not characters)."
+                    ));
+                }
+                return expr_string_index_with_name(base, alive, rebased, fname);
+            }
+            expr_string_index_with_name(base, alive, rebased, fname)
+        }
+        Expr::Binary(_, l, r) => {
+            expr_string_index_with_name(&l, alive, rebased, fname)?;
+            expr_string_index_with_name(r, alive, rebased, fname)
+        }
+        Expr::Unary(_, x) | Expr::Cast(x, _) | Expr::Field(x, _) => {
+            expr_string_index_with_name(x, alive, rebased, fname)
+        }
+        Expr::Call(c, args) => {
+            expr_string_index_with_name(c, alive, rebased, fname)?;
+            for a in args {
+                expr_string_index_with_name(&a.value, alive, rebased, fname)?;
+            }
+            Ok(())
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_string_index_with_name(cond, alive, rebased, fname)?;
+            let mut alive2 = alive.clone();
+            walk_stmt_list(&then_branch.stmts, fname, &mut alive2)?;
+            if let Some(eb) = else_branch {
+                let mut alive3 = alive.clone();
+                walk_stmt_list(&eb.stmts, fname, &mut alive3)?;
+            }
+            Ok(())
+        }
+        Expr::Match { scrutinee, arms } => {
+            expr_string_index_with_name(scrutinee, alive, rebased, fname)?;
+            // Clone alive since match arms don't shadow module strings (they're just blocks) but
+            // walk_stmt_list needs &mut. Match arms are independent so the clone is safe.
+            for a in arms {
+                let mut _a = alive.clone();
+                walk_stmt_list(&a.body.stmts, fname, &mut _a)?;
+            }
+            Ok(())
+        }
+        Expr::List(items) => {
+            for it in items {
+                expr_string_index_with_name(it, alive, rebased, fname)?;
+            }
+            Ok(())
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields {
+                expr_string_index_with_name(v, alive, rebased, fname)?;
+            }
+            Ok(())
+        }
+        Expr::SliceRange(b, lo, hi) => {
+            expr_string_index_with_name(b, alive, rebased, fname)?;
+            if let Some(l) = lo {
+                expr_string_index_with_name(&l, alive, rebased, fname)?;
+            }
+            if let Some(h) = hi {
+                expr_string_index_with_name(&h, alive, rebased, fname)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn expr_string_index(e: &Expr, fname: &str, alive: &HashSet<&str>) -> Result<(), String> {
+    expr_string_index_with_name(e, alive, None, fname)
+}
+
+#[cfg(test)]
+mod string_index_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn string_globals(_funcs: &[Function], globals: &[Global]) -> HashSet<String> {
+        // A module-level string is declared as `string` and its initializer is a string literal.
+        // The parser lowers `string` to `View(u32, N)` and stores `Expr::Str(...)` as init.
+        // A byte buffer like `u8[8]` is NOT a string even if its type is `View(u8, ...)`:
+        // it is a real byte array. Distinguish by checking that the init is a Str expression.
+        globals
+            .iter()
+            .filter(|g| matches!(g.init, Expr::Str(_)))
+            .map(|g| g.name.clone())
+            .collect()
+    }
+
+    fn check(src: &str) -> Result<(), String> {
+        let mut p = Parser::new(tokenize(src));
+        let funcs = p.parse_program();
+        let globals = p.take_globals();
+        let sg = string_globals(&funcs, &globals);
+        check_module_string_indexing(&funcs, &sg)
+    }
+
+    #[test]
+    fn index_a_module_string_constant_index_is_refused() {
+        let err = check("let S: string = \"anb\"\nfn main() -> i64 { S[1] }").unwrap_err();
+        assert!(
+            err.contains("indexing") && err.contains("S") && err.contains("peek8"),
+            "should name S and suggest peek8; got: {err}"
+        );
+    }
+
+    #[test]
+    fn index_a_module_string_variable_index_is_refused() {
+        let err = check("let S: string = \"anb\"\nfn main(i: i64) -> i64 { S[i] }").unwrap_err();
+        assert!(
+            err.contains("indexing") && err.contains("S") && err.contains("peek8"),
+            "should name S and suggest peek8; got: {err}"
+        );
+    }
+
+    #[test]
+    fn peek8_on_module_string_compiles_and_is_not_caught() {
+        let ok = check("let S: string = \"anb\"\nfn main() -> i64 { peek8(S + 1) }");
+        assert!(ok.is_ok(), "peek8 on a module string must not be caught; got {ok:?}");
+    }
+
+    #[test]
+    fn module_view_buffer_still_indexes() {
+        let ok = check("let mut g: u8[8]\nfn main() -> i64 { g[1] = 65\n0 }");
+        assert!(
+            ok.is_ok(),
+            "a u8[8] module buffer must not be caught by the string check; got {ok:?}"
+        );
+    }
+
+    #[test]
+    fn local_string_still_indexes() {
+        let ok = check("fn main() -> i64 { let l: string = \"anb\"\nl[1] }");
+        assert!(ok.is_ok(), "a local string must still be indexable; got {ok:?}");    }
 }

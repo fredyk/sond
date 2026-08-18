@@ -581,6 +581,7 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
                 cond,
                 invariant,
                 body,
+                ..
             } if !invariant.is_empty() => eval_loop(live, cond.as_ref(), invariant, body, ctx)?,
             Stmt::For { cond, body, .. } => {
                 // The prover cannot carry state through a loop it has no invariant for, and
@@ -2013,6 +2014,131 @@ pub fn index_provably_oob(idx: &Expr, bound: &Expr, assumptions: &[Expr], params
     };
     matches!(prove(&lower, &asm, &it), Outcome::Disproven)
         || matches!(prove(&upper, &asm, &it), Outcome::Disproven)
+}
+
+/// Is `expr1 > expr2` provable over integers (wrapping semantics), under the given
+/// assumptions and parameter types?
+///
+/// Used by the range bounds checker in `check.rs` to detect provably empty loops.
+/// Unlike the standard prover version, this works over ℤ rather than i64, so
+/// it correctly identifies `n+1 > n` even at `i64::MAX` where wrapping semantics
+/// would otherwise hold.
+pub fn proves_gt_for_bounds(
+    expr1: &Expr,
+    expr2: &Expr,
+    assumptions: &[Expr],
+    params: &[Param],
+) -> bool {
+    let int_types: HashMap<String, (i128, i128)> = int_types_of(params);
+    let mut names: HashSet<String> = HashSet::new();
+    collect_expr_vars(expr1, &mut names);
+    collect_expr_vars(expr2, &mut names);
+    for a in assumptions {
+        collect_expr_vars(a, &mut names);
+    }
+    let env: HashMap<String, Sym> = names.iter().map(|n| (n.clone(), Sym::Var(n.clone()))).collect();
+    let Some(l) = eval_expr(expr1, &env) else { return false };
+    let Some(r) = eval_expr(expr2, &env) else { return false };
+    let (Some(lf), Some(lr)) = (lin_of_sym(&l), lin_of_sym(&r)) else {
+        return false; // non-linear: cannot decide, conservative pass-through
+    };
+    let diff = lf.sub(&lr); // start - end
+    let Some(mut tight) = diff else { return false };
+    tight.k -= 1; // integer-tighten: start > end ⟺ start - end - 1 >= 0
+    // Relevant assumptions only (same as prove).
+    let sym_asm: Vec<SymProp> = assumptions.iter().flat_map(|e| sym_props(e, &env)).collect();
+    let relevant = relevant_assumptions(&SymProp { op: BinOp::Ge, lhs: l.clone(), rhs: r.clone() }, &sym_asm);
+    let asm_lins: Vec<Lin> = relevant.iter().filter_map(|ap| {
+        let (Some(l), Some(r)) = (lin_of_sym(&ap.lhs), lin_of_sym(&ap.rhs)) else { return None };
+        holds_cons(&ap.op, &l, &r).map(|cs| cs.into_iter().next()).flatten()
+    }).collect();
+    // Add variable range constraints from int_types (same as prove).
+    let range_of = |v: &str| {
+        int_types
+            .get(v)
+            .copied()
+            .unwrap_or((i64::MIN as i128, i64::MAX as i128))
+    };
+    let mut vars: std::collections::HashSet<String> = lf.coeffs.keys().cloned().collect();
+    vars.extend(lr.coeffs.keys().cloned());
+    for v in vars {
+        let (lo, hi) = range_of(&v);
+        let vv = Lin::var(&v);
+        let (Some(loc), Some(hic)) = (
+            vv.sub(&Lin::const_i128(lo)),
+            Lin::const_i128(hi).sub(&vv),
+        ) else {
+            return false; // overflow forming a bound, conservative
+        };
+        let mut ext = asm_lins.clone();
+        ext.push(loc);
+        ext.push(hic);
+        if implies_geq0(&ext, &tight) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Same idea as `proves_gt_for_bounds` but proves `expr1 <= expr2`.
+///
+/// Used by the range bounds checker in `check.rs` to require that `start <= end`
+/// for parameterized range loops (`for i in a..b` where at least one bound is variable).
+pub fn proves_le_for_bounds(
+    expr1: &Expr,
+    expr2: &Expr,
+    assumptions: &[Expr],
+    params: &[Param],
+) -> bool {
+    let int_types: HashMap<String, (i128, i128)> = int_types_of(params);
+    let mut names: HashSet<String> = HashSet::new();
+    collect_expr_vars(expr1, &mut names);
+    collect_expr_vars(expr2, &mut names);
+    for a in assumptions {
+        collect_expr_vars(a, &mut names);
+    }
+    let env: HashMap<String, Sym> = names.iter().map(|n| (n.clone(), Sym::Var(n.clone()))).collect();
+    let Some(l) = eval_expr(expr1, &env) else { return false };
+    let Some(r) = eval_expr(expr2, &env) else { return false };
+    let (Some(lf), Some(lr)) = (lin_of_sym(&l), lin_of_sym(&r)) else {
+        return false; // non-linear: cannot decide, pass-through (conservative)
+    };
+    // Prove: lr - lf >= 0  (i.e., end - start >= 0)
+    let diff = lr.sub(&lf); // end - start
+    let Some(tight) = diff else { return false }; // >= 0, no tightening needed
+    // Relevant assumptions only.
+    let sym_asm: Vec<SymProp> = assumptions.iter().flat_map(|e| sym_props(e, &env)).collect();
+    let relevant = relevant_assumptions(&SymProp { op: BinOp::Ge, lhs: r.clone(), rhs: l.clone() }, &sym_asm);
+    let asm_lins: Vec<Lin> = relevant.iter().filter_map(|ap| {
+        let (Some(l), Some(r)) = (lin_of_sym(&ap.lhs), lin_of_sym(&ap.rhs)) else { return None };
+        holds_cons(&ap.op, &l, &r).map(|cs| cs.into_iter().next()).flatten()
+    }).collect();
+    // Add variable range constraints.
+    let range_of = |v: &str| {
+        int_types
+            .get(v)
+            .copied()
+            .unwrap_or((i64::MIN as i128, i64::MAX as i128))
+    };
+    let mut vars: std::collections::HashSet<String> = lf.coeffs.keys().cloned().collect();
+    vars.extend(lr.coeffs.keys().cloned());
+    let asm_lins: Vec<Lin> = {
+        let mut ext = asm_lins;
+        for v in vars {
+            let (lo, hi) = range_of(&v);
+            let vv = Lin::var(&v);
+            let (Some(loc), Some(hic)) = (
+                vv.sub(&Lin::const_i128(lo)),
+                Lin::const_i128(hi).sub(&vv),
+            ) else {
+                continue;
+            };
+            ext.push(loc);
+            ext.push(hic);
+        }
+        ext
+    };
+    implies_geq0(&asm_lins, &tight)
 }
 
 /// The integer-typed parameters and their value ranges (`i32` -> [-2^31, 2^31-1]), so the prover

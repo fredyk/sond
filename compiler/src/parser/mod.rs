@@ -588,6 +588,7 @@ impl Parser {
                             cond: Some(cond),
                             body,
                             invariant: Vec::new(),
+                            is_range_for: false,
                         });
                         self.skip_semicolons();
                         continue;
@@ -644,6 +645,7 @@ impl Parser {
                                 )),
                                 invariant: Vec::new(),
                                 body,
+                                is_range_for: true,
                             });
                         } else {
                             // Foreach `for x in coll { body }`: iterate a slice/array's elements.
@@ -681,6 +683,7 @@ impl Parser {
                                 )),
                                 invariant: Vec::new(),
                                 body,
+                                is_range_for: false,
                             });
                         }
                         self.skip_semicolons();
@@ -709,6 +712,7 @@ impl Parser {
                             cond,
                             invariant,
                             body,
+                            is_range_for: false,
                         });
                         self.skip_semicolons();
                     }
