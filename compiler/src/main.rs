@@ -404,25 +404,14 @@ fn main() -> ExitCode {
             .arg(&asm_path)
             .args(["-o", &hex_path])
             .status();
-        match pic16_status {
-            Ok(s) if s.success() => {
-                if !Path::new(&hex_path).exists() {
-                    eprintln!(
-                        "sondc: gpasm returned success but `{hex_path}` does not exist",
-                    );
-                    return ExitCode::FAILURE;
-                }
-            }
-            Ok(_) => {
-                eprintln!("sondc: gpasm failed to assemble {asm_path}");
-                return ExitCode::FAILURE;
-            }
+        let pic16_msg = match pic16_result(pic16_status, Path::new(&hex_path)) {
+            Ok(msg) => msg,
             Err(e) => {
-                eprintln!("sondc: cannot run gpasm (install gputils): {e}");
+                eprintln!("sondc: {e}");
                 return ExitCode::FAILURE;
             }
-        }
-        println!("sondc: wrote PIC16F684 Intel HEX `{hex_path}` (flash it to the chip)");
+        };
+        println!("{pic16_msg}");
         return ExitCode::SUCCESS;
     }
 
@@ -566,6 +555,130 @@ fn ensure_pic16_output(user_output: &str) -> String {
         user_output.to_string()
     } else {
         format!("{user_output}.hex")
+    }
+}
+
+/// Turns the assembler's outcome into what the user is told, given the HEX path that was
+/// asked for. Split out of `main` so it can be tested without ever running gpasm.
+///
+/// The case that matters is the third one: gpasm exits 0 whether or not it wrote anything,
+/// so success is only success once the file is on disk.
+///
+/// - could not even be launched -> tell the user to install gputils
+/// - ran and failed            -> report the failure, without looking at the disk
+/// - ran, succeeded, no file   -> an error naming the file that is missing
+/// - ran, succeeded, file there -> the message announcing it
+fn pic16_result(status: std::io::Result<std::process::ExitStatus>, hex_path: &std::path::Path) -> Result<String, String> {
+    let hex_display = hex_path.display().to_string();
+    let s = status.map_err(|e| {
+        format!("sondc: cannot run gpasm (install gputils): {e}")
+    })?;
+
+    if !s.success() {
+        return Err(format!(
+            "sondc: gpasm failed to assemble (exit code: {})",
+            s.code().map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+
+    if !hex_path.exists() {
+        return Err(format!(
+            "sondc: gpasm returned success but `{hex_display}` does not exist"
+        ));
+    }
+
+    Ok(format!("sondc: wrote PIC16F684 Intel HEX `{hex_display}` (flash it to the chip)"))
+}
+
+#[cfg(test)]
+mod pic16_assemble_tests {
+    use super::*;
+    use std::io;
+    use std::process::ExitStatus;
+
+    // A real exit status that succeeded.
+    fn success_exit_status() -> ExitStatus {
+        Command::new("true").status().expect("true ran")
+    }
+
+    // A real exit status that failed.
+    fn failure_exit_status() -> ExitStatus {
+        Command::new("false").status().expect("false ran")
+    }
+
+    #[test]
+    fn gpasm_success_but_hex_missing_returns_error_naming_path() {
+        let hex_path = std::env::temp_dir().join(format!("sondc_test_no_file_8f3a_2c4d-{}.hex", std::process::id()));
+        if hex_path.exists() {
+            let _ = std::fs::remove_file(&hex_path);
+        }
+        // Make sure it truly is not there.
+        let _ = std::fs::remove_file(&hex_path);
+        let result = pic16_result(Ok(success_exit_status()), &hex_path);
+        assert!(
+            result.is_err(),
+            "the assembler succeeded but the file is missing: must be an error; got {result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("does not exist"),
+            "the error must say the file does not exist; got: {err}"
+        );
+        assert!(
+            err.contains("sondc:"),
+            "the error must carry the `sondc:` prefix; got: {err}"
+        );
+    }
+
+    #[test]
+    fn gpasm_success_and_hex_exists_returns_ok_naming_path() {
+        let hex = std::env::temp_dir().join(format!("sondc_test_exists_a1b2_7e9f-{}.hex", std::process::id()));
+        // Create the file; removed at the end of the test.
+        std::fs::write(&hex, ":020000040000FA02").unwrap();
+        let result = pic16_result(Ok(success_exit_status()), &hex);
+        assert!(
+            result.is_ok(),
+            "the file is there: must be Ok; got {result:?}"
+        );
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("wrote") && msg.contains(&hex.display().to_string()),
+            "the success message must name the file it wrote; got: {msg}"
+        );
+        assert!(
+            msg.contains("sondc:"),
+            "the message must carry the `sondc:` prefix; got: {msg}"
+        );
+        let _ = std::fs::remove_file(&hex);
+    }
+
+    #[test]
+    fn gpasm_failure_returns_error_without_checking_disk() {
+        let hex_path = std::env::temp_dir().join(format!("sondc_test_fail_c3d4_a5b6-{}.hex", std::process::id()));
+        // The file is deliberately absent: a failed run must not look at the disk at all.
+        let result = pic16_result(Ok(failure_exit_status()), &hex_path);
+        assert!(result.is_err(), "a failed assembler run must be an error; got {result:?}");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("failed") || err.contains("exit"),
+            "the error must say gpasm failed; got: {err}"
+        );
+    }
+
+    #[test]
+    fn gpasm_cannot_run_returns_install_gputils_error() {
+        let hex_path = std::env::temp_dir().join(format!("sondc_test_norun_e5f6_c7d8-{}.hex", std::process::id()));
+        let io_err = io::Error::new(io::ErrorKind::NotFound, "gpasm: No such file or directory");
+        let result = pic16_result(Err(io_err), &hex_path);
+        assert!(
+            result.is_err(),
+            "no se puede lanzar gpasm → error; result={result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_lowercase().contains("gputils") || err.to_lowercase().contains("gpasm"),
+            "the error must point at gputils/gpasm; got: {err}"
+        );
     }
 }
 
