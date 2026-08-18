@@ -317,6 +317,16 @@ fn main() -> ExitCode {
     // Module-level strings are byte pointers, not code-point views.
     // Indexing them multiplies by 4 and reads garbage.
     // A `let S: string = "..."` has init = Expr::Str(...) — the distinguishing feature.
+    // PIC16-specific constraints: the backend stores each local/parameter in one byte
+    // and only emits 8-bit immediates. Values that do not fit (u16 locals, constants > 255,
+    // u8 = 300) must be rejected before codegen, never silently truncated.
+    if pic16 {
+        if let Err(msg) = sondc::check::check_pic16_constraints(&funcs) {
+            eprintln!("sondc: {msg}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     let string_globals: std::collections::HashSet<String> = globals
         .iter()
         .filter(|g| matches!(g.init, sondc::ast::Expr::Str(_)))
