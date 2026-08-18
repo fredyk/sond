@@ -136,6 +136,21 @@ test "a stalled output gives up instead of hanging forever" {
     assert(splice_pump(s1r, s3w, s2, 11) < 0)
 }
 
+// A path can be written as text. `open_file_str` takes the literal as it is written, so the
+// `.utf8` rigmarole disappears from the call; the pointer form `open_file` stays for paths built
+// at runtime, as `serial.snd` does with its port name.
+test "open_file_str opens a file named by a literal" {
+    let fd = open_file_str("__io_test_str.txt", O_WRONLY | O_CREAT | O_TRUNC, 420)
+    assert(fd >= 0)
+    assert_eq(write_buf(fd, CONTENT.utf8, 11), 11)
+    close_fd(fd)
+
+    poison(64)
+    assert_eq(read_file("__io_test_str.txt".utf8, buf, 64), 11)
+    assert_eq(bytes_eq(buf, CONTENT.utf8, 11), 1)
+    remove_file("__io_test_str.txt".utf8)
+}
+
 test "a file exactly the size of the buffer still fits" {
     // The boundary the truncation check is most likely to get wrong: 11 bytes into 11 bytes is
     // a complete read, not an overflow.

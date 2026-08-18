@@ -41,6 +41,26 @@ test "http_send_redirect writes a 301 with the Location header" {
     assert_eq(bytes_eq(bytes_slice(resp, 0, bytes_len(want)), want), 1)
 }
 
+// The status line goes in as it is written, with no `.utf8` at the call site, and the bytes on
+// the wire are the same ones as before: the signature changed, the response did not.
+test "http_send_status takes the status line as text" {
+    let fds[1]
+    syscall(SYS_pipe, fds)
+    let rfd = peek32(fds + 0)
+    let wfd = peek32(fds + 4)
+
+    http_send_status(wfd, "404 Not Found")
+    close_fd(wfd)
+
+    let buf[256]
+    let n = read_buf(rfd, buf, 256)
+    close_fd(rfd)
+
+    let want = bytes_from_str("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+    assert_eq(n, bytes_len(want))
+    assert_eq(bytes_eq(bytes_from_raw(buf, n), want), 1)
+}
+
 // Integration: over a real loopback socket, http_serve_file streams a file as 200 (covering
 // http_file_size), and a missing file falls to http_send_status's 404.
 test "http_serve_file streams a 200 and 404s a missing file" {

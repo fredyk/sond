@@ -9,7 +9,7 @@
 //   include "x86_64/linux/http-server.snd"
 //   ... in the request handler:
 //     let name = ...route the path...
-//     if name == 0 { let __b0_11: string = "404 Not Found" http_send_status(afd, __b0_11.utf8) }
+//     if name == 0 { http_send_status(afd, "404 Not Found") }
 //     else { http_serve_file(afd, name, my_content_type(name)) }
 
 include "x86_64/linux/io.snd"
@@ -83,7 +83,7 @@ fn http_send_redirect(afd: i64, location: i64) {
 }
 
 // Send a bodyless HTTP response with the given status line (e.g. "404 Not Found").
-fn http_send_status(afd: i64, status: i64) {
+fn http_send_status(afd: i64, status: string) {
     let body = bytes_new()
     let resp = http_response(status, body)
     write_buf(afd, peek64(resp), bytes_len(resp))
@@ -101,8 +101,7 @@ fn http_serve_file_cc(afd: i64, path: i64, ctype: i64, cc: i64) -> i64 {
     bytes_push(p, 0)                                   // NUL-terminate for open
     let fd = open_file(peek64(p), 0, 0)                // O_RDONLY
     if fd < 0 {
-        let __lit2: string = "404 Not Found"
-        http_send_status(afd, __lit2.utf8)
+        http_send_status(afd, "404 Not Found")
         return 0
     }
     let sz = http_file_size(fd)

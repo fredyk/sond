@@ -2,7 +2,8 @@
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
 // lib/x86_64/linux/io.snd: file I/O on Linux syscalls. No allocator: caller provides buffers.
-// API: open_file(path,flags,mode)->fd|-errno ; read_buf(fd,buf,n) ; write_buf(fd,buf,n) ;
+// API: open_file(path,flags,mode)->fd|-errno ; open_file_str(text,flags,mode)->fd|-errno ;
+//      read_buf(fd,buf,n) ; write_buf(fd,buf,n) ;
 //      close_fd(fd) ; read_file(path,dst,cap)->bytes|-errno ; remove_file(path)
 // Open flags: O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_TRUNC, O_APPEND.
 
@@ -24,6 +25,10 @@ let EFBIG = 27
 
 fn open_file(path: i64, flags: i64, mode: i64) -> i64 {
     syscall(SYS_open, path, flags, mode)
+}
+
+fn open_file_str(path: string, flags: i64, mode: i64) -> i64 {
+    open_file(path, flags, mode)
 }
 
 fn read_buf(fd: i64, buf: i64, n: i64) -> i64 {
