@@ -1385,6 +1385,27 @@ impl Codegen {
                 panic!("global `{}` is declared more than once", g.name);
             }
             self.global_names.insert(g.name.clone());
+            // A string literal global (`let NAME = "..."` or `let NAME: string = "..."`):
+            // the global holds the ADDRESS of the interned bytes in `.rodata`, a valid
+            // compile-time constant. When the parser lowered `let s: string = "..."` to
+            // `Type::View(u32, n)` + `Expr::Str`, this must still be treated as a string,
+            // not passed through to the typed-view branch below.
+            //
+            // THE LOWERED VIEW MEANS TWO DIFFERENT THINGS:
+            //   - Inside a function: `Type::View(u32, n)` on a `let s: string = ".."` is the
+            //     code-point view the compiler emits in `.rodata` and the binding holds its
+            //     ADDRESS.  Indexing and `.len` work on it.
+            //   - At module level: the *same* lowered form used to mean a typed buffer `u32[n]`
+            //     with N·4 bytes in `.bss`.  That is WRONG — a module-level string literal must
+            //     remain a pointer in `.rodata` just like the unannotated form.
+            //
+            // FIX: handle `Expr::Str` before `Type::View` in set_globals() so the lowered
+            // module-level string takes the string-literal path, not the bss-buffer path.
+            if let Expr::Str(s) = &g.init {
+                let label = self.intern_string(s);
+                self.global_str_data.push((g.name.clone(), label));
+                continue;
+            }
             // A typed view at module level (`let NAME: T[N]`). Must have a literal length,
             // reserves that many *bytes* (not words) in `.bss`, and the Var resolves to the
             // buffer address; indexing scales by the element width.
@@ -1439,13 +1460,6 @@ impl Codegen {
                 self.global_arrays.insert(g.name.clone());
                 self.global_array_data
                     .push((g.name.clone(), words, n as usize));
-                continue;
-            }
-            // A string-literal global is a pointer to its NUL-terminated bytes in `.rodata`: a
-            // valid compile-time constant (the string's address), so `let MSG = "hi"` works.
-            if let Expr::Str(s) = &g.init {
-                let label = self.intern_string(s);
-                self.global_str_data.push((g.name.clone(), label));
                 continue;
             }
             let value = self.const_eval(&g.init).unwrap_or_else(|| {
@@ -2287,6 +2301,21 @@ impl Codegen {
                             self.view_elem.insert(name.clone(), kind_of_type(elem));
                             if let Some(n) = len.as_ref().and_then(|l| l.parse::<i64>().ok()) {
                                 self.view_len.insert(name.clone(), n);
+                            }
+                        }
+                        // `let q: string = l` where l's type is `string` (view of code points):
+                        // inherit the source's length and element info so `.len` works on the copy.
+                        // The parser does NOT lower `let q: string = l` to a view type when l is
+                        // a variable (it lowers only for string *literals*). So `ty` here is
+                        // `Some(Type::Named("string"))`, which does NOT match the `Type::View`
+                        // check above. Yet `q` holds the SAME representation as `l` (a pointer to
+                        // `.rodata` code points), so `.len` must be inherited from `l`.
+                        if let Expr::Var(src_name) = value {
+                            if let Some(&n) = self.view_len.get(src_name) {
+                                self.view_len.insert(name.clone(), n);
+                            }
+                            if let Some(&k) = self.view_elem.get(src_name) {
+                                self.view_elem.insert(name.clone(), k);
                             }
                         }
                     }

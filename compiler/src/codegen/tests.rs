@@ -2159,3 +2159,168 @@ fn the_canonical_view_form_a_caller_writes_keeps_working() {
         "the alpha of the first pixel and the blue of the last, through the form a caller writes"
     );
 }
+
+// --- Issue: string module-level regression and .len on copy ---
+
+#[test]
+fn module_string_with_type_annotation_returns_pointer_to_bytes() {
+    // `let saludo: string = "ax"` must return the address of the interned bytes,
+    // so peek8(saludo + 0) == 97 ('a'). Before the fix it returned 0 (bss buffer).
+    assert_eq!(
+        compile_and_run_with_globals("let saludo: string = \"ax\"\nfn main() -> i64 { peek8(saludo + 0) }"),
+        97,
+        "typed module-level string: the first byte of 'ax' is 97"
+    );
+}
+
+#[test]
+fn module_string_annotated_and_unannotated_produce_identical_result() {
+    // Both forms must read the same bytes.
+    assert_eq!(
+        compile_and_run_with_globals("let a = \"hola\"\nfn main() -> i64 { peek8(a + 0) }"),
+        104,
+        "unannotated: 'h' = 104"
+    );
+    assert_eq!(
+        compile_and_run_with_globals("let b: string = \"hola\"\nfn main() -> i64 { peek8(b + 0) }"),
+        104,
+        "annotated: 'h' = 104"
+    );
+    // They must resolve to the same interned label too.
+    let mut p1 = Parser::new(tokenize("let a = \"dup-test\"\nfn f() -> i64 { 0 }"));
+    let funcs1 = p1.parse_program();
+    let globals1 = p1.take_globals();
+    let asm1 = emit_shared_g(&globals1, &[], &funcs1);
+    let mut p2 = Parser::new(tokenize("let b: string = \"dup-test\"\nfn f() -> i64 { 0 }"));
+    let funcs2 = p2.parse_program();
+    let globals2 = p2.take_globals();
+    let asm2 = emit_shared_g(&globals2, &[], &funcs2);
+    assert_eq!(
+        asm1.matches(".asciz \"dup-test\"").count(),
+        1,
+        "both forms intern to the same label: {asm1}"
+    );
+}
+
+#[test]
+fn module_string_non_ascii_yields_utf8_bytes() {
+    // `"año"`, `peek8(s+0)`=97('a'), `peek8(s+1)`=195, `peek8(s+2)`=177.
+    // Use Rust's compile-time unicode escape so the Sond source contains actual ñ (UTF-8 c0a9).
+    let src: &str = concat!("let s: string = \"a\u{00f1}o\"\nfn main() -> i64 { peek8(s + 0) }");
+    assert_eq!(compile_and_run_with_globals(src), 97);
+    let src: &str = concat!("let s: string = \"a\u{00f1}o\"\nfn main() -> i64 { peek8(s + 1) }");
+    assert_eq!(compile_and_run_with_globals(src), 195);
+    let src: &str = concat!("let s: string = \"a\u{00f1}o\"\nfn main() -> i64 { peek8(s + 2) }");
+    assert_eq!(compile_and_run_with_globals(src), 177);
+}
+
+#[test]
+fn string_copy_inherits_length() {
+    // `let l: string = "hola"` then `let q: string = l` -> q.len == 4.
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let l: string = \"hola\"\n\
+                 let q: string = l\n\
+                 q.len\n\
+             }"
+        ),
+        4,
+        "copy of string local inherits length"
+    );
+}
+
+#[test]
+fn module_level_byte_view_still_works() {
+    // `let mut g: u8[32]` at module level must still reserve 32 bytes in .bss.
+    let asm = emit_with_globals("let mut g: u8[32]\nfn main() -> i64 { g[0] }");
+    assert!(asm.contains(".bss"));
+    assert!(asm.contains("g: .zero 32"));
+    assert_eq!(
+        compile_and_run_with_globals("let mut g: u8[32]\nfn main() -> i64 { g[0] = 65\ng[0] }"),
+        65
+    );
+}
+
+#[test]
+fn module_level_u32_view_still_works() {
+    // `let mut v: u32[16]` at module level.
+    let asm = emit_with_globals("let mut v: u32[16]\nfn main() -> i64 { peek32(v) }");
+    assert!(asm.contains(".bss"));
+    assert!(asm.contains("v: .zero 64"));
+    assert_eq!(
+        compile_and_run_with_globals("let mut v: u32[16]\nfn main() -> i64 { v[0] = 42\npeek32(v) }"),
+        42
+    );
+}
+
+#[test]
+fn local_string_codepoints_work() {
+    // Local string: `l[i]` accesses code points, and `l.len == 3`.
+    // With "añb": code points are 97, 241(ñ), 98; len=3.
+    assert_eq!(
+        compile_and_run(
+            concat!("fn f() -> i64 {\n            \
+                 let l: string = \"a", "\u{00f1}", "b\"\n\
+                 l.len\n\
+             }")
+        ),
+        3,
+        "local string .len counts code points"
+    );
+    assert_eq!(
+        compile_and_run(
+            concat!("fn f() -> i64 {\n            \
+                 let l: string = \"a", "\u{00f1}", "b\"\n\
+                 l[0]\n\
+             }")
+        ),
+        97,
+        "l[0] is the code point for 'a'"
+    );
+    assert_eq!(
+        compile_and_run(
+            concat!("fn f() -> i64 {\n            \
+                 let l: string = \"a", "\u{00f1}", "b\"\n\
+                 l[1]\n\
+             }")
+        ),
+        241,
+        "l[1] is the code point for 'ñ'"
+    );
+    assert_eq!(
+        compile_and_run(
+            concat!("fn f() -> i64 {\n            \
+                 let l: string = \"a", "\u{00f1}", "b\"\n\
+                 l[2]\n\
+             }")
+        ),
+        98,
+        "l[2] is the code point for 'b'"
+    );
+}
+
+/// Copying a view keeps its ELEMENT WIDTH, not just its length.
+///
+/// Inheriting the source's view info (which is what makes `.len` survive a copy) also fixes
+/// something the copy got wrong before: `let p = b` over a `u8` view used to index in 8-byte
+/// words, so `p[1]` read past the two bytes just written and answered 0 while `b[1]` answered 2.
+/// A copy points at the same memory as its source; reading it at a different stride is the kind
+/// of wrong answer that compiles clean, which is the only reason this is pinned by a test rather
+/// than left as an implementation detail.
+#[test]
+fn a_copied_byte_view_still_indexes_in_bytes() {
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut b: u8[16]\n\
+                 b[0] = 1\n\
+                 b[1] = 2\n\
+                 let p = b\n\
+                 p[1]\n\
+             }"
+        ),
+        2,
+        "a copy of a u8 view indexes in bytes, like the view it copies"
+    );
+}
