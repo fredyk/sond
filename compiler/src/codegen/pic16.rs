@@ -14,6 +14,48 @@
 use crate::ast::{Expr, Function, Stmt};
 use std::collections::HashMap;
 
+/// Tracks which memory bank we believe is selected.
+/// Address 0x00-0x7F lives in bank 0; 0x80-0xFF lives in bank 1 (PIC16F684).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BankState {
+    /// We are in bank 0 (e.g. at reset, or after a banksel to a bank-0 address).
+    Known0,
+    /// We are in bank 1 (e.g. after a banksel to a bank-1 address).
+    Known1,
+    /// We don't know what bank is selected (e.g. after a call, or after
+    /// merging control flow). When in this state we MUST emit a `banksel`
+    /// before every fixed-address access, whether it is bank 0 or bank 1.
+    Unknown,
+}
+
+/// Determine the PIC bank for a literal file-register address: 0x00-0x7F → 0, 0x80-0xFF → 1.
+fn addr_bank(addr: u8) -> u8 {
+    if addr < 0x80 { 0 } else { 1 }
+}
+
+/// Ensure that the assembly stream is in the bank for `target_addr`,
+/// emitting a `banksel` only when the current tracking state says it is
+/// necessary. Updates `bank_state` to `Known(target_bank)` after emission.
+fn emit_banksel(bank_state: &mut BankState, target_addr: u8, out: &mut String) {
+    macro_rules! l {
+        ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
+    }
+    let target_bank = addr_bank(target_addr);
+
+    let current = *bank_state;
+    let should_emit = !matches!(
+        (current, target_bank),
+        (BankState::Known0, 0) | (BankState::Known1, 1)
+    );
+
+    if should_emit {
+        l!("        banksel 0x{:02X}", target_addr & 0xFF);
+    } else {
+    }
+
+    *bank_state = if target_bank == 0 { BankState::Known0 } else { BankState::Known1 };
+}
+
 /// Folds an expression to an 8-bit constant, or `None` if it is not a compile-time
 /// constant this minimal backend can place in a `movlw`.
 fn const8(e: &Expr) -> Option<i64> {
@@ -76,7 +118,8 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
 
     l!("main:");
     if let Some(m) = funcs.iter().find(|f| f.name == "main") {
-        emit_block(&m.body, &mut out, &mut lbl, &fn_locals[&m.name], &fnp, None);
+        let mut bank_state = BankState::Known0;
+        emit_block(&m.body, &mut out, &mut lbl, &fn_locals[&m.name], &fnp, None, &mut bank_state);
     }
     l!("        goto    $               ; halt");
 
@@ -87,7 +130,8 @@ pub fn emit_pic16(funcs: &[Function]) -> String {
             continue;
         }
         l!("{}:", f.name);
-        emit_block(&f.body, &mut out, &mut lbl, &fn_locals[&f.name], &fnp, None);
+        let mut bank_state = BankState::Unknown;
+        emit_block(&f.body, &mut out, &mut lbl, &fn_locals[&f.name], &fnp, None, &mut bank_state);
         l!("        return");
     }
     // A simple ~two-nested-loop busy delay (uses two GPRs at 0x70/0x71 in the common bank).
@@ -248,24 +292,27 @@ fn collect_locals(b: &crate::ast::Block, map: &mut HashMap<String, u8>, next: &m
 /// stored to the callee's fixed parameter slot, then `call name`. The callee
 /// leaves its return value in W. `fnp` maps a function name to its parameter
 /// register addresses (allocated disjointly, so there is no reentrancy hazard).
+/// Updates `bank_state` to Unknown after the call.
 fn emit_user_call(
     name: &str,
     args: &[crate::ast::Arg],
     out: &mut String,
     locals: &HashMap<String, u8>,
     fnp: &HashMap<String, Vec<u8>>,
+    bank_state: &mut BankState,
 ) {
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
     }
     let addrs = &fnp[name];
     for (i, arg) in args.iter().enumerate() {
-        eval_to_w(&arg.value, out, locals, fnp);
+        eval_to_w(&arg.value, out, locals, fnp, bank_state);
         if let Some(&a) = addrs.get(i) {
             l!("        movwf   0x{a:02X}            ; arg {i} -> param");
         }
     }
     l!("        call    {name}");
+    *bank_state = BankState::Unknown;
 }
 
 fn eval_to_w(
@@ -273,28 +320,37 @@ fn eval_to_w(
     out: &mut String,
     locals: &HashMap<String, u8>,
     fnp: &HashMap<String, Vec<u8>>,
+    bank_state: &mut BankState,
 ) {
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
     }
+
+    // Helper: ensure bank 0 for scratch-register writes that follow.
+    fn ensure_bank_0(bs: &mut BankState, out: &mut String) {
+        emit_banksel(bs, 0x00, out);
+    }
+
     if let Some(c) = const8(e) {
         l!("        movlw   0x{:02X}", c & 0xFF);
         return;
     }
     match e {
         Expr::Var(v) => match locals.get(v) {
-            Some(a) => l!("        movf    0x{a:02X}, w"),
+            Some(a) => {
+                emit_banksel(bank_state, *a, out);
+                l!("        movf    0x{a:02X}, w");
+                *bank_state = BankState::Known0;
+            }
             None => l!("        ; unknown local `{v}`"),
         },
-        // Shift by a COMPILE-TIME CONSTANT: the PIC14 has no barrel shifter, so
-        // emit N single-bit shifts. `<< 1` is a doubling (add to self); `>> 1` is
-        // an rrf with carry pre-cleared. This is the generic primitive a Sond
-        // bit-bang UART needs for rrf-style byte assembly (no variable shifts).
+        // Shift by a COMPILE-TIME CONSTANT.
         Expr::Binary(op @ (crate::ast::BinOp::Shl | crate::ast::BinOp::Shr), a, b)
             if const8(b).is_some() =>
         {
-            eval_to_w(a, out, locals, fnp);
-            let n = (const8(b).unwrap() as usize).min(8); // >=8 on an 8-bit value is 0
+            eval_to_w(a, out, locals, fnp, bank_state);
+            ensure_bank_0(bank_state, out);
+            let n = (const8(b).unwrap() as usize).min(8);
             for _ in 0..n {
                 l!("        movwf   0x7E");
                 match op {
@@ -305,23 +361,20 @@ fn eval_to_w(
                     }
                 }
             }
+            *bank_state = BankState::Known0;
         }
         Expr::Binary(op, a, b) => {
-            eval_to_w(a, out, locals, fnp);
+            eval_to_w(a, out, locals, fnp, bank_state);
+            ensure_bank_0(bank_state, out);
             l!("        movwf   0x7E            ; lhs");
-            eval_to_w(b, out, locals, fnp);
+            eval_to_w(b, out, locals, fnp, bank_state);
+            *bank_state = BankState::Known0;
             match op {
                 crate::ast::BinOp::Add => l!("        addwf   0x7E, w         ; lhs + rhs"),
                 crate::ast::BinOp::Sub => l!("        subwf   0x7E, w         ; lhs - rhs"),
                 crate::ast::BinOp::BitAnd => l!("        andwf   0x7E, w"),
                 crate::ast::BinOp::BitOr => l!("        iorwf   0x7E, w"),
                 crate::ast::BinOp::BitXor => l!("        xorwf   0x7E, w"),
-                // LOUD, not a comment. This used to emit `; unsupported operator` into the
-                // assembly and carry on, so `sondc --pic16` exited 0 and produced a .hex with
-                // the operation MISSING -- a firmware that flashes, runs, and computes something
-                // else. On a microcontroller that is not a wrong number on a screen: it is a
-                // motor step that never happens. `*`, `/`, `%` and the ordered comparisons are
-                // the ones that land here today.
                 other => panic!(
                     "PIC16 codegen does not implement the `{other:?}` operator yet. It is not \
                      emitted, so a program using it would flash and compute the wrong thing; \
@@ -331,19 +384,21 @@ fn eval_to_w(
             }
         }
         _ => match as_call(e) {
-            Some(("serial_getc", [])) => l!("        call    serial_getc"),
-            // peek8(reg): read a register (e.g. an input port) into W. Needed for
-            // reading pins — node-ID straps, an SPI-slave data line, RX bits.
+            Some(("serial_getc", [])) => {
+                l!("        call    serial_getc");
+                *bank_state = BankState::Unknown;
+            }
             Some(("peek8", args)) if args.len() == 1 => {
                 if let Some(r) = const8(&args[0].value) {
-                    l!("        banksel 0x{:02X}", r & 0xFF);
+                    emit_banksel(bank_state, r as u8, out);
                     l!("        movf    0x{:02X}, w", r & 0xFF);
+                    *bank_state = BankState::Unknown;
                 } else {
                     l!("        ; peek8 needs a constant register in Phase 1b");
                 }
             }
             Some((name, args)) if fnp.contains_key(name) => {
-                emit_user_call(name, args, out, locals, fnp)
+                emit_user_call(name, args, out, locals, fnp, bank_state);
             }
             _ => l!("        ; unsupported expression in Phase 1b"),
         },
@@ -352,6 +407,8 @@ fn eval_to_w(
 
 /// Emits a block: its statements, then its TAIL expression (Sond makes the last `if`/call in a
 /// block the tail, not a statement, so an `if`-dispatch at the end of a loop body lives here).
+/// `bank_state` is threaded through so consecutive accesses to the same bank don't repeat
+/// `banksel`. After `emit_block` returns, the bank state is `Unknown`.
 fn emit_block(
     b: &crate::ast::Block,
     out: &mut String,
@@ -359,9 +416,10 @@ fn emit_block(
     locals: &HashMap<String, u8>,
     fnp: &HashMap<String, Vec<u8>>,
     le: Option<usize>,
+    bank_state: &mut BankState,
 ) {
     for s in &b.stmts {
-        emit_stmt(s, out, lbl, locals, fnp, le);
+        emit_stmt(s, out, lbl, locals, fnp, le, bank_state);
     }
     if let Some(tail) = &b.tail {
         match tail.as_ref() {
@@ -369,13 +427,17 @@ fn emit_block(
                 cond,
                 then_branch,
                 else_branch,
-            } => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals, fnp, le),
-            e if as_call(e).is_some() => emit_call(e, out, locals, fnp),
+            } => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals, fnp, le, bank_state),
+            e if as_call(e).is_some() => emit_call(e, out, locals, fnp, bank_state),
             // A value tail is the block's result — for a function body it is the
             // return value, left in W.
-            e => eval_to_w(e, out, locals, fnp),
+            e => eval_to_w(e, out, locals, fnp, bank_state),
         }
     }
+    // After the block, the bank state is unknown: the block may have called
+    // a function (which could have landed in any bank) or merged
+    // control-flow paths with different bank effects.
+    *bank_state = BankState::Unknown;
 }
 
 fn emit_stmt(
@@ -385,13 +447,14 @@ fn emit_stmt(
     locals: &HashMap<String, u8>,
     fnp: &HashMap<String, Vec<u8>>,
     le: Option<usize>,
+    bank_state: &mut BankState,
 ) {
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
     }
     match s {
         Stmt::Let { name, value, .. } => {
-            eval_to_w(value, out, locals, fnp);
+            eval_to_w(value, out, locals, fnp, bank_state);
             if let Some(a) = locals.get(name) {
                 l!("        movwf   0x{a:02X}            ; let {name}");
             }
@@ -400,7 +463,7 @@ fn emit_stmt(
             target: Expr::Var(v),
             value,
         } => {
-            eval_to_w(value, out, locals, fnp);
+            eval_to_w(value, out, locals, fnp, bank_state);
             if let Some(a) = locals.get(v) {
                 l!("        movwf   0x{a:02X}            ; {v} =");
             }
@@ -412,9 +475,11 @@ fn emit_stmt(
             let n = *lbl;
             *lbl += 1;
             l!("_loop{n}:");
-            emit_block(body, out, lbl, locals, fnp, Some(n));
+            emit_block(body, out, lbl, locals, fnp, Some(n), bank_state);
+            *bank_state = BankState::Unknown;
             l!("        goto    _loop{n}");
             l!("_end{n}:                          ; break target");
+            *bank_state = BankState::Unknown;
         }
         // `for lhs < rhs { .. }`: an 8-bit counted loop (unsigned), the basis of compute kernels
         // and reading a length-prefixed payload. `lhs = lhs + 1` in the body advances it.
@@ -426,15 +491,17 @@ fn emit_stmt(
             let n = *lbl;
             *lbl += 1;
             l!("_loop{n}:");
-            eval_to_w(lhs, out, locals, fnp);
+            eval_to_w(lhs, out, locals, fnp, bank_state);
             l!("        movwf   0x7E            ; loop lhs");
-            eval_to_w(rhs, out, locals, fnp);
+            eval_to_w(rhs, out, locals, fnp, bank_state);
             l!("        subwf   0x7E, w         ; lhs - rhs, C set iff lhs >= rhs");
             l!("        btfsc   STATUS, 0       ; C is bit 0");
             l!("        goto    _end{n}         ; lhs >= rhs -> exit");
-            emit_block(body, out, lbl, locals, fnp, Some(n));
+            emit_block(body, out, lbl, locals, fnp, Some(n), bank_state);
+            *bank_state = BankState::Unknown;
             l!("        goto    _loop{n}");
             l!("_end{n}:");
+            *bank_state = BankState::Unknown;
         }
         // `break`: jump to the enclosing loop's end label.
         Stmt::Break => match le {
@@ -446,8 +513,8 @@ fn emit_stmt(
             cond,
             then_branch,
             else_branch,
-        }) => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals, fnp, le),
-        Stmt::Expr(e) => emit_call(e, out, locals, fnp),
+        }) => emit_if(cond, then_branch, else_branch.as_deref(), out, lbl, locals, fnp, le, bank_state),
+        Stmt::Expr(e) => emit_call(e, out, locals, fnp, bank_state),
         _ => l!("        ; (unsupported statement omitted in Phase 1b)"),
     }
 }
@@ -466,6 +533,7 @@ fn emit_if(
     locals: &HashMap<String, u8>,
     fnp: &HashMap<String, Vec<u8>>,
     le: Option<usize>,
+    bank_state: &mut BankState,
 ) {
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
@@ -475,14 +543,14 @@ fn emit_if(
     if let Expr::Binary(op @ (crate::ast::BinOp::Eq | crate::ast::BinOp::Ne), lhs, rhs) = cond {
         // Leave W = lhs XOR rhs, so the Z flag is set iff the two are equal.
         if let Some(c) = const8(rhs) {
-            eval_to_w(lhs, out, locals, fnp);
+            eval_to_w(lhs, out, locals, fnp, bank_state);
             l!("        xorlw   0x{:02X}            ; Z set iff equal", c & 0xFF);
         } else {
             // General comparison of two runtime values (e.g. a frame checksum
             // `calc == chk`): stash rhs in a scratch register, then XOR lhs in.
-            eval_to_w(rhs, out, locals, fnp);
+            eval_to_w(rhs, out, locals, fnp, bank_state);
             l!("        movwf   0x7D            ; rhs of the comparison");
-            eval_to_w(lhs, out, locals, fnp);
+            eval_to_w(lhs, out, locals, fnp, bank_state);
             l!("        xorwf   0x7D, w         ; Z set iff lhs == rhs");
         }
         // Eq: skip the then-branch when NOT equal; Ne: skip when equal.
@@ -492,11 +560,11 @@ fn emit_if(
             l!("        btfsc   STATUS, 2");
         }
         l!("        goto    _else{n}");
-        emit_block(then_b, out, lbl, locals, fnp, le);
+        emit_block(then_b, out, lbl, locals, fnp, le, bank_state);
         l!("        goto    _endif{n}");
         l!("_else{n}:");
         if let Some(eb) = else_b {
-            emit_block(eb, out, lbl, locals, fnp, le);
+            emit_block(eb, out, lbl, locals, fnp, le, bank_state);
         }
         l!("_endif{n}:");
     } else if let Expr::Binary(
@@ -512,9 +580,9 @@ fn emit_if(
         // computes f - W, so with lhs stashed and rhs in W the carry is set iff lhs >= rhs (no
         // borrow) and Z is set iff they are equal. `>` and `<=` need both flags, since they are
         // the strict/non-strict halves that `>=` alone cannot tell apart.
-        eval_to_w(lhs, out, locals, fnp);
+        eval_to_w(lhs, out, locals, fnp, bank_state);
         l!("        movwf   0x7D            ; lhs of the comparison");
-        eval_to_w(rhs, out, locals, fnp);
+        eval_to_w(rhs, out, locals, fnp, bank_state);
         l!("        subwf   0x7D, w         ; lhs - rhs: C iff lhs >= rhs, Z iff equal");
         match op {
             // lhs < rhs: C clear. Skip the then-branch when C is set.
@@ -543,11 +611,11 @@ fn emit_if(
                 l!("_then{n}:");
             }
         }
-        emit_block(then_b, out, lbl, locals, fnp, le);
+        emit_block(then_b, out, lbl, locals, fnp, le, bank_state);
         l!("        goto    _endif{n}");
         l!("_else{n}:");
         if let Some(eb) = else_b {
-            emit_block(eb, out, lbl, locals, fnp, le);
+            emit_block(eb, out, lbl, locals, fnp, le, bank_state);
         }
         l!("_endif{n}:");
     } else {
@@ -561,15 +629,23 @@ fn emit_if(
              have the `if` silently disappear."
         );
     }
+    // Merge point: both branches (or the fall-through path in ordered compares)
+    // may have left the bank in different states. After an `if`, the bank is
+    // unknown regardless of which path was taken.
+    *bank_state = BankState::Unknown;
 }
 
 /// Emits a call in statement position: `poke8`, `delay`, `serial_init`, `serial_putc`, and a
 /// bare `serial_getc()` (value discarded).
+/// Emits a call in statement position: `poke8`, `delay`, `serial_init`, `serial_putc`, and a
+/// bare `serial_getc()` (value discarded). `bank_state` is set to `Unknown` after every `call`.
+/// `poke8` is special: it bank-selects the target register before writing.
 fn emit_call(
     e: &Expr,
     out: &mut String,
     locals: &HashMap<String, u8>,
     fnp: &HashMap<String, Vec<u8>>,
+    bank_state: &mut BankState,
 ) {
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
@@ -579,39 +655,49 @@ fn emit_call(
         return;
     };
     match (name, args.len()) {
-        // A user-defined function wins over a same-named backend intrinsic (so a
-        // `provides Serial for pic16` written in Sond is dispatched with proper
-        // argument passing, not the intrinsic's W convention).
-        (name, _) if fnp.contains_key(name) => emit_user_call(name, args, out, locals, fnp),
+        // A user-defined function wins over a same-named backend intrinsic.
+        (name, _) if fnp.contains_key(name) => {
+            emit_user_call(name, args, out, locals, fnp, bank_state);
+        }
         ("poke8", 2) => match (const8(&args[0].value), const8(&args[1].value)) {
             (Some(r), Some(v)) => {
-                l!("        banksel 0x{r:02X}");
+                emit_banksel(bank_state, r as u8, out);
                 l!("        movlw   0x{v:02X}");
                 l!("        movwf   0x{r:02X}");
+                *bank_state = if (r & 0x80) != 0 { BankState::Known1 } else { BankState::Known0 };
             }
-            // Constant register, RUNTIME value: evaluate the value into W (banksel
-            // is bit-ops on STATUS, so W survives), then store it. The register
-            // address must still be a constant so we can bank-select it.
             (Some(r), None) => {
-                eval_to_w(&args[1].value, out, locals, fnp);
-                l!("        banksel 0x{r:02X}");
+                eval_to_w(&args[1].value, out, locals, fnp, bank_state);
+                emit_banksel(bank_state, r as u8, out);
                 l!("        movwf   0x{r:02X}");
+                *bank_state = if (r & 0x80) != 0 { BankState::Known1 } else { BankState::Known0 };
             }
             _ => l!("        ; poke8 needs a constant register in Phase 1b"),
         },
-        ("delay", 0) => l!("        call    delay"),
+        ("delay", 0) => {
+            l!("        call    delay");
+            *bank_state = BankState::Unknown;
+        }
         ("delay_loop", 1) => match const8(&args[0].value) {
             Some(n) => {
                 l!("        movlw   0x{:02X}", n & 0xFF);
                 l!("        call    _delayw");
+                *bank_state = BankState::Unknown;
             }
             None => l!("        ; delay_loop needs a constant count in Phase 1b"),
         },
-        ("serial_init", 0) => l!("        call    serial_init"),
-        ("serial_getc", 0) => l!("        call    serial_getc"),
+        ("serial_init", 0) => {
+            l!("        call    serial_init");
+            *bank_state = BankState::Unknown;
+        }
+        ("serial_getc", 0) => {
+            l!("        call    serial_getc");
+            *bank_state = BankState::Unknown;
+        }
         ("serial_putc", 1) => {
-            eval_to_w(&args[0].value, out, locals, fnp);
+            eval_to_w(&args[0].value, out, locals, fnp, bank_state);
             l!("        call    serial_putc");
+            *bank_state = BankState::Unknown;
         }
         _ => l!("        ; (unsupported call `{name}` in Phase 1b)"),
     }
