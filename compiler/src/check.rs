@@ -5699,3 +5699,224 @@ fn check_for(src: &str) -> Result<(), String> {
         assert!(ok.is_ok(), "hand-written while should not trigger range check: {ok:?}");
     }
 }
+
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Module-level string indexing → compile error
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Indexing a module-level `string` variable is a compile error.
+pub fn check_module_string_indexing(
+    funcs: &[Function],
+    string_globals: &HashSet<String>,
+) -> Result<(), String> {
+    for f in funcs {
+        let mut alive: HashSet<&str> = string_globals.iter().map(|s| s.as_str()).collect();
+        walk_stmt_list(&f.body.stmts, &f.name, &mut alive)?;
+        if let Some(ref t) = f.body.tail {
+            expr_string_index(t, &f.name, &alive)?;
+        }
+    }
+    Ok(())
+}
+
+fn walk_stmt_list(stmts: &[Stmt], fname: &str, alive: &mut HashSet<&str>) -> Result<(), String> {
+    for st in stmts {
+        match st {
+            Stmt::Let { name, value, .. } => {
+                // Shadowing: remove from alive.
+                alive.remove(name.as_str());
+                // Check the initializer.
+                expr_string_index(value, fname, alive)?;
+            }
+            Stmt::Assign { target, value } => {
+                // S = ... drops S.
+                if let Expr::Var(ref n) = *target {
+                    alive.remove(n.as_str());
+                }
+                expr_string_index(target, fname, alive)?;
+                expr_string_index(value, fname, alive)?;
+            }
+            Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => {
+                expr_string_index(e, fname, alive)?
+            }
+            Stmt::For { cond, body, .. } => {
+                if let Some(c) = cond {
+                    expr_string_index(c, fname, alive)?
+                }
+                walk_stmt_list(&body.stmts, fname, alive)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn expr_string_index_with_name<'a>(
+    e: &'a Expr,
+    alive: &'a HashSet<&'a str>,
+    rebased: Option<&str>,
+    fname: &str,
+) -> Result<(), String> {
+    let is_alive_string = |name: &str| {
+        rebased.map_or(true, |r| name != r)
+            && alive.contains(name)
+    };
+
+    match e {
+        Expr::Index(base, idx) => {
+            if let Expr::Var(ref name) = **base {
+                if is_alive_string(name) {
+                    if let Some(k) = const_index(idx) {
+                        return Err(format!(
+                            "function `{fname}`: indexing `{name}` with `{k}` — `{name}` is a \
+                             `string` declared at module level, which holds the ADDRESS of its \
+                             UTF-8 bytes, not a code-point view; the compiler multiplies by 4 and \
+                             reads garbage. Use `peek8({name} + {k})` to read the raw UTF-8 byte \
+                             at offset {k} (those are UTF-8 bytes, not characters)."
+                        ));
+                    }
+                    return Err(format!(
+                        "function `{fname}`: indexing `{name}` — `{name}` is a `string` \
+                         declared at module level, which holds the ADDRESS of its UTF-8 bytes, \
+                         not a code-point view; the compiler multiplies the index by 4 and reads \
+                         garbage. Use `peek8({name} + i)` to read the raw UTF-8 byte at offset \
+                         `i` (those are UTF-8 bytes, not characters)."
+                    ));
+                }
+                return expr_string_index_with_name(base, alive, rebased, fname);
+            }
+            expr_string_index_with_name(base, alive, rebased, fname)
+        }
+        Expr::Binary(_, l, r) => {
+            expr_string_index_with_name(&l, alive, rebased, fname)?;
+            expr_string_index_with_name(r, alive, rebased, fname)
+        }
+        Expr::Unary(_, x) | Expr::Cast(x, _) | Expr::Field(x, _) => {
+            expr_string_index_with_name(x, alive, rebased, fname)
+        }
+        Expr::Call(c, args) => {
+            expr_string_index_with_name(c, alive, rebased, fname)?;
+            for a in args {
+                expr_string_index_with_name(&a.value, alive, rebased, fname)?;
+            }
+            Ok(())
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_string_index_with_name(cond, alive, rebased, fname)?;
+            let mut alive2 = alive.clone();
+            walk_stmt_list(&then_branch.stmts, fname, &mut alive2)?;
+            if let Some(eb) = else_branch {
+                let mut alive3 = alive.clone();
+                walk_stmt_list(&eb.stmts, fname, &mut alive3)?;
+            }
+            Ok(())
+        }
+        Expr::Match { scrutinee, arms } => {
+            expr_string_index_with_name(scrutinee, alive, rebased, fname)?;
+            // Clone alive since match arms don't shadow module strings (they're just blocks) but
+            // walk_stmt_list needs &mut. Match arms are independent so the clone is safe.
+            for a in arms {
+                let mut _a = alive.clone();
+                walk_stmt_list(&a.body.stmts, fname, &mut _a)?;
+            }
+            Ok(())
+        }
+        Expr::List(items) => {
+            for it in items {
+                expr_string_index_with_name(it, alive, rebased, fname)?;
+            }
+            Ok(())
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields {
+                expr_string_index_with_name(v, alive, rebased, fname)?;
+            }
+            Ok(())
+        }
+        Expr::SliceRange(b, lo, hi) => {
+            expr_string_index_with_name(b, alive, rebased, fname)?;
+            if let Some(l) = lo {
+                expr_string_index_with_name(&l, alive, rebased, fname)?;
+            }
+            if let Some(h) = hi {
+                expr_string_index_with_name(&h, alive, rebased, fname)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn expr_string_index(e: &Expr, fname: &str, alive: &HashSet<&str>) -> Result<(), String> {
+    expr_string_index_with_name(e, alive, None, fname)
+}
+
+#[cfg(test)]
+mod string_index_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn string_globals(_funcs: &[Function], globals: &[Global]) -> HashSet<String> {
+        // A module-level string is declared as `string` and its initializer is a string literal.
+        // The parser lowers `string` to `View(u32, N)` and stores `Expr::Str(...)` as init.
+        // A byte buffer like `u8[8]` is NOT a string even if its type is `View(u8, ...)`:
+        // it is a real byte array. Distinguish by checking that the init is a Str expression.
+        globals
+            .iter()
+            .filter(|g| matches!(g.init, Expr::Str(_)))
+            .map(|g| g.name.clone())
+            .collect()
+    }
+
+    fn check(src: &str) -> Result<(), String> {
+        let mut p = Parser::new(tokenize(src));
+        let funcs = p.parse_program();
+        let globals = p.take_globals();
+        let sg = string_globals(&funcs, &globals);
+        check_module_string_indexing(&funcs, &sg)
+    }
+
+    #[test]
+    fn index_a_module_string_constant_index_is_refused() {
+        let err = check("let S: string = \"anb\"\nfn main() -> i64 { S[1] }").unwrap_err();
+        assert!(
+            err.contains("indexing") && err.contains("S") && err.contains("peek8"),
+            "should name S and suggest peek8; got: {err}"
+        );
+    }
+
+    #[test]
+    fn index_a_module_string_variable_index_is_refused() {
+        let err = check("let S: string = \"anb\"\nfn main(i: i64) -> i64 { S[i] }").unwrap_err();
+        assert!(
+            err.contains("indexing") && err.contains("S") && err.contains("peek8"),
+            "should name S and suggest peek8; got: {err}"
+        );
+    }
+
+    #[test]
+    fn peek8_on_module_string_compiles_and_is_not_caught() {
+        let ok = check("let S: string = \"anb\"\nfn main() -> i64 { peek8(S + 1) }");
+        assert!(ok.is_ok(), "peek8 on a module string must not be caught; got {ok:?}");
+    }
+
+    #[test]
+    fn module_view_buffer_still_indexes() {
+        let ok = check("let mut g: u8[8]\nfn main() -> i64 { g[1] = 65\n0 }");
+        assert!(
+            ok.is_ok(),
+            "a u8[8] module buffer must not be caught by the string check; got {ok:?}"
+        );
+    }
+
+    #[test]
+    fn local_string_still_indexes() {
+        let ok = check("fn main() -> i64 { let l: string = \"anb\"\nl[1] }");
+        assert!(ok.is_ok(), "a local string must still be indexable; got {ok:?}");    }
+}

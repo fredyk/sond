@@ -309,6 +309,17 @@ fn main() -> ExitCode {
         eprintln!("sondc: {msg}");
         return ExitCode::FAILURE;
     }
+    // Module-level strings are byte pointers, not code-point views.
+    // Indexing them multiplies by 4 and reads garbage.
+    // A `let S: string = "..."` has init = Expr::Str(...) — the distinguishing feature.
+    let string_globals: std::collections::HashSet<String> = globals.iter()
+        .filter(|g| matches!(g.init, sondc::ast::Expr::Str(_)))
+        .map(|g| g.name.clone())
+        .collect();
+    if let Err(msg) = sondc::check::check_module_string_indexing(&funcs, &string_globals) {
+        eprintln!("sondc: {msg}");
+        return ExitCode::FAILURE;
+    }
     if let Err(msg) = sondc::check::check_constant_bounds(&funcs, &globals) {
         eprintln!("sondc: {msg}");
         return ExitCode::FAILURE;
