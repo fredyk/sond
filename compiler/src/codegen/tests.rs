@@ -1222,6 +1222,31 @@ fn a_string_literal_lowers_to_the_address_of_null_terminated_bytes() {
 }
 
 #[test]
+fn a_control_byte_in_a_literal_is_escaped_for_the_assembler() {
+    // `"ERROR\0"` reached the assembler as a raw NUL between the quotes of a `.asciz`, which
+    // ends the string right there as far as `as` is concerned: it answered `invalid character
+    // (0xa) in mnemonic` pointing at a line the programmer never wrote, and the build died
+    // with nothing to grep for. Every control byte gets an octal escape now, so the text
+    // survives the trip and keeps the NUL it was written with -- separate from the one
+    // `.asciz` appends.
+    let asm = emit_program(
+        &Parser::new(tokenize(
+            "fn f() -> i64 { let s: string = \"ERROR\\0\"\n    s.utf8 }",
+        ))
+        .parse_program(),
+    );
+    assert!(
+        asm.contains(r#".asciz "ERROR\000""#),
+        "a NUL inside a literal must be escaped as \\000:\n{asm}"
+    );
+    assert!(
+        !asm.lines()
+            .any(|l| l.contains(".asciz") && l.contains('\0')),
+        "no line may carry a raw control byte inside the quotes:\n{asm}"
+    );
+}
+
+#[test]
 fn the_same_literal_used_twice_has_one_address() {
     // Two uses of the same `string` global gave two DIFFERENT pointers, ten bytes apart --
     // one `.rodata` copy per use -- because `intern_string` interned nothing: it appended a

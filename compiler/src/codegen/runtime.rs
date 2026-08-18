@@ -467,6 +467,12 @@ impl Codegen {
             self.line(".section .rodata");
             self.line(".p2align 3");
             for (label, bytes) in &strings {
+                // Every control byte gets an octal escape, not just the two that read as
+                // punctuation. A literal written `"ERROR\0"` used to land here as a raw NUL
+                // inside the quotes, which ends the string as far as the assembler is
+                // concerned: it reported `invalid character (0xa) in mnemonic` on a line the
+                // programmer never wrote, and the build failed with nothing to grep for. The
+                // trailing NUL that `.asciz` adds is separate from any the text itself holds.
                 let escaped: String = bytes
                     .chars()
                     .map(|c| match c {
@@ -474,6 +480,9 @@ impl Codegen {
                         '\\' => "\\\\".to_string(),
                         '\n' => "\\n".to_string(),
                         '\t' => "\\t".to_string(),
+                        c if (c as u32) < 0x20 || c as u32 == 0x7F => {
+                            format!("\\{:03o}", c as u32)
+                        }
                         other => other.to_string(),
                     })
                     .collect();

@@ -1032,6 +1032,20 @@ struct Codegen {
     /// address (an i64), so `var_types` says i64 for it; this is what `v[i]` needs, so the index
     /// scales by the element's width instead of assuming a 64-bit word. Reset per function.
     view_elem: HashMap<String, Ty>,
+    /// The rodata label for each local `string` variable whose value the compiler
+    /// can trace to a literal. When a tracked variable is passed as a `string` argument, emit
+    /// `leaq label(%rip), %rax` (UTF-8 bytes) instead of loading the code-point pointer.
+    /// Reset per function.
+    string_rodata_cur: HashMap<String, String>,
+    /// Functions whose return type is `string` (a view of code points). Populated in `emit_all`,
+    /// used in lowering to track call results as string variables.
+    string_returning_fns: HashSet<String>,
+    /// Local variables known to be of `string` type (vs. an arbitrary view type). Reset per function.
+    string_vars: HashSet<String>,
+    /// For each string variable tracked in `string_rodata_cur`, the source lines at which
+    /// the variable was assigned a string literal, together with the literal text.  Used to
+    /// build the error message that names both conflicting assignments.
+    string_assignments: HashMap<String, Vec<(u32, String)>>,
     /// The return kind of every user function, to type a call expression.
     fn_ret_types: HashMap<String, Ty>,
     /// Word count of each struct type (its by-value size), so a function returning a
@@ -1106,6 +1120,9 @@ impl Codegen {
         self.locals.clear();
         self.var_types.clear();
         self.view_elem.clear();
+        self.string_rodata_cur.clear();
+        self.string_vars.clear();
+        self.string_assignments.clear();
         // Register module-level view-typed globals so their element width is known.
         for (name, (elem_kind, _byte_len)) in &self.global_view_lengths {
             self.view_elem.insert(name.clone(), *elem_kind);
@@ -2221,6 +2238,18 @@ impl Codegen {
                             self.line(&format!("    movq %rax, {off}(%rbp)"));
                             self.var_types.insert(name.clone(), Ty::I64);
                             self.view_elem.insert(name.clone(), Ty::U32);
+                            // Also record the UTF-8 rodata label so passing this
+                            // variable as a `string` argument sends the real
+                            // source bytes, not the code-point array.
+                            let utflabel = self.intern_string(text);
+                            let asgn_line = block.stmt_lines.get(i).copied().unwrap_or(0);
+                            let desc = format!("{} = \"{}\"", name, text);
+                            self.string_assignments
+                                .entry(name.clone())
+                                .or_default()
+                                .push((asgn_line, desc));
+                            self.string_rodata_cur.insert(name.clone(), utflabel);
+                            self.string_vars.insert(name.clone());
                             if let Some(crate::ast::Type::View(_, Some(l))) = ty.as_ref()
                                 && let Ok(n) = l.parse::<i64>()
                             {
@@ -2317,6 +2346,42 @@ impl Codegen {
                             if let Some(&k) = self.view_elem.get(src_name) {
                                 self.view_elem.insert(name.clone(), k);
                             }
+                            // Propagate the UTF-8 rodata label too, so `q` can be passed
+                            // as a `string` argument (even when the source was itself a
+                            // copy of a string literal).
+                            if let Some(label) = self.string_rodata_cur.get(src_name) {
+                                self.string_rodata_cur.insert(name.clone(), label.clone());
+                            }
+                            // Only mark as a string if the source IS a string variable.
+                            if self.string_vars.contains(src_name) {
+                                self.string_vars.insert(name.clone());
+                                // Copy assignment info so the error can trace the copy chain.
+                                if let Some(src_asgns) = self.string_assignments.get(src_name) {
+                                    let src_asgns = src_asgns.clone();
+                                    self.string_assignments
+                                        .entry(name.clone())
+                                        .or_default()
+                                        .extend(
+                                            src_asgns.iter().map(|&(l, ref s)| {
+                                                (l, format!("{} = {}", name, s))
+                                            }),
+                                        );
+                                }
+                            }
+                        }
+                        // `let l = f()`: if `f` returns `string`, treat `l` as a string
+                        // variable so the call site can know the variable's representation.
+                        if let Expr::Call(callee, _) = value {
+                            let callee_name = match callee.as_ref() {
+                                Expr::Var(n) => n.as_str(),
+                                _ => "",
+                            };
+                            if self.string_returning_fns.contains(callee_name) {
+                                // It is a string, but we don't know its rodata label
+                                // (the function parameter is untraceable). It will
+                                // still enter the `string_vars` check at call sites.
+                                self.string_vars.insert(name.clone());
+                            }
                         }
                     }
                 }
@@ -2326,6 +2391,48 @@ impl Codegen {
                 } => {
                     let kind = self.ty_of(value);
                     self.expr(value);
+                    // When assigning a string literal to a string variable,
+                    // update the tracked rodata label so future uses of the
+                    // variable in a `string` argument send the correct bytes.
+                    let label = if let Expr::Str(text) = value
+                        && self.view_elem.contains_key(name)
+                    {
+                        // Record the assignment location for error messages.
+                        let asgn_line = block.stmt_lines.get(i).copied().unwrap_or(0);
+                        let desc = format!("{} = \"{}\"", name, text);
+                        self.string_assignments
+                            .entry(name.clone())
+                            .or_default()
+                            .push((asgn_line, desc));
+                        Some(self.intern_string(text))
+                    } else {
+                        None
+                    };
+                    if let Some(l) = label {
+                        self.string_rodata_cur.insert(name.clone(), l);
+                        self.string_vars.insert(name.clone());
+                    }
+                    // When assigning one tracked string to another, copy the rodata key
+                    // and the assignment chain.
+                    if let Expr::Var(src) = value {
+                        let src = src.clone();
+                        if let Some(label) = self.string_rodata_cur.get(&src) {
+                            let label = label.clone();
+                            self.string_rodata_cur.insert(name.clone(), label);
+                            self.string_vars.insert(name.clone());
+                            if let Some(src_asgns) = self.string_assignments.get(&src) {
+                                let src_asgns = src_asgns.clone();
+                                self.string_assignments
+                                    .entry(name.clone())
+                                    .or_default()
+                                    .extend(
+                                        src_asgns
+                                            .iter()
+                                            .map(|&(l, ref s)| (l, format!("{} = {}", name, s))),
+                                    );
+                            }
+                        }
+                    }
                     if let Some(&off) = self.locals.get(name) {
                         if kind.is_float() {
                             self.line(&format!("    movsd %xmm0, {off}(%rbp)"));
@@ -2395,6 +2502,13 @@ impl Codegen {
                     self.line(&format!("    jmp {}", self.ret_label.clone()));
                 }
                 Stmt::For { cond, body, .. } => {
+                    /* Track string-variable state before the loop body so we can detect
+                     * which variables were modified inside it.  The language rule: a
+                     * string variable that is assigned anywhere in a loop body becomes
+                     * *unknown* after the loop (because the body may run 0..N times and
+                     * the value at the end of one iteration might differ from what it
+                     * was before entering the loop). */
+                    let before_loop = self.save_string_state();
                     let start = self.fresh_label("for");
                     let end = self.fresh_label("endfor");
                     self.loop_labels.push((start.clone(), end.clone()));
@@ -2405,6 +2519,15 @@ impl Codegen {
                         self.line(&format!("    je {end}"));
                     }
                     self.block(body);
+                    // Invalidate any string variable that was modified inside the
+                    // loop body — after N iterations its value may differ from
+                    // what it was before the loop started.
+                    let after_loop = self.save_string_state();
+                    for var in &before_loop.1 {
+                        if after_loop.0.get(var) != before_loop.0.get(var) {
+                            self.string_rodata_cur.remove(var);
+                        }
+                    }
                     self.line(&format!("    jmp {start}"));
                     self.line(&format!("{end}:"));
                     self.loop_labels.pop();
@@ -2431,6 +2554,87 @@ impl Codegen {
         }
         if let Some(tail) = &block.tail {
             self.expr(tail);
+        }
+    }
+
+    /// String-literal branch tracking helpers (see `if_else`) so we can merge
+    /// per-branch values and either propagate a known text or flag an unknown one.
+    pub(crate) fn save_string_state(&self) -> (HashMap<String, String>, HashSet<String>) {
+        (self.string_rodata_cur.clone(), self.string_vars.clone())
+    }
+    /// Build a compile-time error message for a string variable whose value is
+    /// unknown (present in `string_vars` but missing from `string_rodata_cur`).
+    pub(crate) fn string_unknown_error(&self, var: &str) -> String {
+        if let Some(assigns) = self.string_assignments.get(var) {
+            // Variables with tracked assignments: name the conflicting ones.
+            let mut msg = format!(
+                "passing `{var}`: its value as a `string` is unknown \
+                 after a branch or loop — the compiler cannot prove which text \
+                 the variable holds. The assignments that make it impossible to \
+                 decide:\n"
+            );
+            // The assignments are named by what they say, not by a line number: after an
+            // `include` the source the codegen walks is the spliced one, so the count here is
+            // 150 lines past anything the programmer can point at in their own file. A number
+            // that names a line the reader cannot find is worse than no number at all.
+            for (_line, desc) in assigns {
+                msg.push_str(&format!("  {desc}\n"));
+            }
+            msg.push_str(
+                "Remove one of the conflicting assignments so there is a \
+                          single, provable value.\n",
+            );
+            msg
+        } else {
+            format!(
+                "passing `{var}`: its value as a `string` is unknown \
+                 because {var} was not initialized from a literal or \
+                 another traceable string variable. Assign a literal to \
+                 {var} before passing it, or restructure the code \
+                 so the compiler can see which text flows."
+            )
+        }
+    }
+    /// Merge two post-branch states into `string_rodata_cur` / `string_vars`.
+    /// For every variable that is a tracked string after at least one branch,
+    /// keep the rodata label only when both branches agree; otherwise mark it
+    /// as unknown.  Variables present only in one branch are also marked
+    /// unknown (one branch has a value, the other does not).
+    ///
+    /// `has_else: false` means no else block was present, so `post_else` /
+    /// `post_else_vars` are actually a copy of the pre-if state.  In that
+    /// case we still merge — variables that changed in *then* will have the
+    /// label in `post_then` but not in `post_else`, producing the same
+    /// "unknown" result.  The implementation is identical so we only need
+    /// to compute the union from the post-branch states regardless.
+    pub(crate) fn merge_string_branches(
+        &mut self,
+        _pre_if: &HashMap<String, String>,
+        _pre_vars: &HashSet<String>,
+        post_then: &HashMap<String, String>,
+        post_then_vars: &HashSet<String>,
+        post_else: &HashMap<String, String>,
+        post_else_vars: &HashSet<String>,
+    ) {
+        // For each variable in string_vars after the if, decide its post-if label.
+        let final_vars: HashSet<String> = {
+            let mut v = post_then_vars.clone();
+            v.extend(post_else_vars.iter().cloned());
+            v
+        };
+        for var in &final_vars {
+            let then_label = post_then.get(var);
+            let else_label = post_else.get(var);
+
+            if then_label == else_label {
+                // Both branches agree -- keep the label.
+                if let Some(l) = then_label {
+                    self.string_rodata_cur.insert(var.clone(), l.clone());
+                }
+            } else {
+                // Disagree or one side has no value → unknown.
+                self.string_rodata_cur.remove(var);
+            }
         }
     }
 }

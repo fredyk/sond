@@ -166,3 +166,13 @@ test "the raw-pointer entry points still work" {
     assert_eq(bytes_get(b, 4), 95)
     assert_eq(bytes_get(b, 5), 122)
 }
+
+test "bytes_from_str with a variable gives the same UTF-8 bytes as the literal" {
+    let s: string = "añb"
+    let b = bytes_from_str(s)
+    assert_eq(bytes_len(b), 4)
+    assert_eq(bytes_get(b, 0), 97)
+    assert_eq(bytes_get(b, 1), 195)
+    assert_eq(bytes_get(b, 2), 177)
+    assert_eq(bytes_get(b, 3), 98)
+}

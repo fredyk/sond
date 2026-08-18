@@ -453,13 +453,44 @@ impl Codegen {
         self.expr(cond);
         self.line("    cmpq $0, %rax");
         self.line(&format!("    je {else_l}"));
+
+        // Save string-literal state before either branch runs.
+        let pre_if = self.save_string_state();
+
         self.block(then_b);
+        // State after then branch is now in self.*
+        let post_then = self.save_string_state();
+
         self.line(&format!("    jmp {end_l}"));
         self.line(&format!("{else_l}:"));
         match else_b {
-            Some(eb) => self.block(eb),
-            None => self.line("    movq $0, %rax"),
+            Some(eb) => {
+                self.block(eb);
+                // State after else branch is in self.*
+                let post_else = self.save_string_state();
+                self.merge_string_branches(
+                    &pre_if.0,
+                    &pre_if.1,
+                    &post_then.0,
+                    &post_then.1,
+                    &post_else.0,
+                    &post_else.1,
+                );
+            }
+            None => {
+                // No else branch: the "else" state is pre-if
+                // (the variable value was just preserved).
+                self.merge_string_branches(
+                    &pre_if.0,
+                    &pre_if.1,
+                    &post_then.0,
+                    &post_then.1,
+                    &pre_if.0,
+                    &pre_if.1,
+                );
+            }
         }
+
         self.line(&format!("{end_l}:"));
     }
 }
