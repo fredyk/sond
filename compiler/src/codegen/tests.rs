@@ -2167,7 +2167,9 @@ fn module_string_with_type_annotation_returns_pointer_to_bytes() {
     // `let saludo: string = "ax"` must return the address of the interned bytes,
     // so peek8(saludo + 0) == 97 ('a'). Before the fix it returned 0 (bss buffer).
     assert_eq!(
-        compile_and_run_with_globals("let saludo: string = \"ax\"\nfn main() -> i64 { peek8(saludo + 0) }"),
+        compile_and_run_with_globals(
+            "let saludo: string = \"ax\"\nfn main() -> i64 { peek8(saludo + 0) }"
+        ),
         97,
         "typed module-level string: the first byte of 'ax' is 97"
     );
@@ -2191,14 +2193,24 @@ fn module_string_annotated_and_unannotated_produce_identical_result() {
     let funcs1 = p1.parse_program();
     let globals1 = p1.take_globals();
     let asm1 = emit_shared_g(&globals1, &[], &funcs1);
-    let mut p2 = Parser::new(tokenize("let b: string = \"dup-test\"\nfn f() -> i64 { 0 }"));
+    let mut p2 = Parser::new(tokenize(
+        "let b: string = \"dup-test\"\nfn f() -> i64 { 0 }",
+    ));
     let funcs2 = p2.parse_program();
     let globals2 = p2.take_globals();
     let asm2 = emit_shared_g(&globals2, &[], &funcs2);
     // Each form interns the literal exactly once, and both emit the SAME label for it:
     // comparing `asm1` with itself would pass no matter what the annotated form does.
-    assert_eq!(asm1.matches(".asciz \"dup-test\"").count(), 1, "unannotated interns once: {asm1}");
-    assert_eq!(asm2.matches(".asciz \"dup-test\"").count(), 1, "annotated interns once: {asm2}");
+    assert_eq!(
+        asm1.matches(".asciz \"dup-test\"").count(),
+        1,
+        "unannotated interns once: {asm1}"
+    );
+    assert_eq!(
+        asm2.matches(".asciz \"dup-test\"").count(),
+        1,
+        "annotated interns once: {asm2}"
+    );
     let label_of = |asm: &str| {
         asm.lines()
             .position(|l| l.contains(".asciz \"dup-test\""))
@@ -2209,7 +2221,10 @@ fn module_string_annotated_and_unannotated_produce_identical_result() {
         l1.as_deref().is_some_and(|l| l.contains(':')),
         "the literal must be preceded by a label, got {l1:?}"
     );
-    assert_eq!(l1, l2, "both forms must reach the literal through the same label");
+    assert_eq!(
+        l1, l2,
+        "both forms must reach the literal through the same label"
+    );
 }
 
 #[test]
@@ -2259,7 +2274,9 @@ fn module_level_u32_view_still_works() {
     assert!(asm.contains(".bss"));
     assert!(asm.contains("v: .zero 64"));
     assert_eq!(
-        compile_and_run_with_globals("let mut v: u32[16]\nfn main() -> i64 { v[0] = 42\npeek32(v) }"),
+        compile_and_run_with_globals(
+            "let mut v: u32[16]\nfn main() -> i64 { v[0] = 42\npeek32(v) }"
+        ),
         42
     );
 }
@@ -2269,42 +2286,50 @@ fn local_string_codepoints_work() {
     // Local string: `l[i]` accesses code points, and `l.len == 3`.
     // With "añb": code points are 97, 241(ñ), 98; len=3.
     assert_eq!(
-        compile_and_run(
-            concat!("fn f() -> i64 {\n            \
-                 let l: string = \"a", "\u{00f1}", "b\"\n\
+        compile_and_run(concat!(
+            "fn f() -> i64 {\n            \
+                 let l: string = \"a",
+            "\u{00f1}",
+            "b\"\n\
                  l.len\n\
-             }")
-        ),
+             }"
+        )),
         3,
         "local string .len counts code points"
     );
     assert_eq!(
-        compile_and_run(
-            concat!("fn f() -> i64 {\n            \
-                 let l: string = \"a", "\u{00f1}", "b\"\n\
+        compile_and_run(concat!(
+            "fn f() -> i64 {\n            \
+                 let l: string = \"a",
+            "\u{00f1}",
+            "b\"\n\
                  l[0]\n\
-             }")
-        ),
+             }"
+        )),
         97,
         "l[0] is the code point for 'a'"
     );
     assert_eq!(
-        compile_and_run(
-            concat!("fn f() -> i64 {\n            \
-                 let l: string = \"a", "\u{00f1}", "b\"\n\
+        compile_and_run(concat!(
+            "fn f() -> i64 {\n            \
+                 let l: string = \"a",
+            "\u{00f1}",
+            "b\"\n\
                  l[1]\n\
-             }")
-        ),
+             }"
+        )),
         241,
         "l[1] is the code point for 'ñ'"
     );
     assert_eq!(
-        compile_and_run(
-            concat!("fn f() -> i64 {\n            \
-                 let l: string = \"a", "\u{00f1}", "b\"\n\
+        compile_and_run(concat!(
+            "fn f() -> i64 {\n            \
+                 let l: string = \"a",
+            "\u{00f1}",
+            "b\"\n\
                  l[2]\n\
-             }")
-        ),
+             }"
+        )),
         98,
         "l[2] is the code point for 'b'"
     );

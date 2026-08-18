@@ -22,7 +22,9 @@ use std::process::{Command, ExitCode};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: sondc <input.snd> [-o <output>] [--freestanding | --uefi | --windows | --shared | --object]");
+        eprintln!(
+            "usage: sondc <input.snd> [-o <output>] [--freestanding | --uefi | --windows | --shared | --object]"
+        );
         return ExitCode::from(2);
     }
 
@@ -46,7 +48,9 @@ fn main() -> ExitCode {
         break;
     }
     let Some(input) = input else {
-        eprintln!("usage: sondc <input.snd> [-o <output>] [--test | --freestanding | --uefi | --windows | --shared | --object]");
+        eprintln!(
+            "usage: sondc <input.snd> [-o <output>] [--test | --freestanding | --uefi | --windows | --shared | --object]"
+        );
         return ExitCode::from(2);
     };
     let output = parse_output_flag(&args).unwrap_or_else(|| default_output(input));
@@ -76,24 +80,23 @@ fn main() -> ExitCode {
     // the user's. The hook used to be set further down, after this phase.
     std::panic::set_hook(Box::new(|_| {}));
     let input_for_resolve = input.clone();
-    let (mut src, cov_scope) =
-        match std::panic::catch_unwind(move || {
-            sondc::resolve::resolve_includes_scoped(std::path::Path::new(&input_for_resolve))
-        })
-        .unwrap_or_else(|e| {
-            Err(std::io::Error::other(format!(
-                "lex error while reading {input}: {}",
-                panic_message(&e)
-            )))
-        }) {
-            Ok(s) => s,
-            Err(e) => {
-                // `e` already names the file that failed (the entry, or the nested include that
-                // could not be resolved), so it is not re-blamed on `input` here.
-                eprintln!("sondc: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let (mut src, cov_scope) = match std::panic::catch_unwind(move || {
+        sondc::resolve::resolve_includes_scoped(std::path::Path::new(&input_for_resolve))
+    })
+    .unwrap_or_else(|e| {
+        Err(std::io::Error::other(format!(
+            "lex error while reading {input}: {}",
+            panic_message(&e)
+        )))
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            // `e` already names the file that failed (the entry, or the nested include that
+            // could not be resolved), so it is not re-blamed on `input` here.
+            eprintln!("sondc: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     // RFC-0016: in a --debug build, append the debug agent, WRITTEN IN SOND (see `debug_agent`). The
     // per-statement checkpoint (emitted by codegen) calls `__dbg_step(line)`; the agent is the Sond
     // that serves the socket step protocol. Appended after include resolution, so it depends only on
@@ -165,7 +168,9 @@ fn main() -> ExitCode {
             let uses = p.take_uses();
             sondc::testing::check_all_tests_registered(&declared_tests, &funcs)
                 .unwrap_or_else(|e| panic!("{e}"));
-            (funcs, globals, structs, externs, enums, ports, providers, uses)
+            (
+                funcs, globals, structs, externs, enums, ports, providers, uses,
+            )
         }) {
             Ok(fg) => fg,
             Err(e) => {
@@ -312,7 +317,8 @@ fn main() -> ExitCode {
     // Module-level strings are byte pointers, not code-point views.
     // Indexing them multiplies by 4 and reads garbage.
     // A `let S: string = "..."` has init = Expr::Str(...) — the distinguishing feature.
-    let string_globals: std::collections::HashSet<String> = globals.iter()
+    let string_globals: std::collections::HashSet<String> = globals
+        .iter()
         .filter(|g| matches!(g.init, sondc::ast::Expr::Str(_)))
         .map(|g| g.name.clone())
         .collect();
@@ -584,16 +590,19 @@ fn ensure_pic16_output(user_output: &str) -> String {
 /// - ran and failed            -> report the failure, without looking at the disk
 /// - ran, succeeded, no file   -> an error naming the file that is missing
 /// - ran, succeeded, file there -> the message announcing it
-fn pic16_result(status: std::io::Result<std::process::ExitStatus>, hex_path: &std::path::Path) -> Result<String, String> {
+fn pic16_result(
+    status: std::io::Result<std::process::ExitStatus>,
+    hex_path: &std::path::Path,
+) -> Result<String, String> {
     let hex_display = hex_path.display().to_string();
-    let s = status.map_err(|e| {
-        format!("sondc: cannot run gpasm (install gputils): {e}")
-    })?;
+    let s = status.map_err(|e| format!("sondc: cannot run gpasm (install gputils): {e}"))?;
 
     if !s.success() {
         return Err(format!(
             "sondc: gpasm failed to assemble (exit code: {})",
-            s.code().map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string())
+            s.code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
         ));
     }
 
@@ -603,7 +612,9 @@ fn pic16_result(status: std::io::Result<std::process::ExitStatus>, hex_path: &st
         ));
     }
 
-    Ok(format!("sondc: wrote PIC16F684 Intel HEX `{hex_display}` (flash it to the chip)"))
+    Ok(format!(
+        "sondc: wrote PIC16F684 Intel HEX `{hex_display}` (flash it to the chip)"
+    ))
 }
 
 #[cfg(test)]
@@ -624,7 +635,10 @@ mod pic16_assemble_tests {
 
     #[test]
     fn gpasm_success_but_hex_missing_returns_error_naming_path() {
-        let hex_path = std::env::temp_dir().join(format!("sondc_test_no_file_8f3a_2c4d-{}.hex", std::process::id()));
+        let hex_path = std::env::temp_dir().join(format!(
+            "sondc_test_no_file_8f3a_2c4d-{}.hex",
+            std::process::id()
+        ));
         if hex_path.exists() {
             let _ = std::fs::remove_file(&hex_path);
         }
@@ -648,7 +662,10 @@ mod pic16_assemble_tests {
 
     #[test]
     fn gpasm_success_and_hex_exists_returns_ok_naming_path() {
-        let hex = std::env::temp_dir().join(format!("sondc_test_exists_a1b2_7e9f-{}.hex", std::process::id()));
+        let hex = std::env::temp_dir().join(format!(
+            "sondc_test_exists_a1b2_7e9f-{}.hex",
+            std::process::id()
+        ));
         // Create the file; removed at the end of the test.
         std::fs::write(&hex, ":020000040000FA02").unwrap();
         let result = pic16_result(Ok(success_exit_status()), &hex);
@@ -670,10 +687,16 @@ mod pic16_assemble_tests {
 
     #[test]
     fn gpasm_failure_returns_error_without_checking_disk() {
-        let hex_path = std::env::temp_dir().join(format!("sondc_test_fail_c3d4_a5b6-{}.hex", std::process::id()));
+        let hex_path = std::env::temp_dir().join(format!(
+            "sondc_test_fail_c3d4_a5b6-{}.hex",
+            std::process::id()
+        ));
         // The file is deliberately absent: a failed run must not look at the disk at all.
         let result = pic16_result(Ok(failure_exit_status()), &hex_path);
-        assert!(result.is_err(), "a failed assembler run must be an error; got {result:?}");
+        assert!(
+            result.is_err(),
+            "a failed assembler run must be an error; got {result:?}"
+        );
         let err = result.unwrap_err();
         assert!(
             err.contains("failed") || err.contains("exit"),
@@ -683,7 +706,10 @@ mod pic16_assemble_tests {
 
     #[test]
     fn gpasm_cannot_run_returns_install_gputils_error() {
-        let hex_path = std::env::temp_dir().join(format!("sondc_test_norun_e5f6_c7d8-{}.hex", std::process::id()));
+        let hex_path = std::env::temp_dir().join(format!(
+            "sondc_test_norun_e5f6_c7d8-{}.hex",
+            std::process::id()
+        ));
         let io_err = io::Error::new(io::ErrorKind::NotFound, "gpasm: No such file or directory");
         let result = pic16_result(Err(io_err), &hex_path);
         assert!(

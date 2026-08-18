@@ -65,9 +65,10 @@ fn check_matches_expr(e: &Expr, enums: &[EnumDef], fname: &str) -> Result<(), St
                 check_matches_block(&a.body, enums, fname)?;
             }
             // The enum these arms belong to: the one whose variants ⊇ the arms'.
-            let owner = enums
-                .iter()
-                .find(|en| seen.iter().all(|v| en.variants.iter().any(|ev| ev.name == **v)));
+            let owner = enums.iter().find(|en| {
+                seen.iter()
+                    .all(|v| en.variants.iter().any(|ev| ev.name == **v))
+            });
             let Some(owner) = owner else {
                 return Err(format!(
                     "function `{fname}`: match arms name no known enum's variants \
@@ -232,14 +233,17 @@ fn nested_blocks_of_block<'a>(b: &'a Block, out: &mut Vec<&'a Block>) {
 /// that tracks loop nesting needs to treat that one differently).
 fn nested_blocks_of_stmt<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
     match s {
-        Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Spawn(value) | Stmt::Return(Some(value)) => {
-            nested_blocks(value, out)
-        }
+        Stmt::Let { value, .. }
+        | Stmt::Expr(value)
+        | Stmt::Spawn(value)
+        | Stmt::Return(Some(value)) => nested_blocks(value, out),
         Stmt::Assign { target, value } => {
             nested_blocks(target, out);
             nested_blocks(value, out);
         }
-        Stmt::For { cond, invariant, .. } => {
+        Stmt::For {
+            cond, invariant, ..
+        } => {
             if let Some(c) = cond {
                 nested_blocks(c, out);
             }
@@ -328,7 +332,12 @@ pub fn check_syscall_retry_has_an_exit(funcs: &[Function]) -> Result<(), String>
             {
                 out.push(guarded);
             }
-            if let Stmt::Expr(Expr::If { cond, then_branch, else_branch }) = s {
+            if let Stmt::Expr(Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            }) = s
+            {
                 let g = guarded || mentions(cond, result);
                 assignments_to(then_branch, counter, result, g, out);
                 if let Some(eb) = else_branch {
@@ -345,7 +354,11 @@ pub fn check_syscall_retry_has_an_exit(funcs: &[Function]) -> Result<(), String>
         // The tail: `for got < n { let r = ..\n if r > 0 { got = got + r } }` puts the guarded
         // update HERE, not in stmts, which is exactly the shape being looked for.
         if let Some(t) = &b.tail
-            && let Expr::If { cond, then_branch, else_branch } = t.as_ref()
+            && let Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } = t.as_ref()
         {
             let g = guarded || mentions(cond, result);
             assignments_to(then_branch, counter, result, g, out);
@@ -356,7 +369,12 @@ pub fn check_syscall_retry_has_an_exit(funcs: &[Function]) -> Result<(), String>
     }
     fn walk(stmts: &[Stmt], fname: &str) -> Result<(), String> {
         for s in stmts {
-            if let Stmt::For { cond: Some(cond), body, .. } = s {
+            if let Stmt::For {
+                cond: Some(cond),
+                body,
+                ..
+            } = s
+            {
                 // The loop's own exit variable, and the name bound to a direct syscall result.
                 let mut result: Option<&str> = None;
                 for bs in &body.stmts {
@@ -442,7 +460,6 @@ pub fn check_spawn_not_in_loop(funcs: &[Function]) -> Result<(), String> {
     let _ = funcs;
     Ok(())
 }
-
 
 /// The source symbol of a binary operator, for diagnostics.
 fn op_symbol(op: &BinOp) -> &'static str {
@@ -861,11 +878,7 @@ pub fn check_par_confluence(funcs: &[Function], globals: &[Global]) -> Result<()
                     walk_expr(v, fname, eff)?;
                 }
             }
-            Expr::Int(_)
-            | Expr::Decimal(_)
-            | Expr::Str(_)
-            | Expr::Bool(_)
-            | Expr::Var(_) => {}
+            Expr::Int(_) | Expr::Decimal(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Var(_) => {}
         }
         Ok(())
     }
@@ -891,9 +904,7 @@ pub fn check_par_confluence(funcs: &[Function], globals: &[Global]) -> Result<()
                     walk_expr(target, fname, eff)?;
                     walk_expr(value, fname, eff)?;
                 }
-                Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => {
-                    walk_expr(e, fname, eff)?
-                }
+                Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => walk_expr(e, fname, eff)?,
                 Stmt::For { cond, body, .. } => {
                     if let Some(c) = cond {
                         walk_expr(c, fname, eff)?;
@@ -1196,7 +1207,11 @@ pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> 
                     collect_calls_expr(v, out);
                 }
             }
-            Expr::If { cond, then_branch, else_branch } => {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 collect_calls_expr(cond, out);
                 collect_calls(then_branch, out);
                 if let Some(eb) = else_branch {
@@ -1208,11 +1223,15 @@ pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> 
     }
     // `syscall(SYS_exit, N)` or `syscall(60, N)` (231 = exit_group): the process-termination call.
     fn is_process_exit(callee: &Expr, args: &[Arg]) -> bool {
-        let Expr::Var(name) = callee else { return false };
+        let Expr::Var(name) = callee else {
+            return false;
+        };
         if name != "syscall" {
             return false;
         }
-        let Some(first) = args.first() else { return false };
+        let Some(first) = args.first() else {
+            return false;
+        };
         match &first.value {
             Expr::Var(n) => n == "SYS_exit" || n == "SYS_exit_group",
             Expr::Int(n) => *n == 60 || *n == 231,
@@ -1375,9 +1394,10 @@ pub fn check_no_close_fd_after_spawn(funcs: &[Function]) -> Result<(), String> {
                 }
                 // Reassigning a variable un-moves it: it now names a fresh descriptor.
                 Stmt::Let { name, .. } => moved.retain(|m| *m != name.as_str()),
-                Stmt::Assign { target: Expr::Var(name), .. } => {
-                    moved.retain(|m| *m != name.as_str())
-                }
+                Stmt::Assign {
+                    target: Expr::Var(name),
+                    ..
+                } => moved.retain(|m| *m != name.as_str()),
                 // A nested block's statements run after the spawn too, so carry `moved` in.
                 Stmt::For { body, .. } => walk(&body.stmts, moved, fname)?,
                 _ => {}
@@ -1808,7 +1828,11 @@ fn cmp_const(op: BinOp, v: &str, c: i64) -> Expr {
 }
 
 fn cmp_var(op: BinOp, v: &str, rhs: &Expr) -> Expr {
-    Expr::Binary(op, Box::new(Expr::Var(v.to_string())), Box::new(rhs.clone()))
+    Expr::Binary(
+        op,
+        Box::new(Expr::Var(v.to_string())),
+        Box::new(rhs.clone()),
+    )
 }
 
 /// Does `e` mention the variable `name`?
@@ -2175,7 +2199,9 @@ fn expr_assigns_preserve_nonneg(e: &Expr, g: &str) -> bool {
         }
         Expr::Match { scrutinee, arms } => {
             expr_assigns_preserve_nonneg(scrutinee, g)
-                && arms.iter().all(|a| block_assigns_preserve_nonneg(&a.body, g))
+                && arms
+                    .iter()
+                    .all(|a| block_assigns_preserve_nonneg(&a.body, g))
         }
         Expr::Binary(_, l, r) | Expr::Index(l, r) => {
             expr_assigns_preserve_nonneg(l, g) && expr_assigns_preserve_nonneg(r, g)
@@ -2185,16 +2211,22 @@ fn expr_assigns_preserve_nonneg(e: &Expr, g: &str) -> bool {
         }
         Expr::Call(c, args) => {
             expr_assigns_preserve_nonneg(c, g)
-                && args.iter().all(|a| expr_assigns_preserve_nonneg(&a.value, g))
+                && args
+                    .iter()
+                    .all(|a| expr_assigns_preserve_nonneg(&a.value, g))
         }
         Expr::List(items) => items.iter().all(|i| expr_assigns_preserve_nonneg(i, g)),
-        Expr::StructLit(_, fields) => {
-            fields.iter().all(|(_, v)| expr_assigns_preserve_nonneg(v, g))
-        }
+        Expr::StructLit(_, fields) => fields
+            .iter()
+            .all(|(_, v)| expr_assigns_preserve_nonneg(v, g)),
         Expr::SliceRange(b, lo, hi) => {
             expr_assigns_preserve_nonneg(b, g)
-                && lo.as_ref().is_none_or(|x| expr_assigns_preserve_nonneg(x, g))
-                && hi.as_ref().is_none_or(|x| expr_assigns_preserve_nonneg(x, g))
+                && lo
+                    .as_ref()
+                    .is_none_or(|x| expr_assigns_preserve_nonneg(x, g))
+                && hi
+                    .as_ref()
+                    .is_none_or(|x| expr_assigns_preserve_nonneg(x, g))
         }
         _ => true,
     }
@@ -2235,7 +2267,11 @@ fn nonnegative_globals(funcs: &[Function], globals: &[Global]) -> HashSet<String
         .filter(|g| matches!(const_index(&g.init), Some(v) if v >= 0))
         .map(|g| g.name.clone())
         .collect();
-    cands.retain(|g| funcs.iter().all(|f| block_assigns_preserve_nonneg(&f.body, g)));
+    cands.retain(|g| {
+        funcs
+            .iter()
+            .all(|f| block_assigns_preserve_nonneg(&f.body, g))
+    });
     cands
 }
 
@@ -2267,7 +2303,12 @@ fn guard_upper(cond: &Expr, g: &str, consts: &HashMap<String, i64>) -> Option<i6
 }
 
 /// Combines the enclosing guard with the one `cond` adds (the tighter of the two upper bounds).
-fn tighten_guard(cur: Option<i64>, cond: &Expr, g: &str, consts: &HashMap<String, i64>) -> Option<i64> {
+fn tighten_guard(
+    cur: Option<i64>,
+    cond: &Expr,
+    g: &str,
+    consts: &HashMap<String, i64>,
+) -> Option<i64> {
     match (cur, guard_upper(cond, g, consts)) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (None, b) => b,
@@ -2305,7 +2346,8 @@ fn walk_ceiling_expr(
             true
         }
         Expr::Binary(_, l, r) | Expr::Index(l, r) => {
-            walk_ceiling_expr(l, g, guard, consts, ceil) && walk_ceiling_expr(r, g, guard, consts, ceil)
+            walk_ceiling_expr(l, g, guard, consts, ceil)
+                && walk_ceiling_expr(r, g, guard, consts, ceil)
         }
         Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
             walk_ceiling_expr(x, g, guard, consts, ceil)
@@ -2381,16 +2423,18 @@ fn walk_ceiling(
             | Stmt::Return(Some(value))
             | Stmt::Expr(value)
             | Stmt::Assign { value, .. }
-                if !walk_ceiling_expr(value, g, guard, consts, ceil) => {
-                    return false;
-                }
+                if !walk_ceiling_expr(value, g, guard, consts, ceil) =>
+            {
+                return false;
+            }
             _ => {}
         }
     }
     if let Some(t) = &b.tail
-        && !walk_ceiling_expr(t, g, guard, consts, ceil) {
-            return false;
-        }
+        && !walk_ceiling_expr(t, g, guard, consts, ceil)
+    {
+        return false;
+    }
     true
 }
 
@@ -2603,10 +2647,10 @@ fn literals_block(
     let mut strings: HashSet<String> = outer_strings.clone();
     for st in &b.stmts {
         match st {
-            Stmt::Let { name, ty, value, .. } => {
-                if matches!(value, Expr::Str(_))
-                    && !ty.as_ref().is_some_and(is_string_ty)
-                {
+            Stmt::Let {
+                name, ty, value, ..
+            } => {
+                if matches!(value, Expr::Str(_)) && !ty.as_ref().is_some_and(is_string_ty) {
                     return Err(format!(
                         "function `{fname}`: `{name}` is given a string literal but is not \
                          declared `string`; text has a type — write `let {name}: string = ..`"
@@ -2702,7 +2746,11 @@ fn literals_expr(
             }
             Ok(())
         }
-        Expr::If { cond, then_branch, else_branch } => {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             literals_expr(cond, fname, sigs, strings)?;
             literals_block(then_branch, fname, sigs, strings)?;
             if let Some(eb) = else_branch {
@@ -2765,7 +2813,9 @@ fn subst_vars(e: &Expr, map: &HashMap<String, Expr>) -> Expr {
         ),
         Expr::Unary(op, x) => Expr::Unary(op.clone(), Box::new(subst_vars(x, map))),
         Expr::Field(x, f) => Expr::Field(Box::new(subst_vars(x, map)), f.clone()),
-        Expr::Index(a, b) => Expr::Index(Box::new(subst_vars(a, map)), Box::new(subst_vars(b, map))),
+        Expr::Index(a, b) => {
+            Expr::Index(Box::new(subst_vars(a, map)), Box::new(subst_vars(b, map)))
+        }
         Expr::Cast(x, t) => Expr::Cast(Box::new(subst_vars(x, map)), t.clone()),
         Expr::Call(c, args) => Expr::Call(
             Box::new(subst_vars(c, map)),
@@ -2888,8 +2938,9 @@ fn bounds_block(
                 // elsewhere) leaves no capacity at all, and then the view has to declare its
                 // length or go unindexed — silence is the one answer that is not allowed.
                 let view_capacity = match ty.as_ref() {
-                    Some(Type::View(elem, _)) => view_bytes_available(value, sizes)
-                        .map(|bytes| bytes / elem_bytes(elem)),
+                    Some(Type::View(elem, _)) => {
+                        view_bytes_available(value, sizes).map(|bytes| bytes / elem_bytes(elem))
+                    }
                     _ => None,
                 };
                 // Rebinding a name drops whatever it used to be, view or not; then record it if
@@ -3005,7 +3056,9 @@ fn bounds_block(
                     }
                 }
             }
-            Stmt::Return(Some(v)) | Stmt::Expr(v) => bounds_expr(v, fname, sizes, flow, params, funcs)?,
+            Stmt::Return(Some(v)) | Stmt::Expr(v) => {
+                bounds_expr(v, fname, sizes, flow, params, funcs)?
+            }
             Stmt::For {
                 cond,
                 invariant,
@@ -3399,7 +3452,10 @@ mod tests {
                    fn alloc() -> (r: i64) ensures { r >= 0; r < 4 } { 2 }\n\
                    fn use_it() { let i = alloc()\nt[i] = 1 }\n\
                    fn main() -> i64 { use_it()\n0 }";
-        assert!(bounds(src).is_ok(), "callee ensures should bound the return");
+        assert!(
+            bounds(src).is_ok(),
+            "callee ensures should bound the return"
+        );
     }
 
     #[test]
@@ -3411,7 +3467,10 @@ mod tests {
                    let mut t[4]\n\
                    fn bump() { if count < 4 { t[count] = 1\ncount = count + 1 } }\n\
                    fn main() -> i64 { bump()\n0 }";
-        assert!(bounds(src).is_ok(), "nonneg global counter should give the lower bound");
+        assert!(
+            bounds(src).is_ok(),
+            "nonneg global counter should give the lower bound"
+        );
     }
 
     #[test]
@@ -3422,7 +3481,10 @@ mod tests {
         let src = "let mut t[8]\n\
                    fn at(x: i64) requires { x >= 0 } { let i = if x >= 8 { 7 } else { x }\nt[i] = 1 }\n\
                    fn main() -> i64 { at(3)\n0 }";
-        assert!(bounds(src).is_ok(), "if-expression clamp should bound the index");
+        assert!(
+            bounds(src).is_ok(),
+            "if-expression clamp should bound the index"
+        );
     }
 
     #[test]
@@ -3434,7 +3496,10 @@ mod tests {
                    let mut ring[16]\n\
                    fn push(v: i64) { let i = head % 16\nring[i] = v\nhead = head + 1 }\n\
                    fn main() -> i64 { push(7)\n0 }";
-        assert!(bounds(src).is_ok(), "modulo of a nonneg global is a valid ring index");
+        assert!(
+            bounds(src).is_ok(),
+            "modulo of a nonneg global is a valid ring index"
+        );
     }
 
     #[test]
@@ -3446,7 +3511,10 @@ mod tests {
                    fn dec() { count = count - 1 }\n\
                    fn use_it() { if count < 4 { t[count] = 1 } }\n\
                    fn main() -> i64 { use_it()\n0 }";
-        assert!(bounds(src).is_err(), "a decremented global is not provably nonneg");
+        assert!(
+            bounds(src).is_err(),
+            "a decremented global is not provably nonneg"
+        );
     }
 
     #[test]
@@ -3459,7 +3527,10 @@ mod tests {
                    fn push(v: i64) { if cnt < 8 { buf[cnt] = v\ncnt = cnt + 1 } }\n\
                    fn sum() -> i64 { let mut i = 0\nlet mut s = 0\nfor i < cnt { s = s + buf[i]\ni = i + 1 }\ns }\n\
                    fn main() -> i64 { push(1)\nsum() }";
-        assert!(bounds(src).is_ok(), "a guard-bounded global counter should bound the loop");
+        assert!(
+            bounds(src).is_ok(),
+            "a guard-bounded global counter should bound the loop"
+        );
     }
 
     #[test]
@@ -3471,7 +3542,10 @@ mod tests {
                    let px: u32[n] = heap_alloc(n * 4)\n\
                    for i in 0..n { px[i] = i }\n0 }\n\
                    fn heap_alloc(n: i64) -> i64 { n }";
-        assert!(bounds(src).is_ok(), "the range itself should bound the index");
+        assert!(
+            bounds(src).is_ok(),
+            "the range itself should bound the index"
+        );
     }
 
     #[test]
@@ -3483,7 +3557,10 @@ mod tests {
                    let px: u32[n] = heap_alloc(n * 4)\n\
                    for i in 0..n+3 { px[i] = i }\n0 }\n\
                    fn heap_alloc(n: i64) -> i64 { n }";
-        assert!(bounds(src).is_err(), "walking past the declared length must not compile");
+        assert!(
+            bounds(src).is_err(),
+            "walking past the declared length must not compile"
+        );
     }
 
     #[test]
@@ -3496,7 +3573,10 @@ mod tests {
                    fn bump() { cnt = cnt + 1 }\n\
                    fn sum() -> i64 { let mut i = 0\nlet mut s = 0\nfor i < cnt { s = s + buf[i]\ni = i + 1 }\ns }\n\
                    fn main() -> i64 { bump()\nsum() }";
-        assert!(bounds(src).is_err(), "an unguarded increment leaves the counter unbounded");
+        assert!(
+            bounds(src).is_err(),
+            "an unguarded increment leaves the counter unbounded"
+        );
     }
 
     #[test]
@@ -3508,7 +3588,10 @@ mod tests {
                    fn push(v: i64) { if cnt < 100 { cnt = cnt + 1 } }\n\
                    fn sum() -> i64 { let mut i = 0\nlet mut s = 0\nfor i < cnt { s = s + buf[i]\ni = i + 1 }\ns }\n\
                    fn main() -> i64 { push(1)\nsum() }";
-        assert!(bounds(src).is_err(), "a ceiling above the array size is not in bounds");
+        assert!(
+            bounds(src).is_err(),
+            "a ceiling above the array size is not in bounds"
+        );
     }
 
     #[test]
@@ -3520,7 +3603,10 @@ mod tests {
                    fn alloc() -> (r: i64) ensures { r < 64 } { 5 }\n\
                    fn open() { let fi = alloc()\nif fi < 0 { return }\nused[fi] = 1 }\n\
                    fn main() -> i64 { open()\n0 }";
-        assert!(bounds(src).is_ok(), "early-return guard should establish fi >= 0");
+        assert!(
+            bounds(src).is_ok(),
+            "early-return guard should establish fi >= 0"
+        );
     }
 
     #[test]
@@ -3543,7 +3629,10 @@ mod tests {
                    fn pick(n: i64) -> (r: i64) ensures { r < n } { 0 }\n\
                    fn use_it() { let i = pick(n=4)\nt[i] = 1 }\n\
                    fn main() -> i64 { use_it()\n0 }";
-        assert!(bounds(src).is_err(), "must not assume an unmapped-param ensures");
+        assert!(
+            bounds(src).is_err(),
+            "must not assume an unmapped-param ensures"
+        );
     }
 
     #[test]
@@ -3552,14 +3641,20 @@ mod tests {
         // idiom `for i < TABLE_SIZE { table[i] }`) must prove: the global constant is resolved to
         // its value, so `i < 64` bounds `table[64]`.
         let src = "let N = 8\nfn f() -> i64 { let a[8]\nlet mut i = 0\nfor i < N { a[i] = 0\ni = i + 1 }\n0 }";
-        assert!(bounds(src).is_ok(), "a loop bounded by a global const should prove");
+        assert!(
+            bounds(src).is_ok(),
+            "a loop bounded by a global const should prove"
+        );
     }
 
     #[test]
     fn rejects_an_unproven_variable_index() {
         // Checked-by-default: an index that is not PROVEN in range is a compile error.
         let err = bounds("fn f(i: i64) -> i64 { let a[4]\na[i] }").unwrap_err();
-        assert!(err.contains("cannot prove this index is in bounds"), "got: {err}");
+        assert!(
+            err.contains("cannot prove this index is in bounds"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -3572,8 +3667,8 @@ mod tests {
     #[test]
     fn rejects_a_variable_index_inside_a_branch_that_does_not_bound_it() {
         // The `i >= 4` guard does not prove `i < 4`, so `a[i]` in that branch is rejected.
-        let err = bounds("fn f(i: i64) -> i64 { let a[4]\nif i >= 4 { a[i] } else { 0 } }")
-            .unwrap_err();
+        let err =
+            bounds("fn f(i: i64) -> i64 { let a[4]\nif i >= 4 { a[i] } else { 0 } }").unwrap_err();
         assert!(err.contains("cannot prove"), "got: {err}");
     }
 
@@ -3598,20 +3693,24 @@ mod tests {
     fn accepts_a_counting_loop_with_no_invariant_clause() {
         // The floor comes from the constant init `i = 0` (a proven monotonic counter), the upper
         // bound from the loop condition. No user `invariant` is needed or trusted.
-        assert!(bounds(
-            "fn f() -> i64 { let a[4]\nlet mut i = 0\nfor i < 4 { a[i] = 0\ni = i + 1 }\n0 }"
-        )
-        .is_ok());
+        assert!(
+            bounds(
+                "fn f() -> i64 { let a[4]\nlet mut i = 0\nfor i < 4 { a[i] = 0\ni = i + 1 }\n0 }"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn accepts_a_counting_loop_from_a_nonzero_constant_start() {
         // `i` starts at 2 and only steps up, so `i >= 2`; the condition gives `i < 6`. Both bound
         // `a[i]` in a size-6 array.
-        assert!(bounds(
-            "fn f() -> i64 { let a[6]\nlet mut i = 2\nfor i < 6 { a[i] = 0\ni = i + 1 }\n0 }"
-        )
-        .is_ok());
+        assert!(
+            bounds(
+                "fn f() -> i64 { let a[6]\nlet mut i = 2\nfor i < 6 { a[i] = 0\ni = i + 1 }\n0 }"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -3730,10 +3829,7 @@ mod tests {
     #[test]
     fn accepts_a_bitmask_index_confined_to_the_array() {
         // `a[i & 7]` ∈ [0, 8) for any `i`: a power-of-two-minus-one mask, no sign obligation.
-        assert!(bounds(
-            "fn f(i: i64) -> i64 { let a[8]\na[i & 7] = 0\na[0] }"
-        )
-        .is_ok());
+        assert!(bounds("fn f(i: i64) -> i64 { let a[8]\na[i & 7] = 0\na[0] }").is_ok());
     }
 
     #[test]
@@ -3752,8 +3848,7 @@ mod tests {
 
     #[test]
     fn rejects_a_slice_index_not_proven_within_the_length() {
-        let err =
-            bounds("fn f(s: Slice, i: i64) -> i64 { s[i] }").unwrap_err();
+        let err = bounds("fn f(s: Slice, i: i64) -> i64 { s[i] }").unwrap_err();
         assert!(
             err.contains("cannot prove") && err.contains("slice"),
             "got: {err}"
@@ -3762,9 +3857,7 @@ mod tests {
 
     #[test]
     fn accepts_a_slice_index_proven_within_the_length() {
-        assert!(
-            bounds("fn f(s: Slice, i: i64 where 0 <= i && i < s.len) -> i64 { s[i] }").is_ok()
-        );
+        assert!(bounds("fn f(s: Slice, i: i64 where 0 <= i && i < s.len) -> i64 { s[i] }").is_ok());
     }
 
     #[test]
@@ -3869,7 +3962,10 @@ mod tests {
              let mut i = 0\nfor i < 9 { b[i] = 1\ni = i + 1 }\n0 }",
         )
         .unwrap_err();
-        assert!(err.contains("size 8"), "the bound is the byte capacity, got: {err}");
+        assert!(
+            err.contains("size 8"),
+            "the bound is the byte capacity, got: {err}"
+        );
     }
 
     #[test]
@@ -3978,11 +4074,12 @@ mod tests {
             "the error must name the type a literal belongs to, got: {err}"
         );
         // The same through a call: a parameter that says `i64` does not accept text either.
-        let err = literals(
-            "fn takes(p: i64) -> i64 { p }\nfn main() -> i64 { takes(\"hola\") }",
-        )
-        .unwrap_err();
-        assert!(err.contains("string"), "a literal argument needs a `string` parameter: {err}");
+        let err = literals("fn takes(p: i64) -> i64 { p }\nfn main() -> i64 { takes(\"hola\") }")
+            .unwrap_err();
+        assert!(
+            err.contains("string"),
+            "a literal argument needs a `string` parameter: {err}"
+        );
     }
 
     #[test]
@@ -4126,7 +4223,10 @@ mod tests {
     fn rejects_constant_index_past_a_module_level_array() {
         // A `.data` table (crypto S-box etc.) indexed by a constant out of range is caught too.
         let err = bounds("let K[4] = [1, 2, 3, 4]\nfn f() -> i64 { K[9] }").unwrap_err();
-        assert!(err.contains("out of bounds") && err.contains("K"), "got: {err}");
+        assert!(
+            err.contains("out of bounds") && err.contains("K"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -4331,7 +4431,8 @@ mod tests {
         // crypto substrate), so an overflow that would be a compile error in an ordinary function
         // is allowed, the region marker that lets #3 flip to checked-by-default elsewhere.
         let over = "9000000000000000000 + 9000000000000000000";
-        let ordinary = Parser::new(tokenize(&format!("fn f() -> i64 {{ {over} }}"))).parse_program();
+        let ordinary =
+            Parser::new(tokenize(&format!("fn f() -> i64 {{ {over} }}"))).parse_program();
         assert!(
             check_constant_overflow(&ordinary).is_err(),
             "an ordinary function still rejects the overflow"
@@ -4348,12 +4449,13 @@ mod tests {
     fn wrapping_exempts_only_overflow_not_bounds() {
         // `wrapping` narrows to arithmetic overflow, a `wrapping fn` still gets bounds-checked, so
         // a provable out-of-bounds index is rejected exactly as in an ordinary function.
-        let funcs = Parser::new(tokenize(
-            "wrapping fn f() -> i64 { let a[4]\na[9] }",
-        ))
-        .parse_program();
+        let funcs =
+            Parser::new(tokenize("wrapping fn f() -> i64 { let a[4]\na[9] }")).parse_program();
         let err = check_constant_bounds(&funcs, &[]).unwrap_err();
-        assert!(err.contains("out of bounds"), "wrapping must not exempt bounds: {err}");
+        assert!(
+            err.contains("out of bounds"),
+            "wrapping must not exempt bounds: {err}"
+        );
     }
 
     #[test]
@@ -4369,8 +4471,7 @@ mod tests {
         // counterpart. `g[i]` with a variable index is unprovable and must error.
         let err = bounds("let mut g: u8[8]\nfn main(i: i64) -> i64 { g[i] }").unwrap_err();
         assert!(
-            err.contains("cannot prove this index is in bounds")
-                && err.contains("0..8"),
+            err.contains("cannot prove this index is in bounds") && err.contains("0..8"),
             "module view index must be checked like local view; got: {err}"
         );
     }
@@ -4416,10 +4517,19 @@ mod syscall_retry_tests {
              for got < n { let r = syscall(SYS_getrandom, buf + got, n - got, 0)\n\
              if r > 0 { got = got + r } } }",
         );
-        assert!(e.is_err(), "a retry loop with no error branch must be rejected");
+        assert!(
+            e.is_err(),
+            "a retry loop with no error branch must be rejected"
+        );
         let msg = e.unwrap_err();
-        assert!(msg.contains("got") && msg.contains("r"), "name the counter and the result: {msg}");
-        assert!(msg.contains("EINTR"), "the error should say what the fix is: {msg}");
+        assert!(
+            msg.contains("got") && msg.contains("r"),
+            "name the counter and the result: {msg}"
+        );
+        assert!(
+            msg.contains("EINTR"),
+            "the error should say what the fix is: {msg}"
+        );
     }
 
     #[test]
@@ -4432,7 +4542,10 @@ mod syscall_retry_tests {
              if r > 0 { got = got + r } else { if r != 0 - 4 { return 0 } } }\n\
              1 }",
         );
-        assert!(ok.is_ok(), "a loop that reports the failure is correct, got {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "a loop that reports the failure is correct, got {ok:?}"
+        );
     }
 
     #[test]
@@ -4479,7 +4592,10 @@ mod call_arity_tests {
         let e = check("fn f(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { f(1, 2, 99) }");
         assert!(e.is_err(), "an extra argument must be an error");
         let msg = e.unwrap_err();
-        assert!(msg.contains("2") && msg.contains("3"), "it says both counts, got: {msg}");
+        assert!(
+            msg.contains("2") && msg.contains("3"),
+            "it says both counts, got: {msg}"
+        );
     }
 
     #[test]
@@ -4552,7 +4668,9 @@ mod spawn_loop_tests {
     #[test]
     fn accepts_spawn_inside_an_if_inside_a_loop() {
         // The shape every accept loop has: `for { let c = accept(); if c >= 0 { spawn h(c) } }`.
-        let ok = check("fn w() -> i64 { 0 }\nfn f() -> i64 { for i in 0..3 { if i > 0 { spawn w() } } 0 }");
+        let ok = check(
+            "fn w() -> i64 { 0 }\nfn f() -> i64 { for i in 0..3 { if i > 0 { spawn w() } } 0 }",
+        );
         assert!(ok.is_ok(), "got {ok:?}");
     }
 
@@ -4574,7 +4692,10 @@ mod spawn_loop_tests {
     #[test]
     fn accepts_spawn_inside_an_if_outside_any_loop() {
         let ok = check("fn w() -> i64 { 0 }\nfn f(c: i64) -> i64 { if c > 0 { spawn w() } 0 }");
-        assert!(ok.is_ok(), "a conditional spawn that runs once is fine, got {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "a conditional spawn that runs once is fine, got {ok:?}"
+        );
     }
 }
 
@@ -4598,7 +4719,10 @@ mod par_let_tests {
         );
         assert!(e.is_err(), "mismatched name/peer counts must be rejected");
         let msg = e.unwrap_err();
-        assert!(msg.contains("2 name") && msg.contains("3 peer"), "names the counts: {msg}");
+        assert!(
+            msg.contains("2 name") && msg.contains("3 peer"),
+            "names the counts: {msg}"
+        );
     }
 
     #[test]
@@ -4651,8 +4775,14 @@ mod par_let_tests {
              fn a() { G = 1 }\nfn b() { G = 2 }\n\
              fn run() { par a() ~~ b() }",
         );
-        assert!(e.is_err(), "a write-write race on a global must be rejected");
-        assert!(e.unwrap_err().contains("G"), "the error names the raced global");
+        assert!(
+            e.is_err(),
+            "a write-write race on a global must be rejected"
+        );
+        assert!(
+            e.unwrap_err().contains("G"),
+            "the error names the raced global"
+        );
     }
 
     #[test]
@@ -4687,7 +4817,10 @@ mod par_let_tests {
              fn a() { bump() }\nfn b() { bump() }\n\
              fn run() { par a() ~~ b() }",
         );
-        assert!(e.is_err(), "a race reached transitively must still be rejected");
+        assert!(
+            e.is_err(),
+            "a race reached transitively must still be rejected"
+        );
     }
 
     #[test]
@@ -4697,7 +4830,10 @@ mod par_let_tests {
              fn a() -> i64 { 1 }\nfn b() -> i64 { 2 }\n\
              fn run() { par a() ~~ b() }",
         );
-        assert!(ok.is_ok(), "peers that touch no global are confluent, got {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "peers that touch no global are confluent, got {ok:?}"
+        );
     }
 
     fn acyclic(src: &str) -> Result<(), String> {
@@ -4712,7 +4848,10 @@ mod par_let_tests {
              fn run() -> i64 { let r = graph { node a = id(b)\n node b = id(a)\n yield a }\n r }",
         );
         assert!(e.is_err(), "a dependency cycle in a graph must be rejected");
-        assert!(e.unwrap_err().contains("cycle"), "the error explains the cycle");
+        assert!(
+            e.unwrap_err().contains("cycle"),
+            "the error explains the cycle"
+        );
     }
 
     #[test]
@@ -4721,7 +4860,10 @@ mod par_let_tests {
             "fn id(x: i64) -> i64 { x }\nfn add(a: i64, b: i64) -> i64 { a + b }\n\
              fn run() -> i64 { let r = graph { node c = add(a, b)\n node a = id(1)\n node b = id(2)\n yield c }\n r }",
         );
-        assert!(ok.is_ok(), "a DAG is fine even out of source order, got {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "a DAG is fine even out of source order, got {ok:?}"
+        );
     }
 
     #[test]
@@ -4734,7 +4876,10 @@ mod par_let_tests {
         .parse_program();
         let e = check_no_duplicate_functions(&funcs);
         assert!(e.is_err(), "a duplicate function name must be rejected");
-        assert!(e.unwrap_err().contains("helper"), "the error names the function");
+        assert!(
+            e.unwrap_err().contains("helper"),
+            "the error names the function"
+        );
     }
 
     #[test]
@@ -4743,7 +4888,10 @@ mod par_let_tests {
             "fn a() -> i64 { 1 }\nfn b() -> i64 { 2 }\nfn main() -> i64 { a() + b() }",
         ))
         .parse_program();
-        assert!(check_no_duplicate_functions(&funcs).is_ok(), "distinct names are fine");
+        assert!(
+            check_no_duplicate_functions(&funcs).is_ok(),
+            "distinct names are fine"
+        );
     }
 
     #[test]
@@ -4755,7 +4903,10 @@ mod par_let_tests {
              fn a() { G = 1 }\nfn b() { G = 2 }\n\
              fn run(c: i64) { if c > 0 { par a() ~~ b() } }",
         );
-        assert!(e.is_err(), "a race inside an `if` branch must still be rejected");
+        assert!(
+            e.is_err(),
+            "a race inside an `if` branch must still be rejected"
+        );
     }
 }
 
@@ -4778,8 +4929,14 @@ mod close_fd_after_spawn_tests {
             "fn pump(fd: i64) -> i64 { 0 }\n\
              fn f(fd: i64) -> i64 { spawn pump(fd) close_fd(fd) 0 }",
         );
-        assert!(e.is_err(), "close_fd after moving fd into a spawn must be rejected");
-        assert!(e.unwrap_err().contains("close_fd"), "the error should name the close");
+        assert!(
+            e.is_err(),
+            "close_fd after moving fd into a spawn must be rejected"
+        );
+        assert!(
+            e.unwrap_err().contains("close_fd"),
+            "the error should name the close"
+        );
     }
 
     #[test]
@@ -4794,7 +4951,10 @@ mod close_fd_after_spawn_tests {
             "fn pump(fd: i64) -> i64 { 0 }\n\
              fn f(a: i64, b: i64) -> i64 { spawn pump(a) close_fd(b) 0 }",
         );
-        assert!(ok.is_ok(), "closing a descriptor the thread does not hold is fine, got {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "closing a descriptor the thread does not hold is fine, got {ok:?}"
+        );
     }
 
     #[test]
@@ -4834,7 +4994,10 @@ mod exit_in_spawn_tests {
         );
         assert!(e.is_err(), "exit inside a spawned body must be rejected");
         let msg = e.unwrap_err();
-        assert!(msg.contains("worker"), "error should name the offending function: {msg}");
+        assert!(
+            msg.contains("worker"),
+            "error should name the offending function: {msg}"
+        );
         assert!(
             msg.contains("task_return") || msg.contains("whole process"),
             "error should explain the process-termination effect: {msg}"
@@ -4851,7 +5014,10 @@ mod exit_in_spawn_tests {
              fn worker() -> i64 { bail() 0 }\n\
              fn f() -> i64 { spawn worker() 0 }",
         );
-        assert!(e.is_err(), "exit reached through a call chain must be rejected");
+        assert!(
+            e.is_err(),
+            "exit reached through a call chain must be rejected"
+        );
     }
 
     #[test]
@@ -4863,7 +5029,10 @@ mod exit_in_spawn_tests {
              fn worker() -> i64 { syscall(SYS_exit, 2) 0 }\n\
              fn f(c: i64) -> i64 { if c > 0 { spawn worker() } 0 }",
         );
-        assert!(e.is_err(), "a spawn inside an if must still carry the effect check");
+        assert!(
+            e.is_err(),
+            "a spawn inside an if must still carry the effect check"
+        );
     }
 
     #[test]
@@ -4876,7 +5045,10 @@ mod exit_in_spawn_tests {
              fn other() -> i64 { 1 }\n\
              fn f() -> i64 { let a ~~ b = par worker() ~~ other()\na + b }",
         );
-        assert!(e.is_err(), "a par-let peer runs on a thread, so exit must be rejected there too");
+        assert!(
+            e.is_err(),
+            "a par-let peer runs on a thread, so exit must be rejected there too"
+        );
     }
 
     #[test]
@@ -4889,7 +5061,10 @@ mod exit_in_spawn_tests {
              fn worker() -> i64 { syscall(SYS_exit, 2) 0 }\n\
              fn f(c: i64) -> i64 { if c > 0 { spawn worker() } }",
         );
-        assert!(e.is_err(), "a spawn in a tail conditional must still carry the effect check");
+        assert!(
+            e.is_err(),
+            "a spawn in a tail conditional must still carry the effect check"
+        );
     }
 
     #[test]
@@ -4899,7 +5074,10 @@ mod exit_in_spawn_tests {
             "fn worker() -> i64 { syscall(60, 1) 0 }\n\
              fn f() -> i64 { spawn worker() 0 }",
         );
-        assert!(e.is_err(), "exit written as syscall(60, ..) must be rejected too");
+        assert!(
+            e.is_err(),
+            "exit written as syscall(60, ..) must be rejected too"
+        );
     }
 
     #[test]
@@ -4910,7 +5088,10 @@ mod exit_in_spawn_tests {
             "let SYS_exit = 60\n\
              fn main() -> i64 { syscall(SYS_exit, 0) 0 }",
         );
-        assert!(ok.is_ok(), "exit in non-spawned code is legitimate, got {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "exit in non-spawned code is legitimate, got {ok:?}"
+        );
     }
 
     #[test]
@@ -4924,8 +5105,14 @@ mod exit_in_spawn_tests {
              fn outer() -> i64 { spawn inner() 0 }\n\
              fn f() -> i64 { spawn outer() 0 }",
         );
-        assert!(e.is_err(), "exit inside a nested spawned body must be rejected");
-        assert!(e.unwrap_err().contains("inner"), "the error should name the nested body");
+        assert!(
+            e.is_err(),
+            "exit inside a nested spawned body must be rejected"
+        );
+        assert!(
+            e.unwrap_err().contains("inner"),
+            "the error should name the nested body"
+        );
     }
 
     #[test]
@@ -4938,7 +5125,10 @@ mod exit_in_spawn_tests {
              fn worker() -> i64 { 0 }\n\
              fn f() -> i64 { spawn worker() helper() 0 }",
         );
-        assert!(ok.is_ok(), "exit off the spawn path is legitimate, got {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "exit off the spawn path is legitimate, got {ok:?}"
+        );
     }
 
     #[test]
@@ -4948,7 +5138,10 @@ mod exit_in_spawn_tests {
              fn worker() -> i64 { 0 }\n\
              fn f() -> i64 { spawn worker() 0 }",
         );
-        assert!(ok.is_ok(), "a clean spawned body must be accepted, got {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "a clean spawned body must be accepted, got {ok:?}"
+        );
     }
 }
 
@@ -5040,7 +5233,10 @@ pub fn check_no_raw_access_to_declared_buffers(
         let mut declared = declared.clone();
         for s in &b.stmts {
             // A name is only protected from the point it is declared with a length.
-            if let Stmt::Let { name, ty, value, .. } = s {
+            if let Stmt::Let {
+                name, ty, value, ..
+            } = s
+            {
                 walk_expr(value, &declared, fname)?;
                 let is_view = matches!(ty.as_ref(), Some(Type::View(..)));
                 if is_view {
@@ -5136,9 +5332,10 @@ fn find_range_start<'a>(block: &'a Block, var: &str, loop_idx: usize) -> Option<
             value,
             ..
         } = &block.stmts[i]
-            && name == var {
-                return Some(value);
-            }
+            && name == var
+        {
+            return Some(value);
+        }
     }
     None
 }
@@ -5146,7 +5343,9 @@ fn find_range_start<'a>(block: &'a Block, var: &str, loop_idx: usize) -> Option<
 fn range_bounds_const_fold(e: &Expr) -> Option<i64> {
     match e {
         Expr::Int(n) => Some(*n),
-        Expr::Unary(UnOp::Neg, inner) => range_bounds_const_fold(inner).and_then(|v| v.checked_neg()),
+        Expr::Unary(UnOp::Neg, inner) => {
+            range_bounds_const_fold(inner).and_then(|v| v.checked_neg())
+        }
         Expr::Binary(op, l, r) => {
             let a = range_bounds_const_fold(l)?;
             let b = range_bounds_const_fold(r)?;
@@ -5290,7 +5489,12 @@ fn range_bounds_walk_block(
 }
 
 /// Extract and walk all expressions from a statement.
-fn range_bounds_walk_expr_for_stmt(s: &Stmt, fname: &str, params: &[Param], flow: &[Expr]) -> Result<(), String> {
+fn range_bounds_walk_expr_for_stmt(
+    s: &Stmt,
+    fname: &str,
+    params: &[Param],
+    flow: &[Expr],
+) -> Result<(), String> {
     match s {
         Stmt::Let { value, .. } => range_bounds_walk_expr(value, fname, params, flow),
         Stmt::Expr(v) => range_bounds_walk_expr(v, fname, params, flow),
@@ -5304,11 +5508,15 @@ fn range_bounds_walk_expr_for_stmt(s: &Stmt, fname: &str, params: &[Param], flow
             let mut ok = Ok(());
             for p in peers {
                 ok = range_bounds_walk_expr(p, fname, params, flow);
-                if ok.is_err() { break; }
+                if ok.is_err() {
+                    break;
+                }
             }
             ok
         }
-        Stmt::GraphLet { nodes, yield_expr, .. } => {
+        Stmt::GraphLet {
+            nodes, yield_expr, ..
+        } => {
             for (_, e) in nodes {
                 range_bounds_walk_expr(e, fname, params, flow)?;
             }
@@ -5318,7 +5526,12 @@ fn range_bounds_walk_expr_for_stmt(s: &Stmt, fname: &str, params: &[Param], flow
     }
 }
 
-fn range_bounds_walk_expr(e: &Expr, fname: &str, params: &[Param], flow: &[Expr]) -> Result<(), String> {
+fn range_bounds_walk_expr(
+    e: &Expr,
+    fname: &str,
+    params: &[Param],
+    flow: &[Expr],
+) -> Result<(), String> {
     match e {
         Expr::Binary(_, l, r) => {
             range_bounds_walk_expr(l, fname, params, flow)?;
@@ -5350,7 +5563,11 @@ fn range_bounds_walk_expr(e: &Expr, fname: &str, params: &[Param], flow: &[Expr]
             }
             Ok(())
         }
-        Expr::If { cond, then_branch, else_branch } => {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             range_bounds_walk_expr(cond, fname, params, flow)?;
             let mut then_flow = flow.to_vec();
             then_flow.push((**cond).clone());
@@ -5384,10 +5601,19 @@ fn range_bounds_expr_short(e: &Expr) -> String {
                 BinOp::Mul => "*",
                 _ => "?",
             };
-            format!("{} {} {}", range_bounds_expr_short(l), sym, range_bounds_expr_short(r))
+            format!(
+                "{} {} {}",
+                range_bounds_expr_short(l),
+                sym,
+                range_bounds_expr_short(r)
+            )
         }
         Expr::Field(base, field) => format!("{}.{}", range_bounds_expr_short(base), field),
-        Expr::Index(base, idx) => format!("{}[{}]", range_bounds_expr_short(base), range_bounds_expr_short(idx)),
+        Expr::Index(base, idx) => format!(
+            "{}[{}]",
+            range_bounds_expr_short(base),
+            range_bounds_expr_short(idx)
+        ),
         _ => "<expr>".to_string(),
     }
 }
@@ -5436,7 +5662,10 @@ mod raw_access_tests {
         // each site is migrated. Pinned here so the scope is a decision on the record rather
         // than something that drifts.
         let ok = check("fn f() -> i64 { let a[4]\npoke64(a + 8, 7)\n0 }");
-        assert!(ok.is_ok(), "the array half is a separate, announced migration, got {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "the array half is a separate, announced migration, got {ok:?}"
+        );
     }
 
     #[test]
@@ -5450,7 +5679,10 @@ mod raw_access_tests {
         // The boundary where there IS no declared length: an allocation, a string, a buffer a
         // syscall filled. Refusing here would push the same hole one call deeper, not close it.
         let ok = check("fn f(p: i64) -> i64 { poke8(p, 65)\npeek8(p + 1) }");
-        assert!(ok.is_ok(), "a raw pointer has no length to check against, got {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "a raw pointer has no length to check against, got {ok:?}"
+        );
     }
 
     #[test]
@@ -5458,14 +5690,20 @@ mod raw_access_tests {
         // Rebinding drops the length, so it must also drop the prohibition: refusing here would
         // reject correct code, and a check that rejects correct code gets switched off.
         let ok = check("fn f(p: i64) -> i64 { let a[4]\nlet a = p\npeek8(a) }");
-        assert!(ok.is_ok(), "after rebinding, `a` is a plain pointer again, got {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "after rebinding, `a` is a plain pointer again, got {ok:?}"
+        );
     }
 
     #[test]
     fn the_prohibition_starts_where_the_declaration_does() {
         // A name that is not a declared buffer YET must not be caught by a later declaration.
         let ok = check("fn f(a: i64) -> i64 { let x = peek8(a)\nlet a[4]\nx }");
-        assert!(ok.is_ok(), "the parameter `a` is a raw pointer at that point, got {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "the parameter `a` is a raw pointer at that point, got {ok:?}"
+        );
     }
 
     #[test]
@@ -5519,7 +5757,7 @@ mod range_bounds_checks {
     use crate::parser::Parser;
 
     #[allow(dead_code)]
-fn check_for(src: &str) -> Result<(), String> {
+    fn check_for(src: &str) -> Result<(), String> {
         let mut p = Parser::new(tokenize(src));
         let funcs = p.parse_program();
         check_for_range_bounds(&funcs)
@@ -5528,11 +5766,12 @@ fn check_for(src: &str) -> Result<(), String> {
     #[test]
     fn constant_inverted_range_is_rejected() {
         // `3..0` is inverted and must be rejected with a clear message.
-        let err = check_for(
-            "fn main() -> i64 { let mut n = 0\nfor i in 3..0 { n = n + 1 }\nn }",
-        )
-        .unwrap_err();
-        assert!(err.contains("3..0"), "error should mention the inverted range");
+        let err = check_for("fn main() -> i64 { let mut n = 0\nfor i in 3..0 { n = n + 1 }\nn }")
+            .unwrap_err();
+        assert!(
+            err.contains("3..0"),
+            "error should mention the inverted range"
+        );
         assert!(err.contains("inverted"), "error should say it is inverted");
         assert!(err.contains("0..3"), "error should suggest the fix");
     }
@@ -5541,7 +5780,10 @@ fn check_for(src: &str) -> Result<(), String> {
     fn constant_empty_range_55_compiles() {
         // `5..5` is not inverted (start == end), it is the idiomatic zero-element range.
         let ok = check_for("fn main() -> i64 { let mut n = 0\nfor i in 5..5 { n = n + 1 }\nn }");
-        assert!(ok.is_ok(), "5..5 (empty zero-element range) should compile: {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "5..5 (empty zero-element range) should compile: {ok:?}"
+        );
     }
 
     #[test]
@@ -5608,7 +5850,10 @@ fn check_for(src: &str) -> Result<(), String> {
             "fn main() -> i64 { let mut n = 0\nfor i in 0..5 { let mut j = 0\nfor j in 3..0 { n = n + 1 } }\nn }",
         )
         .unwrap_err();
-        assert!(err.contains("3..0"), "nested inverted range should be caught: {err}");
+        assert!(
+            err.contains("3..0"),
+            "nested inverted range should be caught: {err}"
+        );
     }
 
     #[test]
@@ -5631,7 +5876,10 @@ fn check_for(src: &str) -> Result<(), String> {
              s\n\
              }",
         );
-        assert!(ok.is_ok(), "two consecutive valid loops should compile: {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "two consecutive valid loops should compile: {ok:?}"
+        );
     }
 
     #[test]
@@ -5646,8 +5894,14 @@ fn check_for(src: &str) -> Result<(), String> {
              }",
         )
         .unwrap_err();
-        assert!(err.contains("9..5"), "error should mention the second loop's range: {err}");
-        assert!(!err.contains("0..3"), "error must not mention the first loop's range: {err}");
+        assert!(
+            err.contains("9..5"),
+            "error should mention the second loop's range: {err}"
+        );
+        assert!(
+            !err.contains("0..3"),
+            "error must not mention the first loop's range: {err}"
+        );
     }
 
     #[test]
@@ -5663,7 +5917,10 @@ fn check_for(src: &str) -> Result<(), String> {
              }",
         )
         .unwrap_err();
-        assert!(err.contains("5..2"), "error should mention the middle loop: {err}");
+        assert!(
+            err.contains("5..2"),
+            "error should mention the middle loop: {err}"
+        );
         assert!(!err.contains("0..3"), "must not mention first loop: {err}");
         assert!(!err.contains("7..10"), "must not mention third loop: {err}");
     }
@@ -5681,7 +5938,10 @@ fn check_for(src: &str) -> Result<(), String> {
              }",
         )
         .unwrap_err();
-        assert!(err.contains("3..0"), "nested inverted range should be caught: {err}");
+        assert!(
+            err.contains("3..0"),
+            "nested inverted range should be caught: {err}"
+        );
     }
 
     #[test]
@@ -5696,10 +5956,12 @@ fn check_for(src: &str) -> Result<(), String> {
              i\n\
              }",
         );
-        assert!(ok.is_ok(), "hand-written while should not trigger range check: {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "hand-written while should not trigger range check: {ok:?}"
+        );
     }
 }
-
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Module-level string indexing → compile error
@@ -5758,10 +6020,7 @@ fn expr_string_index_with_name<'a>(
     rebased: Option<&str>,
     fname: &str,
 ) -> Result<(), String> {
-    let is_alive_string = |name: &str| {
-        rebased.map_or(true, |r| name != r)
-            && alive.contains(name)
-    };
+    let is_alive_string = |name: &str| rebased.map_or(true, |r| name != r) && alive.contains(name);
 
     match e {
         Expr::Index(base, idx) => {
@@ -5903,7 +6162,10 @@ mod string_index_tests {
     #[test]
     fn peek8_on_module_string_compiles_and_is_not_caught() {
         let ok = check("let S: string = \"anb\"\nfn main() -> i64 { peek8(S + 1) }");
-        assert!(ok.is_ok(), "peek8 on a module string must not be caught; got {ok:?}");
+        assert!(
+            ok.is_ok(),
+            "peek8 on a module string must not be caught; got {ok:?}"
+        );
     }
 
     #[test]
@@ -5918,5 +6180,9 @@ mod string_index_tests {
     #[test]
     fn local_string_still_indexes() {
         let ok = check("fn main() -> i64 { let l: string = \"anb\"\nl[1] }");
-        assert!(ok.is_ok(), "a local string must still be indexable; got {ok:?}");    }
+        assert!(
+            ok.is_ok(),
+            "a local string must still be indexable; got {ok:?}"
+        );
+    }
 }
