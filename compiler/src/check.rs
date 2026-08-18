@@ -2434,6 +2434,15 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
     for g in globals {
         if let Some(n) = g.array_len {
             global_sizes.insert(g.name.clone(), n);
+        } else if let Some(Type::View(_, Some(len_str))) = &g.ty {
+            // A module-level view-typed global (`let mut NAME: T[N]`) has its length in
+            // bytes stored elsewhere, but the element count N is what bounds checks use:
+            // `NAME[i]` must be PROVEN in `0..N`. This is the same path that local views
+            // follow through `sizes` -> `flow.views` -> length name, except globals live
+            // in `sizes` from entry so the lookup succeeds without a name indirection.
+            if let Ok(n) = len_str.parse::<i64>() {
+                global_sizes.insert(g.name.clone(), n);
+            }
         } else if !g.mutable
             && let Some(v) = const_index(&g.init)
         {
@@ -4351,6 +4360,35 @@ mod tests {
         let funcs = Parser::new(tokenize("pub wrapping fn f() -> i64 { 1 }")).parse_program();
         assert!(funcs[0].is_wrapping && matches!(funcs[0].vis, crate::ast::Visibility::Pub));
     }
+
+    #[test]
+    fn rejects_an_index_into_a_module_view_without_a_proof() {
+        // A module-level `let mut g: u8[8]` must be index-checked exactly like its local
+        // counterpart. `g[i]` with a variable index is unprovable and must error.
+        let err = bounds("let mut g: u8[8]\nfn main(i: i64) -> i64 { g[i] }").unwrap_err();
+        assert!(
+            err.contains("cannot prove this index is in bounds")
+                && err.contains("0..8"),
+            "module view index must be checked like local view; got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_for_loop_over_a_module_view_is_in_bounds() {
+        // Using a bounded loop to prove the index must still compile cleanly: the loop
+        // condition proves 0 <= i < 8, which is exactly what the bounds checker needs.
+        let src = "let mut g: u8[8]\n\
+                   fn main() -> i64 {\n\
+                       let mut i = 0\n\
+                       for i < 8 { g[i] = 0\ni = i + 1 }\n\
+                       0\n\
+                   }";
+        assert!(
+            bounds(src).is_ok(),
+            "for i < 8 {{ g[i] }} must compile without where/requires; got: {:?}",
+            bounds(src).err()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4929,7 +4967,10 @@ mod exit_in_spawn_tests {
 /// one is migrated. Views are new, nothing reaches into them raw yet, and the code being written
 /// against them right now is exactly the code this protects. The array half is a separate,
 /// announced migration, not a side effect of this.
-pub fn check_no_raw_access_to_declared_buffers(funcs: &[Function]) -> Result<(), String> {
+pub fn check_no_raw_access_to_declared_buffers(
+    funcs: &[Function],
+    globals: &[Global],
+) -> Result<(), String> {
     fn is_raw_access(name: &str) -> bool {
         matches!(
             name,
@@ -5037,6 +5078,20 @@ pub fn check_no_raw_access_to_declared_buffers(funcs: &[Function]) -> Result<(),
                 declared.insert(p.name.clone());
             }
         }
+        // Module-level view-typed globals are declared with a length everywhere, so they
+        // are protected from raw peek/poke across all functions.
+        //
+        // A string literal is the exception, and not a special case: `let S: string = "..."`
+        // lowers to the same `Type::View` shape, but at module level it holds the ADDRESS of
+        // its UTF-8 bytes rather than storage of its own. It is a pointer with no declared
+        // length, which is exactly what raw `peek`/`poke` are for. Protecting it would reject
+        // working code and point the caller at `S[i]`, which walks code-point-wide slots over
+        // a byte pointer and answers garbage without saying so.
+        for g in globals {
+            if matches!(&g.ty, Some(Type::View(..))) && !matches!(&g.init, Expr::Str(_)) {
+                declared.insert(g.name.clone());
+            }
+        }
         walk_block(&f.body, &declared, &f.name)?;
     }
     Ok(())
@@ -5049,8 +5104,10 @@ mod raw_access_tests {
     use crate::parser::Parser;
 
     fn check(src: &str) -> Result<(), String> {
-        let funcs = Parser::new(tokenize(src)).parse_program();
-        check_no_raw_access_to_declared_buffers(&funcs)
+        let mut p = Parser::new(tokenize(src));
+        let funcs = p.parse_program();
+        let globals = p.take_globals();
+        check_no_raw_access_to_declared_buffers(&funcs, &globals)
     }
 
     #[test]
@@ -5072,7 +5129,7 @@ mod raw_access_tests {
                    fn main() -> i64 { largo(\"hola\") }";
         let funcs = Parser::new(tokenize(src)).parse_program();
         assert!(
-            check_no_raw_access_to_declared_buffers(&funcs).is_ok(),
+            check_no_raw_access_to_declared_buffers(&funcs, &[]).is_ok(),
             "a string cannot be indexed yet, so raw access is the only access it has"
         );
     }
@@ -5114,5 +5171,48 @@ mod raw_access_tests {
         // A name that is not a declared buffer YET must not be caught by a later declaration.
         let ok = check("fn f(a: i64) -> i64 { let x = peek8(a)\nlet a[4]\nx }");
         assert!(ok.is_ok(), "the parameter `a` is a raw pointer at that point, got {ok:?}");
+    }
+
+    #[test]
+    fn a_module_view_is_protected_from_raw_peek8() {
+        // A module-level view must not be accessible via peek/poke: the same rule that protects
+        // a local declared buffer (or parameter) applies here. `peek8(g + 100)` into a
+        // `let mut g: u8[8]` must be refused with the same message as the local version.
+        let e = check("let mut g: u8[8]\nfn f() -> i64 { peek8(g + 100) }");
+        assert!(e.is_err(), "raw peek into a module view must be refused");
+        let err = e.unwrap_err();
+        assert!(
+            err.contains("peek8") && err.contains("declared with a length") && err.contains("g"),
+            "the error must name the function, the accessor, and the buffer; got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_module_view_is_protected_from_raw_poke8() {
+        let e = check("let mut g: u8[16]\nfn f() -> i64 { poke8(g + 0, 65)\n0 }");
+        assert!(e.is_err(), "raw poke into a module view must be refused");
+    }
+
+    #[test]
+    fn peek8_on_other_view_accessors_is_protected() {
+        // peek16, peek32, peek64, poke16, poke32, poke64 on module views must also be refused.
+        let e1 = check("let mut g: u16[4]\nfn f() -> i64 { peek16(g + 0) }");
+        assert!(e1.is_err(), "peek16 into a u16 module view must be refused");
+        let e2 = check("let mut g: u32[8]\nfn f() -> i64 { poke32(g + 0, 42)\n0 }");
+        assert!(e2.is_err(), "poke32 into a u32 module view must be refused");
+    }
+
+    #[test]
+    fn a_module_string_literal_is_still_a_raw_pointer() {
+        // `let S: string = "..."` at module level is NOT a declared buffer: it lowers to the
+        // ADDRESS of its UTF-8 bytes in `.rodata`, exactly like a literal handed to a function.
+        // Reading those bytes with `peek8` is the only access it has today, so protecting it
+        // here would reject working code and send the caller to `S[i]`, which reads
+        // code-point-wide slots off a byte pointer and quietly answers garbage.
+        let ok = check("let S: string = \"anb\"\nfn f() -> i64 { peek8(S + 1) }");
+        assert!(
+            ok.is_ok(),
+            "a module string literal is a pointer, not a buffer with a length; got {ok:?}"
+        );
     }
 }
