@@ -203,7 +203,11 @@ pub fn emit_program_g(globals: &[Global], structs: &[StructDef], funcs: &[Functi
 
 /// Like [`emit_program_g`] but with the RFC-0016 `--debug` checkpoint instrumentation (a per-
 /// statement `__dbg_step(line)` trace). A separate entry so a normal build stays byte-identical.
-pub fn emit_program_debug_g(globals: &[Global], structs: &[StructDef], funcs: &[Function]) -> String {
+pub fn emit_program_debug_g(
+    globals: &[Global],
+    structs: &[StructDef],
+    funcs: &[Function],
+) -> String {
     emit_program_maybe_debug(globals, structs, funcs, true)
 }
 
@@ -267,8 +271,11 @@ pub fn emit_windows_g(
     };
     cg.set_globals(globals);
     cg.extern_fns = externs.iter().map(|e| e.name.clone()).collect();
-    cg.fn_ret_types
-        .extend(externs.iter().map(|e| (e.name.clone(), e.ret.as_ref().map_or(Ty::I64, kind_of_type))));
+    cg.fn_ret_types.extend(
+        externs
+            .iter()
+            .map(|e| (e.name.clone(), e.ret.as_ref().map_or(Ty::I64, kind_of_type))),
+    );
     emit_all(&mut cg, structs, funcs, "main");
     cg.line(".globl main");
     cg.line("main:");
@@ -420,7 +427,11 @@ pub fn emit_freestanding(funcs: &[Function]) -> String {
 }
 
 /// Like [`emit_freestanding`], but with module-level globals and struct definitions.
-pub fn emit_freestanding_g(globals: &[Global], structs: &[StructDef], funcs: &[Function]) -> String {
+pub fn emit_freestanding_g(
+    globals: &[Global],
+    structs: &[StructDef],
+    funcs: &[Function],
+) -> String {
     let mut cg = Codegen {
         check_contracts: true,
         ..Default::default()
@@ -582,7 +593,11 @@ pub(crate) fn frame_layout(func: &Function) -> FrameLayout {
         if let Some((_, o, _)) = params.iter().find(|(nm, _, _)| nm == n) {
             return *o;
         }
-        locals.iter().find(|(nm, _)| nm == n).map(|(_, o)| *o).unwrap_or(0)
+        locals
+            .iter()
+            .find(|(nm, _)| nm == n)
+            .map(|(_, o)| *o)
+            .unwrap_or(0)
     };
     let mut arr = Vec::new();
     collect_arrays(&func.body, &mut arr);
@@ -599,7 +614,14 @@ pub(crate) fn frame_layout(func: &Function) -> FrameLayout {
         (Some(off), func.ret_name.clone().map(|rn| (rn, off)))
     };
     let frame = (slot * 8 + 15) & !15;
-    FrameLayout { params, locals, arrays, ret_slot, ret_name, frame }
+    FrameLayout {
+        params,
+        locals,
+        arrays,
+        ret_slot,
+        ret_name,
+        frame,
+    }
 }
 
 /// Collects the names of all local bindings in a block (recursing into the
@@ -750,9 +772,7 @@ fn collect_arrays_in_expr(expr: &Expr, out: &mut Vec<(String, i64)>) {
             collect_arrays_in_expr(l, out);
             collect_arrays_in_expr(r, out);
         }
-        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
-            collect_arrays_in_expr(x, out)
-        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => collect_arrays_in_expr(x, out),
         Expr::List(items) => items.iter().for_each(|it| collect_arrays_in_expr(it, out)),
         _ => {}
     }
@@ -761,7 +781,11 @@ fn collect_arrays_in_expr(expr: &Expr, out: &mut Vec<(String, i64)>) {
 /// Collects, into `out`, the indices of the graph nodes that `expr` references (a data-dependency
 /// edge). Exhaustive over `Expr` so no reference is missed, which would let a node be scheduled
 /// before a node it depends on.
-pub(crate) fn collect_node_refs(expr: &Expr, node_idx: &HashMap<&str, usize>, out: &mut HashSet<usize>) {
+pub(crate) fn collect_node_refs(
+    expr: &Expr,
+    node_idx: &HashMap<&str, usize>,
+    out: &mut HashSet<usize>,
+) {
     match expr {
         Expr::Var(name) => {
             if let Some(&i) = node_idx.get(name.as_str()) {
@@ -905,9 +929,7 @@ fn collect_locals_in_expr(expr: &Expr, out: &mut Vec<String>) {
             collect_locals_in_expr(l, out);
             collect_locals_in_expr(r, out);
         }
-        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
-            collect_locals_in_expr(x, out)
-        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => collect_locals_in_expr(x, out),
         Expr::List(items) => items.iter().for_each(|it| collect_locals_in_expr(it, out)),
         _ => {}
     }
@@ -999,6 +1021,9 @@ struct Codegen {
     /// of zeros, which is RESERVED rather than written out (see `emit_globals`), so a buffer of
     /// millions of elements costs the compiler and the binary nothing per element.
     global_array_data: Vec<(String, Vec<GlobalWord>, usize)>,
+    /// `let NAME: T[N]` at module level — the element type and declared length, so
+    /// `emit_globals` can reserve the right number of BYTES (not words) in `.bss`.
+    global_view_lengths: HashMap<String, (Ty, i64)>,
     /// The value kind (`Int`/`Float`) of each in-scope local/parameter, so codegen
     /// knows to use the integer (`%rax`) or SSE (`%xmm0`) path for a `Var`. Reset per
     /// function alongside `locals`.
@@ -1081,6 +1106,10 @@ impl Codegen {
         self.locals.clear();
         self.var_types.clear();
         self.view_elem.clear();
+        // Register module-level view-typed globals so their element width is known.
+        for (name, (elem_kind, _byte_len)) in &self.global_view_lengths {
+            self.view_elem.insert(name.clone(), *elem_kind);
+        }
         // The debug agent itself must NOT be instrumented, or `__dbg_step` (and every helper it
         // calls to serve the socket) would re-enter the checkpoint at each statement: unbounded
         // recursion. The agent is the `__dbg_` namespace, so disable the checkpoint for all of it.
@@ -1118,8 +1147,11 @@ impl Codegen {
         }
         // Fixed-size stack arrays `let a[N]`: the name's pointer slot is made to point at the
         // reserved N-word storage region (element 0 at the lowest address).
-        let array_bases: Vec<(i32, i32)> =
-            layout.arrays.iter().map(|(_, ptr, base)| (*ptr, *base)).collect();
+        let array_bases: Vec<(i32, i32)> = layout
+            .arrays
+            .iter()
+            .map(|(_, ptr, base)| (*ptr, *base))
+            .collect();
         // The return slot binds the named return (e.g. `vat_amount`) so `ensures` can read it.
         if let Some((rn, off)) = &layout.ret_name {
             self.locals.insert(rn.clone(), *off);
@@ -1335,7 +1367,11 @@ impl Codegen {
     /// unit, or a struct too large for registers, which is not yet supported).
     fn ret_struct_words(&self, ret: &Option<Type>) -> Option<i64> {
         match ret {
-            Some(Type::Named(n)) => self.struct_sizes.get(n).copied().filter(|&w| (1..=2).contains(&w)),
+            Some(Type::Named(n)) => self
+                .struct_sizes
+                .get(n)
+                .copied()
+                .filter(|&w| (1..=2).contains(&w)),
             _ => None,
         }
     }
@@ -1349,6 +1385,35 @@ impl Codegen {
                 panic!("global `{}` is declared more than once", g.name);
             }
             self.global_names.insert(g.name.clone());
+            // A typed view at module level (`let NAME: T[N]`). Must have a literal length,
+            // reserves that many *bytes* (not words) in `.bss`, and the Var resolves to the
+            // buffer address; indexing scales by the element width.
+            if let Some(Type::View(elem, len_str)) = &g.ty {
+                let elem_kind = kind_of_type(elem);
+                let len: i64 = len_str
+                    .clone()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "global `{}`: view length must be a literal (not a variable); \
+                         reserve it inside a function instead",
+                            g.name
+                        )
+                    })
+                    .parse()
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "global `{}`: view length must be a literal (not a variable); \
+                         reserve it inside a function instead",
+                            g.name
+                        )
+                    });
+                let byte_len = len * elem_kind.bits() as i64 / 8;
+                assert_ne!(byte_len, 0, "global `{}`: view length must be > 0", g.name);
+                self.global_arrays.insert(g.name.clone());
+                self.global_view_lengths
+                    .insert(g.name.clone(), (elem_kind, byte_len));
+                continue;
+            }
             // An array global `let NAME[N] = [c0, c1, ...]` is a constant table in
             // `.data`; its `Var` resolves to the base ADDRESS so `NAME[i]` indexes.
             if let Some(n) = g.array_len {
@@ -1372,7 +1437,8 @@ impl Codegen {
                 // stored (`emit_globals`).
                 words.truncate(n as usize);
                 self.global_arrays.insert(g.name.clone());
-                self.global_array_data.push((g.name.clone(), words, n as usize));
+                self.global_array_data
+                    .push((g.name.clone(), words, n as usize));
                 continue;
             }
             // A string-literal global is a pointer to its NUL-terminated bytes in `.rodata`: a
@@ -1609,7 +1675,8 @@ impl Codegen {
                 .collect();
             for j in 0..nodes.len() {
                 for i in 0..j {
-                    if crate::check::footprints_conflict(&fps[i], &fps[j]) && !deps[j].contains(&i) {
+                    if crate::check::footprints_conflict(&fps[i], &fps[j]) && !deps[j].contains(&i)
+                    {
                         deps[j].push(i);
                     }
                 }
@@ -1746,7 +1813,10 @@ impl Codegen {
         // the six a normal call takes.
         let n = args.len();
         if n > ARG_REGS.len() {
-            panic!("spawn passes at most {} arguments (got {n})", ARG_REGS.len());
+            panic!(
+                "spawn passes at most {} arguments (got {n})",
+                ARG_REGS.len()
+            );
         }
         // 256 KiB per thread stack. The top 32 bytes hold the arena control block; the arguments
         // sit just below it, in a 16-aligned block, and the child's stack grows down from there.
@@ -1763,7 +1833,8 @@ impl Codegen {
         if in_loop {
             table = format!("sond_ctidtab_{}", self.spawn_tables.len());
             self.spawn_tables.push((table.clone(), Self::SPAWN_SLOTS));
-            self.fn_spawn_tables.push((table.clone(), Self::SPAWN_SLOTS));
+            self.fn_spawn_tables
+                .push((table.clone(), Self::SPAWN_SLOTS));
         } else {
             cell = format!("sond_ctid_{}", self.all_ctids.len());
             self.all_owner_cells.push(Self::owner_cell(&cell));
@@ -1980,7 +2051,10 @@ impl Codegen {
         // the rotating index. All zero, which reads as "slot never used" everywhere it is
         // checked, so the first turns of the loop join nothing and start immediately.
         for (table, slots) in tables {
-            self.line(&format!("{table}: .quad {}", vec!["0"; slots * 2].join(", ")));
+            self.line(&format!(
+                "{table}: .quad {}",
+                vec!["0"; slots * 2].join(", ")
+            ));
             self.line(&format!("{table}_i: .quad {}", slots - 1)); // first rotation lands on 0
         }
         // The pid that started each of those threads. Zero until the spawn runs, which no real
@@ -1995,6 +2069,7 @@ impl Codegen {
             self.line(&format!("{cell}: .quad 0"));
         }
         self.emit_zeroed_arrays(zeroed);
+        self.emit_view_globals();
     }
 
     /// Reserves the ALL-ZERO module-level arrays in `.bss`, one `.zero <bytes>` each.
@@ -2014,6 +2089,30 @@ impl Codegen {
         self.line(".p2align 3");
         for (name, _, len) in zeroed {
             self.line(&format!("{name}: .zero {}", len * 8));
+        }
+    }
+
+    /// Reserves a typed view global (`let NAME: T[N]`) in `.bss` with the correct byte size.
+    /// A `u8[32]` reserves 32 BYTES; a `u32[16]` reserves 64 BYTES.
+    fn emit_view_globals(&mut self) {
+        if self.global_view_lengths.is_empty() {
+            return;
+        }
+        // Sorted, and WITHOUT draining the map: `enter_function` reads it to learn each
+        // global's element width, so emptying it here would leave every function compiled
+        // after this point indexing at the wrong stride, depending on the order of two
+        // passes. Same reason it is not a `HashMap` iteration: emitted code is a build
+        // artefact and must not depend on hash order.
+        let mut views: Vec<_> = self
+            .global_view_lengths
+            .iter()
+            .map(|(name, (_, byte_len))| (name.clone(), *byte_len))
+            .collect();
+        views.sort();
+        self.line(".bss");
+        self.line(".p2align 3");
+        for (name, byte_len) in views {
+            self.line(&format!("{name}: .zero {byte_len}"));
         }
     }
 

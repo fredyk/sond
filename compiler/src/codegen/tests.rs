@@ -1,6 +1,6 @@
 use super::testutil::{
-    compile_and_capture, compile_and_run, compile_and_run_freestanding,
-    compile_and_run_windows, freestanding_section_alignment, parse_function,
+    compile_and_capture, compile_and_run, compile_and_run_freestanding, compile_and_run_windows,
+    freestanding_section_alignment, parse_function,
 };
 use super::*;
 use crate::lexer::tokenize;
@@ -28,7 +28,10 @@ fn coverage_build_instruments_each_statement() {
         "coverage build marks statements"
     );
     // The total point count is published for the harness to size its buffer.
-    assert!(asm.contains("__cov_total:"), "publishes the total point count");
+    assert!(
+        asm.contains("__cov_total:"),
+        "publishes the total point count"
+    );
 }
 
 #[test]
@@ -119,10 +122,14 @@ fn compiles_and_runs_local_variables_on_real_x64() {
 fn a_debug_build_emits_a_per_statement_checkpoint_a_normal_build_does_not() {
     // The codegen emits the per-statement CHECKPOINT (`call __dbg_step`); the `__dbg_step` runtime
     // itself is a Sond function appended to the program in a --debug build (RFC-0016), not codegen.
-    let funcs = Parser::new(tokenize("fn main() -> i64 { let a = 1\nlet b = 2\na + b }")).parse_program();
+    let funcs =
+        Parser::new(tokenize("fn main() -> i64 { let a = 1\nlet b = 2\na + b }")).parse_program();
     let debug_asm = emit_program_debug_g(&[], &[], &funcs);
     let normal_asm = emit_program_g(&[], &[], &funcs);
-    assert!(debug_asm.contains("call __dbg_step"), "the --debug build calls the checkpoint");
+    assert!(
+        debug_asm.contains("call __dbg_step"),
+        "the --debug build calls the checkpoint"
+    );
     // The checkpoint passes the CURRENT frame base (%rbp) as the second argument, so the agent can
     // read the debuggee's locals and walk its call stack.
     assert!(
@@ -143,8 +150,14 @@ fn a_debug_build_tracks_call_depth_for_step_over_and_step_out() {
     let funcs = Parser::new(tokenize("fn main() -> i64 { let a = 1\na }")).parse_program();
     let debug_asm = emit_program_debug_g(&[], &[], &funcs);
     let normal_asm = emit_program_g(&[], &[], &funcs);
-    assert!(debug_asm.contains("call __dbg_enter"), "the --debug build bumps the depth on entry");
-    assert!(debug_asm.contains("call __dbg_exit"), "the --debug build drops the depth on exit");
+    assert!(
+        debug_asm.contains("call __dbg_enter"),
+        "the --debug build bumps the depth on entry"
+    );
+    assert!(
+        debug_asm.contains("call __dbg_exit"),
+        "the --debug build drops the depth on exit"
+    );
     assert!(
         !normal_asm.contains("__dbg_enter") && !normal_asm.contains("__dbg_exit"),
         "a normal build tracks no call depth"
@@ -180,8 +193,14 @@ fn a_shared_pub_function_seeds_the_arena_at_the_c_abi_boundary() {
     let globals = p.take_globals();
     let structs = p.take_structs();
     let asm = emit_shared_g(&globals, &structs, &funcs);
-    assert!(asm.contains("pushq %r15"), "the pub boundary saves the host's %r15");
-    assert!(asm.contains("popq %r15"), "and restores it before returning");
+    assert!(
+        asm.contains("pushq %r15"),
+        "the pub boundary saves the host's %r15"
+    );
+    assert!(
+        asm.contains("popq %r15"),
+        "and restores it before returning"
+    );
     // The seed appears exactly once: for the single `pub` function, not the hidden one.
     assert_eq!(
         asm.matches("leaq sond_arena_tcb(%rip), %r15").count(),
@@ -205,7 +224,11 @@ fn par_runs_every_peer_on_a_thread_and_joins_before_continuing() {
             par w(a, 0) ~~ w(a, 1) ~~ w(a, 2)\n\
             peek64(a) + peek64(a + 8) + peek64(a + 16)\n\
         }";
-    assert_eq!(compile_and_run(src), 3, "all three peers ran and were joined");
+    assert_eq!(
+        compile_and_run(src),
+        3,
+        "all three peers ran and were joined"
+    );
 }
 
 #[test]
@@ -222,7 +245,11 @@ fn par_let_binds_each_peer_result_by_source_position() {
             let a ~~ b ~~ c = par one() ~~ two() ~~ three()\n\
             a * 16 + b * 4 + c\n\
         }";
-    assert_eq!(compile_and_run(src), 27, "results bound by position: a=1, b=2, c=3");
+    assert_eq!(
+        compile_and_run(src),
+        27,
+        "results bound by position: a=1, b=2, c=3"
+    );
 }
 
 #[test]
@@ -240,7 +267,11 @@ fn par_reduce_folds_peer_results_with_a_commutative_op() {
         fn b() -> i64 { 3 }\n\
         fn c() -> i64 { 7 }\n\
         fn main() -> i64 { let s = par(*) a() ~~ b() ~~ c()\n s }";
-    assert_eq!(compile_and_run(prod), 42, "par(*) multiplies the peer results");
+    assert_eq!(
+        compile_and_run(prod),
+        42,
+        "par(*) multiplies the peer results"
+    );
 }
 
 #[test]
@@ -261,7 +292,11 @@ fn graph_evaluates_nodes_in_dependency_order_not_source_order() {
             }\n\
             r\n\
         }";
-    assert_eq!(compile_and_run(src), 41, "nodes evaluate in dependency order regardless of source order");
+    assert_eq!(
+        compile_and_run(src),
+        41,
+        "nodes evaluate in dependency order regardless of source order"
+    );
 }
 
 #[test]
@@ -315,7 +350,11 @@ fn graph_runs_independent_nodes_in_parallel_and_binds_them_correctly() {
             }\n\
             r\n\
         }";
-    assert_eq!(compile_and_run(src), 27, "parallel level nodes bound to their own results");
+    assert_eq!(
+        compile_and_run(src),
+        27,
+        "parallel level nodes bound to their own results"
+    );
 }
 
 #[test]
@@ -382,7 +421,10 @@ fn freestanding_argc_reads_the_process_arguments() {
     // do it), and the globals must be declared, else `argc()` fails to link. Run with no
     // args, argc is 1 (the program name).
     let (code, _) = compile_and_run_freestanding("fn main() -> i64 { argc() }");
-    assert_eq!(code, 1, "argc() should be 1 when run with no extra arguments");
+    assert_eq!(
+        code, 1,
+        "argc() should be 1 when run with no extra arguments"
+    );
 }
 
 #[test]
@@ -479,9 +521,7 @@ fn a_global_array_of_string_literals_holds_their_addresses() {
     // string literal IS a compile-time constant: its address in `.rodata`. A scalar
     // `let MSG = "hi"` already worked, so rejecting the same literal one bracket deeper was an
     // inconsistency that pushed every fixed list into a function body.
-    let asm = emit_with_globals(
-        "let NAMES[2] = [\"uno\", \"dos\"]\nfn main() -> i64 { NAMES[0] }",
-    );
+    let asm = emit_with_globals("let NAMES[2] = [\"uno\", \"dos\"]\nfn main() -> i64 { NAMES[0] }");
     assert!(
         asm.contains("NAMES: .quad .Lstr"),
         "the table holds the literals' rodata addresses, got:\n{asm}"
@@ -598,6 +638,114 @@ fn a_bss_global_array_still_reads_and_writes_on_real_x64() {
             "let mut px[64]\nfn main() -> i64 { px[10] = 7\npx[63] = 35\npx[10] + px[63] + px[0] }"
         ),
         42
+    );
+}
+
+#[test]
+fn module_level_byte_view_reserves_bytes_and_writes_in_bytes() {
+    // `let mut g: u8[32]` at module level must allocate exactly 32 bytes in .bss, resolve to
+    // the buffer address, index at byte granularitiy (two adjacent positions stay independent),
+    // and start zeroed.
+    let asm = emit_with_globals("let mut g: u8[32]\nfn main() -> i64 { g[0] }");
+    assert!(
+        asm.contains(".bss"),
+        "a byte view at module level must be reserved in .bss, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("g: .zero 32"),
+        "u8[32] must reserve exactly 32 bytes, not 256 words, got:\n{}",
+        &asm[..asm.len().min(3000)]
+    );
+    // The index must use byte-width stores (movb/movq %al) not 64-bit stores into word slots.
+    // With byte-width we get g[0]=65, g[1]=42 independently.
+    assert_eq!(
+        compile_and_run_with_globals("let mut g: u8[32]\nfn main() -> i64 { g[0] = 65\ng[0] }"),
+        65
+    );
+    // Two adjacent positions must be independent byte slots.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut g: u8[32]\nfn main() -> i64 {\n    g[0] = 65\n    g[1] = 42\n    g[0] + g[1]\n    }"
+        ),
+        107
+    );
+    // Byte-level independence via raw memory access: peek at g+0 and g+1 independently.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut g: u8[32]\nfn main() -> i64 {\n    g[0] = 65\n    g[1] = 42\n    peek8(g + 0)\n    }"
+        ),
+        65
+    );
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut g: u8[32]\nfn main() -> i64 {\n    g[0] = 65\n    g[1] = 42\n    peek8(g + 1)\n    }"
+        ),
+        42
+    );
+    // Must start at zero.
+    assert_eq!(
+        compile_and_run_with_globals("let mut g: u8[32]\nfn main() -> i64 { g[0] + g[31] }"),
+        0
+    );
+}
+
+#[test]
+fn module_level_u32_view_reserves_bytes_at_4_byte_granularity() {
+    // `let mut buf: u32[16]` must reserve 64 bytes (16 * 4), index at 4-byte boundaries.
+    let asm = emit_with_globals("let mut buf: u32[16]\nfn main() -> i64 { peek32(buf) }");
+    assert!(asm.contains(".bss"));
+    assert!(asm.contains("buf: .zero 64"));
+    // Write at element 0 and read it back. Value 0xaa = 170 fits in exit code.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut buf: u32[16]\nfn main() -> i64 {\n    buf[0] = 0xaa\n    peek32(buf)\n    }"
+        ),
+        0xaa
+    );
+    // Verify 4-byte granularity: write 1 to element 2 (byte offset 8).
+    // If the compiler mistakenly used 8-byte word granularity, writing 1 at offset 8
+    // would actually be element 1, not element 2. We verify by checking element 0 is still 0xaa.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut buf: u32[16]\nfn main() -> i64 {\n    buf[0] = 0xaa\n    buf[2] = 0xbb\n    peek32(buf)\n    }"
+        ),
+        0xaa // element 0 unchanged by write to element 2
+    );
+    // Element 2 should be 0xbb = 187, fits in exit code.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut buf: u32[16]\nfn main() -> i64 {\n    buf[2] = 0xbb\n    peek32(buf + 8)\n    }"
+        ),
+        0xbb
+    );
+}
+
+#[test]
+fn module_level_view_large_does_not_expand_binary() {
+    // The binary size for a zeroed view must not grow proportionally to its capacity.
+    let asm_small = emit_with_globals("let mut g: u8[64]\nfn main() -> i64 { 0 }");
+    let asm_big = emit_with_globals("let mut g: u8[200000]\nfn main() -> i64 { 0 }");
+    let growth = asm_big.len() - asm_small.len();
+    assert!(
+        growth < 256,
+        "a zeroed view must NOT expand the binary: growth={growth} bytes (expected < 256)"
+    );
+}
+
+#[test]
+fn non_literal_view_length_is_a_compile_error() {
+    // If the length is not a literal (e.g. derived from a variable), compilation must fail.
+    let src = "let mut buf: u8[n]\nfn main(n: i64) -> i64 { 0 }";
+    let mut p = Parser::new(tokenize(src));
+    let funcs = p.parse_program();
+    let globals = p.take_globals();
+    // emit_program_g calls set_globals internally, which must panic for non-literal view lengths.
+    let result = std::panic::catch_unwind(|| {
+        emit_program_g(&globals, &[], &funcs);
+    });
+    assert!(
+        result.is_err(),
+        "set_globals must panic for non-literal view length"
     );
 }
 
@@ -1061,9 +1209,8 @@ fn uefi_readkey_polls_conin_and_print_char_uses_conout() {
 #[test]
 fn a_string_literal_lowers_to_the_address_of_null_terminated_bytes() {
     // "A" should emit leaq and the string data; peek8 reads 'A' (65).
-    let asm = emit_program(
-        &Parser::new(tokenize("fn f() -> i64 { peek8(\"A\") }")).parse_program(),
-    );
+    let asm =
+        emit_program(&Parser::new(tokenize("fn f() -> i64 { peek8(\"A\") }")).parse_program());
     assert!(
         asm.contains("leaq .Lstr0(%rip), %rax"),
         "cstr must lea the string address into %rax"
@@ -1107,9 +1254,7 @@ fn the_same_float_used_twice_has_one_constant() {
     // The same hole in intern_float. A duplicated f64 constant cannot break equality the way
     // the string one does (the value is loaded, not its address), so this is only waste --
     // but it is the same function shape, and half a fix is the half that rots.
-    let asm = emit_program(
-        &Parser::new(tokenize("fn f() -> f64 { 1.5 + 1.5 }")).parse_program(),
-    );
+    let asm = emit_program(&Parser::new(tokenize("fn f() -> f64 { 1.5 + 1.5 }")).parse_program());
     assert_eq!(
         asm.matches(".Lflt0:").count(),
         1,
@@ -1170,7 +1315,10 @@ fn a_port_program_compiles_and_runs_end_to_end() {
          use Doubler\n\
          fn main() -> i64 { dbl(21) }",
     );
-    assert_eq!(code, 42, "the spliced provider method runs on real hardware");
+    assert_eq!(
+        code, 42,
+        "the spliced provider method runs on real hardware"
+    );
 }
 
 #[test]
@@ -1193,8 +1341,14 @@ fn a_port_provider_compiles_to_a_pic16_subroutine_and_is_called() {
             .expect("the pic16 provider resolves"),
     );
     let asm = super::pic16::emit_pic16(&funcs);
-    assert!(asm.contains("dbl"), "the provider method is emitted as a subroutine:\n{asm}");
-    assert!(asm.contains("call"), "main reaches the spliced provider via a call:\n{asm}");
+    assert!(
+        asm.contains("dbl"),
+        "the provider method is emitted as a subroutine:\n{asm}"
+    );
+    assert!(
+        asm.contains("call"),
+        "main reaches the spliced provider via a call:\n{asm}"
+    );
     assert!(
         !asm.contains("unsupported call"),
         "the spliced provider call must not be a no-op:\n{asm}"
@@ -1218,10 +1372,14 @@ fn a_pic16_serial_provider_replaces_the_backend_intrinsic() {
     let providers = p.take_providers();
     let uses = p.take_uses();
     funcs.extend(
-        crate::ports::resolve_ports(&ports, &providers, &uses, "pic16").expect("resolves for pic16"),
+        crate::ports::resolve_ports(&ports, &providers, &uses, "pic16")
+            .expect("resolves for pic16"),
     );
     let asm = super::pic16::emit_pic16(&funcs);
-    assert!(asm.contains("serial_getc"), "the provider's serial_getc is emitted:\n{asm}");
+    assert!(
+        asm.contains("serial_getc"),
+        "the provider's serial_getc is emitted:\n{asm}"
+    );
     assert!(
         !asm.contains("_sg_wait"),
         "the backend's hidden bit-bang intrinsic ceded to the provider:\n{asm}"
@@ -1251,7 +1409,10 @@ fn a_bare_bang_negates_instead_of_vanishing() {
 #[test]
 fn a_bang_equals_is_still_an_inequality() {
     // The same character starts `!=`, so the fix must not turn `a != b` into a negation of `=`.
-    assert_eq!(compile_and_run("fn main() -> i64 { if 1 != 2 { 7 } else { 0 } }"), 7);
+    assert_eq!(
+        compile_and_run("fn main() -> i64 { if 1 != 2 { 7 } else { 0 } }"),
+        7
+    );
 }
 
 #[test]
@@ -1306,7 +1467,11 @@ fn a_spawn_in_a_loop_runs_every_iteration_and_joins_them_all() {
                  k = 0\n\
                  for k < 8 { sum = sum + peek64(slots + k * 8)\nk = k + 1 }\n\
                  sum }";
-    assert_eq!(compile_and_run(src), 36, "1 + 2 + ... + 8: every spawned thread ran and was joined");
+    assert_eq!(
+        compile_and_run(src),
+        36,
+        "1 + 2 + ... + 8: every spawned thread ran and was joined"
+    );
 }
 
 #[test]
@@ -1326,7 +1491,11 @@ fn a_loop_with_more_turns_than_slots_reuses_them_without_losing_a_thread() {
                  k = 0\n\
                  for k < 100 { n = n + peek64(slots + k * 8)\nk = k + 1 }\n\
                  n }";
-    assert_eq!(compile_and_run(src), 100, "all 100 threads ran and were joined");
+    assert_eq!(
+        compile_and_run(src),
+        100,
+        "all 100 threads ran and were joined"
+    );
 }
 
 #[test]
@@ -1350,8 +1519,15 @@ fn the_data_section_declares_its_alignment() {
         rodata_align >= 8,
         ".rodata must declare at least 8-byte alignment, got {rodata_align}"
     );
-    assert_ne!(ctid, 0, "the test program should have a spawn cell to check");
-    assert_eq!(ctid % 8, 0, "the join cell must be 8-byte aligned, got {ctid:#x}");
+    assert_ne!(
+        ctid, 0,
+        "the test program should have a spawn cell to check"
+    );
+    assert_eq!(
+        ctid % 8,
+        0,
+        "the join cell must be 8-byte aligned, got {ctid:#x}"
+    );
 }
 
 #[test]
@@ -1412,7 +1588,10 @@ fn shared_abi_code_assembles_into_a_relocatable_object_and_links_statically() {
         .arg(&obj_path)
         .status()
         .expect("cc should be available");
-    assert!(asm_ok.success(), "the shared-ABI assembly must assemble to a .o");
+    assert!(
+        asm_ok.success(),
+        "the shared-ABI assembly must assemble to a .o"
+    );
 
     let link = Command::new("cc")
         .arg("-static")
@@ -1422,10 +1601,16 @@ fn shared_abi_code_assembles_into_a_relocatable_object_and_links_statically() {
         .arg(&bin_path)
         .status()
         .unwrap();
-    assert!(link.success(), "the object must link statically into a C program");
+    assert!(
+        link.success(),
+        "the object must link statically into a C program"
+    );
 
     let code = Command::new(&bin_path).status().unwrap().code().unwrap();
-    assert_eq!(code, 42, "the statically linked Sond function must run and return 19 + 23");
+    assert_eq!(
+        code, 42,
+        "the statically linked Sond function must run and return 19 + 23"
+    );
 
     for p in [&asm_path, &obj_path, &c_path, &bin_path] {
         let _ = std::fs::remove_file(p);
@@ -1588,10 +1773,12 @@ fn declaring_a_view_with_a_length_reserves_it_zeroed() {
     );
 
     // And the size asked for is the element count times the element's own width, not a word each.
-    let asm = emit_program(&Parser::new(tokenize(
-        "fn main() -> i64 { let n = 16\nlet ar: i32[n]\nar[0] }",
-    ))
-    .parse_program());
+    let asm = emit_program(
+        &Parser::new(tokenize(
+            "fn main() -> i64 { let n = 16\nlet ar: i32[n]\nar[0] }",
+        ))
+        .parse_program(),
+    );
     assert!(
         asm.contains("imulq $4, %rax, %rdi"),
         "an i32 view reserves four bytes per element, got:\n{asm}"
@@ -1673,7 +1860,9 @@ fn a_windows_program_links_as_a_console_pe_and_runs() {
     assert_eq!(compile_and_run_windows("fn main() -> i64 { 6 * 7 }"), 42);
     // Control flow and locals, so the target is a real one and not just a `ret`.
     assert_eq!(
-        compile_and_run_windows("fn main() -> i64 { let mut s = 0\nlet mut i = 0\nfor i < 10 { s = s + i\ni = i + 1 }\ns }"),
+        compile_and_run_windows(
+            "fn main() -> i64 { let mut s = 0\nlet mut i = 0\nfor i < 10 { s = s + i\ni = i + 1 }\ns }"
+        ),
         45
     );
 }
