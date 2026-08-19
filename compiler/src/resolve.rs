@@ -317,20 +317,27 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
     // Per file, resolve each colliding name to the single definition visible in its include
     // closure (the file itself plus everything it includes, transitively). If the closure sees
     // more than one definer, the name is genuinely ambiguous from that file and is left alone.
-    let mut resolve_map: std::collections::HashMap<PathBuf, std::collections::HashMap<String, u32>> =
-        std::collections::HashMap::new();
+    let mut resolve_map: std::collections::HashMap<
+        PathBuf,
+        std::collections::HashMap<String, u32>,
+    > = std::collections::HashMap::new();
     // Per file, the modules it can NAME (its include closure, by module name) and the names that
     // are genuinely ambiguous from there: exported by two of the modules it can see, so an
     // unqualified use has to be turned back rather than guessed at.
-    let mut module_maps: std::collections::HashMap<PathBuf, std::collections::HashMap<String, PathBuf>> =
-        std::collections::HashMap::new();
-    let mut ambiguous_maps: std::collections::HashMap<PathBuf, std::collections::HashMap<String, Vec<String>>> =
-        std::collections::HashMap::new();
+    let mut module_maps: std::collections::HashMap<
+        PathBuf,
+        std::collections::HashMap<String, PathBuf>,
+    > = std::collections::HashMap::new();
+    let mut ambiguous_maps: std::collections::HashMap<
+        PathBuf,
+        std::collections::HashMap<String, Vec<String>>,
+    > = std::collections::HashMap::new();
     for f in g.edges.keys() {
         let closure = include_closure(f, &g.edges);
         let mut map = std::collections::HashMap::new();
         let mut mods = std::collections::HashMap::new();
-        let mut amb: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        let mut amb: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         for name in &colliding {
             let definers: Vec<&PathBuf> = closure
                 .iter()
@@ -339,7 +346,10 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
                         || g.exports.get(*c).is_some_and(|e| e.contains(name))
                 })
                 .collect();
-            let ids: HashSet<u32> = definers.iter().filter_map(|c| g.ids.get(*c).copied()).collect();
+            let ids: HashSet<u32> = definers
+                .iter()
+                .filter_map(|c| g.ids.get(*c).copied())
+                .collect();
             if ids.len() == 1 {
                 map.insert(name.clone(), *ids.iter().next().unwrap());
                 continue;
@@ -502,10 +512,7 @@ fn resolve_into(
     // every read error, so a missing NESTED include (`any/json.snd` not on any root) is blamed on
     // the top file, which is deeply confusing to debug.
     let src = std::fs::read_to_string(path).map_err(|e| {
-        std::io::Error::new(
-            e.kind(),
-            format!("cannot read `{}`: {e}", path.display()),
-        )
+        std::io::Error::new(e.kind(), format!("cannot read `{}`: {e}", path.display()))
     })?;
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -677,8 +684,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sond_rel_{}_{}", std::process::id(), uid()));
         std::fs::create_dir_all(dir.join("lib/mylib")).unwrap();
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::write(dir.join("lib/mylib/helper.snd"), "fn helper_answer() -> i64 { 42 }\n").unwrap();
-        std::fs::write(dir.join("src/prog.snd"), "include \"mylib/helper.snd\"\nfn main() -> i64 { helper_answer() }\n").unwrap();
+        std::fs::write(
+            dir.join("lib/mylib/helper.snd"),
+            "fn helper_answer() -> i64 { 42 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/prog.snd"),
+            "include \"mylib/helper.snd\"\nfn main() -> i64 { helper_answer() }\n",
+        )
+        .unwrap();
 
         let from_absolute = resolve_includes_scoped(&dir.join("src/prog.snd"))
             .expect("an absolute entry resolves the project lib");
@@ -725,23 +740,41 @@ mod tests {
     fn a_bare_name_resolves_under_any_with_the_snd_extension_added() {
         // `include "serial"` must reach `any/serial.snd`: the extension is optional and the
         // `any/` prefix is tried when the exact path is not found (JMV's alias request).
-        let entry = lib_fixture("any/serial.snd", "fn serial_getc() -> i64 { 7 }", "include \"serial\"");
+        let entry = lib_fixture(
+            "any/serial.snd",
+            "fn serial_getc() -> i64 { 7 }",
+            "include \"serial\"",
+        );
         let combined = resolve_includes(&entry).unwrap();
-        assert!(combined.contains("fn serial_getc"), "`include \"serial\"` pulled in any/serial.snd");
+        assert!(
+            combined.contains("fn serial_getc"),
+            "`include \"serial\"` pulled in any/serial.snd"
+        );
     }
 
     #[test]
     fn the_snd_extension_is_optional_on_an_explicit_any_path() {
-        let entry = lib_fixture("any/frame.snd", "fn frame_encode() -> i64 { 1 }", "include \"any/frame\"");
+        let entry = lib_fixture(
+            "any/frame.snd",
+            "fn frame_encode() -> i64 { 1 }",
+            "include \"any/frame\"",
+        );
         let combined = resolve_includes(&entry).unwrap();
-        assert!(combined.contains("fn frame_encode"), "`any/frame` resolved to any/frame.snd");
+        assert!(
+            combined.contains("fn frame_encode"),
+            "`any/frame` resolved to any/frame.snd"
+        );
     }
 
     #[test]
     fn an_explicit_full_path_still_resolves_exactly() {
         // The alias must not change behaviour for the canonical, extension-carrying paths the
         // whole stdlib already uses.
-        let entry = lib_fixture("x86_64/linux/io.snd", "fn close_fd(fd: i64) -> i64 { 0 }", "include \"x86_64/linux/io.snd\"");
+        let entry = lib_fixture(
+            "x86_64/linux/io.snd",
+            "fn close_fd(fd: i64) -> i64 { 0 }",
+            "include \"x86_64/linux/io.snd\"",
+        );
         let combined = resolve_includes(&entry).unwrap();
         assert!(combined.contains("fn close_fd"), "explicit path unchanged");
     }
@@ -755,9 +788,17 @@ mod tests {
         std::fs::create_dir_all(lib_file.parent().unwrap()).unwrap();
         std::fs::write(&lib_file, "fn serial_putc(b: i64) { }").unwrap();
         let entry = root.join("main.snd");
-        std::fs::write(&entry, "include \"serial\"\ninclude \"any/serial.snd\"\nfn main() -> i64 { 0 }").unwrap();
+        std::fs::write(
+            &entry,
+            "include \"serial\"\ninclude \"any/serial.snd\"\nfn main() -> i64 { 0 }",
+        )
+        .unwrap();
         let combined = resolve_includes(&entry).unwrap();
-        assert_eq!(combined.matches("fn serial_putc").count(), 1, "included once despite two spellings");
+        assert_eq!(
+            combined.matches("fn serial_putc").count(),
+            1,
+            "included once despite two spellings"
+        );
     }
 
     #[test]
@@ -782,18 +823,27 @@ mod tests {
 
     #[test]
     fn a_colliding_private_helper_is_file_scoped_a_unique_one_is_left_alone() {
-        let root = std::env::temp_dir().join(format!("sond_fscope_{}_{}", std::process::id(), uid()));
+        let root =
+            std::env::temp_dir().join(format!("sond_fscope_{}_{}", std::process::id(), uid()));
         std::fs::create_dir_all(&root).unwrap();
         // Two included libs each define a PRIVATE `secret` (a collision); libb also has a unique
         // private `only_b`. The entry includes both.
-        std::fs::write(root.join("a.snd"), "fn secret() -> i64 { 1 }\npub fn a() -> i64 { secret() }").unwrap();
+        std::fs::write(
+            root.join("a.snd"),
+            "fn secret() -> i64 { 1 }\npub fn a() -> i64 { secret() }",
+        )
+        .unwrap();
         std::fs::write(
             root.join("b.snd"),
             "fn secret() -> i64 { 2 }\nfn only_b() -> i64 { 9 }\npub fn b() -> i64 { secret() + only_b() }",
         )
         .unwrap();
         let entry = root.join("main.snd");
-        std::fs::write(&entry, "include \"a.snd\"\ninclude \"b.snd\"\nfn main() -> i64 { a() + b() }").unwrap();
+        std::fs::write(
+            &entry,
+            "include \"a.snd\"\ninclude \"b.snd\"\nfn main() -> i64 { a() + b() }",
+        )
+        .unwrap();
         let combined = resolve_includes(&entry).unwrap();
         // The colliding `secret` is renamed per file: no bare `fn secret(` survives.
         assert_eq!(
@@ -807,7 +857,10 @@ mod tests {
             "two definitions + two call sites of `secret` are mangled:\n{combined}"
         );
         // The unique private `only_b` is NOT touched (nothing that calls it across files breaks).
-        assert!(combined.contains("fn only_b()"), "a unique private helper is left alone");
+        assert!(
+            combined.contains("fn only_b()"),
+            "a unique private helper is left alone"
+        );
     }
 
     #[test]
@@ -818,14 +871,23 @@ mod tests {
         // left its call BARE, while both definitions were mangled per file. Result: the bare
         // call resolved to nothing. A caller must bind to the definition visible in ITS include
         // closure.
-        let root = std::env::temp_dir().join(format!("sond_xfile_{}_{}", std::process::id(), uid()));
+        let root =
+            std::env::temp_dir().join(format!("sond_xfile_{}_{}", std::process::id(), uid()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.snd"), "fn shared() -> i64 { 1 }").unwrap();
         std::fs::write(root.join("b.snd"), "fn shared() -> i64 { 2 }").unwrap();
         // c includes ONLY b, and calls `shared` without defining it: it must bind to b's `shared`.
-        std::fs::write(root.join("c.snd"), "include \"b.snd\"\npub fn c_call() -> i64 { shared() }").unwrap();
+        std::fs::write(
+            root.join("c.snd"),
+            "include \"b.snd\"\npub fn c_call() -> i64 { shared() }",
+        )
+        .unwrap();
         let entry = root.join("main.snd");
-        std::fs::write(&entry, "include \"a.snd\"\ninclude \"c.snd\"\nfn main() -> i64 { c_call() }").unwrap();
+        std::fs::write(
+            &entry,
+            "include \"a.snd\"\ninclude \"c.snd\"\nfn main() -> i64 { c_call() }",
+        )
+        .unwrap();
         let combined = resolve_includes(&entry).unwrap();
 
         // Both definitions are file-scoped: no bare `fn shared(` survives.
@@ -853,7 +915,9 @@ mod tests {
         let line = combined
             .lines()
             .find(|l| l.contains("shared__f") && l.contains(marker))
-            .unwrap_or_else(|| panic!("no mangled `shared__f` line with `{marker}` in:\n{combined}"));
+            .unwrap_or_else(|| {
+                panic!("no mangled `shared__f` line with `{marker}` in:\n{combined}")
+            });
         let start = line.find("shared__f").unwrap();
         line[start..]
             .chars()
@@ -868,10 +932,22 @@ mod tests {
         // program that pulls in both would otherwise fail with "declared more than once".
         let root = std::env::temp_dir().join(format!("sond_glob_{}_{}", std::process::id(), uid()));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("a.snd"), "let MASK = 255\npub fn a() -> i64 { 7 & MASK }").unwrap();
-        std::fs::write(root.join("b.snd"), "let MASK = 255\npub fn b() -> i64 { 9 & MASK }").unwrap();
+        std::fs::write(
+            root.join("a.snd"),
+            "let MASK = 255\npub fn a() -> i64 { 7 & MASK }",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("b.snd"),
+            "let MASK = 255\npub fn b() -> i64 { 9 & MASK }",
+        )
+        .unwrap();
         let entry = root.join("main.snd");
-        std::fs::write(&entry, "include \"a.snd\"\ninclude \"b.snd\"\nfn main() -> i64 { a() + b() }").unwrap();
+        std::fs::write(
+            &entry,
+            "include \"a.snd\"\ninclude \"b.snd\"\nfn main() -> i64 { a() + b() }",
+        )
+        .unwrap();
         let combined = resolve_includes(&entry).unwrap();
         assert_eq!(
             combined.matches("let MASK =").count(),
@@ -890,15 +966,26 @@ mod tests {
     fn a_uniquely_named_global_shared_across_files_is_left_alone() {
         // A global defined in ONE file and used in another (a shared constant) must NOT be
         // mangled: it does not collide, so cross-file use keeps working.
-        let root = std::env::temp_dir().join(format!("sond_globshare_{}_{}", std::process::id(), uid()));
+        let root =
+            std::env::temp_dir().join(format!("sond_globshare_{}_{}", std::process::id(), uid()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("k.snd"), "let SHARED = 42").unwrap();
-        std::fs::write(root.join("u.snd"), "include \"k.snd\"\npub fn u() -> i64 { SHARED }").unwrap();
+        std::fs::write(
+            root.join("u.snd"),
+            "include \"k.snd\"\npub fn u() -> i64 { SHARED }",
+        )
+        .unwrap();
         let entry = root.join("main.snd");
         std::fs::write(&entry, "include \"u.snd\"\nfn main() -> i64 { u() }").unwrap();
         let combined = resolve_includes(&entry).unwrap();
-        assert!(combined.contains("let SHARED = 42"), "a unique shared global is untouched:\n{combined}");
-        assert!(!combined.contains("SHARED__f"), "a non-colliding global is never mangled:\n{combined}");
+        assert!(
+            combined.contains("let SHARED = 42"),
+            "a unique shared global is untouched:\n{combined}"
+        );
+        assert!(
+            !combined.contains("SHARED__f"),
+            "a non-colliding global is never mangled:\n{combined}"
+        );
     }
 
     #[test]
@@ -974,10 +1061,20 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("dns.snd"), "pub fn resolve() -> i64 { 7 }").unwrap();
         let entry = root.join("main.snd");
-        std::fs::write(&entry, "include \"dns.snd\"\nfn main() -> i64 { dns::resolve() }").unwrap();
+        std::fs::write(
+            &entry,
+            "include \"dns.snd\"\nfn main() -> i64 { dns::resolve() }",
+        )
+        .unwrap();
         let combined = resolve_includes(&entry).unwrap();
-        assert!(!combined.contains("::"), "no `::` survives resolution:\n{combined}");
-        assert!(combined.contains("resolve()"), "it binds to the module's function:\n{combined}");
+        assert!(
+            !combined.contains("::"),
+            "no `::` survives resolution:\n{combined}"
+        );
+        assert!(
+            combined.contains("resolve()"),
+            "it binds to the module's function:\n{combined}"
+        );
     }
 
     #[test]
@@ -1000,7 +1097,10 @@ mod tests {
             0,
             "both definitions are renamed apart:\n{combined}"
         );
-        assert!(!combined.contains("::"), "and both uses are resolved:\n{combined}");
+        assert!(
+            !combined.contains("::"),
+            "and both uses are resolved:\n{combined}"
+        );
     }
 
     #[test]
@@ -1019,7 +1119,10 @@ mod tests {
         )
         .unwrap();
         let err = resolve_includes(&entry).unwrap_err().to_string();
-        assert!(err.contains("read"), "it names the ambiguous name, got: {err}");
+        assert!(
+            err.contains("read"),
+            "it names the ambiguous name, got: {err}"
+        );
         assert!(
             err.contains("disk") && err.contains("net"),
             "and both modules that export it, got: {err}"
@@ -1043,9 +1146,17 @@ mod tests {
         // visibility that already exists would stop meaning anything the moment `::` landed.
         let root = std::env::temp_dir().join(format!("sond_ns5_{}_{}", std::process::id(), uid()));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("dns.snd"), "fn helper() -> i64 { 7 }\npub fn resolve() -> i64 { helper() }").unwrap();
+        std::fs::write(
+            root.join("dns.snd"),
+            "fn helper() -> i64 { 7 }\npub fn resolve() -> i64 { helper() }",
+        )
+        .unwrap();
         let entry = root.join("main.snd");
-        std::fs::write(&entry, "include \"dns.snd\"\nfn main() -> i64 { dns::helper() }").unwrap();
+        std::fs::write(
+            &entry,
+            "include \"dns.snd\"\nfn main() -> i64 { dns::helper() }",
+        )
+        .unwrap();
         let err = resolve_includes(&entry).unwrap_err().to_string();
         assert!(
             err.contains("helper") && err.contains("dns"),

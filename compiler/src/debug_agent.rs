@@ -443,6 +443,9 @@ mod tests {
 
         // And it must lower without panicking, emitting the checkpoint the codegen calls into.
         let asm = emit_program_debug_g(&globals, &structs, &funcs);
-        assert!(asm.contains("__dbg_step"), "the agent is lowered into the program");
+        assert!(
+            asm.contains("__dbg_step"),
+            "the agent is lowered into the program"
+        );
     }
 }

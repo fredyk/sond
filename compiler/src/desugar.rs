@@ -212,7 +212,11 @@ fn lower_enum_expr(e: &mut Expr, info: &HashMap<String, VariantInfo>) {
 
 /// If/else-if chain for a PAYLOAD-FREE match: the scrutinee is an integer tag, so each
 /// arm tests `scrutinee == tag`. Scrutinee and bodies are already lowered.
-fn lower_match_int(scrutinee: &Expr, arms: &[MatchArm], info: &HashMap<String, VariantInfo>) -> Expr {
+fn lower_match_int(
+    scrutinee: &Expr,
+    arms: &[MatchArm],
+    info: &HashMap<String, VariantInfo>,
+) -> Expr {
     let n = arms.len();
     let mut acc = arms[n - 1].body.clone(); // final else = the last arm
     for i in (0..n - 1).rev() {
@@ -230,7 +234,7 @@ fn lower_match_int(scrutinee: &Expr, arms: &[MatchArm], info: &HashMap<String, V
         acc = Block {
             stmts: Vec::new(),
             tail: Some(Box::new(if_expr)),
-        stmt_lines: Vec::new(),
+            stmt_lines: Vec::new(),
         };
     }
     match acc.tail {
@@ -264,7 +268,7 @@ fn lower_match_payload(
         acc = Block {
             stmts: Vec::new(),
             tail: Some(Box::new(if_expr)),
-        stmt_lines: Vec::new(),
+            stmt_lines: Vec::new(),
         };
     }
     match acc.tail {
@@ -632,7 +636,9 @@ fn desugar_stmt(
             desugar_expr(target, fields, sizes, locals, methods);
             desugar_expr(value, fields, sizes, locals, methods);
         }
-        Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => desugar_expr(e, fields, sizes, locals, methods),
+        Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => {
+            desugar_expr(e, fields, sizes, locals, methods)
+        }
         Stmt::Par(peers) => {
             for p in peers {
                 desugar_expr(p, fields, sizes, locals, methods);
@@ -708,10 +714,7 @@ fn desugar_expr(
                     let idx = std::mem::replace(&mut **i, Expr::Int(0));
                     **i = Expr::Binary(
                         BinOp::Add,
-                        Box::new(Expr::Field(
-                            Box::new(Expr::Var(sname)),
-                            "len".to_string(),
-                        )),
+                        Box::new(Expr::Field(Box::new(Expr::Var(sname)), "len".to_string())),
                         Box::new(idx),
                     );
                 }
@@ -887,7 +890,10 @@ fn collect_array_sizes_block(b: &Block, out: &mut HashMap<String, i64>) {
                 collect_array_sizes_expr(value, out);
             }
             Stmt::For {
-                cond, invariant, body, ..
+                cond,
+                invariant,
+                body,
+                ..
             } => {
                 if let Some(c) = cond {
                     collect_array_sizes_expr(c, out);
@@ -937,10 +943,12 @@ fn collect_array_sizes_expr(e: &Expr, out: &mut HashMap<String, i64>) {
                 collect_array_sizes_expr(&a.value, out);
             }
         }
-        Expr::List(items) => items.iter().for_each(|it| collect_array_sizes_expr(it, out)),
-        Expr::StructLit(_, fields) => {
-            fields.iter().for_each(|(_, v)| collect_array_sizes_expr(v, out))
-        }
+        Expr::List(items) => items
+            .iter()
+            .for_each(|it| collect_array_sizes_expr(it, out)),
+        Expr::StructLit(_, fields) => fields
+            .iter()
+            .for_each(|(_, v)| collect_array_sizes_expr(v, out)),
         _ => {}
     }
 }
@@ -956,7 +964,10 @@ fn len_block(b: &mut Block, sizes: &HashMap<String, i64>) {
                 len_expr(value, sizes);
             }
             Stmt::For {
-                cond, invariant, body, ..
+                cond,
+                invariant,
+                body,
+                ..
             } => {
                 if let Some(c) = cond {
                     len_expr(c, sizes);
@@ -997,9 +1008,7 @@ fn len_expr(e: &mut Expr, sizes: &HashMap<String, i64>) {
             }
         }
         Expr::List(items) => items.iter_mut().for_each(|it| len_expr(it, sizes)),
-        Expr::StructLit(_, fields) => {
-            fields.iter_mut().for_each(|(_, v)| len_expr(v, sizes))
-        }
+        Expr::StructLit(_, fields) => fields.iter_mut().for_each(|(_, v)| len_expr(v, sizes)),
         Expr::If {
             cond,
             then_branch,
@@ -1093,7 +1102,10 @@ fn sr_block(b: &mut Block) {
                 sr_expr(value);
             }
             Stmt::For {
-                cond, invariant, body, ..
+                cond,
+                invariant,
+                body,
+                ..
             } => {
                 if let Some(c) = cond {
                     sr_expr(c);
@@ -1580,9 +1592,7 @@ mod tests {
     fn print_int_of_a_u64_still_prints_unsigned() {
         // A `u64` whose high bit is set is a large positive number, not a negative, the
         // signed path must NOT be taken for unsigned types.
-        let out = compile_and_capture(
-            "fn main() -> i64 { let h: u64 = 0 - 1  print_int(h)  0 }",
-        );
+        let out = compile_and_capture("fn main() -> i64 { let h: u64 = 0 - 1  print_int(h)  0 }");
         assert_eq!(out, "18446744073709551615");
     }
 

@@ -102,7 +102,11 @@ pub(crate) fn freestanding_section_alignment(src: &str) -> (u64, u64, u64) {
         .expect("cc should be available");
     assert!(status.success(), "freestanding link failed");
 
-    let sections = Command::new("readelf").args(["-SW"]).arg(&bin_path).output().unwrap();
+    let sections = Command::new("readelf")
+        .args(["-SW"])
+        .arg(&bin_path)
+        .output()
+        .unwrap();
     let sections = String::from_utf8_lossy(&sections.stdout).to_string();
     // `readelf -SW` puts the alignment in the last column of each section's row.
     let align_of = |name: &str| -> u64 {

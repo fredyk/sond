@@ -366,9 +366,7 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
     // parser-wide special-casing. (Gate finding: an independent AI hit "expected identifier, got
     // Test" writing `fn test()`.)
     for i in 0..tokens.len() {
-        if matches!(tokens[i], Token::Test)
-            && !matches!(tokens.get(i + 1), Some(Token::Str(_)))
-        {
+        if matches!(tokens[i], Token::Test) && !matches!(tokens.get(i + 1), Some(Token::Str(_))) {
             tokens[i] = Token::Ident("test".to_string());
         }
     }

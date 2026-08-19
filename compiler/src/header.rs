@@ -10,7 +10,9 @@
 //! This module owns the SERIALIZATION of the interface; separate compilation
 //! (compile-against-header + link) is a later cycle.
 
-use crate::ast::{BinOp, Expr, Function, Global, PortDef, Signature, StructDef, Type, UnOp, Visibility};
+use crate::ast::{
+    BinOp, Expr, Function, Global, PortDef, Signature, StructDef, Type, UnOp, Visibility,
+};
 
 /// Renders the public interface of a program (its `pub` fns, structs and globals)
 /// as Sond header text. Private (`Priv`) items are omitted; function bodies are
@@ -189,7 +191,8 @@ fn expr_to_source(e: &Expr) -> String {
         Expr::Field(base, name) => format!("{}.{name}", expr_to_source(base)),
         Expr::Index(base, idx) => format!("{}[{}]", expr_to_source(base), expr_to_source(idx)),
         Expr::SliceRange(base, lo, hi) => {
-            let s = |o: &Option<Box<Expr>>| o.as_ref().map(|e| expr_to_source(e)).unwrap_or_default();
+            let s =
+                |o: &Option<Box<Expr>>| o.as_ref().map(|e| expr_to_source(e)).unwrap_or_default();
             format!("{}[{}:{}]", expr_to_source(base), s(lo), s(hi))
         }
         Expr::List(items) => format!(
@@ -364,12 +367,27 @@ mod port_header_tests {
         p.parse_program();
         let ports = p.take_ports();
         let h = emit_header(src, &[], &[], &[], &ports);
-        assert!(h.contains("// A serial line."), "the port's doc comment is kept");
+        assert!(
+            h.contains("// A serial line."),
+            "the port's doc comment is kept"
+        );
         assert!(h.contains("pub iface Serial {"), "the port is emitted");
-        assert!(h.contains("fn serial_getc() -> (b: i64)"), "a method keeps its named return");
-        assert!(h.contains("ensures { b >= -1 }"), "a method keeps its contract");
-        assert!(h.contains("fn serial_putc(b: i64)"), "a bodyless method is rendered");
-        assert!(!h.contains("provides"), "a provider is implementation, never in the header");
+        assert!(
+            h.contains("fn serial_getc() -> (b: i64)"),
+            "a method keeps its named return"
+        );
+        assert!(
+            h.contains("ensures { b >= -1 }"),
+            "a method keeps its contract"
+        );
+        assert!(
+            h.contains("fn serial_putc(b: i64)"),
+            "a bodyless method is rendered"
+        );
+        assert!(
+            !h.contains("provides"),
+            "a provider is implementation, never in the header"
+        );
         assert!(!h.contains("{ 0 }"), "no provider body leaks in");
     }
 
@@ -380,6 +398,9 @@ mod port_header_tests {
         p.parse_program();
         let ports = p.take_ports();
         let h = emit_header(src, &[], &[], &[], &ports);
-        assert!(!h.contains("Internal"), "a private (non-pub) port is not part of the interface");
+        assert!(
+            !h.contains("Internal"),
+            "a private (non-pub) port is not part of the interface"
+        );
     }
 }
