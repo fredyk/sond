@@ -2384,3 +2384,130 @@ fn a_copied_byte_view_still_indexes_in_bytes() {
         "a copy of a u8 view indexes in bytes, like the view it copies"
     );
 }
+
+// The tests below guard `a string parameter carries UTF-8 bytes whoever the caller is`.
+// Each one is written so it goes red when the mechanism it names is broken: passing a
+// variable through the call path, and refusing when more than one text can reach the call.
+
+#[test]
+fn a_string_variable_reaches_the_callee_as_the_same_bytes_as_a_literal() {
+    // The bug this closes: the same declared type arrived in two representations, and the
+    // callee could not tell which. `añb` is the probe because its second byte (0xC3) only
+    // exists in the UTF-8 view -- the code-point view answers 0 there, so an ASCII-only
+    // literal would have hidden the whole thing.
+    let from_literal = "fn b(s: string) -> i64 { peek8(s + 1) }\n\
+                        fn f() -> i64 { b(\"a\u{00f1}b\") }";
+    let from_variable = "fn b(s: string) -> i64 { peek8(s + 1) }\n\
+                         fn f() -> i64 { let l: string = \"a\u{00f1}b\"\nb(l) }";
+    assert_eq!(compile_and_run(from_literal), 195, "literal argument");
+    assert_eq!(
+        compile_and_run(from_variable),
+        195,
+        "a variable holding the same text must hand over the same bytes"
+    );
+}
+
+#[test]
+fn a_reassigned_variable_hands_over_the_text_it_holds_now() {
+    // The label travels with the reassignment: what reaches the callee is the last text
+    // assigned, not the one the variable was born with.
+    let prog = "fn b(s: string) -> i64 { peek8(s) }\n\
+                fn f() -> i64 { let mut l: string = \"a\u{00f1}\"\nl = \"z\u{00f1}\"\nb(l) }";
+    assert_eq!(
+        compile_and_run(prog),
+        122,
+        "after the reassignment, 'z' = 122"
+    );
+}
+
+#[test]
+fn a_parameter_forwarded_to_another_function_keeps_its_bytes() {
+    let prog = "fn b(s: string) -> i64 { peek8(s + 1) }\n\
+                fn a(x: string) -> i64 { b(x) }\n\
+                fn f() -> i64 { a(\"a\u{00f1}b\") }";
+    assert_eq!(compile_and_run(prog), 195, "the bytes survive one more hop");
+}
+
+#[test]
+fn both_branches_assigning_the_same_text_still_compiles() {
+    // Refusing correct code would be worse than the bug: when the two branches cannot
+    // disagree, there is nothing undecidable and the call goes through.
+    let prog = "fn b(s: string) -> i64 { peek8(s) }\n\
+                fn f(c: i64) -> i64 { let mut a: string = \"h\u{00f1}\"\n\
+                if c > 0 { a = \"h\u{00f1}\" } else { a = \"h\u{00f1}\" }\nb(a) }";
+    assert_eq!(
+        compile_and_run(prog),
+        104,
+        "same text on both sides, 'h' = 104"
+    );
+}
+
+#[test]
+#[should_panic(expected = "its value as a `string` is unknown")]
+fn two_branches_assigning_different_texts_are_refused_at_the_call() {
+    // The other half of the commit, and the half that had no test: where two texts can
+    // reach the same call the compiler refuses instead of picking one. Silently picking
+    // the `then` branch compiles clean and hands the callee the wrong bytes at runtime.
+    emit_program(
+        &Parser::new(tokenize(
+            "fn b(s: string) -> i64 { peek8(s) }\n\
+         fn f(c: i64) -> i64 { let mut a: string = \"one\"\n\
+         if c > 0 { a = \"two\" } else { a = \"three\" }\nb(a) }",
+        ))
+        .parse_program(),
+    );
+}
+
+#[test]
+#[should_panic(expected = "its value as a `string` is unknown")]
+fn a_loop_body_that_reassigns_is_refused_at_the_call() {
+    // Same reasoning through a loop: the text at the call depends on how many times the
+    // body ran, which is not something the compiler can decide.
+    emit_program(
+        &Parser::new(tokenize(
+            "fn b(s: string) -> i64 { peek8(s) }\n\
+         fn f() -> i64 { let mut a: string = \"one\"\n\
+         let mut i = 0\n\
+         for i < 3 { a = \"two\"\ni = i + 1 }\nb(a) }",
+        ))
+        .parse_program(),
+    );
+}
+
+#[test]
+fn a_branch_that_assigns_nothing_leaves_the_variable_passable() {
+    // An `if` that never touches the variable must not cost it its label: the merge has
+    // to look at what the branches assigned, not at whether a branch ran.
+    let prog = "fn b(s: string) -> i64 { peek8(s) }\n\
+                fn f(c: i64) -> i64 { let mut a: string = \"h\u{00f1}\"\n\
+                if c > 0 { let z = 1 }\nb(a) }";
+    assert_eq!(compile_and_run(prog), 104, "'h' = 104");
+}
+
+#[test]
+fn a_delete_byte_in_a_literal_is_escaped_for_the_assembler() {
+    // 0x7F is not below 0x20, so a range check written as `< 0x20` lets it through raw.
+    // A NUL is already covered by `a_control_byte_in_a_literal_is_escaped_for_the_assembler`.
+    let asm = emit_program(
+        &Parser::new(tokenize(
+            "fn f() -> i64 { let s: string = \"E\x7FX\"\n    s.utf8 }",
+        ))
+        .parse_program(),
+    );
+    assert!(
+        asm.contains(r#".asciz "E\177X""#),
+        "0x7F must reach the assembler as \\177:\n{asm}"
+    );
+    let with_tab = emit_program(
+        &Parser::new(tokenize(
+            "fn f() -> i64 { let s: string = \"E\tX\"\n    s.utf8 }",
+        ))
+        .parse_program(),
+    );
+    assert!(
+        !with_tab
+            .lines()
+            .any(|l| l.contains(".asciz") && l.as_bytes().contains(&b'\t')),
+        "no raw tab may sit inside the quotes of a .asciz:\n{with_tab}"
+    );
+}
