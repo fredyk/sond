@@ -6186,3 +6186,361 @@ mod string_index_tests {
         );
     }
 }
+
+/// Checks PIC16-specific constraints: the backend is an 8-bit accumulator machine where every
+/// local/parameter occupies exactly one byte of RAM and only `movlw`/`movwf` are emitted.
+/// A value that does not fit in one byte would be silently truncated by the codegen, so the
+/// check rejects it as a compile error.
+pub fn check_pic16_constraints(funcs: &[Function]) -> Result<(), String> {
+    for f in funcs {
+        // 1) Multi-byte types: every local/parameter is one byte, so u16/i16/u32/i32/i64/...
+        //    are impossible to store. Reject them in declarations so the author knows why.
+        for p in &f.params {
+            let Type::Named(ref n) = p.ty else { continue };
+            if pic16_too_wide(&p.ty) {
+                return Err(format!(
+                    "function `{}`: `{}` is annotated as `{}` but the PIC16 backend stores \
+                     each parameter in a single byte; a {} is two or more bytes. Use \
+                     separate `u8` variables to hold the high and low bytes.",
+                    f.name, p.name, n, n
+                ));
+            }
+        }
+        // Walk every statement and expression in the function body, checking let bindings
+        // that have an explicit multi-byte type annotation OR a constant value > 255.
+        pic16_block(&f.body, &f.name)?;
+    }
+    Ok(())
+}
+
+/// Whether a type someone wrote down is wider than the one byte the PIC16 backend gives to every
+/// local and every parameter. The widths come from `elem_bytes`, the table this file already keeps.
+///
+/// `i64` is the exception, and not an oversight: it is what Sond gives to everything the programmer
+/// did not annotate, so every firmware in the tree is full of i64 values the backend already stores
+/// as bytes. Refusing it would refuse code that works today. A width written on purpose -- `u16`,
+/// `i32` -- is a different statement: the programmer asked for two bytes, and there is one.
+///
+/// One function for the two places that ask, so the exception cannot be remembered in one and
+/// forgotten in the other. It was: a parameter `x: i64` compiled and a local `a: i64` did not.
+fn pic16_too_wide(t: &Type) -> bool {
+    let Type::Named(n) = t else { return false };
+    n != "i64" && elem_bytes(t) > 1
+}
+
+fn pic16_block(b: &Block, fname: &str) -> Result<(), String> {
+    for s in &b.stmts {
+        match s {
+            // `let name: Ty = expr`: reject multi-byte types (u16/i16/u32/i32/u64/i64
+            // on anything wider than 8 bits) and check the initializer value for PIC16
+            // compatibility.  The type width comes from `elem_bytes` — the machine's
+            // definition, not a string heuristic.
+            Stmt::Let {
+                name, ty, value, ..
+            } => {
+                if let Some(t) = &ty {
+                    if let Type::Named(ref n) = *t {
+                        if pic16_too_wide(t) {
+                            return Err(format!(
+                                "function `{fname}`: `{name}` is declared as `{n}` but the PIC16 \
+                                 backend stores each local in a single byte; a {n} is two or more bytes. \
+                                 Use separate `u8` variables for the high and low bytes."
+                            ));
+                        }
+                    }
+                }
+                check_pic16_expr(value, fname)?;
+            }
+            Stmt::Assign { target, value } => {
+                check_pic16_expr(value, fname)?;
+                check_pic16_expr(target, fname)?;
+            }
+            Stmt::Return(Some(value)) | Stmt::Expr(value) | Stmt::Spawn(value) => {
+                check_pic16_expr(value, fname)?;
+            }
+            Stmt::For {
+                cond,
+                invariant,
+                body,
+                ..
+            } => {
+                if let Some(c) = cond {
+                    check_pic16_expr(c, fname)?;
+                }
+                for inv in invariant {
+                    check_pic16_expr(inv, fname)?;
+                }
+                pic16_block(body, fname)?;
+            }
+            Stmt::Par(peers) | Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
+                for p in peers {
+                    check_pic16_expr(p, fname)?;
+                }
+            }
+            Stmt::GraphLet {
+                nodes, yield_expr, ..
+            } => {
+                for (_, e) in nodes {
+                    check_pic16_expr(e, fname)?;
+                }
+                check_pic16_expr(yield_expr, fname)?;
+            }
+            _ => {}
+        }
+    }
+    if let Some(t) = &b.tail {
+        check_pic16_expr(t, fname)?;
+    }
+    Ok(())
+}
+
+/// Descend an expression tree, checking that all integer literal values fit in 8 bits
+/// (0..255 unsigned, -128..127 signed for signed types). This catches `poke8(0x20, 1000)`
+/// where 1000 = 0x03E8 would be truncated to 232 = 0xE8.
+///
+/// Also checks that constant expressions (binary ops on literals) that evaluate to a value
+/// outside 8 bits are rejected: `let a = 200 + 100` → 300, which cannot be emitted.
+fn check_pic16_expr(e: &Expr, fname: &str) -> Result<(), String> {
+    match e {
+        Expr::Int(n) => {
+            // An integer literal used in PIC16 must fit in 8 bits.
+            // The PIC16 backend is an 8-bit machine: locals are one byte, and immediates
+            // are loaded with `movlw` which takes an 8-bit value.
+            if *n > 255 || *n < -128 {
+                return Err(format!(
+                    "function `{fname}`: integer literal `{n}` does not fit in 8 bits; \
+                     the PIC16 backend only emits 8-bit values (range 0..255). \
+                     Divide the value or express it as a constant expression that the \
+                     backend can break down."
+                ));
+            }
+        }
+        Expr::Binary(_, l, r) => {
+            // Also fold the expression to catch `200 + 100` = 300 from a binary op.
+            if let Some(v) = const_fold_pic16(e)
+                && !(-128..=255).contains(&v)
+            {
+                return Err(format!(
+                    "function `{fname}`: constant expression evaluates to `{v}` which \
+                     does not fit in 8 bits; the PIC16 backend only emits 8-bit values \
+                     (range 0..255). Split the value or use separate `u8` variables."
+                ));
+            }
+            check_pic16_expr(l, fname)?;
+            check_pic16_expr(r, fname)?;
+        }
+        Expr::Unary(UnOp::Neg, x) => {
+            check_pic16_expr(x, fname)?;
+            // Negation of -128 would be 128 which overflows i8. Check the inner value.
+            if let Expr::Int(n) = x.as_ref()
+                && *n == -128
+            {
+                return Err(format!(
+                    "function `{fname}`: integer literal `-(-128)` is 128 which does not \
+                     fit in a signed i8 type's range (-128..127) on the PIC16 backend."
+                ));
+            }
+        }
+        Expr::Field(x, _) | Expr::Cast(x, _) => {
+            check_pic16_expr(x, fname)?;
+        }
+        Expr::Index(a, b) => {
+            check_pic16_expr(a, fname)?;
+            check_pic16_expr(b, fname)?;
+        }
+        Expr::Call(c, args) => {
+            check_pic16_expr(c, fname)?;
+            for a in args {
+                check_pic16_expr(&a.value, fname)?;
+            }
+        }
+        Expr::List(items) => {
+            for it in items {
+                check_pic16_expr(it, fname)?;
+            }
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields {
+                check_pic16_expr(v, fname)?;
+            }
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            check_pic16_expr(cond, fname)?;
+            pic16_block(then_branch, fname)?;
+            if let Some(eb) = else_branch {
+                pic16_block(eb, fname)?;
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            check_pic16_expr(scrutinee, fname)?;
+            for a in arms {
+                pic16_block(&a.body, fname)?;
+            }
+        }
+        Expr::SliceRange(b, lo, hi) => {
+            check_pic16_expr(b, fname)?;
+            if let Some(l) = lo {
+                check_pic16_expr(l, fname)?;
+            }
+            if let Some(h) = hi {
+                check_pic16_expr(h, fname)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Folds a constant integer expression to its value, or `None` if not a compile-time
+/// constant.  The value is returned as-is (unmasked); callers that need an 8-bit literal
+/// must apply the `& 0xFF` mask themselves.  Used by the PIC16 checker and by the PIC16
+/// codegen so there is exactly one place where constant folding lives.
+pub fn const_fold_pic16(e: &Expr) -> Option<i64> {
+    match e {
+        Expr::Int(n) => Some(*n),
+        Expr::Unary(UnOp::Neg, x) => Some(const_fold_pic16(x)?.wrapping_neg()),
+        Expr::Binary(op, l, r) => {
+            let (a, b) = (const_fold_pic16(l)?, const_fold_pic16(r)?);
+            Some(match op {
+                BinOp::Add => a.wrapping_add(b),
+                BinOp::Sub => a.wrapping_sub(b),
+                BinOp::Mul => a.wrapping_mul(b),
+                BinOp::BitOr => a | b,
+                BinOp::BitAnd => a & b,
+                BinOp::BitXor => a ^ b,
+                BinOp::Shl => a << b,
+                BinOp::Shr => a >> b,
+                _ => return None,
+            })
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod pic16_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn pic16_check(src: &str) -> Result<(), String> {
+        let mut p = Parser::new(tokenize(src));
+        let funcs = p.parse_program();
+        check_pic16_constraints(&funcs)
+    }
+
+    // CASE 1: u16 local — backend stores each local in one byte
+    #[test]
+    fn u16_local_is_rejected() {
+        let err =
+            pic16_check("fn main() -> i64 { let b: u16 = 1000\npoke8(0x20, b)\n0 }").unwrap_err();
+        assert!(
+            err.contains("`b` is declared as `u16`") && err.contains("single byte"),
+            "u16 local should be rejected; got: {err}"
+        );
+    }
+
+    // u16 parameter — one byte per param
+    #[test]
+    fn u16_parameter_is_rejected() {
+        let err = pic16_check("fn main(x: u16) -> i64 { poke8(0x20, x) 0 }").unwrap_err();
+        assert!(
+            err.contains("`x` is annotated as `u16`") && err.contains("single byte"),
+            "u16 parameter should be rejected; got: {err}"
+        );
+    }
+
+    // CASE 2: literal 1000 — caught by the literal-width check
+    #[test]
+    fn literal_1000_is_rejected() {
+        let err = pic16_check("fn main() -> i64 { poke8(0x20, 1000) 0 }").unwrap_err();
+        assert!(
+            err.contains("integer literal") && err.contains("1000") && err.contains("8 bits"),
+            "literal 1000 should be rejected; got: {err}"
+        );
+    }
+
+    // CASE 3: u8 = 300 (value out of declared type range)
+    // The literal 300 is caught by the literal-width check before reaching the type annotation.
+    // The test asserts the literal is named, not the type.
+    #[test]
+    fn const_out_of_declared_range_is_rejected() {
+        let err =
+            pic16_check("fn main() -> i64 { let a: u8 = 300\npoke8(0x20, a)\n0 }").unwrap_err();
+        assert!(
+            err.contains("300") && err.contains("8 bits"),
+            "`let a: u8 = 300` should be rejected naming the value and its width; got: {err}"
+        );
+    }
+
+    // `i64` is what Sond gives to everything the programmer did not annotate, so the tree is
+    // full of it and the backend already treats it as a byte. A parameter written `x: i64` is
+    // accepted; a local written `a: i64` is the same declaration and has to be accepted too.
+    #[test]
+    fn an_i64_written_out_is_accepted_in_a_local_as_it_is_in_a_parameter() {
+        assert!(
+            pic16_check("fn f(x: i64) { poke8(0x20, x) }").is_ok(),
+            "a parameter written `i64` must compile"
+        );
+        assert!(
+            pic16_check("fn main() -> i64 { let a: i64 = 5\npoke8(0x20, a)\n0 }").is_ok(),
+            "a local written `i64` must compile too"
+        );
+    }
+
+    // POSITIVE: u8 = 255 should compile
+    #[test]
+    fn u8_255_is_accepted() {
+        assert!(
+            pic16_check("fn main() -> i64 { let a: u8 = 255\npoke8(0x20, a)\n0 }").is_ok(),
+            "u8 = 255 must still compile"
+        );
+    }
+
+    // POSITIVE: unnamed constant 255 should compile
+    #[test]
+    fn unnamed_255_is_accepted() {
+        assert!(
+            pic16_check("fn main() -> i64 { let a = 255\npoke8(0x20, a)\n0 }").is_ok(),
+            "= 255 must still compile"
+        );
+    }
+
+    // POSITIVE: zero should compile
+    #[test]
+    fn zero_is_accepted() {
+        assert!(
+            pic16_check("fn main() -> i64 { let a = 0\npoke8(0x20, a)\n0 }").is_ok(),
+            "= 0 must still compile"
+        );
+    }
+
+    // CASE 1: u16 local with a VARIABLE value (serial_getc returns one byte, stored in u16)
+    // This was the original bug case: the multi-byte check required a constant value,
+    // so `let b: u16 = x` where x is a variable silently compiled.
+    #[test]
+    fn u16_local_with_variable_is_rejected() {
+        let err =
+            pic16_check("fn main() { let x = serial_getc()\nlet b: u16 = x\npoke8(0x20, b)\n}")
+                .unwrap_err();
+        assert!(
+            err.contains("`b` is declared as `u16`") && err.contains("single byte"),
+            "u16 local with variable value should be rejected; got: {err}"
+        );
+    }
+
+    // CASE 2: constant from binary operation > 255
+    #[test]
+    fn binary_const_200_plus_100_is_rejected() {
+        let err =
+            pic16_check("fn main() -> i64 { let a = 200 + 100\npoke8(0x20, a)\n0 }").unwrap_err();
+        assert!(
+            err.contains("constant expression") && err.contains("300") && err.contains("8 bits"),
+            "200+100 should be rejected; got: {err}"
+        );
+    }
+}

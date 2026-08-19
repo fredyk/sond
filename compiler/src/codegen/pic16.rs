@@ -62,32 +62,8 @@ fn compute_scratch_addr(depth: usize) -> u8 {
 }
 
 use crate::ast::{Expr, Function, Stmt};
+use crate::check::const_fold_pic16;
 use std::collections::HashMap;
-
-/// Folds an expression to an 8-bit constant, or `None` if it is not a compile-time
-/// constant this minimal backend can place in a `movlw`.
-fn const8(e: &Expr) -> Option<i64> {
-    match e {
-        Expr::Int(n) => Some(*n & 0xFF),
-        Expr::Unary(crate::ast::UnOp::Neg, x) => const8(x).map(|v| (-v) & 0xFF),
-        Expr::Binary(op, l, r) => {
-            let (a, b) = (const8(l)?, const8(r)?);
-            Some(
-                match op {
-                    crate::ast::BinOp::Add => a + b,
-                    crate::ast::BinOp::Sub => a - b,
-                    crate::ast::BinOp::BitOr => a | b,
-                    crate::ast::BinOp::BitAnd => a & b,
-                    crate::ast::BinOp::BitXor => a ^ b,
-                    crate::ast::BinOp::Shl => a << b,
-                    crate::ast::BinOp::Shr => a >> b,
-                    _ => return None,
-                } & 0xFF,
-            )
-        }
-        _ => None,
-    }
-}
 
 /// Returns `true` if comparing an unsigned 8-bit value with constant `c` using
 /// `op` is a tautology (always true or always false, regardless of the operand's
@@ -472,7 +448,7 @@ fn eval_to_w(
     macro_rules! l {
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
     }
-    if let Some(c) = const8(e) {
+    if let Some(c) = const_fold_pic16(e) {
         l!("        movlw   0x{:02X}", c & 0xFF);
         return;
     }
@@ -485,7 +461,7 @@ fn eval_to_w(
         return;
     }
     if let Expr::Unary(crate::ast::UnOp::Neg, _x) = e {
-        // Negation: load const and negate (already handled by const8 for ints)
+        // Negation: load const and negate (already handled by const_fold_pic16 for ints)
         // If we reach here, the negation is non-const (not supported here)
         l!("        ; unsupported unary negation in Phase 1b");
         return;
@@ -495,10 +471,10 @@ fn eval_to_w(
     // an rrf with carry pre-cleared. This is the generic primitive a Sond
     // bit-bang UART needs for rrf-style byte assembly (no variable shifts).
     if let Expr::Binary(op @ (crate::ast::BinOp::Shl | crate::ast::BinOp::Shr), a, b) = e
-        && const8(b).is_some()
+        && const_fold_pic16(b).is_some()
     {
         eval_to_w(a, out, locals, fnp, scratch_depth);
-        let n = (const8(b).unwrap() as usize).min(8); // >=8 on an 8-bit value is 0
+        let n = (const_fold_pic16(b).unwrap() as usize).min(8); // >=8 on an 8-bit value is 0
         for _ in 0..n {
             let sa = compute_scratch_addr(scratch_depth);
             l!(
@@ -543,7 +519,7 @@ fn eval_to_w(
         return;
     }
     if let Some(("peek8", [arg])) = as_call(e) {
-        if let Some(r) = const8(&arg.value) {
+        if let Some(r) = const_fold_pic16(&arg.value) {
             l!("        banksel 0x{:02X}", r & 0xFF);
             l!("        movf    0x{:02X}, w", r & 0xFF);
         } else {
@@ -717,8 +693,8 @@ fn emit_if(
     // so they are compile errors (not silent drop).
     if let Expr::Binary(op, lhs, rhs) = cond {
         // Only check when one operand is a compile-time constant (the other is a variable).
-        let rc = const8(rhs);
-        let lc = const8(lhs);
+        let rc = const_fold_pic16(rhs);
+        let lc = const_fold_pic16(lhs);
         if let Some(c) = rc {
             // LHS is a variable, RHS is constant c.
             // Check if the comparison is a tautology.
@@ -803,7 +779,7 @@ fn emit_if(
 
     if let Expr::Binary(op @ (crate::ast::BinOp::Eq | crate::ast::BinOp::Ne), lhs, rhs) = cond {
         // Leave W = lhs XOR rhs, so the Z flag is set iff the two are equal.
-        if let Some(c) = const8(rhs) {
+        if let Some(c) = const_fold_pic16(rhs) {
             eval_to_w(lhs, out, locals, fnp, scratch_depth);
             l!(
                 "        xorlw   0x{:02X}            ; Z set iff equal",
@@ -918,10 +894,15 @@ fn emit_call(
         (name, _) if fnp.contains_key(name) => {
             emit_user_call(name, args, out, locals, fnp, scratch_depth)
         }
-        ("poke8", 2) => match (const8(&args[0].value), const8(&args[1].value)) {
+        ("poke8", 2) => match (
+            const_fold_pic16(&args[0].value),
+            const_fold_pic16(&args[1].value),
+        ) {
             (Some(r), Some(v)) => {
                 l!("        banksel 0x{r:02X}");
-                l!("        movlw   0x{v:02X}");
+                // Masked here, at the instruction: `movlw` takes one byte, and a folded
+                // constant is a full i64 (a `-1` written in a firmware is 0xFFFF_FFFF_FFFF_FFFF).
+                l!("        movlw   0x{:02X}", v & 0xFF);
                 l!("        movwf   0x{r:02X}");
             }
             // Constant register, RUNTIME value: evaluate the value into W (banksel
@@ -935,7 +916,7 @@ fn emit_call(
             _ => l!("        ; poke8 needs a constant register in Phase 1b"),
         },
         ("delay", 0) => l!("        call    delay"),
-        ("delay_loop", 1) => match const8(&args[0].value) {
+        ("delay_loop", 1) => match const_fold_pic16(&args[0].value) {
             Some(n) => {
                 l!("        movlw   0x{:02X}", n & 0xFF);
                 l!("        call    _delayw");
@@ -962,6 +943,23 @@ mod tests {
     fn asm_for(src: &str) -> String {
         let funcs = Parser::new(tokenize(src)).parse_program();
         emit_pic16(&funcs)
+    }
+
+    // `poke8(reg, -1)` is how a firmware writes a byte of all ones. The immediate that reaches
+    // the assembler has to be the byte, not the 64-bit two's complement: `movlw 0xFFFFFFFFFFFFFFFF`
+    // is not an instruction. gpasm happens to swallow it and emit the right byte anyway, which is
+    // exactly why this needs a test -- the .hex comes out identical and nothing complains.
+    #[test]
+    fn a_negative_constant_is_emitted_as_one_byte() {
+        let asm = asm_for("fn main() { poke8(0x20, -1) }");
+        assert!(
+            asm.contains("movlw   0xFF\n"),
+            "the immediate must be the single byte 0xFF; got:\n{asm}"
+        );
+        assert!(
+            !asm.contains("0xFFFFFFFFFFFFFFFF"),
+            "a 64-bit immediate reached the assembler:\n{asm}"
+        );
     }
 
     // Bug A: `b0 + (b1 << 1)` — both sides of `+` are computed expressions.
