@@ -3,6 +3,12 @@
 # on PATH, so scripts and example-testing use one consistent compiler).
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# rustup installs cargo under $CARGO_HOME/bin and puts it on PATH from the shell profile, which a
+# non-interactive shell (a deploy script, cron, CI) never sources. Look there before giving up.
+if ! command -v cargo >/dev/null 2>&1 && [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/cargo" ]; then
+  PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+fi
+
 "$REPO/tools/sandbox.sh" --mem 4G --time 180 -- \
   cargo build --release --manifest-path "$REPO/compiler/Cargo.toml"
 mkdir -p "$HOME/.local/bin"

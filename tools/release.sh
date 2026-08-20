@@ -14,6 +14,12 @@ OUT="${1:-$REPO/dist/release}"
 PLAT="x86_64-linux"
 TGZ="sond-$PLAT.tar.gz"
 
+# rustup installs cargo under $CARGO_HOME/bin and puts it on PATH from the shell profile, which a
+# non-interactive shell (a deploy script, cron, CI) never sources. Look there before giving up.
+if ! command -v cargo >/dev/null 2>&1 && [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/cargo" ]; then
+  PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+fi
+
 echo "==> building release binaries (sondc + sond)"
 cargo build --release --manifest-path "$REPO/compiler/Cargo.toml"
 
