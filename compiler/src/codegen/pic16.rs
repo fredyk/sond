@@ -1940,4 +1940,77 @@ mod tests {
             );
         }
     }
+
+    // BUG A: a banksel to bank-1 register followed by a local access reads the wrong bank.
+    // After `banksel 0x91` the RP0 bit is set (RP0=1), so `movf 0x20, w` actually reads 0xA0.
+    // The fix: after every banksel+access to a bank-1 register, emit `bcf STATUS, 0` to restore.
+    #[test]
+    fn bug_a_banksel_bank1_then_local_read_restores_bank0() {
+        let asm = asm_for(
+            "fn main() { let i = 7 poke8(0x91, 1) poke8(0x20, i) }",
+        );
+        // banksel 0x41 is STATUS.RP0 bit position -> restore bank 0 after bank-1 access
+        assert!(
+            asm.lines().any(|l| l.contains("bcf     STATUS, 0")),
+            "after banksel to bank 1 (0x91), the emitter must restore bank 0 with bcf STATUS, 0;\n\
+             got:\n{}",
+            asm
+        );
+    }
+
+    // BUG B: a for-loop whose body ends with a bank-1 poke leaks RP0=1 across the goto.
+    // The very next instruction (movf of the loop condition) reads the wrong bank.
+    #[test]
+    fn bug_b_loop_body_ends_in_bank1_restores_bank0() {
+        let asm = asm_for(
+            "fn main() { let mut i = 0 for i < 3 { i = i + 1 if i > 1 { poke8(0x91, 1) } } }",
+        );
+        assert!(
+            asm.lines().any(|l| l.trim().starts_with("bcf     STATUS, 0")),
+            "after banksel to bank 1 (0x91) inside the loop, the emitter must restore bank 0;\n\
+             got:\n{}",
+            asm
+        );
+    }
+
+    // BUG C: poke8(0x91, 1) before a loop + poke8(0x20, i) inside the loop → the loop body's
+    // banksel for 0x20 sees RP0=1 from the pre-loop 0x91 access, so it reads from 0xA0.
+    #[test]
+    fn bug_c_pok8_before_loop_with_inside_access() {
+        let asm = asm_for(
+            "fn main() { let mut i = 0 poke8(0x91, 1) for i < 3 { let j = i poke8(0x20, j) } }",
+        );
+        // The banksel for 0x20 must NOT leave RP0=1; bank 0 must be restored before it.
+        // The key invariant: after every banksel+access to bank-1, RP0 is cleared.
+        assert!(
+            asm.lines().any(|l| l.trim().starts_with("bcf     STATUS, 0")),
+            "after banksel to bank 1 (0x91) before the loop, bank 0 must be restored so the\n\
+             inner local access reads the correct bank;\n\
+             got:\n{}",
+            asm
+        );
+    }
+
+    // NO-REGRESSION: a program that accesses only bank-0 registers must not gain any instruction.
+    // This verifies the fix is a conditional that only fires for bank-1.
+    #[test]
+    fn no_regression_no_extra_instructions_for_bank0_only() {
+        let asm = asm_for(
+            "fn main() { poke8(0x05, 42) poke8(0x20, 10) }",
+        );
+        // 0x05 and 0x20 are both bank-0. The emitter must NOT emit bcf STATUS, 0.
+        assert!(
+            !asm.lines().any(|l| l.trim().starts_with("bcf     STATUS, 0")),
+            "a program that only accesses bank-0 registers must not get bcf STATUS, 0;\n\
+             got:\n{}",
+            asm
+        );
+        // Verify that banksel is still emitted for 0x05 (even though it's bank 0, banksel is
+        // emitted for all constant regs to be safe, but no restore is needed).
+        assert!(
+            asm.contains("banksel   0x05") || asm.contains("banksel 0x05"),
+            "banksel must still be emitted for bank-0 regs;\n{}",
+            asm
+        );
+    }
 }
