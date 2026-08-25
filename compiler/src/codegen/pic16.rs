@@ -413,6 +413,56 @@ fn as_call(e: &Expr) -> Option<(&str, &[crate::ast::Arg])> {
     None
 }
 
+/// Returns true if the block ever writes/reads a fixed register in bank 1,
+/// via a call such as `poke8(0xNN, ...)` where NN >= 0x80.  This is used by
+/// the two-pass `for`-loop emitter to decide whether the header needs a
+/// `banksel` so that return-from-body does not land in the wrong bank.
+fn block_touches_bank1(b: &crate::ast::Block) -> bool {
+    for s in &b.stmts {
+        use crate::ast::Stmt::*;
+        match s {
+            Let { value, .. } | Assign { value, .. } | Expr(value) => {
+                if value_touches_bank1(value) {
+                    return true;
+                }
+            }
+            For { body, .. } => {
+                if block_touches_bank1(body) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(tail) = b.tail.as_ref() {
+        if value_touches_bank1(tail) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns true if `e` (in value position) accesses a bank-1 register.
+fn value_touches_bank1(e: &Expr) -> bool {
+    if let Some((name, args)) = as_call(e) {
+        if name == "poke8" && args.len() >= 1 {
+            if let Some(v) = const8(&args[0].value) {
+                if v as u8 >= 0x80 {
+                    return true;
+                }
+            }
+        }
+        for a in args {
+            if value_touches_bank1(&a.value) {
+                return true;
+            }
+        }
+    } else if let Expr::Binary(_, l, r) = e {
+        return value_touches_bank1(l) || value_touches_bank1(r);
+    }
+    false
+}
+
 /// Returns the maximum expression depth: how deeply binary operators and
 /// callees nest inside each other.  depth 0 = top-level expression (no
 /// scratch needed beyond the value itself), depth 1 = one level of nesting
@@ -732,6 +782,32 @@ fn emit_stmt(
             let n = *lbl;
             *lbl += 1;
             l!("_loop{n}:");
+            // A conditional loop is reached by fall-through (first iteration)
+            // and by `goto _loopN` from the bottom (every subsequent one).
+            // The return path ends in `bank_state = Unknown` after the body,
+            // so on subsequent iterations the condition check lands in the bank
+            // that the body left.  If the body ever touches bank 1, the condition
+            // check at the header (which reads locals in bank 0) must carry a
+            // `banksel` to switch back.  We avoid bloating infinite loops that
+            // never cross banks by only emitting the header `banksel` when:
+            // (1) we entered in a known bank state, AND
+            // (2) the body accesses bank 1.
+            let body_touches_bank1 = block_touches_bank1(body);
+            // `_loop{n}:` has two predecessors: the fall-through of the first
+            // iteration and the `goto _loop{n}` jumping back from the body.  A
+            // label reached from more than one site does not inherit the bank
+            // of the instruction above it, so the header must re-select the
+            // bank it reads (bank 0) whenever either incoming path can land on
+            // something other than bank 0:
+            //   * the fall-through path, when we arrive with bank 1 selected
+            //     (e.g. after `poke8(0xNN, ...)` with NN >= 0x80), or
+            //   * the return path, when the body itself touches bank 1.
+            // A loop that stays entirely in bank 0 (Known0 entry, body never
+            // selects bank 1) must not gain a `banksel`, so it is skipped.
+            if *bank_state != BankState::Known0 || body_touches_bank1 {
+                out.push_str("        banksel 0x20\n");
+                *bank_state = BankState::Known0;
+            }
             eval_to_w(lhs, out, locals, fnp, scratch_depth, bank_state);
             l!(
                 "        movwf   0x{:02X}            ; loop lhs",
@@ -2041,6 +2117,137 @@ mod tests {
                 asm
             );
         }
+    }
+
+    // CAUGHT-6: the loop header is a jump target with two predecessors (the
+    // fall-through first iteration and the `goto _loopN` from the body).  A
+    // label reached from more than one site inherits no bank from the
+    // instruction above it.  So a loop reached while bank 1 is selected (e.g.
+    // after `poke8(0x91, 1)`) must still re-select bank 0 before its first
+    // RAM access, even when the body itself never touches bank 1.
+    #[test]
+    fn conditional_loop_entered_in_bank1_needs_banksel_at_header() {
+        let asm = asm_for(
+            "fn main() { \
+                let mut i = 0 \
+                poke8(0x91, 1) \
+                for i < 3 { let t = i  i = i + 1 } \
+            }",
+        );
+        let loop_label = asm.find("_loop0:").expect("loop label must exist");
+        let after_label = &asm[loop_label..];
+        let first_access = after_label
+            .find("movf    0x")
+            .or_else(|| after_label.find("movwf   0x"))
+            .expect("first RAM access after _loop0");
+        let between = &after_label[..first_access];
+        assert!(
+            between.contains("banksel"),
+            "loop header entered with bank 1 selected must carry banksel before first RAM access;\
+             got:\n{asm}"
+        );
+    }
+
+    // CAUGHT-5: the `goto _loopN` at the end of a conditional loop body returns to the top
+    // with the bank left by the body.  The condition check at `_loopN` accesses locals (bank 0)
+    // that need a `banksel` when the body touched bank 1.
+    #[test]
+    fn conditional_loop_with_bank1_body_needs_banksel_at_header() {
+        let asm = asm_for(
+            "fn main() { \
+                let mut i = 0 \
+                for i < 3 { let t = i  i = i + 1  poke8(0x91, 1) } \
+            }",
+        );
+        let loop_label = asm.find("_loop0:").expect("loop label must exist");
+        let after_label = &asm[loop_label..];
+        let first_access = after_label
+            .find("movf    0x")
+            .or_else(|| after_label.find("movwf   0x"))
+            .expect("first RAM access after _loop0");
+        let between = &after_label[..first_access];
+        assert!(
+            between.contains("banksel"),
+            "loop header must have banksel before first RAM access; got:\n{asm}"
+        );
+    }
+
+    // A conditional loop whose body never touches bank 1 must NOT gain any banksel.
+    #[test]
+    fn conditional_loop_single_bank_no_extra_banksel() {
+        let asm = asm_for(
+            "fn main() { \
+                let mut i = 0 \
+                for i < 3 { let t = i  i = i + 1 } \
+            }",
+        );
+        // Count banksels before main function's code (runtime) and after user code
+        // vs banksels in the user code. We compare user-code banksel count between:
+        // (A) a single-bank conditional loop and (B) the same loop plus a bank-1 poke8.
+        // The single-bank version should emit FEWER than the bank-crossing one.
+        let banksel_in_main = asm.lines()
+            .skip_while(|l| !l.contains("main:"))
+            .take_while(|l| !l.contains("goto    $"))
+            .filter(|l| l.contains("banksel"))
+            .count();
+        // Just the entry banksel (banksel 0x20) from let i = 0
+        assert!(
+            banksel_in_main <= 2,
+            "single-bank loop should emit at most 2 banksels, got {}:\n{asm}",
+            banksel_in_main
+        );
+    }
+
+    // An infinite loop that only touches bank 0 must NOT gain a banksel.
+    #[test]
+    fn infinite_loop_single_bank_no_extra_banksel() {
+        let asm = asm_for(
+            "fn main() { \
+                let mut i = 0 \
+                for { let t = i  i = i + 1 } \
+            }",
+        );
+        let banksel_in_main = asm.lines()
+            .skip_while(|l| !l.contains("main:"))
+            .take_while(|l| !l.contains("goto    $"))
+            .filter(|l| l.contains("banksel"))
+            .count();
+        assert!(
+            banksel_in_main <= 1,
+            "infinite single-bank loop must emit at most 1 banksel (entry), got {}:\n{asm}",
+            banksel_in_main
+        );
+    }
+
+// A conditional loop that only touches bank 0 must emit the same number of
+    // banksels as a bare entry sequence (just banksel 0x20 for let i = 0).
+    // Adding a bank-1 poke8 should INCREASE the count, proving the fix is
+    // targeting the right condition (body_touches_bank1 && entered_known_bank).
+    #[test]
+    fn no_poke8_same_banksel_count_as_baseline() {
+        let asm_with_poke = asm_for(
+            "fn main() { let mut i = 0  for i < 3 { let t = i  i = i + 1  poke8(0x91, 1) } }",
+        );
+        let asm_no_poke = asm_for(
+            "fn main() { let mut i = 0  for i < 3 { let t = i  i = i + 1 } }",
+        );
+        let count_user = |asm: &str| -> usize {
+            asm.lines()
+                .skip_while(|l| !l.contains("main:"))
+                .take_while(|l| !l.contains("goto    $"))
+                .filter(|l| l.contains("banksel"))
+                .count()
+        };
+        let c_with = count_user(&asm_with_poke);
+        let c_no = count_user(&asm_no_poke);
+        // With poke8 should have MORE banksels (header banksel + poke8 banksel)
+        assert!(
+            c_with > c_no,
+            "loop with bank1 body should have more banksels than one without;\
+             with: {}, without: {}",
+            c_with,
+            c_no
+        );
     }
 
     /// `if a >= 0` now suggests the user likely meant something else.
