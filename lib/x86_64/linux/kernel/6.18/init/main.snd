@@ -54,8 +54,7 @@ fn start_kernel() {
     serial_print("[    0.000000] PIT initialized.\n")
 
     // Enable interrupts.
-    let __f0_56: string = "sti"
-    asm(__f0_56.utf8)
+    asm("sti")
     serial_print("[    0.000000] Interrupts enabled.\n")
     serial_print("[    0.000000] Sond/Linux 6.18-sond booted.\n")
 }
