@@ -1098,10 +1098,6 @@ struct Codegen {
     /// so no effect edges are needed.
     mut_globals: HashSet<String>,
     graph_effects: Option<crate::check::GlobalEffects>,
-    /// Names of local variables that are arrays (have reserved storage below the frame).
-    /// Used in `block()` to skip overwriting the pointer slot set by the prologue.
-    /// Reset per function.
-    array_local_names: HashSet<String>,
 }
 
 /// Functions excluded from coverage instrumentation: the synthesized `sond test` harness
@@ -1173,7 +1169,6 @@ impl Codegen {
             .iter()
             .map(|(_, ptr, base)| (*ptr, *base))
             .collect();
-        self.array_local_names = layout.arrays.iter().map(|(n, _, _)| n.clone()).collect();
         // The return slot binds the named return (e.g. `vat_amount`) so `ensures` can read it.
         if let Some((rn, off)) = &layout.ret_name {
             self.locals.insert(rn.clone(), *off);
@@ -2316,21 +2311,17 @@ impl Codegen {
                                 }
                                 self.line("    popq %rax");
                             }
-                        } else if !self.array_local_names.contains(name) {
+                        } else {
                             self.expr(value);
                         }
                         let off = self.slot(name);
                         if value_kind.is_float() {
-                            if !self.array_local_names.contains(name) {
-                                self.line(&format!("    movsd %xmm0, {off}(%rbp)"));
-                            }
+                            self.line(&format!("    movsd %xmm0, {off}(%rbp)"));
                         } else {
-                            if !self.array_local_names.contains(name) {
-                                if recorded.bits() < 64 && !recorded.is_float() {
-                                    self.canon(recorded); // truncate to the declared width
-                                }
-                                self.line(&format!("    movq %rax, {off}(%rbp)"));
+                            if recorded.bits() < 64 && !recorded.is_float() {
+                                self.canon(recorded); // truncate to the declared width
                             }
+                            self.line(&format!("    movq %rax, {off}(%rbp)"));
                         }
                         self.var_types.insert(name.clone(), recorded);
                         // `let px: u32[] = heap_alloc(..)`: the variable holds the base address,
