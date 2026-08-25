@@ -62,7 +62,7 @@ fn call(fd: i64, node: i64, code: i64, pay: i64, plen: i64, rxbuf: i64) -> i64 {
 
 fn main() -> i64 {
     let __e0_63: string = "/dev/ttyUSB0"
-    let fd = serial_open(__e0_63.utf8)
+    let fd = serial_open_str(__e0_63)
     let __e1_64: string = "open /dev/ttyUSB0 failed\n"
     if fd < 0 { puts(__e1_64.utf8); return 1 }
     serial_config(fd, B9600, 0, 20)     // raw 8N1, 2.0s read timeout

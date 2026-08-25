@@ -140,6 +140,24 @@ impl Codegen {
             {
                 self.expr(inner)
             }
+            // `.utf8` on a variable: for string locals with a rodata label, load that label;
+            // for string parameters, the variable's stack slot already holds the bytes pointer
+            // (after d58a0ad string params carry the interned UTF-8 address), so fall through.
+            Expr::Field(base, field)
+                if field == "utf8" && matches!(base.as_ref(), Expr::Var(_)) =>
+            {
+                match base.as_ref() {
+                    Expr::Var(var_name) if self.string_rodata_cur.contains_key(var_name) => {
+                        let label = self.string_rodata_cur[var_name].clone();
+                        self.line(&format!("    leaq {label}(%rip), %rax"));
+                    }
+                    _ => {
+                        // Untracked string param or other source: load from the stack slot.
+                        // After d58a0ad this is already the bytes pointer.
+                        self.expr(base);
+                    }
+                }
+            }
             // `s.len` on a view whose length is written down (a `string`, or `u32[16]`) is that
             // constant: the compiler counted it, so nothing has to be walked to find out.
             Expr::Field(base, field)

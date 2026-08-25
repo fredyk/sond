@@ -91,7 +91,7 @@ fn build_fixture() -> i64 {
     d + 37
 }
 
-fn write_file_bytes(path: i64, src: i64, n: i64) -> i64 {
+fn write_file_bytes(path: string, src: i64, n: i64) -> i64 {
     let fd = open_file(path, O_WRONLY | O_CREAT | O_TRUNC, 420)
     if fd < 0 { return fd }
     let w = write_buf(fd, src, n)
@@ -107,12 +107,12 @@ fn strlen_(p: i64) -> i64 {
 
 fn write_fixture() -> i64 {
     let n = build_fixture()
-    write_file_bytes(TZ_PATH.utf8, fx, n)
+    write_file_bytes(TZ_PATH, fx, n)
 }
 
 test "an instant between two transitions takes the offset of the first" {
     assert(write_fixture() > 0)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 1500), 3600)
+    assert_eq(tz_offset_from(TZ_PATH, 1500), 3600)
     remove_file(TZ_PATH.utf8)
 }
 
@@ -121,8 +121,8 @@ test "an instant after the last transition keeps its offset, negative included" 
     // as unsigned it would come back as 4294963696, and a clock built on it would be off by
     // 1193 hours -- wrong in a way no plausibility check catches.
     assert(write_fixture() > 0)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 2000), 0 - 3600)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 999999), 0 - 3600)
+    assert_eq(tz_offset_from(TZ_PATH, 2000), 0 - 3600)
+    assert_eq(tz_offset_from(TZ_PATH, 999999), 0 - 3600)
     remove_file(TZ_PATH.utf8)
 }
 
@@ -130,8 +130,8 @@ test "an instant before the first transition falls back to standard time" {
     // Not to type 0 -- that one is DST here. The rule is the first type with isdst = 0, which is
     // what a zone file means by "what this place did before the record starts".
     assert(write_fixture() > 0)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 0), 7200)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 999), 7200)
+    assert_eq(tz_offset_from(TZ_PATH, 0), 7200)
+    assert_eq(tz_offset_from(TZ_PATH, 999), 7200)
     remove_file(TZ_PATH.utf8)
 }
 
@@ -140,19 +140,19 @@ test "the transition instant itself already belongs to the new offset" {
     // one second here and the clock is wrong for exactly one second twice a year, which is the
     // kind of thing that is never found by looking.
     assert(write_fixture() > 0)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 999), 7200)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 1000), 3600)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 1999), 3600)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 2000), 0 - 3600)
+    assert_eq(tz_offset_from(TZ_PATH, 999), 7200)
+    assert_eq(tz_offset_from(TZ_PATH, 1000), 3600)
+    assert_eq(tz_offset_from(TZ_PATH, 1999), 3600)
+    assert_eq(tz_offset_from(TZ_PATH, 2000), 0 - 3600)
     remove_file(TZ_PATH.utf8)
 }
 
 test "a file that is not there, and one that is not a TZif, are refused" {
     // Refused rather than answered with 0: an offset of 0 is a real answer (it is UTC), so
     // handing it back on failure would put a program in London whenever the file went missing.
-    assert_eq(tz_offset_from(ABSENT_PATH.utf8, 0), TZ_ENOFILE)
-    assert(write_file_bytes(TZ_PATH.utf8, NOT_TZ.utf8, strlen_(NOT_TZ.utf8)) > 0)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 0), TZ_EFORMAT)
+    assert_eq(tz_offset_from(ABSENT_PATH, 0), TZ_ENOFILE)
+    assert(write_file_bytes(TZ_PATH, NOT_TZ.utf8, strlen_(NOT_TZ.utf8)) > 0)
+    assert_eq(tz_offset_from(TZ_PATH, 0), TZ_EFORMAT)
     remove_file(TZ_PATH.utf8)
 }
 
@@ -170,8 +170,8 @@ test "a version 1 file is refused instead of read with 32-bit times" {
     // A parser that accepts it is right today, which is exactly what makes it dangerous.
     let n = build_fixture()
     poke8(fx + 4, 49)   // version '1'
-    assert(write_file_bytes(TZ_PATH.utf8, fx, n) > 0)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 1500), TZ_EFORMAT)
+    assert(write_file_bytes(TZ_PATH, fx, n) > 0)
+    assert_eq(tz_offset_from(TZ_PATH, 1500), TZ_EFORMAT)
     remove_file(TZ_PATH.utf8)
 }
 
@@ -180,12 +180,12 @@ test "a file cut short is refused at every place it can be cut" {
     // these cuts lands in a different part of the parse: before the header is complete, before
     // the second header, and in the middle of the type records.
     let n = build_fixture()
-    assert(write_file_bytes(TZ_PATH.utf8, fx, 20) > 0)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 1500), TZ_EFORMAT)
-    assert(write_file_bytes(TZ_PATH.utf8, fx, 60) > 0)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 1500), TZ_EFORMAT)
-    assert(write_file_bytes(TZ_PATH.utf8, fx, n - 8) > 0)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 1500), TZ_EFORMAT)
+    assert(write_file_bytes(TZ_PATH, fx, 20) > 0)
+    assert_eq(tz_offset_from(TZ_PATH, 1500), TZ_EFORMAT)
+    assert(write_file_bytes(TZ_PATH, fx, 60) > 0)
+    assert_eq(tz_offset_from(TZ_PATH, 1500), TZ_EFORMAT)
+    assert(write_file_bytes(TZ_PATH, fx, n - 8) > 0)
+    assert_eq(tz_offset_from(TZ_PATH, 1500), TZ_EFORMAT)
     remove_file(TZ_PATH.utf8)
 }
 
@@ -194,16 +194,16 @@ test "a header claiming more types than the file holds is refused" {
     // do not back would read the offset from whatever follows the mapping.
     let n = build_fixture()
     put_be32(fx, 44 + 7 + 36, 4000)   // typecnt in the v2 header
-    assert(write_file_bytes(TZ_PATH.utf8, fx, n) > 0)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 1500), TZ_EFORMAT)
+    assert(write_file_bytes(TZ_PATH, fx, n) > 0)
+    assert_eq(tz_offset_from(TZ_PATH, 1500), TZ_EFORMAT)
     remove_file(TZ_PATH.utf8)
 }
 
 test "a transition pointing at a type that does not exist is refused" {
     let n = build_fixture()
     poke8(fx + 44 + 7 + 44 + 16, 9)   // first transition -> type 9, of three
-    assert(write_file_bytes(TZ_PATH.utf8, fx, n) > 0)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 1500), TZ_EFORMAT)
+    assert(write_file_bytes(TZ_PATH, fx, n) > 0)
+    assert_eq(tz_offset_from(TZ_PATH, 1500), TZ_EFORMAT)
     remove_file(TZ_PATH.utf8)
 }
 
@@ -244,8 +244,8 @@ fn build_fixture_no_transitions() -> i64 {
 
 test "a zone with no transitions at all answers with its standard time" {
     let n = build_fixture_no_transitions()
-    assert(write_file_bytes(TZ_PATH.utf8, fx, n) > 0)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 1500), 7200)
+    assert(write_file_bytes(TZ_PATH, fx, n) > 0)
+    assert_eq(tz_offset_from(TZ_PATH, 1500), 7200)
     remove_file(TZ_PATH.utf8)
 }
 
@@ -256,8 +256,8 @@ test "each byte of the magic number is checked, not just the first" {
     for bad in 1..4 {
         let n = build_fixture()
         poke8(fx + bad, 88)   // 'X' in place of Z, i or f
-        assert(write_file_bytes(TZ_PATH.utf8, fx, n) > 0)
-        assert_eq(tz_offset_from(TZ_PATH.utf8, 1500), TZ_EFORMAT)
+        assert(write_file_bytes(TZ_PATH, fx, n) > 0)
+        assert_eq(tz_offset_from(TZ_PATH, 1500), TZ_EFORMAT)
     }
     remove_file(TZ_PATH.utf8)
 }
@@ -267,12 +267,12 @@ test "a zone file too big for the buffer is reported, not truncated" {
     // obvious fix, while a malformed one is a corrupt install. Reading the first 8 KiB of a
     // larger file would parse a header whose counts describe bytes that were never read.
     let big = build_fixture()
-    let fd = open_file(TZ_PATH.utf8, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    let fd = open_file(TZ_PATH, O_WRONLY | O_CREAT | O_TRUNC, 420)
     assert(fd >= 0)
     for k in 0..300 {
         write_buf(fd, fx, big)      // ~300 * 88 bytes, comfortably over 8 KiB
     }
     close_fd(fd)
-    assert_eq(tz_offset_from(TZ_PATH.utf8, 1500), TZ_ETOOBIG)
+    assert_eq(tz_offset_from(TZ_PATH, 1500), TZ_ETOOBIG)
     remove_file(TZ_PATH.utf8)
 }

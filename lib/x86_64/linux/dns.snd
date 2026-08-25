@@ -200,12 +200,52 @@ fn dns_parse_ipv4(p: i64) -> i64 {
     ip
 }
 
-// The address of the first `nameserver` line of a resolv.conf, or a negative error.
-//
-// Only the first is used: a second one is a FALLBACK, and using it correctly means retrying
-// after a timeout, which this module does not do. Pretending otherwise would mean silently
-// asking a server the caller did not choose.
-fn resolv_nameserver(path: i64) -> i64 {
+// Internal: reads resolv.conf using i64 path (caller has the raw bytes).
+fn _resolv_nameserver_i64(path: i64) -> i64 {
+    let fd = syscall(SYS_open, path, O_RDONLY, 0)
+    if fd < 0 { return fd }
+    let mut n = 0
+    let mut buf_off = 0
+    for {
+        let r = read_buf(fd, resolv_buf + buf_off, RESOLV_BYTES - buf_off - 1)
+        if r <= 0 { break }
+        n = n + r
+        buf_off = buf_off + r
+    }
+    close_fd(fd)
+    if n == 0 { return DNS_ENOSERVER }
+    let mut i = 0
+    for i < n {
+        let mut k = 0
+        for k < 10 {
+            if i + k >= n { break }
+            if peek8(resolv_buf + i + k) != peek8(NAMESERVER_KEY.utf8 + k) { break }
+            k = k + 1
+        }
+        if k == 10 {
+            let mut j = i + 10
+            for j < n {
+                if peek8(resolv_buf + j) != 32 {
+                    if peek8(resolv_buf + j) != 9 { break }
+                }
+                j = j + 1
+            }
+            if j > i + 10 {
+                let ip = dns_parse_ipv4(resolv_buf + j)
+                if ip >= 0 { return ip }
+            }
+        }
+        for i < n {
+            if peek8(resolv_buf + i) == 10 { break }
+            i = i + 1
+        }
+        i = i + 1
+    }
+    DNS_ENOSERVER
+}
+
+// Reads a resolv.conf file and returns the first nameserver IP.
+fn resolv_nameserver(path: string) -> i64 {
     let n = read_file(path, resolv_buf, RESOLV_BYTES)
     if n < 0 { return n }
     let mut i = 0
@@ -266,14 +306,14 @@ fn dns_query_fd(fd: i64, server: i64, port: i64, host: i64, id: i64, buf: i64, c
 // nothing over plain UDP is -- it only keeps a late answer to a previous question from being
 // read as the answer to this one.
 fn dns_resolve(host: i64) -> i64 {
-    dns_resolve_from(RESOLV_CONF_PATH.utf8, host)
+    dns_resolve_from(RESOLV_CONF_PATH, host)
 }
 
 // The same, reading the resolver from `path`. Split out from dns_resolve so the whole body can
 // be exercised against a fixture: a test that had to reach the real /etc/resolv.conf would be
 // asking the machine it runs on a question, and would pass or fail for reasons that have
 // nothing to do with this code.
-fn dns_resolve_from(path: i64, host: i64) -> i64 {
+fn dns_resolve_from(path: string, host: i64) -> i64 {
     let server = resolv_nameserver(path)
     if server < 0 { return server }
     let fd = udp_socket()

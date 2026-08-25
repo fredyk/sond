@@ -10,8 +10,7 @@
 
 include "x86_64/linux/io.snd"     // open_file/read_buf/write_buf/close_fd (+ syscall nums)
 
-// open() flags
-let O_RDWR = 2
+// open() flags (O_NOCTTY)
 let O_NOCTTY = 0x100              // don't let the tty become our controlling terminal
 
 // ioctl requests for the terminal
@@ -50,7 +49,11 @@ fn termios_raw(buf: i64, baud: i64, vmin: i64, vtime: i64) {
 // serial_open opens the device read-write without taking it as a controlling
 // terminal. Returns an fd (>= 0) or -errno.
 fn serial_open(path: i64) -> i64 {
-    open_file(path, O_RDWR | O_NOCTTY, 0)
+    syscall(SYS_open, path, O_RDWR | O_NOCTTY, 0)
+}
+
+fn serial_open_str(path: string) -> i64 {
+    syscall(SYS_open, path, O_RDWR | O_NOCTTY, 0)
 }
 
 // serial_config applies a raw 8N1 line at `baud` with the given read timeout.

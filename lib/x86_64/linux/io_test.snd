@@ -21,7 +21,7 @@ let CONTENT: string     = "hola\nmundo\n"
 let mut buf[64]
 
 // Writes `n` bytes from `src` to `path`, replacing it. Returns the fd result of the write.
-fn write_fixture(path: i64, src: i64, n: i64) -> i64 {
+fn write_fixture(path: string, src: i64, n: i64) -> i64 {
     let fd = open_file(path, O_WRONLY | O_CREAT | O_TRUNC, 420)
     if fd < 0 { return fd }
     let w = write_buf(fd, src, n)
@@ -44,9 +44,9 @@ fn bytes_eq(a: i64, b: i64, n: i64) -> i64 {
 }
 
 test "a file read whole comes back byte for byte" {
-    assert_eq(write_fixture(SMALL_PATH.utf8, CONTENT.utf8, 11), 11)
+    assert_eq(write_fixture(SMALL_PATH, CONTENT.utf8, 11), 11)
     poison(64)
-    assert_eq(read_file(SMALL_PATH.utf8, buf, 64), 11)
+    assert_eq(read_file(SMALL_PATH, buf, 64), 11)
     assert_eq(bytes_eq(buf, CONTENT.utf8, 11), 1)
     // Nothing was written past the end: the poison byte is still there.
     assert_eq(peek8(buf + 11), 254)
@@ -54,23 +54,23 @@ test "a file read whole comes back byte for byte" {
 }
 
 test "an empty file reads as zero bytes, not as a failure" {
-    assert_eq(write_fixture(EMPTY_PATH.utf8, CONTENT.utf8, 0), 0)
-    assert_eq(read_file(EMPTY_PATH.utf8, buf, 64), 0)
+    assert_eq(write_fixture(EMPTY_PATH, CONTENT.utf8, 0), 0)
+    assert_eq(read_file(EMPTY_PATH, buf, 64), 0)
     remove_file(EMPTY_PATH.utf8)
 }
 
 test "a file that does not exist reports the kernel's error, not zero" {
     // -ENOENT. The version everyone had been copying returned 0 here, which is also what an
     // empty file returns: "missing" and "empty" were the same answer.
-    assert_eq(read_file(ABSENT_PATH.utf8, buf, 64), -2)
+    assert_eq(read_file(ABSENT_PATH, buf, 64), -2)
 }
 
 test "a file too big for the buffer FAILS instead of silently truncating" {
     // This is the whole reason this function belongs in the library. The copied version filled
     // the buffer and returned its size, so the caller got a valid-looking prefix: a config file
     // cut mid-line parses, and means something else. Here it is an error the caller cannot miss.
-    assert_eq(write_fixture(BIG_PATH.utf8, CONTENT.utf8, 11), 11)
-    assert_eq(read_file(BIG_PATH.utf8, buf, 5), -27)
+    assert_eq(write_fixture(BIG_PATH, CONTENT.utf8, 11), 11)
+    assert_eq(read_file(BIG_PATH, buf, 5), -27)
     remove_file(BIG_PATH.utf8)
 }
 
@@ -78,9 +78,9 @@ test "a buffer with no room is an error, and nothing is written before it" {
     // The probe that detects truncation reads into the LAST byte of the buffer. With cap = 0
     // that byte is `dst - 1`: the check meant to protect the caller would corrupt the word in
     // front of their buffer. The guard is pinned here, sentinel and all.
-    assert_eq(write_fixture(BIG_PATH.utf8, CONTENT.utf8, 11), 11)
+    assert_eq(write_fixture(BIG_PATH, CONTENT.utf8, 11), 11)
     poke8(buf, 111)
-    assert_eq(read_file(BIG_PATH.utf8, buf + 1, 0), -27)
+    assert_eq(read_file(BIG_PATH, buf + 1, 0), -27)
     assert_eq(peek8(buf), 111)
     remove_file(BIG_PATH.utf8)
 }
@@ -88,7 +88,7 @@ test "a buffer with no room is an error, and nothing is written before it" {
 test "a directory is not a file, and says so" {
     // open() succeeds on a directory opened read-only; it is read() that refuses, with EISDIR.
     // Without this the error path of the read loop was never taken by any test.
-    assert_eq(read_file(DOT_PATH.utf8, buf, 64), -21)
+    assert_eq(read_file(DOT_PATH, buf, 64), -21)
 }
 
 test "splice_pump moves the bytes through a pipe unchanged" {
@@ -146,7 +146,7 @@ test "open_file_str opens a file named by a literal" {
     close_fd(fd)
 
     poison(64)
-    assert_eq(read_file("__io_test_str.txt".utf8, buf, 64), 11)
+    assert_eq(read_file("__io_test_str.txt", buf, 64), 11)
     assert_eq(bytes_eq(buf, CONTENT.utf8, 11), 1)
     remove_file("__io_test_str.txt".utf8)
 }
@@ -154,9 +154,9 @@ test "open_file_str opens a file named by a literal" {
 test "a file exactly the size of the buffer still fits" {
     // The boundary the truncation check is most likely to get wrong: 11 bytes into 11 bytes is
     // a complete read, not an overflow.
-    assert_eq(write_fixture(BIG_PATH.utf8, CONTENT.utf8, 11), 11)
+    assert_eq(write_fixture(BIG_PATH, CONTENT.utf8, 11), 11)
     poison(64)
-    assert_eq(read_file(BIG_PATH.utf8, buf, 11), 11)
+    assert_eq(read_file(BIG_PATH, buf, 11), 11)
     assert_eq(bytes_eq(buf, CONTENT.utf8, 11), 1)
     remove_file(BIG_PATH.utf8)
 }

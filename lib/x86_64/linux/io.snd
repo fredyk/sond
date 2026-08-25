@@ -28,7 +28,7 @@ fn open_file(path: i64, flags: i64, mode: i64) -> i64 {
 }
 
 fn open_file_str(path: string, flags: i64, mode: i64) -> i64 {
-    open_file(path, flags, mode)
+    open_file(path.utf8, flags, mode)
 }
 
 fn read_buf(fd: i64, buf: i64, n: i64) -> i64 {
