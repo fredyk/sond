@@ -2511,3 +2511,36 @@ fn a_delete_byte_in_a_literal_is_escaped_for_the_assembler() {
         "no raw tab may sit inside the quotes of a .asciz:\n{with_tab}"
     );
 }
+
+/// `let name[N]` must not zero the pointer slot that the prologue set.
+/// If the pointer were overwritten with 0, reading `name[i]` would deref null.
+/// This pins that array declarations with an implicit zero initializer don't
+/// clobber the pointer the prologue established.
+#[test]
+fn array_let_does_not_clobber_pointer_prologue() {
+    // `let buf[2]` declares an array. After the declaration, `buf[0]` must
+    // read from the reserved storage, not from address 0.
+    let src = "\
+        fn f() -> i64 {\n\
+            let buf[2]\n\
+            poke64(buf, 42)\n\
+            peek64(buf)\n\
+        }";
+    assert_eq!(compile_and_run(src), 42);
+}
+
+/// Two array declarations in sequence each keep their pointer intact.
+/// The prologue sets both `__s0` and `__s1` pointers, and neither should be
+/// zeroed by the `let __s0[1]` / `let __s1[1]` initializers.
+#[test]
+fn multiple_array_declarations_preserve_all_pointers() {
+    let src = "\
+        fn f() -> i64 {\n\
+            let a[1]\n\
+            let b[1]\n\
+            poke64(a, 11)\n\
+            poke64(b, 22)\n\
+            peek64(a) + peek64(b)\n\
+        }";
+    assert_eq!(compile_and_run(src), 33);
+}
