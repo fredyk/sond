@@ -2511,3 +2511,228 @@ fn a_delete_byte_in_a_literal_is_escaped_for_the_assembler() {
         "no raw tab may sit inside the quotes of a .asciz:\n{with_tab}"
     );
 }
+
+// ---------- atomic_cas64 ----------
+
+/// `atomic_cas64` when *ptr == expected: returns old value, writes new.
+#[test]
+fn atomic_cas64_when_value_matches_writes_new_and_returns_old() {
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 2)\n\
+                 let old = atomic_cas64(slot, 2, 5)\n\
+                 old\n\
+             }"
+        ),
+        2,
+        "old value returned"
+    );
+    // Verify memory was updated (separate program to check peek64)
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 2)\n\
+                 atomic_cas64(slot, 2, 5)\n\
+                 peek64(slot)\n\
+             }"
+        ),
+        5,
+        "new value written to memory"
+    );
+}
+
+/// `atomic_cas64` when *ptr != expected: returns *ptr untouched, memory unchanged.
+#[test]
+fn atomic_cas64_when_value_does_not_match_leaves_memory_alone() {
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 7)\n\
+                 let old = atomic_cas64(slot, 0, 99)\n\
+                 old\n\
+             }"
+        ),
+        7,
+        "returns *ptr when no match"
+    );
+    // Verify memory was NOT changed
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 7)\n\
+                 atomic_cas64(slot, 0, 99)\n\
+                 peek64(slot)\n\
+             }"
+        ),
+        7,
+        "memory untouched on mismatch"
+    );
+}
+
+// ---------- atomic_add64 ----------
+
+/// `atomic_add64` returns the value BEFORE the add; memory holds the sum.
+#[test]
+fn atomic_add64_returns_old_value_and_memory_holds_sum() {
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 10)\n\
+                 let old = atomic_add64(slot, 5)\n\
+                 old\n\
+             }"
+        ),
+        10,
+        "returns old value"
+    );
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 10)\n\
+                 atomic_add64(slot, 5)\n\
+                 peek64(slot)\n\
+             }"
+        ),
+        15,
+        "memory holds the sum"
+    );
+}
+
+// ---------- lock mutual exclusion ----------
+
+/// Multiple threads each increment a shared counter N times inside a lock.
+/// The final value must equal threads × N. Without the lock the value would be lower.
+#[test]
+fn lock_provides_mutual_exclusion() {
+    let threads = 8;
+    let n = 10;
+    let expected = threads * n;
+
+    // WITH lock: every increment is serialized → exact answer.
+    let with_lock = compile_and_run_with_globals(&format!(
+        "let mut mtx[1]\n\
+         let mut counter[1]\n\
+         fn bump() -> i64 {{\n\
+             let mut i = 0\n\
+             for i < {n} {{\n\
+                 lock (mtx) {{ counter[0] = counter[0] + 1 }}\n\
+                 i = i + 1\n\
+             }}\n\
+             0\n\
+         }}\n\
+         fn run() -> i64 {{\n\
+             let mut t = 0\n\
+             for t < {threads} {{ spawn bump()\nt = t + 1 }}\n\
+             peek64(counter)\n\
+         }}\n\
+         fn f() -> i64 {{ run() }}"
+    ));
+
+    // WITHOUT lock: race condition → value < expected.
+    let without_lock = compile_and_run_with_globals(&format!(
+        "let mut mtx[1]\n\
+         let mut counter[1]\n\
+         fn bump() -> i64 {{\n\
+             let mut i = 0\n\
+             for i < {n} {{\n\
+                 counter[0] = counter[0] + 1\n\
+                 i = i + 1\n\
+             }}\n\
+             0\n\
+         }}\n\
+         fn run() -> i64 {{\n\
+             let mut t = 0\n\
+             for t < {threads} {{ spawn bump()\nt = t + 1 }}\n\
+             peek64(counter)\n\
+         }}\n\
+         fn f() -> i64 {{ run() }}"
+    ));
+
+    assert_eq!(with_lock, expected, "with lock: {threads} threads × {n} = {expected}");
+    assert!(
+        without_lock < expected,
+        "without lock must lose increments: got {without_lock}, expected {expected}"
+    );
+}
+
+// ---------- lock lexical scope ----------
+
+/// The lock releases on a `return` inside the critical section.
+/// A second thread that was spinning on the lock can proceed after the first returns.
+#[test]
+fn lock_releases_on_return_inside_critical_section() {
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut mtx[1]\n\
+             let mut cnt_data[1]\n\
+             fn early_return() -> i64 {\n\
+                 lock (mtx) { return 1 }\n\
+                 0\n\
+             }\n\
+             fn other() -> i64 {\n\
+                 let mut i = 0\n\
+                 for i < 100000 {\n\
+                     lock (mtx) { cnt_data[0] = cnt_data[0] + 1 }\n\
+                     i = i + 1\n\
+                 }\n\
+                 0\n\
+             }\n\
+             fn run() -> i64 {\n\
+                 poke64(cnt_data, 0)\n\
+                 spawn early_return()\n\
+                 spawn other()\n\
+                 peek64(cnt_data)\n\
+             }\n\
+             fn f() -> i64 { run() }"
+        ),
+        100000,
+        "other must finish all iterations → m was released on early return"
+    );
+}
+
+/// The lock releases on a `break` inside the critical section.
+/// A second thread that was blocked can proceed after the first breaks out.
+#[test]
+fn lock_releases_on_break_inside_critical_section() {
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut mtx[1]\n\
+             let mut cnt_data[1]\n\
+             fn breaker() -> i64 {\n\
+                 let mut i = 0\n\
+                 for {\n\
+                     lock (mtx) {\n\
+                         cnt_data[0] = cnt_data[0] + 1\n\
+                         break\n\
+                     }\n\
+                     i = i + 1\n\
+                 }\n\
+                 0\n\
+             }\n\
+             fn incrementer() -> i64 {\n\
+                 let mut i = 0\n\
+                 for i < 100000 {\n\
+                     lock (mtx) { cnt_data[0] = cnt_data[0] + 1 }\n\
+                     i = i + 1\n\
+                 }\n\
+                 0\n\
+             }\n\
+             fn run() -> i64 {\n\
+                 poke64(cnt_data, 0)\n\
+                 spawn breaker()\n\
+                 spawn incrementer()\n\
+                 peek64(cnt_data)\n\
+             }\n\
+             fn f() -> i64 { run() }"
+        ),
+        100001,
+        "breaker=1, incrementer=100000 → break released the lock"
+    );
+}

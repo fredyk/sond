@@ -297,6 +297,12 @@ pub enum Stmt {
         nodes: Vec<(String, Expr)>,
         yield_expr: Expr,
     },
+    /// `lock (m) { .. }`: acquires a futex-based mutex at `m`, runs the body (as a lexical critical
+    /// section), and releases the mutex unconditionally on any exit path (normal, return, break).
+    Lock {
+        name: String,
+        body: Block,
+    },
 }
 
 /// An expression (used in bodies and in `requires`/`ensures` propositions).

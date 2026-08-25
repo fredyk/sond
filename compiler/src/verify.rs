@@ -507,7 +507,7 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
     for stmt in &block.stmts {
         // A path that has already `break`ed out of the loop is done: it skips every remaining
         // statement. Only the still-live paths are advanced; the broken ones are re-joined after.
-        let (mut states_out, live): (Vec<State>, Vec<State>) =
+        let (mut states_out, mut live): (Vec<State>, Vec<State>) =
             states.into_iter().partition(|s| s.broke);
         let advanced = match stmt {
             Stmt::Let { name, value, .. } => fork_bind(live, name, value, ctx)?,
@@ -611,6 +611,22 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
                 broken
             }
             Stmt::Continue => return ctx.bail("a `continue`"),
+            Stmt::Lock { body, .. } => {
+                // Advance each living state through the lock body.
+                let mut new_states = Vec::new();
+                for st in &live {
+                    if let Some(advanced) = eval_stmts(body, st.clone(), ctx) {
+                        for s in advanced {
+                            new_states.push(s);
+                        }
+                    } else {
+                        // Unreachable path.
+                    }
+                }
+                live.clear();
+                live.extend(new_states);
+                return Some(live);
+            }
         };
         states_out.extend(advanced);
         states = states_out;

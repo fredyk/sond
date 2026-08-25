@@ -91,6 +91,8 @@ pub enum Token {
     Break,
     /// `continue`
     Continue,
+    /// `lock`: a lexical critical section (futex-based mutual exclusion).
+    Lock,
 
     // --- Word operators (RFC-0001 §4.16) ---
     /// `and`

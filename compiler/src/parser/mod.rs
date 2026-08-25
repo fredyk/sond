@@ -727,6 +727,17 @@ impl Parser {
                     stmts.push(Stmt::Continue);
                     self.skip_semicolons();
                 }
+                Some(Token::Lock) => {
+                    // `lock (name) { .. }`: acquire a futex mutex at `name`, run the body
+                    // as a lexical critical section, release on any exit (normal, break, return).
+                    self.advance();
+                    self.expect(Token::LParen);
+                    let name = self.expect_ident();
+                    self.expect(Token::RParen);
+                    let body = self.parse_block();
+                    stmts.push(Stmt::Lock { name, body });
+                    self.skip_semicolons();
+                }
                 Some(Token::Spawn) => {
                     // `spawn f(args)`: run the call on a new thread. The inner expression is
                     // parsed as an ordinary expression, but it must be a call, nothing else

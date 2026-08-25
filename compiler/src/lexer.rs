@@ -430,6 +430,7 @@ fn keyword_or_ident(word: String) -> Token {
         "spawn" => Token::Spawn,
         "par" => Token::Par,
         "graph" => Token::Graph,
+        "lock" => Token::Lock,
         "and" => Token::And,
         "or" => Token::Or,
         "not" => Token::Not,
