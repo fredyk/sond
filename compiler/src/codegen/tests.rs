@@ -1170,6 +1170,28 @@ fn asm_emits_the_instruction_verbatim() {
 }
 
 #[test]
+fn asm_rejects_variable_references() {
+    // `asm(...)` requires a string literal so the assembler can emit the
+    // instruction at compile time. Passing a variable (even one holding a
+    // string) must fail with a message saying a literal is required.
+    let err = std::panic::catch_unwind(|| {
+        emit_uefi_with_globals(
+            "fn efi_main() -> i64 { let s: string = \"cli\"\nasm(s.utf8)\n0 }",
+        )
+    })
+    .expect_err("asm with a variable must not compile");
+    let msg = err
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    assert!(
+        msg.contains("string literal"),
+        "must mention 'string literal' in the error, got: {msg}"
+    );
+}
+
+#[test]
 fn uefi_serial_writes_to_com1_port() {
     // serial_print/serial_putc lower to COM1 (0x3F8) iface I/O via a helper
     // that polls the UART line-status register, no firmware, survives EBS.
