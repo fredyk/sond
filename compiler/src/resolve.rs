@@ -140,6 +140,7 @@ struct Namespaces<'a> {
         &'a std::collections::HashMap<PathBuf, std::collections::HashMap<String, Vec<String>>>,
     exports: &'a std::collections::HashMap<PathBuf, HashSet<String>>,
     ids: &'a std::collections::HashMap<PathBuf, u32>,
+    colliding: &'a HashSet<String>,
 }
 
 struct LineCtx<'a> {
@@ -148,6 +149,7 @@ struct LineCtx<'a> {
     exports: &'a std::collections::HashMap<PathBuf, HashSet<String>>,
     ids: &'a std::collections::HashMap<PathBuf, u32>,
     ambiguous: &'a std::collections::HashMap<String, Vec<String>>,
+    colliding: &'a HashSet<String>,
 }
 
 /// Rewrites one line: qualified `module::name` references into the symbol they denote, and
@@ -255,9 +257,7 @@ fn resolve_qualified(module: &str, name: &str, ctx: &LineCtx) -> Result<String, 
         ));
     }
     match ctx.ids.get(file) {
-        Some(id) if ctx.map.contains_key(name) || ctx.ambiguous.contains_key(name) => {
-            Ok(format!("{name}__f{id}"))
-        }
+        Some(id) if ctx.colliding.contains(name) => Ok(format!("{name}__f{id}")),
         _ => Ok(name.to_string()),
     }
 }
@@ -346,6 +346,19 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
                         || g.exports.get(*c).is_some_and(|e| e.contains(name))
                 })
                 .collect();
+            // A file that defines the name itself sees its OWN definition, not the one in a file
+            // it includes: file-local names are the author's to reuse (serial.snd and io.snd both
+            // define O_RDWR and that is legal). That definition appears under the file's own id
+            // (the depth-0 entry has no id and stays bare), so bind the name to it here -- NOT to
+            // the collapsed single id of the other definers. Before this, when the entry (no id)
+            // collided with an include, `ids` below shrank to one value and BOTH definitions were
+            // renamed `name__f<id>`: a duplicate global at codegen time.
+            if definers.contains(&&f) {
+                if let Some(id) = g.ids.get(f) {
+                    map.insert(name.clone(), *id);
+                }
+                continue;
+            }
             let ids: HashSet<u32> = definers
                 .iter()
                 .filter_map(|c| g.ids.get(*c).copied())
@@ -393,6 +406,7 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
         ambiguous_maps: &ambiguous_maps,
         exports: &g.exports,
         ids: &g.ids,
+        colliding: &colliding,
     };
     resolve_into(entry, &mut seen, &mut out, 0, &mut depth0, &mut depth1, &ns)?;
     // Which functions is this entry on the hook for covering?
@@ -530,6 +544,7 @@ fn resolve_into(
         exports: ns.exports,
         ids: ns.ids,
         ambiguous: ns.ambiguous_maps.get(&canon).unwrap_or(&empty_amb),
+        colliding: ns.colliding,
     };
     for line in src.lines() {
         match parse_include(line.trim()) {
@@ -1161,6 +1176,103 @@ mod tests {
         assert!(
             err.contains("helper") && err.contains("dns"),
             "it says which name in which module, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_entry_that_redefines_an_included_global_keeps_its_own() {
+        // The repro behind io.snd/serial.snd: the entry (depth 0) has NO mangling id, so when it
+        // defines a module-level global that an included file also defines, the only id that
+        // survives is the include's -- and the old code renamed BOTH definitions to
+        // `name__f<id>`, i.e. a `global `O_RDWR__f1` is declared more than once` duplicate. The
+        // entry's own definition must stay bare; only the include's is file-scoped.
+        let root = std::env::temp_dir().join(format!("sond_entglob_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.snd"), "let O_RDWR = 2\npub fn a() -> i64 { O_RDWR }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"a.snd\"\nlet O_RDWR = 99\nfn main() -> i64 { O_RDWR }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry)
+            .expect("the collision must resolve, not become a duplicate definition");
+        assert_eq!(
+            combined.matches("let O_RDWR =").count(),
+            1,
+            "exactly one BARE definition survives (the entry's own):\n{combined}"
+        );
+        assert!(
+            combined.contains("let O_RDWR = 99"),
+            "the entry keeps its own global unmangled:\n{combined}"
+        );
+        assert!(
+            combined.contains("let O_RDWR__f1 = 2"),
+            "the include's definition is file-scoped:\n{combined}"
+        );
+        assert!(
+            combined.contains("fn main() -> i64 { O_RDWR }"),
+            "the entry's use binds to its own bare global:\n{combined}"
+        );
+        assert!(
+            combined.contains("O_RDWR__f1 }"),
+            "the include's use binds to its mangled global:\n{combined}"
+        );
+    }
+
+    #[test]
+    fn two_nested_includes_each_keep_their_own_colliding_global() {
+        // The exact shape of the tree KO: `serial.snd` includes `io.snd`, and BOTH define a
+        // private module-level global of the same name (both depth >= 1, both with ids). Each
+        // must be file-scoped to its own definition and its own uses -- no duplicate, no
+        // rebinding where one file starts reading the other's value.
+        let root = std::env::temp_dir().join(format!("sond_nestglob_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("io.snd"), "let O_ROLE = 1\npub fn io_role() -> i64 { O_ROLE }").unwrap();
+        std::fs::write(
+            root.join("serial.snd"),
+            "include \"io.snd\"\nlet O_ROLE = 2\npub fn serial_role() -> i64 { O_ROLE }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"serial.snd\"\nfn main() -> i64 { serial_role() + io_role() }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry)
+            .expect("the nested collision must resolve, not become a duplicate definition");
+        assert_eq!(
+            combined.matches("let O_ROLE =").count(),
+            0,
+            "both definitions are file-scoped (none left bare):\n{combined}"
+        );
+        // io.snd's definition and use bind to io's id; serial.snd's to serial's id; each function
+        // reads its own file's constant (1 and 2), not both reading one or the other.
+        let io_def_line = combined
+            .lines()
+            .find(|l| l.contains("let O_ROLE__") && l.contains("= 1"))
+            .unwrap_or_else(|| panic!("io's file-scoped definition must survive:\n{combined}"));
+        let io_id = &io_def_line[io_def_line.find("O_ROLE__").unwrap() + 8..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric())
+            .collect::<String>();
+        let serial_def_line = combined
+            .lines()
+            .find(|l| l.contains("let O_ROLE__") && l.contains("= 2"))
+            .unwrap_or_else(|| panic!("serial's file-scoped definition must survive:\n{combined}"));
+        let serial_id = &serial_def_line[serial_def_line.find("O_ROLE__").unwrap() + 8..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric())
+            .collect::<String>();
+        assert_ne!(io_id, serial_id, "the two files must NOT share a mangled id:\n{combined}");
+        assert!(
+            combined.contains(&format!("serial_role() -> i64 {{ O_ROLE__{serial_id} }}")),
+            "serial reads its own {serial_id}-mangled constant:\n{combined}"
+        );
+        assert!(
+            combined.contains(&format!("io_role() -> i64 {{ O_ROLE__{io_id} }}")),
+            "io reads its own {io_id}-mangled constant:\n{combined}"
         );
     }
 }

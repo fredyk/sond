@@ -2559,3 +2559,29 @@ fn entry_function_is_callable_by_other_functions_in_the_same_file() {
     // The function must actually run and return 42.
     assert_eq!(compile_and_run("fn caller() -> i64 { callee() }\nfn callee() -> i64 { 42 }"), 42);
 }
+
+#[test]
+fn a_redefined_colliding_global_binds_each_file_to_its_own_value() {
+    // The repro behind io.snd/serial.snd done end-to-end: an included library and the entry
+    // both define a module-level `let O_DUP`, with DIFFERENT values. Each file must read its
+    // own definition -- `a()` the library's 20, `main` the entry's 7 -- so the program's exit
+    // code is 20 + 7 = 27. The bug was both definitions being mangled to the same id (a
+    // "declared more than once" panic in codegen), because the depth-0 entry has no mangling id.
+    static UID: AtomicUsize = AtomicUsize::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "sond_kodup_{}_{}",
+        std::process::id(),
+        UID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.snd"), "let O_DUP = 20\npub fn a() -> i64 { O_DUP }").unwrap();
+    let entry = root.join("main.snd");
+    std::fs::write(
+        &entry,
+        "include \"a.snd\"\nlet O_DUP = 7\nfn main() -> i64 { a() + O_DUP }",
+    )
+    .unwrap();
+    let (src, _) = crate::resolve::resolve_includes_scoped(&entry).unwrap();
+    let code = compile_and_run_with_globals(&src);
+    assert_eq!(code, 27, "a() reads 20 (its file's O_DUP), main reads 7 (its own)");
+}
