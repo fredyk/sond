@@ -936,6 +936,37 @@ fn compile_and_run_with_globals(src: &str) -> i32 {
     code
 }
 
+/// Compiles a program that has module-level globals, runs it, and returns its stdout.
+/// Exit codes are a single byte, so a locked counter that legitimately exceeds 255 (the
+/// return/break tests sum 100000 and 100001 increments) must be compared as decimals.
+fn compile_and_capture_with_globals(src: &str) -> String {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let mut p = Parser::new(tokenize(src));
+    let funcs = p.parse_program();
+    let globals = p.take_globals();
+    let asm = emit_program_g(&globals, &[], &funcs);
+    let dir = std::env::temp_dir();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stem = format!("sondc_cgout_{}_{}", std::process::id(), n);
+    let asm_path = dir.join(format!("{stem}.s"));
+    let bin_path = dir.join(&stem);
+    std::fs::write(&asm_path, asm).unwrap();
+    assert!(
+        Command::new("cc")
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .status()
+            .unwrap()
+            .success(),
+        "compile failed"
+    );
+    let out = Command::new(&bin_path).output().unwrap();
+    let _ = std::fs::remove_file(&asm_path);
+    let _ = std::fs::remove_file(&bin_path);
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
 #[test]
 fn compiles_and_runs_module_level_globals_on_real_x64() {
     // A constant global read from a function.
@@ -2609,71 +2640,105 @@ fn atomic_add64_returns_old_value_and_memory_holds_sum() {
 
 /// Multiple threads each increment a shared counter N times inside a lock.
 /// The final value must equal threads × N. Without the lock the value would be lower.
+///
+/// Every thread bumps an atomic `done` counter when it finishes, and `run` spins on
+/// `done` until every spawn is finished before reading the result. The old version
+/// peeked the counter the moment it had spawned the threads, which measured a race
+/// (a different number every run), not mutual exclusion.
 #[test]
 fn lock_provides_mutual_exclusion() {
+    // The LOCKED case stays at the proof program's scale (8 × 10): those short bursts never
+    // overlap -- a spawn serialises its first threads, so the futex is never contended --
+    // and the sum is byte-exact 80. The UNLOCKED case has to make the threads overlap, which
+    // needs each burst to outlast the clone calls of the spawn loop, so it raises the
+    // iterations to 8 × 10000, where racing increments lose updates on every run: that is
+    // the race made visible, not a coin flip.
     let threads = 8;
-    let n = 10;
-    let expected = threads * n;
+    let locked_n = 10;
+    let unlocked_n = 10000;
+
+    // Shared program shell: each thread runs `body` then signals `done`; `run` spins on
+    // `done` until every thread has finished, and only then prints the counter.
+    let prog = |threads: usize, body: &str| -> String {
+        format!(
+            "let mut mtx[1]\n\
+             let mut counter[1]\n\
+             let mut done[1]\n\
+             fn bump() -> i64 {{\n\
+                 {body}\n\
+                 atomic_add64(done, 1)\n\
+                 0\n\
+             }}\n\
+             fn run() -> i64 {{\n\
+                 poke64(done, 0)\n\
+                 let mut t = 0\n\
+                 for t < {threads} {{ spawn bump()\nt = t + 1 }}\n\
+                 for peek64(done) < {threads} {{ }}\n\
+                 peek64(counter)\n\
+             }}\n\
+             fn main() -> i64 {{\n\
+                 print_int(run())\n\
+                 0\n\
+             }}",
+            threads = threads,
+            body = body
+        )
+    };
 
     // WITH lock: every increment is serialized → exact answer.
-    let with_lock = compile_and_run_with_globals(&format!(
-        "let mut mtx[1]\n\
-         let mut counter[1]\n\
-         fn bump() -> i64 {{\n\
-             let mut i = 0\n\
-             for i < {n} {{\n\
-                 lock (mtx) {{ counter[0] = counter[0] + 1 }}\n\
-                 i = i + 1\n\
-             }}\n\
-             0\n\
-         }}\n\
-         fn run() -> i64 {{\n\
-             let mut t = 0\n\
-             for t < {threads} {{ spawn bump()\nt = t + 1 }}\n\
-             peek64(counter)\n\
-         }}\n\
-         fn f() -> i64 {{ run() }}"
-    ));
+    let locked = format!(
+        "let mut i = 0\nfor i < {n} {{ lock (mtx) {{ counter[0] = counter[0] + 1 }}\ni = i + 1 }}",
+        n = locked_n
+    );
+    let with_lock = compile_and_capture_with_globals(&prog(threads, &locked));
+    assert_eq!(
+        with_lock,
+        (threads * locked_n).to_string(),
+        "with lock: {threads} threads × {locked_n} = {}",
+        threads * locked_n
+    );
 
-    // WITHOUT lock: race condition → value < expected.
-    let without_lock = compile_and_run_with_globals(&format!(
-        "let mut mtx[1]\n\
-         let mut counter[1]\n\
-         fn bump() -> i64 {{\n\
-             let mut i = 0\n\
-             for i < {n} {{\n\
-                 counter[0] = counter[0] + 1\n\
-                 i = i + 1\n\
-             }}\n\
-             0\n\
-         }}\n\
-         fn run() -> i64 {{\n\
-             let mut t = 0\n\
-             for t < {threads} {{ spawn bump()\nt = t + 1 }}\n\
-             peek64(counter)\n\
-         }}\n\
-         fn f() -> i64 {{ run() }}"
-    ));
-
-    assert_eq!(with_lock, expected, "with lock: {threads} threads × {n} = {expected}");
+    // WITHOUT lock: the increments race on `counter`, losing updates → strictly below expected.
+    let unlocked = format!(
+        "let mut i = 0\nfor i < {n} {{ counter[0] = counter[0] + 1\ni = i + 1 }}",
+        n = unlocked_n
+    );
+    let without_lock = compile_and_capture_with_globals(&prog(threads, &unlocked));
+    let raced = without_lock
+        .parse::<i64>()
+        .expect("an integer total from the racing program");
     assert!(
-        without_lock < expected,
-        "without lock must lose increments: got {without_lock}, expected {expected}"
+        raced < (threads * unlocked_n) as i64,
+        "without lock must lose increments: got {raced}, expected {}",
+        threads * unlocked_n
     );
 }
 
 // ---------- lock lexical scope ----------
 
 /// The lock releases on a `return` inside the critical section.
-/// A second thread that was spinning on the lock can proceed after the first returns.
+/// A second thread that was waiting on the lock can proceed once the first returns.
+///
+/// `early_return` acquires the lock, signals `done`, and returns from inside the critical
+/// section; that return must release the lock. `run` waits for that signal, then spawns
+/// `other`, which increments the shared counter under the same lock 100000 times. `other`
+/// can only finish if `early_return` really dropped the lock (if both were spawned at once,
+/// spawn serialisation could hand `other` the lock before `early_return` ever ran, and the
+/// test would assert nothing). `run` waits on `done` for BOTH threads, then prints the exact
+/// total; the old version read the counter the moment it had spawned, saw 0, and proved
+/// nothing.
 #[test]
 fn lock_releases_on_return_inside_critical_section() {
     assert_eq!(
-        compile_and_run_with_globals(
+        compile_and_capture_with_globals(
             "let mut mtx[1]\n\
              let mut cnt_data[1]\n\
+             let mut done[1]\n\
              fn early_return() -> i64 {\n\
-                 lock (mtx) { return 1 }\n\
+                 lock (mtx) {\n\
+                     atomic_add64(done, 1)\n\
+                     return 1\n\
+                 }\n\
                  0\n\
              }\n\
              fn other() -> i64 {\n\
@@ -2682,34 +2747,46 @@ fn lock_releases_on_return_inside_critical_section() {
                      lock (mtx) { cnt_data[0] = cnt_data[0] + 1 }\n\
                      i = i + 1\n\
                  }\n\
+                 atomic_add64(done, 1)\n\
                  0\n\
              }\n\
              fn run() -> i64 {\n\
                  poke64(cnt_data, 0)\n\
+                 poke64(done, 0)\n\
                  spawn early_return()\n\
+                 for peek64(done) < 1 { }\n\
                  spawn other()\n\
+                 for peek64(done) < 2 { }\n\
                  peek64(cnt_data)\n\
              }\n\
-             fn f() -> i64 { run() }"
+             fn main() -> i64 { print_int(run())\n0 }"
         ),
-        100000,
-        "other must finish all iterations → m was released on early return"
+        "100000",
+        "other must finish all iterations → the lock was released on the early return"
     );
 }
 
 /// The lock releases on a `break` inside the critical section.
-/// A second thread that was blocked can proceed after the first breaks out.
+/// A second thread that was waiting on the lock can proceed once the first breaks out.
+///
+/// `breaker` increments once, signals `done`, and breaks out of its loop from inside the
+/// critical section; that break must release the lock. `run` waits for the signal, then
+/// spawns `incrementer`, which runs 100000 locked increments. `run` waits on `done` for
+/// BOTH threads, then prints the exact total (breaker=1, incrementer=100000); the old
+/// version read the counter before the incrementer had run and saw only 1.
 #[test]
 fn lock_releases_on_break_inside_critical_section() {
     assert_eq!(
-        compile_and_run_with_globals(
+        compile_and_capture_with_globals(
             "let mut mtx[1]\n\
              let mut cnt_data[1]\n\
+             let mut done[1]\n\
              fn breaker() -> i64 {\n\
                  let mut i = 0\n\
                  for {\n\
                      lock (mtx) {\n\
                          cnt_data[0] = cnt_data[0] + 1\n\
+                         atomic_add64(done, 1)\n\
                          break\n\
                      }\n\
                      i = i + 1\n\
@@ -2722,17 +2799,21 @@ fn lock_releases_on_break_inside_critical_section() {
                      lock (mtx) { cnt_data[0] = cnt_data[0] + 1 }\n\
                      i = i + 1\n\
                  }\n\
+                 atomic_add64(done, 1)\n\
                  0\n\
              }\n\
              fn run() -> i64 {\n\
                  poke64(cnt_data, 0)\n\
+                 poke64(done, 0)\n\
                  spawn breaker()\n\
+                 for peek64(done) < 1 { }\n\
                  spawn incrementer()\n\
+                 for peek64(done) < 2 { }\n\
                  peek64(cnt_data)\n\
              }\n\
-             fn f() -> i64 { run() }"
+             fn main() -> i64 { print_int(run())\n0 }"
         ),
-        100001,
-        "breaker=1, incrementer=100000 → break released the lock"
+        "100001",
+        "breaker=1, incrementer=100000 → the break released the lock"
     );
 }
