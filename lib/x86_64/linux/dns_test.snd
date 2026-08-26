@@ -70,7 +70,7 @@ fn bytes_eq(a: i64, b: i64, n: i64) -> i64 {
     1
 }
 
-fn write_fixture(path: string, src: i64, n: i64) -> i64 {
+fn write_fixture(path: i64, src: i64, n: i64) -> i64 {
     let fd = open_file(path, O_WRONLY | O_CREAT | O_TRUNC, 420)
     if fd < 0 { return fd }
     let w = write_buf(fd, src, n)
@@ -148,7 +148,7 @@ test "a truncated packet is refused instead of read past its end" {
 let STUB_COMMENT: string = "# This is a comment line of the sort systemd-resolved writes above the nameserver.\n"
 let STUB_NS: string = "nameserver 192.168.1.53\n"
 
-fn write_stub_resolv(path: string) -> i64 {
+fn write_stub_resolv(path: i64) -> i64 {
     let fd = open_file(path, O_WRONLY | O_CREAT | O_TRUNC, 420)
     if fd < 0 { return fd }
     for k in 0..19 {
@@ -168,22 +168,22 @@ test "a resolv.conf with a long header is read to the end, not given up on" {
     // configuration of the three most common distributions.
     //
     // `stat -c%s /etc/resolv.conf` says 39 on such a machine, because it measures the SYMLINK.
-    assert(write_stub_resolv(RESOLV_PATH) > 0)
-    assert_eq(resolv_nameserver(RESOLV_PATH), 0xc0a80135)
+    assert(write_stub_resolv(RESOLV_PATH.utf8) > 0)
+    assert_eq(resolv_nameserver(RESOLV_PATH.utf8), 0xc0a80135)
     remove_file(RESOLV_PATH.utf8)
 }
 
 test "the nameserver is read from a resolv.conf, comments and all" {
-    assert(write_fixture(RESOLV_PATH, RESOLV_BODY.utf8, strlen_(RESOLV_BODY.utf8)) > 0)
-    assert_eq(resolv_nameserver(RESOLV_PATH), 0xc0a80135)
+    assert(write_fixture(RESOLV_PATH.utf8, RESOLV_BODY.utf8, strlen_(RESOLV_BODY.utf8)) > 0)
+    assert_eq(resolv_nameserver(RESOLV_PATH.utf8), 0xc0a80135)
     remove_file(RESOLV_PATH.utf8)
 }
 
 test "a resolv.conf with no nameserver line reports that, and a missing one too" {
-    assert(write_fixture(RESOLV_PATH, RESOLV_NONE.utf8, strlen_(RESOLV_NONE.utf8)) > 0)
-    assert(resolv_nameserver(RESOLV_PATH) < 0)
+    assert(write_fixture(RESOLV_PATH.utf8, RESOLV_NONE.utf8, strlen_(RESOLV_NONE.utf8)) > 0)
+    assert(resolv_nameserver(RESOLV_PATH.utf8) < 0)
     remove_file(RESOLV_PATH.utf8)
-    assert(resolv_nameserver(RESOLV_PATH) < 0)
+    assert(resolv_nameserver(RESOLV_PATH.utf8) < 0)
 }
 
 test "a query and its answer travel over a socket, end to end" {
@@ -220,19 +220,19 @@ test "a nameserver line that is not an address is not accepted as one" {
     // Each of these has to be rejected rather than half-parsed: an octet over 255, a missing
     // octet, and something that is not a number at all. A parser that took what it could would
     // hand back an address the file never named.
-    assert(write_fixture(RESOLV_PATH, RESOLV_BAD1.utf8, strlen_(RESOLV_BAD1.utf8)) > 0)
-    assert(resolv_nameserver(RESOLV_PATH) < 0)
-    assert(write_fixture(RESOLV_PATH, RESOLV_BAD2.utf8, strlen_(RESOLV_BAD2.utf8)) > 0)
-    assert(resolv_nameserver(RESOLV_PATH) < 0)
-    assert(write_fixture(RESOLV_PATH, RESOLV_BAD3.utf8, strlen_(RESOLV_BAD3.utf8)) > 0)
-    assert(resolv_nameserver(RESOLV_PATH) < 0)
+    assert(write_fixture(RESOLV_PATH.utf8, RESOLV_BAD1.utf8, strlen_(RESOLV_BAD1.utf8)) > 0)
+    assert(resolv_nameserver(RESOLV_PATH.utf8) < 0)
+    assert(write_fixture(RESOLV_PATH.utf8, RESOLV_BAD2.utf8, strlen_(RESOLV_BAD2.utf8)) > 0)
+    assert(resolv_nameserver(RESOLV_PATH.utf8) < 0)
+    assert(write_fixture(RESOLV_PATH.utf8, RESOLV_BAD3.utf8, strlen_(RESOLV_BAD3.utf8)) > 0)
+    assert(resolv_nameserver(RESOLV_PATH.utf8) < 0)
     remove_file(RESOLV_PATH.utf8)
 }
 
 test "a whole resolution stops at the resolv.conf when there is no server in it" {
     // Exercises dns_resolve_from end to end without a single packet leaving the process.
-    assert(write_fixture(RESOLV_PATH, RESOLV_NONE.utf8, strlen_(RESOLV_NONE.utf8)) > 0)
-    assert_eq(dns_resolve_from(RESOLV_PATH, HOST_EXAMPLE.utf8), DNS_ENOSERVER)
+    assert(write_fixture(RESOLV_PATH.utf8, RESOLV_NONE.utf8, strlen_(RESOLV_NONE.utf8)) > 0)
+    assert_eq(dns_resolve_from(RESOLV_PATH.utf8, HOST_EXAMPLE.utf8), DNS_ENOSERVER)
     remove_file(RESOLV_PATH.utf8)
 }
 

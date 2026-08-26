@@ -245,7 +245,7 @@ fn _resolv_nameserver_i64(path: i64) -> i64 {
 }
 
 // Reads a resolv.conf file and returns the first nameserver IP.
-fn resolv_nameserver(path: string) -> i64 {
+fn resolv_nameserver(path: i64) -> i64 {
     let n = read_file(path, resolv_buf, RESOLV_BYTES)
     if n < 0 { return n }
     let mut i = 0
@@ -306,14 +306,14 @@ fn dns_query_fd(fd: i64, server: i64, port: i64, host: i64, id: i64, buf: i64, c
 // nothing over plain UDP is -- it only keeps a late answer to a previous question from being
 // read as the answer to this one.
 fn dns_resolve(host: i64) -> i64 {
-    dns_resolve_from(RESOLV_CONF_PATH, host)
+    dns_resolve_from(RESOLV_CONF_PATH.utf8, host)
 }
 
 // The same, reading the resolver from `path`. Split out from dns_resolve so the whole body can
 // be exercised against a fixture: a test that had to reach the real /etc/resolv.conf would be
 // asking the machine it runs on a question, and would pass or fail for reasons that have
 // nothing to do with this code.
-fn dns_resolve_from(path: string, host: i64) -> i64 {
+fn dns_resolve_from(path: i64, host: i64) -> i64 {
     let server = resolv_nameserver(path)
     if server < 0 { return server }
     let fd = udp_socket()

@@ -76,7 +76,7 @@ fn tz_v1_size(h: i64) -> i64 {
 // The walk is linear from the END of the transition list, because the answer is nearly always
 // one of the last few: a program asking about now, or about a recent log line, finds it in two
 // or three steps, while a binary search would pay the same cost for every question.
-fn tz_offset_from(path: string, epoch: i64) -> i64 {
+fn tz_offset_from(path: i64, epoch: i64) -> i64 {
     let n = read_file(path, tz_buf, TZ_BUF_BYTES)
     if n == 0 - 27 { return TZ_ETOOBIG }   // EFBIG: the file is larger than the buffer
     if n < 0 { return TZ_ENOFILE }
@@ -127,7 +127,7 @@ fn tz_offset_from(path: string, epoch: i64) -> i64 {
 
 // Seconds east of UTC at `epoch`, from the system's configured zone.
 fn tz_offset_at(epoch: i64) -> i64 {
-    tz_offset_from(TZFILE_PATH, epoch)
+    tz_offset_from(TZFILE_PATH.utf8, epoch)
 }
 
 // Seconds east of UTC right now. What a program adds to `now_epoch()` before formatting it, to

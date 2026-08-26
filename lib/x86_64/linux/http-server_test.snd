@@ -65,7 +65,7 @@ test "http_send_status takes the status line as text" {
 // http_file_size), and a missing file falls to http_send_status's 404.
 test "http_serve_file streams a 200 and 404s a missing file" {
     let __s0_50: string = "__httptest.txt"
-    let fd = open_file(__s0_50, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    let fd = open_file(__s0_50.utf8, O_WRONLY | O_CREAT | O_TRUNC, 420)
     let __s0_52: string = "hello sond\n"
     write_buf(fd, __s0_52.utf8, 11)
     close_fd(fd)
