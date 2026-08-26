@@ -727,6 +727,23 @@ impl Parser {
                     stmts.push(Stmt::Continue);
                     self.skip_semicolons();
                 }
+                // `lock (name) { ... }`: acquire a futex mutex at `name`, run the body as a
+                // lexical critical section, release the mutex on any exit path. `lock` is a
+                // contextual keyword: it only has this meaning when followed by `(` then an
+                // identifier then `)` then `{` at statement position (the full pattern
+                // `lock (IDENT) { ... }`), so `lock(x)` always parses as a call.
+                // Note: we use `if name == "lock"` in a guard because tokens stores
+                // `Ident(String)` and Rust doesn't allow matching a `String` against
+                // a `&str` in patterns.
+                Some(Token::Ident(name)) if name == "lock" && looks_like_lock_stmt(&self.tokens, self.pos) => {
+                    self.advance(); // `lock`
+                    self.expect(Token::LParen);
+                    let name = self.expect_ident();
+                    self.expect(Token::RParen);
+                    let body = self.parse_block();
+                    stmts.push(Stmt::Lock { name, body });
+                    self.skip_semicolons();
+                }
                 Some(Token::Spawn) => {
                     // `spawn f(args)`: run the call on a new thread. The inner expression is
                     // parsed as an ordinary expression, but it must be a call, nothing else
@@ -1217,6 +1234,17 @@ fn sink_tail(body: &mut Block) {
     if let Some(t) = body.tail.take() {
         body.stmts.push(Stmt::Expr(*t));
     }
+}
+
+/// Peeks ahead to see if the tokens starting from `pos` match `lock (IDENT) {`.
+/// This distinguishes the contextual `lock` keyword from a function call like `lock(x)`.
+fn looks_like_lock_stmt(tokens: &[Token], pos: usize) -> bool {
+    // lock ( IDENT ) {
+    matches!(tokens.get(pos), Some(Token::Ident(s)) if s == "lock")
+        && matches!(tokens.get(pos + 1), Some(Token::LParen))
+        && matches!(tokens.get(pos + 2), Some(Token::Ident(_)))
+        && matches!(tokens.get(pos + 3), Some(Token::RParen))
+        && matches!(tokens.get(pos + 4), Some(Token::LBrace))
 }
 
 mod expr;

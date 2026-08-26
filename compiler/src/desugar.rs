@@ -663,6 +663,9 @@ fn desugar_stmt(
             }
             desugar_block(body, fields, sizes, locals, methods);
         }
+        Stmt::Lock { body, .. } => {
+            desugar_block(body, fields, sizes, locals, methods);
+        }
         Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
     }
 }

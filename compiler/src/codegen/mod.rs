@@ -693,6 +693,9 @@ fn collect_locals(block: &Block, out: &mut Vec<String>) {
                 }
                 collect_locals(body, out);
             }
+            Stmt::Lock { body, .. } => {
+                collect_locals(body, out);
+            }
             Stmt::Break | Stmt::Continue => {}
         }
     }
@@ -753,6 +756,9 @@ fn collect_arrays(block: &Block, out: &mut Vec<(String, i64)>) {
                 if let Some(c) = cond {
                     collect_arrays_in_expr(c, out);
                 }
+                collect_arrays(body, out);
+            }
+            Stmt::Lock { body, .. } => {
                 collect_arrays(body, out);
             }
             Stmt::Break | Stmt::Continue => {}
@@ -965,6 +971,12 @@ struct Codegen {
     uefi: bool,
     /// Stack of `(continue_label, break_label)` for the enclosing loops.
     loop_labels: Vec<(String, String)>,
+    /// Label for `break` to jump to when inside a lock body (the lock's fall-through point).
+    /// Only valid while `in_lock_body` is true.
+    lock_break_cont: Option<String>,
+    /// Whether we are inside a `lock` body: when true, `break` jumps to `lock_break_cont`
+    /// (the lock's fall-through point, after release code), not to the enclosing loop's end.
+    in_lock_body: bool,
     /// Names of the user-defined functions in the program (to tell a call to a
     /// user function from a call to a builtin).
     fn_names: HashSet<String>,
@@ -1668,6 +1680,82 @@ impl Codegen {
         self.line("    addq $16, %rsp");
         self.line(&format!("    jmp {wait}"));
         self.line(&format!("{done}:"));
+    }
+
+    /// Futex-based `lock (m) { body }` acquire: Drepper's "Futexes Are Tricky" protocol,
+    /// three states (0=free, 1=held, 2=held+waiters), uses FUTEX_WAKE. The lock
+    /// variable `m` is a single 64-bit word (an lvalue). The body runs under the lock;
+    /// any early exit (`return`, `break`) releases the lock before continuing.
+    fn emit_lock(&mut self, name: &str, body: &Block) {
+        let acquired = self.fresh_label("lock_acq");
+        let wait_loop = self.fresh_label("lock_wait_loop");
+        let sleep = self.fresh_label("lock_sleep");
+        let released = self.fresh_label("lock_released");
+        let body_cont = self.fresh_label("lock_cont");
+
+        // --- ACQUIRE (fast path: CAS 0→1, then slow path with futex) ---
+        self.line(&format!("    leaq {name}(%rip), %rdi"));
+        self.line("    xorq %rax, %rax");          // rax = 0 (expected: free)
+        self.line("    movq $1, %rsi");           // rsi = 1 (new: held)
+        self.line("    lock cmpxchgq %rsi, (%rdi)");
+        self.line(&format!("    je {acquired}")); // fast path: grabbed it
+        // Slow path
+        self.line(&format!("{wait_loop}:"));
+        self.line("    movq $2, %rsi");  // rsi = 2 (new: held+waiter)
+        self.line("    movq $1, %rax");  // rax = 1 (expected: held)
+        self.line("    lock cmpxchgq %rsi, (%rdi)");
+        self.line(&format!("    je {sleep}")); // still held: sleep
+        // Released to 0: try to grab
+        self.line("    xorq %rax, %rax");   // rax = 0
+        self.line("    movq $1, %rsi");     // rsi = 1
+        self.line("    lock cmpxchgq %rsi, (%rdi)");
+        self.line(&format!("    je {acquired}")); // grabbed it
+        // Sleep until woken
+        self.line(&format!("{sleep}:"));
+        self.line(&format!("    leaq {name}(%rip), %rdi"));
+        self.line("    xorq %rsi, %rsi");     // uaddr2 = NULL
+        self.line("    movq $2, %rdx");       // value = 2
+        self.line("    xorq %r10, %r10");     // flags = 0 (no private)
+        self.line("    movq $202, %rax");     // SYS_futex = 202
+        self.line("    syscall");
+        self.line("    cmpq $-4, %rax");      // EAGAIN: retry
+        self.line(&format!("    je {wait_loop}"));
+        self.line("    cmpq $-11, %rax");     // EINTR: retry
+        self.line(&format!("    je {wait_loop}"));
+        self.line(&format!("    jmp {wait_loop}")); // other error: retry
+
+        // --- BODY (all exits redirect to release) ---
+        self.line(&format!("{acquired}:"));
+
+        // All paths that leave this body (return, break from a loop inside,
+        // fallthrough after the last statement) must release the lock.
+        // We achieve this by:
+        // 1. Redirecting `return` to the `released` label.
+        // 2. Saving `body_cont` in `lock_break_cont` so `break` inside the lock
+        //    body jumps right after the release code (instead of to the enclosing
+        //    loop's end).
+        self.lock_break_cont = Some(body_cont.clone());
+        self.in_lock_body = true;
+        let saved_ret = std::mem::take(&mut self.ret_label);
+        self.ret_label = released.clone();
+        self.block(body);
+        self.in_lock_body = false;
+        self.lock_break_cont = None;
+        self.ret_label = saved_ret;
+
+        // --- RELEASE (CAS 1→0 or 2→0, then wake if needed) ---
+        self.line(&format!("{released}:"));
+        self.line(&format!("    leaq {name}(%rip), %rdi"));
+        self.line("    movq $1, %rax");  // expected: 1 or 2
+        self.line("    movq $0, %rsi");  // new: 0 (free)
+        self.line("    lock cmpxchgq %rsi, (%rdi)");
+        self.line("    cmpq $2, %rax");  // was it 2? (someone was waiting)
+        self.line(&format!("    jne {body_cont}"));
+        self.line(&format!("    leaq {name}(%rip), %rdi"));
+        self.line("    movq $1, %rsi");  // wake 1 waiter
+        self.line("    movq $203, %rax"); // SYS_futex_wake
+        self.line("    syscall");
+        self.line(&format!("{body_cont}:"));
     }
 
     /// Joins every slot of a looping site's ring, at the spawning function's return. A loop over
@@ -2550,24 +2638,29 @@ impl Codegen {
                     self.line(&format!("{end}:"));
                     self.loop_labels.pop();
                 }
-                Stmt::Break => {
-                    let end = self
-                        .loop_labels
-                        .last()
-                        .expect("break outside loop")
-                        .1
-                        .clone();
-                    self.line(&format!("    jmp {end}"));
-                }
-                Stmt::Continue => {
-                    let start = self
-                        .loop_labels
-                        .last()
-                        .expect("continue outside loop")
-                        .0
-                        .clone();
-                    self.line(&format!("    jmp {start}"));
-                }
+                Stmt::Lock { name, body } => self.emit_lock(name, body),
+Stmt::Break => {
+                     if let Some(ref brk) = self.lock_break_cont {
+                         self.line(&format!("    jmp {brk}"));
+                     } else {
+                         let end = self
+                             .loop_labels
+                             .last()
+                             .expect("break outside loop")
+                             .1
+                             .clone();
+                         self.line(&format!("    jmp {end}"));
+                     }
+                 }
+                 Stmt::Continue => {
+                     let start = self
+                         .loop_labels
+                         .last()
+                         .expect("continue outside loop")
+                         .0
+                         .clone();
+                     self.line(&format!("    jmp {start}"));
+                 }
             }
         }
         if let Some(tail) = &block.tail {

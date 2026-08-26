@@ -121,6 +121,9 @@ fn check_block(block: &Block, env: &mut Env) -> Result<Ty, TypeError> {
                 }
                 check_block(body, env)?;
             }
+            Stmt::Lock { body, .. } => {
+                check_block(body, env)?;
+            }
             Stmt::Break | Stmt::Continue => {}
         }
     }
