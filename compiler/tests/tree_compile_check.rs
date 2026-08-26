@@ -29,7 +29,6 @@ const PATH_OVERRIDES: &[(&str, &str)] = &[
 const KNOWN_EXCEPTIONS: &[(&str, &str)] = &[
     ("examples/host/crypto/x25519-lib/selftest.snd", "unknown variable `x25_A_LIMBS`"),
     ("examples/uefi/net/arp-reply/arp-reply.snd", "cannot prove this index is in bounds"),
-    ("lib/x86_64/linux/serial.snd", "is declared more than once"),
 ];
 
 const KNOWN_MODULES: &[(&str, &str)] = &[
