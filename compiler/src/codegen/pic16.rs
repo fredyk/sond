@@ -522,6 +522,9 @@ fn eval_to_w(
         if let Some(r) = const_fold_pic16(&arg.value) {
             l!("        banksel 0x{:02X}", r & 0xFF);
             l!("        movf    0x{:02X}, w", r & 0xFF);
+            if r >= 0x80 {
+                l!("        bcf     STATUS, RP0   ; restore bank 0");
+            }
         } else {
             l!("        ; peek8 needs a constant register in Phase 1b");
         }
@@ -904,6 +907,9 @@ fn emit_call(
                 // constant is a full i64 (a `-1` written in a firmware is 0xFFFF_FFFF_FFFF_FFFF).
                 l!("        movlw   0x{:02X}", v & 0xFF);
                 l!("        movwf   0x{r:02X}");
+                if r >= 0x80 {
+                    l!("        bcf     STATUS, RP0   ; restore bank 0");
+                }
             }
             // Constant register, RUNTIME value: evaluate the value into W (banksel
             // is bit-ops on STATUS, so W survives), then store it. The register
@@ -912,6 +918,9 @@ fn emit_call(
                 eval_to_w(&args[1].value, out, locals, fnp, scratch_depth);
                 l!("        banksel 0x{r:02X}");
                 l!("        movwf   0x{r:02X}");
+                if r >= 0x80 {
+                    l!("        bcf     STATUS, RP0   ; restore bank 0");
+                }
             }
             _ => l!("        ; poke8 needs a constant register in Phase 1b"),
         },
@@ -1939,5 +1948,206 @@ mod tests {
                 s
             );
         }
+    }
+
+    // RP0 invariant: after every access to a bank-1 register (>=0x80), the code
+    // must restore bank 0 via `bcf STATUS, RP0` so that subsequent local reads
+    // (at 0x20..0x6F) target the correct physical address.
+    //
+    // Case A — four lines, no loops: `poke8(0x91, 1)` followed by `poke8(0x20, i)`.
+    // The `movf  0x20, w` that reads `i` runs with RP0=1 and therefore reads
+    // 0xA0 instead of 0x20.  The fix inserts `bcf STATUS, RP0` after the write
+    // to 0x91 and before the read of 0x20.
+    #[test]
+    fn banksel_invariant_after_bank1_access_case_a() {
+        // The source: let i = 7; poke8(0x91, 1); poke8(0x20, i).
+        // The asm body between `main:` and `goto $` must contain the sequence:
+        //   banksel 0x91 / movwf  0x91  /  bcf STATUS, RP0  /  movf 0x20, w
+        // where the bcf appears before the first read of local `i` (movf 0x20, w).
+        let asm = asm_for(
+            "fn main() { let i = 7 poke8(0x91, 1) poke8(0x20, i) }",
+        );
+        // Extract the main body (between `main:` and `goto $`).
+        let start = asm.find("\nmain:").map(|i| i + 6).unwrap_or(0);
+        let end = asm[start..].find("goto    $").map(|i| i + start).unwrap_or(asm.len());
+        let body = &asm[start..end.max(start)];
+
+        // There must be a `movwf  0x91` (write to bank-1 register).
+        assert!(
+            body.contains("movwf   0x91"),
+            "expected write to 0x91 in body:\n{}",
+            body
+        );
+
+        // There must be a `bcf STATUS, RP0` that restores bank 0.
+        assert!(
+            body.contains("bcf     STATUS, RP0"),
+            "after accessing bank 1 register, bank 0 must be restored via `bcf STATUS, RP0`:\n{}",
+            body
+        );
+
+        // The bcf must appear before the first read of local `i` (the first
+        // `movf  0x20, w` in the body, which is the read for `poke8(0x20, i)`).
+        let bcf_pos = body.find("bcf     STATUS, RP0").unwrap();
+        let first_local_read = body.find("movf    0x20, w").unwrap();
+        assert!(
+            bcf_pos < first_local_read,
+            "bank 0 restore must appear before the first local read (movf 0x20, w). \
+             bcf at {}, first movf 0x20, w at {}:\n{}",
+            bcf_pos,
+            first_local_read,
+            body
+        );
+    }
+
+    // Case B — loop body ends in bank 1: `poke8(0x91, 1)` inside `if i > 1`
+    // within a `for` loop.  `goto _loop0` returns to the loop header with
+    // RP0=1, corrupting the condition check.  The fix inserts `bcf STATUS, RP0`
+    // after the write to 0x91, inside the if-body, before the goto that
+    // returns to _loop0.
+    #[test]
+    fn banksel_invariant_after_bank1_access_case_b() {
+        let asm = asm_for(
+            "fn main() { let mut i = 0 for i < 3 { i = i + 1 if i > 1 { poke8(0x91, 1) } } }",
+        );
+        let start = asm.find("\nmain:").map(|i| i + 6).unwrap_or(0);
+        let end = asm[start..].find("goto    $").map(|i| i + start).unwrap_or(asm.len());
+        let body = &asm[start..end.max(start)];
+
+        assert!(
+            body.contains("movwf   0x91"),
+            "expected write to 0x91 in body:\n{}",
+            body
+        );
+
+        // The bcf must appear before the first `goto _loop0` that returns
+        // to the loop entry point.  Without it, RP0=1 persists across the
+        // goto and corrupts the condition check at _loop0.
+        assert!(
+            body.contains("bcf     STATUS, RP0"),
+            "after accessing bank 1 inside a loop, bank 0 must be restored:\n{}",
+            body
+        );
+
+        let bcf_pos = body.find("bcf     STATUS, RP0").unwrap();
+        let first_goto_loop = body.find("goto    _loop0").unwrap();
+        assert!(
+            bcf_pos < first_goto_loop,
+            "bank 0 restore must appear before the goto that returns to _loop0. \
+             bcf at {}, goto _loop0 at {}:\n{}",
+            bcf_pos,
+            first_goto_loop,
+            body
+        );
+    }
+
+    // Case C — bank-1 access before the loop AND inside the loop.
+    // `poke8(0x91, 1)` at the top of main, then a for loop that also writes to 0x91.
+    // Both must be followed by `bcf STATUS, RP0` before any local read.
+    #[test]
+    fn banksel_invariant_after_bank1_access_case_c() {
+        let asm = asm_for(
+            "fn main() { poke8(0x91, 1) let mut i = 0 for i < 3 { i = i + 1 if i > 1 { poke8(0x91, 1) } } }",
+        );
+        let start = asm.find("\nmain:").map(|i| i + 6).unwrap_or(0);
+        let end = asm[start..].find("goto    $").map(|i| i + start).unwrap_or(asm.len());
+        let body = &asm[start..end.max(start)];
+
+        // Count occurrences of `movwf  0x91` — there should be at least two
+        // (one at the top, one inside the loop).
+        let poke_count = body.matches("movwf   0x91").count();
+        assert!(
+            poke_count >= 2,
+            "expected at least 2 writes to 0x91 (one at top, one inside loop), got {}\n{}",
+            poke_count,
+            body
+        );
+
+        // Count `bcf STATUS, RP0` — must be at least 2 (one per bank-1 write).
+        let restore_count = body.matches("bcf     STATUS, RP0").count();
+        assert!(
+            restore_count >= 2,
+            "expected at least 2 bank-0 restores (one per 0x91 write), got {}\n{}",
+            restore_count,
+            body
+        );
+
+        // The FIRST bcf must appear before the first `goto _loop0`.
+        let first_bcf = body.find("bcf     STATUS, RP0").unwrap();
+        let first_goto = body.find("goto    _loop0").unwrap();
+        assert!(
+            first_bcf < first_goto,
+            "first bank 0 restore must appear before first goto _loop0:\n{}",
+            body
+        );
+    }
+
+    // Verifies the fix uses RP0 (bit 5) and NOT bit 0 (carry).
+    // If someone swaps `RP0` back to `0` in the source, this test catches it:
+    // it demands `bcf STATUS, RP0` is present AND `bcf STATUS, 0` is absent.
+    #[test]
+    fn restore_uses_rp0_not_bit_0_carry() {
+        let asm = asm_for(
+            "fn main() { let i = 7 poke8(0x91, 1) poke8(0x20, i) }",
+        );
+        let start = asm.find("\nmain:").map(|i| i + 6).unwrap_or(0);
+        let end = asm[start..].find("goto    $").map(|i| i + start).unwrap_or(asm.len());
+        let body = &asm[start..end.max(start)];
+
+        // The correct instruction must appear.
+        assert!(
+            body.contains("bcf     STATUS, RP0"),
+            "the restore must use RP0, not `bcf STATUS, 0`:\n{}",
+            body
+        );
+
+        // The incorrect bit must NOT appear — any `bcf STATUS, 0` would be the bug.
+        assert!(
+            !body.contains("bcf     STATUS, 0"),
+            "the body must not write to bit 0 of STATUS (carry); using `bcf STATUS, 0` \
+             instead of `bcf STATUS, RP0` would corrupt the carry flag:\n{}",
+            body
+        );
+    }
+
+    // No-regression: a program that does NOT touch bank 1 must not gain any
+    // instructions.  Count the asm lines before and after the fix and verify
+    // they are identical.
+    #[test]
+    fn no_regression_no_extra_instructions_without_bank1_access() {
+        let src = "fn main() { let a = 1 let b = 2 a + b }";
+        let asm = asm_for(src);
+        let start = asm.find("\nmain:").map(|i| i + 6).unwrap_or(0);
+        let end = asm[start..].find("goto    $").map(|i| i + start).unwrap_or(asm.len());
+        let body = &asm[start..end.max(start)];
+
+        // No banksel should appear for bank-0 registers.
+        assert!(
+            !body.contains("banksel"),
+            "program without bank-1 access must not emit banksel:\n{}",
+            body
+        );
+
+        // No bcf STATUS, RP0 should appear either.
+        assert!(
+            !body.contains("bcf     STATUS, RP0"),
+            "program without bank-1 access must not emit bcf STATUS, RP0:\n{}",
+            body
+        );
+
+        // Count instruction lines (non-empty, non-comment, non-label).
+        let instr_count = body
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.trim().starts_with(';'))
+            .count();
+
+        // A simple 2-var add should produce exactly 6 instructions:
+        // movlw 1, movwf 0x20, movlw 2, movwf 0x21, movf 0x20, w, addwf 0x21, w (or similar).
+        assert!(
+            instr_count <= 8,
+            "simple program must not grow; expected ~6 instructions, got {}:\n{}",
+            instr_count,
+            body
+        );
     }
 }
