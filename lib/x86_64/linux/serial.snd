@@ -10,8 +10,7 @@
 
 include "x86_64/linux/io.snd"     // open_file/read_buf/write_buf/close_fd (+ syscall nums)
 
-// open() flags
-let O_RDWR = 2
+// open() flags (O_RDWR comes from io.snd)
 let O_NOCTTY = 0x100              // don't let the tty become our controlling terminal
 
 // ioctl requests for the terminal
