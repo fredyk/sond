@@ -1163,4 +1163,20 @@ mod tests {
             "it says which name in which module, got: {err}"
         );
     }
+
+    #[test]
+    fn a_qualified_name_for_a_module_without_exports_fails_resolution() {
+        // A module that exports nothing cannot be queried for any name via `::`.
+        let root = std::env::temp_dir().join(format!("sond_ns6_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("empty.snd"), "// no functions, no exports").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"empty.snd\"\nfn main() -> i64 { empty::thing() }",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(err.contains("thing") && err.contains("empty"), "error names both, got: {err}");
+    }
 }

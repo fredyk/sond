@@ -1117,6 +1117,229 @@ pub fn check_no_duplicate_functions(funcs: &[Function]) -> Result<(), String> {
     Ok(())
 }
 
+/// Rejects function-body references to variables that are never declared and do not exist.
+/// A variable used in any sub-expression must have been declared at some enclosing scope
+/// (parameter, `let`, or module-level global). The check is intentionally simple and
+/// catches the common case of using a name that the author forgot to define. Function-call
+/// targets are skipped so that `f(x)` does not reject a legitimate `f` (a function) as
+/// an undeclared variable. Function names used as values (e.g. `addr_of(f)`) are also
+/// excluded because a function name in Sond is a first-class identifier, not a variable.
+/// Enum variant constructors are excluded for the same reason.
+pub fn check_undeclared_variables(
+    funcs: &[Function],
+    globals: &[Global],
+    enums: &[EnumDef],
+) -> Result<(), String> {
+    // Collect all enum variant names and function names — they are identifiers, not variables.
+    let mut known_names: HashSet<String> = HashSet::new();
+    for e in enums {
+        for v in &e.variants {
+            known_names.insert(v.name.clone());
+        }
+        known_names.insert(e.name.clone());
+    }
+    for f in funcs {
+        known_names.insert(f.name.clone());
+    }
+
+    fn check_func(
+        func: &Function,
+        globals: &[Global],
+        known_names: &HashSet<String>,
+    ) -> Result<(), String> {
+        let mut scopes: ScopeStack = Vec::new();
+        let mut top: HashSet<String> = HashSet::new();
+        for g in globals {
+            top.insert(g.name.clone());
+        }
+        for p in &func.params {
+            top.insert(p.name.clone());
+        }
+        for n in known_names {
+            top.insert(n.clone());
+        }
+        scopes.push(top);
+        check_undeclared_block(&func.body, &mut scopes, &func.name)?;
+        Ok(())
+    }
+    for f in funcs {
+        check_func(f, globals, &known_names)?;
+    }
+    Ok(())
+}
+
+type ScopeStack = Vec<HashSet<String>>;
+
+fn check_undeclared_block(
+    b: &Block,
+    scopes: &mut ScopeStack,
+    fname: &str,
+) -> Result<(), String> {
+    for s in &b.stmts {
+        check_undeclared_stmt(s, scopes, fname)?;
+    }
+    if let Some(tail) = &b.tail {
+        check_undeclared_expr(tail, scopes, fname)?;
+    }
+    Ok(())
+}
+
+fn check_undeclared_stmt(
+    s: &Stmt,
+    scopes: &mut ScopeStack,
+    fname: &str,
+) -> Result<(), String> {
+    match s {
+        Stmt::Let {
+            name, value, ..
+        } => {
+            check_undeclared_expr(value, scopes, fname)?;
+            scopes.last_mut().unwrap().insert(name.clone());
+        }
+        Stmt::Assign { target, value } => {
+            check_undeclared_expr(target, scopes, fname)?;
+            check_undeclared_expr(value, scopes, fname)?;
+        }
+        Stmt::Return(Some(e)) => {
+            check_undeclared_expr(e, scopes, fname)?;
+        }
+        Stmt::Return(None) => {}
+        Stmt::Expr(expr) | Stmt::Spawn(expr) => {
+            check_undeclared_expr(expr, scopes, fname)?;
+        }
+        Stmt::Par(peers) => {
+            for p in peers {
+                check_undeclared_expr(p, scopes, fname)?;
+            }
+        }
+        Stmt::ParLet { names, peers, .. } => {
+            for p in peers {
+                check_undeclared_expr(p, scopes, fname)?;
+            }
+            for n in names {
+                scopes.last_mut().unwrap().insert(n.clone());
+            }
+        }
+        Stmt::ParReduce { name, peers, .. } => {
+            for p in peers {
+                check_undeclared_expr(p, scopes, fname)?;
+            }
+            scopes.last_mut().unwrap().insert(name.clone());
+        }
+        Stmt::GraphLet {
+            nodes,
+            yield_expr,
+            name,
+            ..
+        } => {
+            for (n, e) in nodes {
+                check_undeclared_expr(e, scopes, fname)?;
+                scopes.last_mut().unwrap().insert(n.clone());
+            }
+            check_undeclared_expr(yield_expr, scopes, fname)?;
+            scopes.last_mut().unwrap().insert(name.clone());
+        }
+        Stmt::For { cond, body, .. } => {
+            if let Some(c) = cond {
+                check_undeclared_expr(c, scopes, fname)?;
+            }
+            scopes.push(HashSet::new());
+            check_undeclared_block(body, scopes, fname)?;
+            scopes.pop();
+        }
+        Stmt::Break | Stmt::Continue => {}
+    }
+    Ok(())
+}
+
+fn check_undeclared_expr(
+    e: &Expr,
+    scopes: &mut ScopeStack,
+    fname: &str,
+) -> Result<(), String> {
+    match e {
+        Expr::Var(name) => {
+            if !scopes.iter().any(|s| s.contains(name.as_str())) {
+                return Err(format!(
+                    "variable `{name}` is not declared in function `{fname}`"
+                ));
+            }
+        }
+        Expr::Field(base, _) => {
+            check_undeclared_expr(base, scopes, fname)?;
+        }
+        Expr::Call(_callee, args) => {
+            for arg in args {
+                check_undeclared_expr(&arg.value, scopes, fname)?;
+            }
+        }
+        Expr::Index(base, index) => {
+            check_undeclared_expr(base, scopes, fname)?;
+            check_undeclared_expr(index, scopes, fname)?;
+        }
+        Expr::Unary(_, inner) => {
+            check_undeclared_expr(inner, scopes, fname)?;
+        }
+        Expr::Binary(_, l, r) => {
+            check_undeclared_expr(l, scopes, fname)?;
+            check_undeclared_expr(r, scopes, fname)?;
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            check_undeclared_expr(cond, scopes, fname)?;
+            scopes.push(HashSet::new());
+            check_undeclared_block(then_branch, scopes, fname)?;
+            scopes.pop();
+            if let Some(eb) = else_branch {
+                scopes.push(HashSet::new());
+                check_undeclared_block(eb, scopes, fname)?;
+                scopes.pop();
+            }
+        }
+        Expr::Match {
+            scrutinee,
+            arms,
+        } => {
+            check_undeclared_expr(scrutinee, scopes, fname)?;
+            for arm in arms {
+                scopes.push(HashSet::new());
+                if let Some(binding) = &arm.binding {
+                    scopes.last_mut().unwrap().insert(binding.clone());
+                }
+                check_undeclared_block(&arm.body, scopes, fname)?;
+                scopes.pop();
+            }
+        }
+        Expr::Cast(inner, _) => {
+            check_undeclared_expr(inner, scopes, fname)?;
+        }
+        Expr::List(items) => {
+            for it in items {
+                check_undeclared_expr(it, scopes, fname)?;
+            }
+        }
+        Expr::SliceRange(base, lo, hi) => {
+            check_undeclared_expr(base, scopes, fname)?;
+            if let Some(e) = lo {
+                check_undeclared_expr(e, scopes, fname)?;
+            }
+            if let Some(e) = hi {
+                check_undeclared_expr(e, scopes, fname)?;
+            }
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, expr) in fields {
+                check_undeclared_expr(expr, scopes, fname)?;
+            }
+        }
+        Expr::Int(_) | Expr::Decimal(_) | Expr::Str(_) | Expr::Bool(_) => {}
+    }
+    Ok(())
+}
+
 /// Rejects the process-termination effect inside a spawned call graph (RFC-0011, footgun #3).
 /// `syscall(SYS_exit, N)` ends the calling *thread* under process-per-connection semantics but
 /// the whole *process* when it runs on a spawned OS thread, so one connection's error path would
@@ -4628,6 +4851,99 @@ mod tests {
             "for i < 8 {{ g[i] }} must compile without where/requires; got: {:?}",
             bounds(src).err()
         );
+    }
+}
+
+#[cfg(test)]
+mod undeclared_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn parse(src: &str) -> (Vec<Function>, Vec<Global>, Vec<EnumDef>) {
+        let mut p = Parser::new(tokenize(src));
+        let funcs = p.parse_program();
+        let globals = p.take_globals();
+        let enums = p.take_enums();
+        (funcs, globals, enums)
+    }
+
+    #[test]
+    fn rejects_undeclared_variable() {
+        let (funcs, globals, _enums) = parse("fn f() -> i64 { undeclared_name }");
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("undeclared_name"),
+            "error must name the variable, got: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_declared_variables() {
+        let (funcs, globals, _enums) = parse(
+            "fn f() -> i64 {
+                let x = 42
+                x
+            }",
+        );
+        check_undeclared_variables(&funcs, &globals, &_enums).expect("declared var must be accepted");
+    }
+
+    #[test]
+    fn accepts_function_parameters() {
+        let (funcs, globals, _enums) = parse("fn f(x: i64) -> i64 { x }");
+        check_undeclared_variables(&funcs, &globals, &_enums).expect("param must be accepted");
+    }
+
+    #[test]
+    fn accepts_module_level_globals() {
+        let (funcs, globals, _enums) = parse(
+            "let SHARED = 42
+             fn f() -> i64 { SHARED }",
+        );
+        check_undeclared_variables(&funcs, &globals, &_enums).expect("global must be accepted");
+    }
+
+    #[test]
+    fn function_call_targets_are_not_checked_as_variables() {
+        // `f` is a function name, not a variable. Only its arguments are checked.
+        let (funcs, globals, _enums) = parse(
+            "fn callee() -> i64 { 0 }
+             fn caller() -> i64 { callee() }",
+        );
+        check_undeclared_variables(&funcs, &globals, &_enums).expect("function callee must be accepted");
+    }
+
+    #[test]
+    fn function_call_arguments_are_checked_against_scope() {
+        let (funcs, globals, _enums) = parse(
+            "fn f() -> i64 { print_int(not_declared) }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("not_declared"),
+            "undeclared call arg must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn reports_error_in_function_name() {
+        let (funcs, globals, _enums) = parse("fn test_field_ops() -> i64 { missing }");
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("test_field_ops"),
+            "error must name the function, got: {err}"
+        );
+    }
+
+    #[test]
+    fn enum_variant_constructors_are_not_rejected() {
+        let (funcs, globals, _enums) = parse(
+            "enum Opt { Some(i64), None }
+             fn f() -> Opt { None }",
+        );
+        check_undeclared_variables(&funcs, &globals, &_enums)
+            .expect("enum variant `None` must not be rejected");
     }
 }
 
