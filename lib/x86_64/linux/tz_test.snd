@@ -107,7 +107,7 @@ fn strlen_(p: i64) -> i64 {
 
 fn write_fixture() -> i64 {
     let n = build_fixture()
-    write_file_bytes(TZ_PATH.utf8, fx, n)
+write_file_bytes(TZ_PATH.utf8, fx, n)
 }
 
 test "an instant between two transitions takes the offset of the first" {

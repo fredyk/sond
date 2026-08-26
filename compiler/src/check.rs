@@ -2598,17 +2598,23 @@ const LITERAL_BUILTINS: [&str; 7] = [
 /// "walk it until a NUL turns up" the natural thing to write — with an address and no length
 /// there is nothing else you can do with it.
 ///
-pub fn check_string_literal_types(funcs: &[Function]) -> Result<(), String> {
+pub fn check_string_literal_types(funcs: &[Function], globals: &[Global]) -> Result<(), String> {
     let sigs: HashMap<&str, &Function> = funcs.iter().map(|f| (f.name.as_str(), f)).collect();
+    // Module-level string globals are text, just like function-local variables.
+    let base_strings: HashSet<String> = globals
+        .iter()
+        .filter(|g| g.ty.as_ref().is_some_and(holds_code_points))
+        .map(|g| g.name.clone())
+        .collect();
     for f in funcs {
         // A parameter declared `string` carries code points just like a local one, so the
         // body starts with them already known.
-        let strings: HashSet<String> = f
-            .params
-            .iter()
-            .filter(|p| holds_code_points(&p.ty))
-            .map(|p| p.name.clone())
-            .collect();
+        let mut strings: HashSet<String> = base_strings.clone();
+        for p in &f.params {
+            if holds_code_points(&p.ty) {
+                strings.insert(p.name.clone());
+            }
+        }
         literals_block(&f.body, &f.name, &sigs, &strings)?;
     }
     Ok(())
@@ -2703,6 +2709,132 @@ fn literals_block(
     Ok(())
 }
 
+/// Whether `e` is a *text* value (code points, not a bare byte pointer).
+/// A string literal, or a variable bound to text (`string` param or local).
+fn is_text_expr(e: &Expr, strings: &HashSet<String>) -> bool {
+    matches!(e, Expr::Str(_)) || matches!(e, Expr::Var(v) if strings.contains(v.as_str()))
+}
+
+/// Whether `e` is an *integer* value (raw pointer / number, not text).
+/// An integer literal, a non-string local, a `.utf8` field access, or an arithmetic chain.
+fn is_int_expr(e: &Expr, strings: &HashSet<String>) -> bool {
+    if let Expr::Field(base, name) = e {
+        if name == "utf8" && is_text_expr(base, strings) {
+            return true;
+        }
+        if name == "utf8" && is_int_expr(base, strings) {
+            return true;
+        }
+        // field access on a known text var is also a pointer → int
+        if name != "utf8" && is_text_expr(base, strings) {
+            return true;
+        }
+        if name != "utf8" && is_int_expr(base, strings) {
+            return true;
+        }
+        // field access on an unknown variable: do NOT assume int (silly struct fields)
+        return false;
+    }
+    if let Expr::Binary(_, l, r) = e {
+        return is_int_expr(l, strings) || is_int_expr(r, strings);
+    }
+    if let Expr::Unary(_, inner) = e {
+        return is_int_expr(inner, strings);
+    }
+    if let Expr::Int(_) = e {
+        return true;
+    }
+    if let Expr::Var(v) = e {
+        return !strings.contains(v.as_str());
+    }
+    false
+}
+
+/// Whether a function parameter accepts text at the type level (`string`).
+fn accepts_text(p: &Param) -> bool {
+    is_string_ty(&p.ty)
+}
+
+/// Whether a function parameter expects a *raw* integer (not a text-typed parameter).
+fn expects_int(p: &Param) -> bool {
+    !accepts_text(p)
+}
+
+/// How an argument was written, for a diagnostic that points at the caller's own text. Only the
+/// forms a programmer can act on are named; anything else is described, never invented.
+fn arg_as_written(e: &Expr) -> String {
+    match e {
+        Expr::Str(_) => "the literal".to_string(),
+        Expr::Var(v) => format!("`{v}`"),
+        Expr::Field(base, n) => match base.as_ref() {
+            Expr::Var(v) => format!("`{v}.{n}`"),
+            // A module-level string reaches here already replaced by its own literal, so there
+            // is no name left to quote -- say what it is instead of inventing one.
+            Expr::Str(_) => format!("the literal's `.{n}`"),
+            _ => format!("the `.{n}` of that value"),
+        },
+        _ => "that value".to_string(),
+    }
+}
+
+/// Check that every argument to a declared function matches the parameter's text/int role.
+///
+/// The two representations of a text are the point: a `string` carries the characters, and
+/// `.utf8` hands over the address of its UTF-8 bytes. Which one a value holds used to depend on
+/// where it came from, and the compiler said nothing either way -- so a signature that said
+/// `string` was a comment, and a `.utf8` sneaked into it kept working until the day it did not.
+fn check_call_type_roles(
+    g: &Function,
+    args: &[Arg],
+    fname: &str,
+    strings: &HashSet<String>,
+) -> Result<(), String> {
+    for (i, a) in args.iter().enumerate() {
+        let Some(param) = g.params.get(i) else {
+            continue;
+        };
+        let pname = param.name.as_str();
+        let callee = g.name.as_str();
+        let written = arg_as_written(&a.value);
+
+        // Text where a number is expected. The way out is `.utf8`, spelled with the caller's
+        // own name for the value -- naming the parameter would send them to edit the callee.
+        if is_text_expr(&a.value, strings) && expects_int(param) {
+            let bytes_of = match &a.value {
+                Expr::Var(v) => format!("`{v}.utf8`"),
+                _ => "`.utf8` on it".to_string(),
+            };
+            return Err(format!(
+                "function `{fname}`: `{callee}` takes `{pname}` as a number, and {written} is \
+                 text -- write {bytes_of} to hand over the bytes"
+            ));
+        }
+
+        if is_int_expr(&a.value, strings) && accepts_text(param) {
+            // A `.utf8` on something that IS text: the caller already has the text and took its
+            // address on the way in. Passing the text itself is almost always what they meant.
+            let stripped = if let Expr::Field(base, n) = &a.value {
+                (n == "utf8" && is_text_expr(base, strings)).then(|| arg_as_written(base))
+            } else {
+                None
+            };
+            if let Some(text) = stripped {
+                return Err(format!(
+                    "function `{fname}`: `{callee}` takes `{pname}` as text, and {written} is the \
+                     address of its bytes -- pass {text} itself"
+                ));
+            }
+            return Err(format!(
+                "function `{fname}`: `{callee}` takes `{pname}` as text, and {written} is a \
+                 number -- a text parameter carries the characters, not an address. If it really \
+                 holds bytes, call the pointer form of `{callee}` if the module has one, the way \
+                 `bytes_from_cstr` sits next to `bytes_from_str`"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn literals_expr(
     e: &Expr,
     fname: &str,
@@ -2713,7 +2845,9 @@ fn literals_expr(
         && let Expr::Var(name) = callee.as_ref()
     {
         if LITERAL_BUILTINS.contains(&name.as_str()) {
-            return Ok(());
+            // Still check type roles even for builtins that take raw ints.
+            // Builtins that deal in text (println etc.) are not expected here
+            // because they only accept a single `string` parameter.
         }
         if let Some(g) = sigs.get(name.as_str()) {
             for (i, a) in args.iter().enumerate() {
@@ -2729,6 +2863,8 @@ fn literals_expr(
                     }
                 }
             }
+            // Check ALL arguments (not just string literals) → text/int mismatch.
+            check_call_type_roles(g, args, fname, strings)?;
         }
     }
     match e {
@@ -3363,7 +3499,8 @@ mod tests {
     fn literals(src: &str) -> Result<(), String> {
         let mut p = Parser::new(tokenize(src));
         let funcs = p.parse_program();
-        check_string_literal_types(&funcs)
+        let globals = p.take_globals();
+        check_string_literal_types(&funcs, &globals)
     }
 
     fn bounds(src: &str) -> Result<(), String> {
@@ -6418,6 +6555,89 @@ pub fn const_fold_pic16(e: &Expr) -> Option<i64> {
             })
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod text_vs_pointer_tests {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    fn check(src: &str) -> Result<(), String> {
+        let mut p = Parser::new(tokenize(src));
+        let funcs = p.parse_program();
+        let globals = p.take_globals();
+        check_string_literal_types(&funcs, &globals)
+    }
+
+    // A `string` parameter used to accept any number at all, so the whole cstr-to-string
+    // migration was a comment with the shape of a signature. These three are what it buys.
+
+    #[test]
+    fn text_where_a_number_is_expected_names_the_callers_own_value() {
+        let err = check(
+            "let S: string = \"hola\"\nfn quiere(p: i64) -> i64 { peek8(p) }\nfn main() -> i64 { quiere(S) }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`S.utf8`"),
+            "the way out has to be spelled with the caller's own name, not the parameter's; got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_utf8_where_text_is_expected_says_to_pass_the_text() {
+        let err = check(
+            "let S: string = \"hola\"\nfn quiere(s: string) -> i64 { peek8(s) }\nfn main() -> i64 { quiere(S.utf8) }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("address of its bytes"),
+            "should say the value is the address, not the text; got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_plain_number_where_text_is_expected_is_refused() {
+        let err = check(
+            "fn quiere(s: string) -> i64 { peek8(s) }\nfn main() -> i64 { let p: i64 = 12345\nquiere(p) }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("carries the characters"),
+            "should explain what a text parameter holds; got: {err}"
+        );
+    }
+
+    // And the four shapes of text that have to keep compiling. Without these, the check above
+    // is one keystroke away from refusing everything and still passing its own tests.
+
+    #[test]
+    fn a_literal_is_text() {
+        check("fn q(s: string) -> i64 { peek8(s) }\nfn main() -> i64 { q(\"hola\") }").unwrap();
+    }
+
+    #[test]
+    fn a_module_string_is_text() {
+        check(
+            "let S: string = \"h\"\nfn q(s: string) -> i64 { peek8(s) }\nfn main() -> i64 { q(S) }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_local_string_is_text() {
+        check(
+            "fn q(s: string) -> i64 { peek8(s) }\nfn main() -> i64 { let t: string = \"h\"\nq(t) }",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_string_parameter_forwarded_to_another_one_is_text() {
+        check("fn o(s: string) -> i64 { peek8(s) }\nfn q(s: string) -> i64 { o(s) }\nfn main() -> i64 { q(\"h\") }")
+            .unwrap();
     }
 }
 

@@ -81,7 +81,7 @@ test "serial: utoa renders small integers" {
 // exercises serial_open/config/flush/read/write/close without any hardware.
 test "serial: open+config+write+read round-trip over a pty" {
     let __s0_82: string = "/dev/ptmx"
-    let master = serial_open(__s0_82.utf8)
+    let master = serial_open_str(__s0_82)
     assert(master >= 0)
 
     let lock[1]

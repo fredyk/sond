@@ -310,7 +310,7 @@ fn main() -> ExitCode {
     // (C) on-ramp for #2 (RFC-0012): a constant index outside a known array's bounds is a
     // compile error, the non-breaking first step of checked array access.
     // Text has a type: a string literal binds to `string`, never to a bare address.
-    if let Err(msg) = sondc::check::check_string_literal_types(&funcs) {
+    if let Err(msg) = sondc::check::check_string_literal_types(&funcs, &globals) {
         eprintln!("sondc: {msg}");
         return ExitCode::FAILURE;
     }

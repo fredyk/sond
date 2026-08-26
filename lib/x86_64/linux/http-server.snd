@@ -94,7 +94,7 @@ fn http_send_redirect(afd: i64, location: i64) {
 // Send a bodyless HTTP response with the given status line (e.g. "404 Not Found").
 fn http_send_status(afd: i64, status: string) {
     let body = bytes_new()
-    let resp = http_response(status, body)
+    let resp = http_response(status.utf8, body)
     write_buf(afd, peek64(resp), bytes_len(resp))
 }
 

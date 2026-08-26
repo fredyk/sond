@@ -200,11 +200,51 @@ fn dns_parse_ipv4(p: i64) -> i64 {
     ip
 }
 
-// The address of the first `nameserver` line of a resolv.conf, or a negative error.
-//
-// Only the first is used: a second one is a FALLBACK, and using it correctly means retrying
-// after a timeout, which this module does not do. Pretending otherwise would mean silently
-// asking a server the caller did not choose.
+// Internal: reads resolv.conf using i64 path (caller has the raw bytes).
+fn _resolv_nameserver_i64(path: i64) -> i64 {
+    let fd = syscall(SYS_open, path, O_RDONLY, 0)
+    if fd < 0 { return fd }
+    let mut n = 0
+    let mut buf_off = 0
+    for {
+        let r = read_buf(fd, resolv_buf + buf_off, RESOLV_BYTES - buf_off - 1)
+        if r <= 0 { break }
+        n = n + r
+        buf_off = buf_off + r
+    }
+    close_fd(fd)
+    if n == 0 { return DNS_ENOSERVER }
+    let mut i = 0
+    for i < n {
+        let mut k = 0
+        for k < 10 {
+            if i + k >= n { break }
+            if peek8(resolv_buf + i + k) != peek8(NAMESERVER_KEY.utf8 + k) { break }
+            k = k + 1
+        }
+        if k == 10 {
+            let mut j = i + 10
+            for j < n {
+                if peek8(resolv_buf + j) != 32 {
+                    if peek8(resolv_buf + j) != 9 { break }
+                }
+                j = j + 1
+            }
+            if j > i + 10 {
+                let ip = dns_parse_ipv4(resolv_buf + j)
+                if ip >= 0 { return ip }
+            }
+        }
+        for i < n {
+            if peek8(resolv_buf + i) == 10 { break }
+            i = i + 1
+        }
+        i = i + 1
+    }
+    DNS_ENOSERVER
+}
+
+// Reads a resolv.conf file and returns the first nameserver IP.
 fn resolv_nameserver(path: i64) -> i64 {
     let n = read_file(path, resolv_buf, RESOLV_BYTES)
     if n < 0 { return n }
