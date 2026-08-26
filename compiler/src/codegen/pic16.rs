@@ -457,14 +457,19 @@ fn eval_to_w(
             l!("        movf    0x{a:02X}, w");
             return;
         }
-        l!("        ; unknown local `{v}`");
-        return;
+        panic!(
+            "PIC16 codegen does not know the variable `{v}`: it is not in scope for this function. \
+             The variable may not have been declared, or the scope tracker did not include it. \
+             Declare `{v}` before you use it."
+        );
     }
     if let Expr::Unary(crate::ast::UnOp::Neg, _x) = e {
         // Negation: load const and negate (already handled by const_fold_pic16 for ints)
         // If we reach here, the negation is non-const (not supported here)
-        l!("        ; unsupported unary negation in Phase 1b");
-        return;
+        panic!(
+            "PIC16 codegen does not implement unary negation (`-x`) yet. Use subtraction from a \
+             constant instead, e.g. `0 - x`, or avoid negation in firmware that targets PIC16."
+        );
     }
     // Shift by a COMPILE-TIME CONSTANT: the PIC14 has no barrel shifter, so
     // emit N single-bit shifts. `<< 1` is a doubling (add to self); `>> 1` is
@@ -526,7 +531,11 @@ fn eval_to_w(
                 l!("        bcf     STATUS, RP0   ; restore bank 0");
             }
         } else {
-            l!("        ; peek8 needs a constant register in Phase 1b");
+            panic!(
+                "PIC16 codegen requires `peek8()` to receive a constant, literal register address \
+                 so it can generate the correct `banksel` directive. Rewrite `peek8(expr)` as \
+                 `peek8(0xNN)` where `0xNN` is a hex literal."
+            );
         }
         return;
     }
@@ -536,7 +545,12 @@ fn eval_to_w(
         emit_user_call(name, args, out, locals, fnp, scratch_depth + 1);
         return;
     }
-    l!("        ; unsupported expression in Phase 1b");
+    panic!(
+        "PIC16 codegen cannot compile this expression to machine code. It is not a supported \
+         expression construct in Phase 1b. Rewrite the expression using only constructs the \
+         backend understands (literals, variable lookup, serial_getc(), binary ops + - & | ^ \
+         << >> == !=, and function calls to known intrinsics or user functions)."
+    );
 }
 
 /// Emits a block: its statements, then its TAIL expression (Sond makes the last `if`/call in a
@@ -646,7 +660,11 @@ fn emit_stmt(
         // `break`: jump to the enclosing loop's end label.
         Stmt::Break => match le {
             Some(n) => l!("        goto    _end{n}         ; break"),
-            None => l!("        ; break outside a loop"),
+            None => panic!(
+                "PIC16 codegen rejects `break` when it is not inside a loop. A `break` can only \
+                 appear inside a `for {{ ... }}` that has no condition. Move the `break` into a \
+                 loop body."
+            ),
         },
         // A statement-position `if x == C { .. } else { .. }`: the command dispatch.
         Stmt::Expr(Expr::If {
@@ -665,7 +683,12 @@ fn emit_stmt(
             scratch_depth,
         ),
         Stmt::Expr(e) => emit_call(e, out, locals, fnp, scratch_depth),
-        _ => l!("        ; (unsupported statement omitted in Phase 1b)"),
+        _ => panic!(
+            "PIC16 codegen does not compile this statement type in Phase 1b. The backend supports \
+             `let`, `assign`, `for`, `if`, `break`, and expression statements (`poke8()`, \
+             `serial_*()`, etc.). Rewrite the code using only constructs supported by the PIC16 \
+             backend."
+        ),
     }
 }
 
@@ -887,8 +910,11 @@ fn emit_call(
         ($($a:tt)*) => {{ out.push_str(&format!($($a)*)); out.push('\n'); }};
     }
     let Some((name, args)) = as_call(e) else {
-        l!("        ; (unsupported expression omitted in Phase 1b)");
-        return;
+        panic!(
+            "PIC16 codegen cannot compile this expression as a function call: the callee is not \
+             a plain function name, but `{e:?}`. The PIC16 backend only supports bare calls \
+             (e.g. `poke8(…)`) whose callee is a name. Rewrite the call with a name as the callee."
+        );
     };
     match (name, args.len()) {
         // A user-defined function wins over a same-named backend intrinsic (so a
@@ -922,7 +948,11 @@ fn emit_call(
                     l!("        bcf     STATUS, RP0   ; restore bank 0");
                 }
             }
-            _ => l!("        ; poke8 needs a constant register in Phase 1b"),
+            _ => panic!(
+                "PIC16 codegen requires the first argument of `poke8()` to be a constant, literal \
+                 register address so it can generate the correct `banksel` directive. \
+                 Rewrite `poke8(expr, …)` as `poke8(0xNN, …)` where `0xNN` is a hex literal."
+            ),
         },
         ("delay", 0) => l!("        call    delay"),
         ("delay_loop", 1) => match const_fold_pic16(&args[0].value) {
@@ -930,7 +960,11 @@ fn emit_call(
                 l!("        movlw   0x{:02X}", n & 0xFF);
                 l!("        call    _delayw");
             }
-            None => l!("        ; delay_loop needs a constant count in Phase 1b"),
+            None => panic!(
+                "PIC16 codegen requires `delay_loop()` to receive a compile-time constant count \
+                 so it can emit the right number of loop iterations. Rewrite `delay_loop(expr)` as \
+                 `delay_loop(N)` where `N` is a numeric literal."
+            ),
         },
         ("serial_init", 0) => l!("        call    serial_init"),
         ("serial_getc", 0) => l!("        call    serial_getc"),
@@ -938,7 +972,12 @@ fn emit_call(
             eval_to_w(&args[0].value, out, locals, fnp, scratch_depth);
             l!("        call    serial_putc");
         }
-        _ => l!("        ; (unsupported call `{name}` in Phase 1b)"),
+        _ => panic!(
+            "PIC16 codegen does not recognise the call `{name}`: it is not a known backend intrinsic \
+             (`poke8`, `peek8`, `delay`, `delay_loop`, `serial_init`, `serial_getc`, `serial_putc`) \
+             and no user-defined function with that name exists. Use one of the supported intrinsics \
+             or declare a function named `{name}`."
+        ),
     }
 }
 
@@ -1792,24 +1831,24 @@ mod tests {
     fn eighty_five_locals_with_nested_expr_rejects_at_depth_ge_1() {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             asm_for(
-                "fn main() -> i64 { \
-                    let mut v0 = 1 let mut v1 = 2 let mut v2 = 3 let mut v3 = 4 let mut v4 = 5 \
-                    let mut v5 = 6 let mut v6 = 7 let mut v7 = 8 let mut v8 = 9 let mut v9 = 10 \
-                    let mut v10 = 11 let mut v11 = 12 let mut v12 = 13 let mut v13 = 14 let mut v14 = 15 \
-                    let mut v15 = 16 let mut v16 = 17 let mut v17 = 18 let mut v18 = 19 let mut v19 = 20 \
-                    let mut v20 = 21 let mut v21 = 22 let mut v22 = 23 let mut v23 = 24 let mut v24 = 25 \
-                    let mut v25 = 26 let mut v27 = 27 let mut v28 = 28 let mut v29 = 29 let mut v30 = 30 \
-                    let mut v31 = 31 let mut v32 = 32 let mut v33 = 33 let mut v34 = 34 let mut v35 = 35 \
-                    let mut v36 = 36 let mut v37 = 37 let mut v38 = 38 let mut v39 = 39 let mut v40 = 40 \
-                    let mut v41 = 41 let mut v42 = 42 let mut v43 = 43 let mut v44 = 44 let mut v45 = 45 \
-                    let mut v46 = 46 let mut v47 = 47 let mut v48 = 48 let mut v49 = 49 let mut v50 = 50 \
-                    let mut v51 = 51 let mut v52 = 52 let mut v53 = 53 let mut v54 = 54 let mut v55 = 55 \
-                    let mut v56 = 56 let mut v57 = 57 let mut v58 = 58 let mut v59 = 59 let mut v60 = 60 \
-                    let mut v61 = 61 let mut v62 = 62 let mut v63 = 63 let mut v64 = 64 let mut v65 = 65 \
-                    let mut v66 = 66 let mut v67 = 67 let mut v68 = 68 let mut v69 = 69 let mut v70 = 70 \
-                    let mut v71 = 71 let mut v72 = 72 let mut v73 = 73 let mut v74 = 74 let mut v75 = 75 \
-                    let mut v76 = 76 let mut v77 = 77 let mut v78 = 78 let mut v79 = 79 let mut v80 = 80 \
-                    let mut v81 = 81 let mut v82 = 82 let mut v83 = 83 let mut v84 = 84 \
+                "fn main() -> i64 { \n\
+                    let mut v0 = 1 let mut v1 = 2 let mut v2 = 3 let mut v3 = 4 let mut v4 = 5 \n\
+                    let mut v5 = 6 let mut v6 = 7 let mut v7 = 8 let mut v8 = 9 let mut v9 = 10 \n\
+                    let mut v10 = 11 let mut v11 = 12 let mut v12 = 13 let mut v13 = 14 let mut v14 = 15 \n\
+                    let mut v15 = 16 let mut v16 = 17 let mut v17 = 18 let mut v18 = 19 let mut v19 = 20 \n\
+                    let mut v20 = 21 let mut v21 = 22 let mut v22 = 23 let mut v23 = 24 let mut v24 = 25 \n\
+                    let mut v25 = 26 let mut v27 = 27 let mut v28 = 28 let mut v29 = 29 let mut v30 = 30 \n\
+                    let mut v31 = 31 let mut v32 = 32 let mut v33 = 33 let mut v34 = 34 let mut v35 = 35 \n\
+                    let mut v36 = 36 let mut v37 = 37 let mut v38 = 38 let mut v39 = 39 let mut v40 = 40 \n\
+                    let mut v41 = 41 let mut v42 = 42 let mut v43 = 43 let mut v44 = 44 let mut v45 = 45 \n\
+                    let mut v46 = 46 let mut v47 = 47 let mut v48 = 48 let mut v49 = 49 let mut v50 = 50 \n\
+                    let mut v51 = 51 let mut v52 = 52 let mut v53 = 53 let mut v54 = 54 let mut v55 = 55 \n\
+                    let mut v56 = 56 let mut v57 = 57 let mut v58 = 58 let mut v59 = 59 let mut v60 = 60 \n\
+                    let mut v61 = 61 let mut v62 = 62 let mut v63 = 63 let mut v64 = 64 let mut v65 = 65 \n\
+                    let mut v66 = 66 let mut v67 = 67 let mut v68 = 68 let mut v69 = 69 let mut v70 = 70 \n\
+                    let mut v71 = 71 let mut v72 = 72 let mut v73 = 73 let mut v74 = 74 let mut v75 = 75 \n\
+                    let mut v76 = 76 let mut v77 = 77 let mut v78 = 78 let mut v79 = 79 let mut v80 = 80 \n\
+                    let mut v81 = 81 let mut v82 = 82 let mut v83 = 83 let mut v84 = 84 \n\
                     (v0 + v1) + (v2 + v3) }",
             )
         }));
@@ -1827,7 +1866,7 @@ mod tests {
                     && s.contains("0x20:0x73")
                     && s.contains("only 0x20:0x6F is free")
                     && s.contains("lands on 0x70"),
-                "rejection message must show the wanted range, the free range and the first \
+                "rejection message must show the wanted range, the free range and the first \n\
                  address that does not fit:\n{}",
                 s
             );
@@ -1839,22 +1878,22 @@ mod tests {
     fn seventy_locals_with_nesting_compiles() {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             asm_for(
-                "fn main() -> i64 { \
-                    let mut v0 = 1 let mut v1 = 2 let mut v2 = 3 let mut v3 = 4 let mut v4 = 5 \
-                    let mut v5 = 6 let mut v6 = 7 let mut v7 = 8 let mut v8 = 9 let mut v9 = 10 \
-                    let mut v10 = 11 let mut v11 = 12 let mut v12 = 13 let mut v13 = 14 let mut v14 = 15 \
-                    let mut v15 = 16 let mut v16 = 17 let mut v17 = 18 let mut v18 = 19 let mut v19 = 20 \
-                    let mut v20 = 21 let mut v21 = 22 let mut v22 = 23 let mut v23 = 24 let mut v24 = 25 \
-                    let mut v25 = 26 let mut v27 = 27 let mut v28 = 28 let mut v29 = 29 let mut v30 = 30 \
-                    let mut v31 = 31 let mut v32 = 32 let mut v33 = 33 let mut v34 = 34 let mut v35 = 35 \
-                    let mut v36 = 36 let mut v37 = 37 let mut v38 = 38 let mut v39 = 39 let mut v40 = 40 \
-                    let mut v41 = 41 let mut v42 = 42 let mut v43 = 43 let mut v44 = 44 let mut v45 = 45 \
-                    let mut v46 = 46 let mut v47 = 47 let mut v48 = 48 let mut v49 = 49 let mut v50 = 50 \
-                    let mut v51 = 51 let mut v52 = 52 let mut v53 = 53 let mut v54 = 54 let mut v55 = 55 \
-                    let mut v56 = 56 let mut v57 = 57 let mut v58 = 58 let mut v59 = 59 let mut v60 = 60 \
-                    let mut v61 = 61 let mut v62 = 62 let mut v63 = 63 let mut v64 = 64 let mut v65 = 65 \
-                    let mut v66 = 66 let mut v67 = 67 let mut v68 = 68 let mut v69 = 69 \
-                    (v0 + v1) + (v2 + v3) }",
+                "fn main() -> i64 { \n\
+                    let mut v0 = 1 let mut v1 = 2 let mut v2 = 3 let mut v3 = 4 let mut v4 = 5 \n\
+                    let mut v5 = 6 let mut v6 = 7 let mut v7 = 8 let mut v8 = 9 let mut v9 = 10 \n\
+                    let mut v10 = 11 let mut v11 = 12 let mut v12 = 13 let mut v13 = 14 let mut v14 = 15 \n\
+                    let mut v15 = 16 let mut v16 = 17 let mut v17 = 18 let mut v18 = 19 let mut v19 = 20 \n\
+                    let mut v20 = 21 let mut v21 = 22 let mut v22 = 23 let mut v23 = 24 let mut v24 = 25 \n\
+                    let mut v25 = 26 let mut v27 = 27 let mut v28 = 28 let mut v29 = 29 let mut v30 = 30 \n\
+                    let mut v31 = 31 let mut v32 = 32 let mut v33 = 33 let mut v34 = 34 let mut v35 = 35 \n\
+                    let mut v36 = 36 let mut v37 = 37 let mut v38 = 38 let mut v39 = 39 let mut v40 = 40 \n\
+                    let mut v41 = 41 let mut v42 = 42 let mut v43 = 43 let mut v44 = 44 let mut v45 = 45 \n\
+                    let mut v46 = 46 let mut v47 = 47 let mut v48 = 48 let mut v49 = 49 let mut v50 = 50 \n\
+                    let mut v51 = 51 let mut v52 = 52 let mut v53 = 53 let mut v54 = 54 let mut v55 = 55 \n\
+                    let mut v56 = 56 let mut v57 = 57 let mut v58 = 58 let mut v59 = 59 let mut v60 = 60 \n\
+                    let mut v61 = 61 let mut v62 = 62 let mut v63 = 63 let mut v64 = 64 let mut v65 = 65 \n\
+                    let mut v66 = 66 let mut v67 = 67 let mut v68 = 68 let mut v69 = 69 \n\
+                    serial_putc(v0 + v1) }",
             )
         }));
         assert!(
@@ -1872,23 +1911,23 @@ mod tests {
     #[test]
     fn eighty_vars_at_depth_two_no_reserved_collision() {
         let asm = asm_for(
-            "fn main() { \
-                let mut v0 = 1 let mut v1 = 2 let mut v2 = 3 let mut v3 = 4 let mut v4 = 5 \
-                let mut v5 = 6 let mut v6 = 7 let mut v7 = 8 let mut v8 = 9 let mut v9 = 10 \
-                let mut v10 = 11 let mut v11 = 12 let mut v12 = 13 let mut v13 = 14 let mut v14 = 15 \
-                let mut v15 = 16 let mut v16 = 17 let mut v17 = 18 let mut v18 = 19 let mut v19 = 20 \
-                let mut v20 = 21 let mut v21 = 22 let mut v22 = 23 let mut v23 = 24 let mut v24 = 25 \
-                let mut v25 = 26 let mut v26 = 27 let mut v27 = 28 let mut v28 = 29 let mut v29 = 30 \
-                let mut v30 = 31 let mut v31 = 32 let mut v32 = 33 let mut v33 = 34 let mut v34 = 35 \
-                let mut v35 = 36 let mut v36 = 37 let mut v37 = 38 let mut v38 = 39 let mut v39 = 40 \
-                let mut v40 = 41 let mut v41 = 42 let mut v42 = 43 let mut v43 = 44 let mut v44 = 45 \
-                let mut v45 = 46 let mut v46 = 47 let mut v47 = 48 let mut v48 = 49 let mut v49 = 50 \
-                let mut v50 = 51 let mut v51 = 52 let mut v52 = 53 let mut v53 = 54 let mut v54 = 55 \
-                let mut v55 = 56 let mut v56 = 57 let mut v57 = 58 let mut v58 = 59 let mut v59 = 60 \
-                let mut v60 = 61 let mut v61 = 62 let mut v62 = 63 let mut v63 = 64 let mut v64 = 65 \
-                let mut v65 = 66 let mut v66 = 67 let mut v67 = 68 let mut v68 = 69 let mut v69 = 70 \
-                let mut v70 = 71 let mut v71 = 72 let mut v72 = 73 let mut v73 = 74 let mut v74 = 75 \
-                let mut v75 = 76 let mut v76 = 77 let mut v77 = 78 let mut v78 = 79 let mut v79 = 80 \
+            "fn main() { \n\
+                let mut v0 = 1 let mut v1 = 2 let mut v2 = 3 let mut v3 = 4 let mut v4 = 5 \n\
+                let mut v5 = 6 let mut v6 = 7 let mut v7 = 8 let mut v8 = 9 let mut v9 = 10 \n\
+                let mut v10 = 11 let mut v11 = 12 let mut v12 = 13 let mut v13 = 14 let mut v14 = 15 \n\
+                let mut v15 = 16 let mut v16 = 17 let mut v17 = 18 let mut v18 = 19 let mut v19 = 20 \n\
+                let mut v20 = 21 let mut v21 = 22 let mut v22 = 23 let mut v23 = 24 let mut v24 = 25 \n\
+                let mut v25 = 26 let mut v26 = 27 let mut v27 = 28 let mut v28 = 29 let mut v29 = 30 \n\
+                let mut v30 = 31 let mut v31 = 32 let mut v32 = 33 let mut v33 = 34 let mut v34 = 35 \n\
+                let mut v35 = 36 let mut v36 = 37 let mut v37 = 38 let mut v38 = 39 let mut v39 = 40 \n\
+                let mut v40 = 41 let mut v41 = 42 let mut v42 = 43 let mut v43 = 44 let mut v44 = 45 \n\
+                let mut v45 = 46 let mut v46 = 47 let mut v47 = 48 let mut v48 = 49 let mut v49 = 50 \n\
+                let mut v50 = 51 let mut v51 = 52 let mut v52 = 53 let mut v53 = 54 let mut v54 = 55 \n\
+                let mut v55 = 56 let mut v56 = 57 let mut v57 = 58 let mut v58 = 59 let mut v59 = 60 \n\
+                let mut v60 = 61 let mut v61 = 62 let mut v62 = 63 let mut v63 = 64 let mut v64 = 65 \n\
+                let mut v65 = 66 let mut v66 = 67 let mut v67 = 68 let mut v68 = 69 let mut v69 = 70 \n\
+                let mut v70 = 71 let mut v71 = 72 let mut v72 = 73 let mut v73 = 74 let mut v74 = 75 \n\
+                let mut v75 = 76 let mut v76 = 77 let mut v77 = 78 let mut v78 = 79 let mut v79 = 80 \n\
                 (v0 + v1) + (v2 + v3) }",
         );
         // 80 vars at depth 2 must compile (scratch_top = 0x70, locals 0x20..0x6F).
@@ -2149,5 +2188,81 @@ mod tests {
             instr_count,
             body
         );
+    }
+
+    // --- The arms that used to emit an assembly comment and carry on ---
+    //
+    // Each one of these programs used to produce a `.hex` the chip would accept and run wrong:
+    // the unsupported construct became a `;` comment and the rest of the firmware was flashed
+    // around the hole. They are compile errors now, and the message names the construct.
+
+    /// The panic payload, as the user would see it after `main.rs` catches it.
+    fn compile_error(src: &str) -> String {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| asm_for(src)));
+        let err = result.expect_err("this program must be rejected, not compiled");
+        if let Some(s) = err.downcast_ref::<String>() {
+            s.clone()
+        } else if let Some(s) = err.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else {
+            panic!("the rejection carried no message the user could read");
+        }
+    }
+
+    #[test]
+    fn unary_negation_is_rejected() {
+        let msg = compile_error("fn main() {\n let x = serial_getc()\n let y = -x\n serial_putc(y)\n}");
+        assert!(msg.contains("negation"), "must name the construct: {msg}");
+    }
+
+    #[test]
+    fn peek8_with_a_variable_register_is_rejected() {
+        let msg = compile_error("fn main() {\n let r = 0x20\n let v = peek8(r)\n serial_putc(v)\n}");
+        assert!(msg.contains("peek8") && msg.contains("constant"), "must say peek8 needs a constant: {msg}");
+    }
+
+    #[test]
+    fn poke8_with_a_variable_register_is_rejected() {
+        let msg = compile_error("fn main() {\n let reg = 0x20\n poke8(reg, 1)\n}");
+        assert!(msg.contains("poke8") && msg.contains("constant"), "must say poke8 needs a constant: {msg}");
+    }
+
+    #[test]
+    fn delay_loop_with_a_variable_count_is_rejected() {
+        let msg = compile_error("fn main() {\n let n = serial_getc()\n delay_loop(n)\n}");
+        assert!(msg.contains("delay_loop") && msg.contains("constant"), "must say the count is not constant: {msg}");
+    }
+
+    #[test]
+    fn break_outside_a_loop_is_rejected() {
+        let msg = compile_error("fn main() {\n break\n}");
+        assert!(msg.contains("break"), "must name the construct: {msg}");
+    }
+
+    #[test]
+    fn a_call_to_an_unknown_function_is_rejected() {
+        // This is the one that made the bug visible: `--pic16` accepted a call to a function that
+        // exists nowhere, returned 0, and wrote a `.hex` whose only trace of the call was a comment.
+        let msg = compile_error("fn main() {\n magic_spell()\n}");
+        assert!(msg.contains("magic_spell"), "must name the function that does not exist: {msg}");
+    }
+
+    #[test]
+    fn a_statement_the_backend_cannot_lower_is_rejected() {
+        // `return` is one: on PIC16 the tail expression is the return mechanism.
+        let msg = compile_error("fn main() {\n return 42\n}");
+        assert!(msg.contains("statement"), "must say which category is unsupported: {msg}");
+    }
+
+    #[test]
+    fn an_expression_the_backend_cannot_lower_is_rejected() {
+        let msg = compile_error("fn main() {\n let ptr = 0x20\n serial_putc(*ptr)\n}");
+        assert!(!msg.is_empty(), "the rejection must carry a message");
+    }
+
+    #[test]
+    fn a_callee_that_is_not_a_function_name_is_rejected() {
+        let msg = compile_error("fn main() {\n 5()\n}");
+        assert!(!msg.is_empty(), "the rejection must carry a message");
     }
 }
