@@ -55,6 +55,19 @@ impl Parser {
                 }
                 Some(Token::LParen) => {
                     self.advance();
+                    // A call's target must be a function NAME (or a method on one,
+                    // `p.m(..)`, which still names the `Type_method` it lowers to).
+                    // Sond has no invocable values, so a literal or any other
+                    // expression in that position is a parse error HERE: it used to
+                    // build `Call(callee, ..)` and survive until codegen, whose
+                    // `todo!` fired with no line number and no hint of the real
+                    // mistake. `let b = 2 (a + b)` must die as "cannot call 2".
+                    match &lhs {
+                        Expr::Var(_) | Expr::Field(_, _) => {}
+                        other => {
+                            panic!("a call can only target a function name, found {other:?}")
+                        }
+                    }
                     lhs = Expr::Call(Box::new(lhs), self.parse_arg_list());
                     continue;
                 }

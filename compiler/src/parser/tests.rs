@@ -468,6 +468,20 @@ fn parses_field_access_and_call() {
 }
 
 #[test]
+#[should_panic(expected = "a call can only target a function name")]
+fn rejects_a_call_whose_callee_is_not_a_name() {
+    // `let mut b = 2 (a + b) + (a + b)` on ONE line: with no semicolons the parser has
+    // to decide where `2` ends, and it used to decide that `(a + b)` was a CALL of the
+    // literal `2`. The resulting program was not the one written, no line survived,
+    // and the tell only surfaced later when x64 codegen met `Int(2)` as a callee.
+    // Sond has no invocable values: only a name (or a method on one) may be called.
+    let mut p = Parser::new(tokenize(
+        "fn main() {\n let mut a = 1\n let mut b = 2 (a + b) + (a + b)\n}",
+    ));
+    let _ = p.parse_program();
+}
+
+#[test]
 fn parses_a_call_with_positional_and_keyword_args() {
     // `round(x, decimals=2)`: RFC-0002 examples use keyword args.
     assert_eq!(

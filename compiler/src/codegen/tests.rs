@@ -2585,3 +2585,20 @@ fn a_redefined_colliding_global_binds_each_file_to_its_own_value() {
     let code = compile_and_run_with_globals(&src);
     assert_eq!(code, 27, "a() reads 20 (its file's O_DUP), main reads 7 (its own)");
 }
+
+#[test]
+fn the_same_program_on_two_lines_is_still_two_statements() {
+    // The one-liner `let mut b = 2 (a + b)` is now a parse error: a call whose
+    // callee is not a name. This is the half that keeps the fix from OVERCHARGING:
+    // the same text split over two lines inserts the implicit `;` at the newline
+    // after `2`, so `2` ends the `let` and `(a + b) + (a + b)` is a separate
+    // statement expression. What was one bogus call must stay two real statements.
+    let src = "fn main() -> i64 {\n let mut a = 1\n let mut b = 2\n (a + b) + (a + b)\n}";
+    let asm = emit_program(&Parser::new(tokenize(src)).parse_program());
+    assert!(
+        asm.contains("addq %rcx, %rax"),
+        "the addition compiles: {asm}"
+    );
+    // It runs to the right answer on real x64: (1 + 2) + (1 + 2) == 6.
+    assert_eq!(compile_and_run(src), 6);
+}
