@@ -164,12 +164,25 @@ fn entry_pos(funcs: &[Function], name: &str) -> usize {
 /// the rest keep their names and are user-callable.
 fn emit_all(cg: &mut Codegen, structs: &[StructDef], funcs: &[Function], entry: &str) {
     let ep = entry_pos(funcs, entry);
+    // The entry function is compiled under the internal label `sond_start`, not its
+    // own name.  For a library file with no `main`, the last function becomes the
+    // entry and other functions in the same file may call it (a forward reference).
+    // Without a trampoline the call lands in the builtin catch-all (`todo!()`).
+    // Fix: when the entry's name differs from the platform's C entry point, add it
+    // to `fn_names` so the codegen emits `call <name>`, and emit a `jmp sond_start`
+    // trampoline from that name so the call actually reaches the function body.
+    let entry_name = &funcs[ep].name;
+    let needs_trampoline =
+        entry_name != "main" && entry_name != "efi_main" && entry_name != "_start";
     cg.fn_names = funcs
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != ep)
         .map(|(_, f)| f.name.clone())
         .collect();
+    if needs_trampoline {
+        cg.fn_names.insert(entry_name.clone());
+    }
     cg.fn_ret_types = funcs
         .iter()
         .map(|f| (f.name.clone(), ret_kind(f)))
@@ -183,6 +196,11 @@ fn emit_all(cg: &mut Codegen, structs: &[StructDef], funcs: &[Function], entry: 
     for (i, f) in funcs.iter().enumerate() {
         if i == ep {
             cg.emit_function(f, "sond_start");
+            if needs_trampoline {
+                cg.line(&format!(".globl {entry_name}"));
+                cg.line(&format!("{entry_name}:"));
+                cg.line("    jmp sond_start");
+            }
         } else {
             cg.emit_function(f, &f.name.clone());
         }

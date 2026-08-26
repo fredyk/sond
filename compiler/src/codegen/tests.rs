@@ -2533,3 +2533,29 @@ fn a_delete_byte_in_a_literal_is_escaped_for_the_assembler() {
         "no raw tab may sit inside the quotes of a .asciz:\n{with_tab}"
     );
 }
+
+#[test]
+fn entry_function_is_callable_by_other_functions_in_the_same_file() {
+    // A library file (no `main`) where the last function is called by another
+    // function defined before it.  The last function becomes the entry and is
+    // compiled under `sond_start`, but it must still be callable by its original
+    // name.  Regression: the entry was excluded from `fn_names`, so the codegen
+    // treated the call as an unrecognised builtin and emitted a `todo!()`.
+    let funcs = Parser::new(tokenize(
+        "fn caller() -> i64 { callee() }\nfn callee() -> i64 { 42 }",
+    ))
+    .parse_program();
+    let asm = emit_program_g(&[], &[], &funcs);
+    assert!(
+        asm.contains("call callee"),
+        "a call to the entry function must emit `call callee`:\n{asm}"
+    );
+    // The entry function is compiled under `sond_start`, so a trampoline from
+    // its original name is needed.
+    assert!(
+        asm.contains("jmp sond_start"),
+        "a trampoline from the entry's name to `sond_start` must exist:\n{asm}"
+    );
+    // The function must actually run and return 42.
+    assert_eq!(compile_and_run("fn caller() -> i64 { callee() }\nfn callee() -> i64 { 42 }"), 42);
+}
