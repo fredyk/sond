@@ -2559,3 +2559,20 @@ fn entry_function_is_callable_by_other_functions_in_the_same_file() {
     // The function must actually run and return 42.
     assert_eq!(compile_and_run("fn caller() -> i64 { callee() }\nfn callee() -> i64 { 42 }"), 42);
 }
+
+#[test]
+fn the_same_program_on_two_lines_is_still_two_statements() {
+    // The one-liner `let mut b = 2 (a + b)` is now a parse error: a call whose
+    // callee is not a name. This is the half that keeps the fix from OVERCHARGING:
+    // the same text split over two lines inserts the implicit `;` at the newline
+    // after `2`, so `2` ends the `let` and `(a + b) + (a + b)` is a separate
+    // statement expression. What was one bogus call must stay two real statements.
+    let src = "fn main() -> i64 {\n let mut a = 1\n let mut b = 2\n (a + b) + (a + b)\n}";
+    let asm = emit_program(&Parser::new(tokenize(src)).parse_program());
+    assert!(
+        asm.contains("addq %rcx, %rax"),
+        "the addition compiles: {asm}"
+    );
+    // It runs to the right answer on real x64: (1 + 2) + (1 + 2) == 6.
+    assert_eq!(compile_and_run(src), 6);
+}
