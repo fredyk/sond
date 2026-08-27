@@ -952,3 +952,207 @@ fn nothing_outside_ast_touches_a_block_s_statements_directly() {
          `insert_stmt`: {culpables:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// for i in a..b: bounds that MUST be lifted (function call + body mutation)
+// ---------------------------------------------------------------------------
+
+/// The helper extracts the inner For loop from the desugared function body.
+fn for_body_and_cond(f: &Function) -> Option<(&crate::ast::Block, &crate::ast::Expr)> {
+    let for_stmt = f
+        .body
+        .stmts
+        .iter()
+        .find(|s| matches!(s, crate::ast::Stmt::For { .. }))?;
+    match for_stmt {
+        crate::ast::Stmt::For { body, cond, .. } => cond.as_ref().map(|c| (body, c)),
+        _ => None,
+    }
+}
+
+fn for_cond_right_var(f: &Function) -> Option<String> {
+    let (_, cond) = for_body_and_cond(f)?;
+    if let crate::ast::Expr::Binary(_, _, right) = cond {
+        if let crate::ast::Expr::Var(v) = right.as_ref() {
+            return Some(v.clone());
+        }
+    }
+    None
+}
+
+/// Does a let-binding for the loop counter appear in the function body?
+fn has_counter_let(f: &Function, var: &str) -> bool {
+    f.body.stmts.iter().any(|s| {
+        matches!(
+            s,
+            crate::ast::Stmt::Let { name, .. } if name == var
+        )
+    })
+}
+
+/// Returns the name of the lifted bound variable (`__endN`) if the bound
+/// was materialised into a local, or `None` if the bound is used directly.
+fn captured_end_name(f: &Function) -> Option<String> {
+    for s in &f.body.stmts {
+        if let crate::ast::Stmt::Let { name, .. } = s {
+            if name.starts_with("__end") {
+                return Some(name.clone());
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn bound_with_function_call_is_lifted() {
+    // `for i in 0..tope()` → a function call in the bound must be evaluated once.
+    // The parser lifts it to `let mut __endN = tope()` and uses `__endN` in the
+    // condition, so the call happens exactly once instead of once per iteration.
+    let funcs = Parser::new(tokenize(
+        "fn tope() -> i64 { 5 }\n\
+         fn main() -> i64 { let mut s = 0\nfor i in 0..tope() { s = s + i }\ns }",
+    ))
+    .parse_program();
+    let f = funcs.iter().find(|f| f.name == "main").expect("must find main");
+    // Must produce: let mut i = 0; (counter let)
+    assert!(has_counter_let(f, "i"), "counter must be declared");
+    // Must produce: let mut __endN = tope();  (lifted bound)
+    let end_name = captured_end_name(f);
+    assert!(
+        end_name.is_some(),
+        "function-call bound must be lifted to a local variable"
+    );
+    // The for loop's condition must reference the lifted name, not the call.
+    assert_eq!(
+        for_cond_right_var(f),
+        end_name,
+        "for condition must reference the lifted bound"
+    );
+}
+
+#[test]
+fn bound_with_body_assignment_is_lifted() {
+    // `for i in 0..n { n = n + 1 ... }` → the body assigns to a name that appears
+    // in the bound. Without lifting, the bound would change each iteration, causing
+    // an infinite loop. The parser lifts to `let mut __endN = n` before the loop.
+    let funcs = Parser::new(tokenize(
+        "fn main() -> i64 { let mut n = 5\nlet mut s = 0\nfor i in 0..n { n = n + 1; s = s + i }\ns }",
+    ))
+    .parse_program();
+    let f = &funcs[0];
+    assert!(has_counter_let(f, "i"), "counter must be declared");
+    let end_name = captured_end_name(f);
+    assert!(
+        end_name.is_some(),
+        "bound that references a body-assigned variable must be lifted"
+    );
+    // The condition must reference the lifted name, not the original var.
+    assert_eq!(
+        for_cond_right_var(f),
+        end_name,
+        "for condition must reference the lifted bound"
+    );
+}
+
+#[test]
+fn stable_variable_bound_is_not_lifted() {
+    // `for i in 0..n { s = s + i }` → a bare variable `n` in the bound, with
+    // no call in the bound and no body assignment to `n`. The bound should NOT
+    // be lifted, so the prover can still reason about `n` (e.g. `i < n` for
+    // bounds-checking).
+    let funcs = Parser::new(tokenize(
+        "fn main(n: i64) -> i64 { let mut s = 0\nfor i in 0..n { s = s + i }\ns }",
+    ))
+    .parse_program();
+    let f = &funcs[0];
+    assert!(has_counter_let(f, "i"), "counter must be declared");
+    // No __endN let-binding — the bound stays as-is.
+    let end_name = captured_end_name(f);
+    assert!(
+        end_name.is_none(),
+        "stable variable bound must NOT be lifted"
+    );
+    // The condition is `i < n` directly.
+    assert_eq!(
+        for_cond_right_var(f),
+        Some("n".to_string()),
+        "stable bound must stay as the original variable"
+    );
+}
+
+#[test]
+fn a_bound_that_is_not_a_plain_name_is_never_stable() {
+    // Anything with a call, or any computed expression, has to be lifted: the parser cannot know
+    // that evaluating it twice gives the same answer, and the whole bug was evaluating it N+1
+    // times. Only a literal or a plain name/field can stay in the condition, where the prover
+    // still sees it by name.
+    let vacio = Block::default();
+    assert!(!end_is_stable(&parse_e("f(g())"), &vacio), "a nested call must be lifted");
+    assert!(!end_is_stable(&parse_e("f(a) + 1"), &vacio), "a call inside a sum must be lifted");
+    assert!(!end_is_stable(&parse_e("a + b"), &vacio), "a computed bound must be lifted");
+    assert!(end_is_stable(&parse_e("4"), &vacio), "a literal never changes");
+    assert!(end_is_stable(&parse_e("a.len"), &vacio), "a field nobody assigns to stays in place");
+}
+
+#[test]
+fn a_bound_variable_the_body_assigns_to_is_seen_however_deep_the_assignment_is() {
+    // The first fix only looked at the body's top-level statements, so moving the very same
+    // assignment inside an `if` brought the infinite loop straight back: measured 51 turns where
+    // 4 were due.
+    let plano = parse_fn("fn f(n: i64) -> i64 { n = 5\nn }");
+    assert!(block_assigns_path(&plano.body, "n"), "a top-level assignment must be seen");
+
+    let anidado = parse_fn("fn f(n: i64) -> i64 { if n > 0 { n = 5 }\nn }");
+    assert!(block_assigns_path(&anidado.body, "n"), "an assignment inside an `if` must be seen");
+
+    let en_bucle = parse_fn("fn f(n: i64) -> i64 { for j in 0..2 { n = n + 1 }\nn }");
+    assert!(block_assigns_path(&en_bucle.body, "n"), "an assignment inside a loop must be seen");
+
+    let solo_lee = parse_fn("fn f(n: i64) -> i64 { let x = n\nx }");
+    assert!(!block_assigns_path(&solo_lee.body, "n"), "reading a bound variable is not assigning");
+
+    // A prefix of the bound's path counts: replacing the whole slice moves its `len` with it.
+    let reemplaza = parse_fn("fn f(s: Slice, u: Slice) -> i64 { s = u\n0 }");
+    assert!(block_assigns_path(&reemplaza.body, "s.len"), "assigning `s` disturbs `s.len`");
+    // Writing one field leaves the others alone: a bound on `s.cap` survives `s.len = 1`.
+    let un_campo = parse_fn("fn f(s: Slice) -> i64 { s.len = 1\n0 }");
+    assert!(block_assigns_path(&un_campo.body, "s.len"), "the field written is disturbed");
+    assert!(!block_assigns_path(&un_campo.body, "s.cap"), "a sibling field is not");
+}
+
+#[test]
+fn writing_into_an_element_does_not_lift_the_length_bound() {
+    // `for i in 0..s.len { s[i] = 0 }` is the single most common loop in the language, and the
+    // prover clears the index by matching `i < s.len` BY NAME. Lifting that bound to `__end0`
+    // would take the name away and start rejecting programs that compile today.
+    //
+    // Writing into an element is not writing to the name: `s[i] = 0` changes neither `s` nor
+    // `s.len`. Only an assignment to the bound's own path -- or to a prefix of it, since `s = t`
+    // moves `s.len` with it -- may lift.
+    let escribe_elemento = Parser::new(tokenize(
+        "fn main(s: Slice) -> i64 { let mut t = 0\nfor i in 0..s.len { s[i] = 0 }\nt }",
+    ))
+    .parse_program();
+    assert!(
+        captured_end_name(&escribe_elemento[0]).is_none(),
+        "writing into an element must leave the `s.len` bound where the prover can see it"
+    );
+
+    let escribe_longitud = Parser::new(tokenize(
+        "fn main(s: Slice) -> i64 { let mut t = 0\nfor i in 0..s.len { s.len = s.len + 1 }\nt }",
+    ))
+    .parse_program();
+    assert!(
+        captured_end_name(&escribe_longitud[0]).is_some(),
+        "a body that raises the bound itself must have it evaluated once"
+    );
+
+    let reasigna_base = Parser::new(tokenize(
+        "fn main(s: Slice, u: Slice) -> i64 { let mut t = 0\nfor i in 0..s.len { s = u }\nt }",
+    ))
+    .parse_program();
+    assert!(
+        captured_end_name(&reasigna_base[0]).is_some(),
+        "assigning the whole slice moves its `len` with it, so the bound must be lifted"
+    );
+}
