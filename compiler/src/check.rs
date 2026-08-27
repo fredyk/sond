@@ -2766,7 +2766,7 @@ pub fn check_constant_bounds(funcs: &[Function], globals: &[Global]) -> Result<(
             ));
             flow.ceilings.insert(g.clone(), *c);
         }
-        bounds_block(&f.body, &f.name, &mut sizes, &mut flow, &f.params, funcs)?;
+        bounds_block(&f.body, &f.name, &mut sizes, &mut flow, &f.params, funcs, 0)?;
     }
     Ok(())
 }
@@ -3274,8 +3274,10 @@ fn bounds_block(
     flow: &mut Flow,
     params: &[Param],
     funcs: &[Function],
+    line: u32,
 ) -> Result<(), String> {
-    for s in &b.stmts {
+    for (i, s) in b.stmts.iter().enumerate() {
+        let stmt_line = b.stmt_lines.get(i).copied().unwrap_or(line);
         match s {
             Stmt::Let {
                 name,
@@ -3284,7 +3286,7 @@ fn bounds_block(
                 ty,
                 ..
             } => {
-                bounds_expr(value, fname, sizes, flow, params, funcs)?;
+                bounds_expr(value, fname, sizes, flow, params, funcs, stmt_line)?;
                 // Rebinding the name drops any prior fact/const/counter about it.
                 flow.invalidate(name);
                 // `let a: u32[] = backing` over an array whose size is known: the view's length is
@@ -3353,7 +3355,7 @@ fn bounds_block(
                 target: Expr::Var(v),
                 value,
             } => {
-                bounds_expr(value, fname, sizes, flow, params, funcs)?;
+                bounds_expr(value, fname, sizes, flow, params, funcs, stmt_line)?;
                 // Classify the reassignment against `v`'s bounds captured BEFORE invalidation:
                 // an increment `v = v + k` keeps the floor (drops the ceiling), a decrement keeps
                 // the ceiling (drops the floor), a fresh constant is exact, and any other value
@@ -3381,8 +3383,8 @@ fn bounds_block(
             }
             Stmt::Assign { target, value } => {
                 // Assigning through an index/field: a memory write, no scalar rebinding.
-                bounds_expr(target, fname, sizes, flow, params, funcs)?;
-                bounds_expr(value, fname, sizes, flow, params, funcs)?;
+                bounds_expr(target, fname, sizes, flow, params, funcs, stmt_line)?;
+                bounds_expr(value, fname, sizes, flow, params, funcs, stmt_line)?;
             }
             Stmt::Expr(e @ Expr::If { .. }) => {
                 // Check the condition and both branches (delegated to bounds_expr, which also
@@ -3393,7 +3395,7 @@ fn bounds_block(
                 // comparison negates cleanly; a conjunctive guard's negation is a disjunction we
                 // simply do not assume (sound, weaker). Symmetrically a diverging `else` with a
                 // fall-through then-branch contributes `cond` (which the prover splits on `&&`).
-                bounds_expr(e, fname, sizes, flow, params, funcs)?;
+                bounds_expr(e, fname, sizes, flow, params, funcs, stmt_line)?;
                 if let Expr::If {
                     cond,
                     then_branch,
@@ -3416,7 +3418,7 @@ fn bounds_block(
                 }
             }
             Stmt::Return(Some(v)) | Stmt::Expr(v) => {
-                bounds_expr(v, fname, sizes, flow, params, funcs)?
+                bounds_expr(v, fname, sizes, flow, params, funcs, stmt_line)?
             }
             Stmt::For {
                 cond,
@@ -3429,7 +3431,7 @@ fn bounds_block(
                 // (init + preservation), trusting a verified invariant is sound, unlike an
                 // unverified one; an unverified/unverifiable clause is simply ignored.
                 if let Some(c) = cond {
-                    bounds_expr(c, fname, sizes, flow, params, funcs)?;
+                    bounds_expr(c, fname, sizes, flow, params, funcs, stmt_line)?;
                 }
                 let mut modified = HashSet::new();
                 assigned_vars(body, &mut modified);
@@ -3488,7 +3490,7 @@ fn bounds_block(
                 }
                 // A declaration inside the loop does not escape it.
                 let mut inner = sizes.clone();
-                bounds_block(body, fname, &mut inner, &mut body_flow, params, funcs)?;
+                bounds_block(body, fname, &mut inner, &mut body_flow, params, funcs, line)?;
                 // After the loop, every reassigned variable is unknown.
                 for v in &modified {
                     flow.invalidate(v);
@@ -3521,7 +3523,8 @@ fn bounds_block(
         }
     }
     if let Some(t) = &b.tail {
-        bounds_expr(t, fname, sizes, flow, params, funcs)?;
+        let tail_line = b.stmt_lines.last().copied().unwrap_or(line);
+        bounds_expr(t, fname, sizes, flow, params, funcs, tail_line)?;
     }
     Ok(())
 }
@@ -3533,6 +3536,7 @@ fn bounds_expr(
     flow: &mut Flow,
     params: &[Param],
     funcs: &[Function],
+    line: u32,
 ) -> Result<(), String> {
     if let Expr::Index(base, idx) = e
         && let Expr::Var(a) = base.as_ref()
@@ -3542,7 +3546,8 @@ fn bounds_expr(
                 // A compile-time-constant index outside [0, N) is a static stack overrun.
                 Some(k) if k < 0 || k >= n => {
                     return Err(format!(
-                        "function `{fname}`: index {k} is out of bounds for `{a}` of size {n} (valid range 0..{n})"
+                        "function `{fname}`: index `{}` (= {k}) is out of bounds for `{a}` of size {n} (valid range 0..{n}) at line {line}",
+                        expr_to_string(idx)
                     ));
                 }
                 // A constant in [0, N) is statically safe.
@@ -3563,7 +3568,8 @@ fn bounds_expr(
                         )
                     {
                         return Err(format!(
-                            "function `{fname}`: cannot prove this index is in bounds for `{a}` of size {n}; bound it with a `where`/`requires`/loop condition to 0..{n}"
+                            "function `{fname}`: cannot prove `{}` is in bounds for `{a}` of size {n} at line {line}; bound it with a `where`/`requires`/loop condition to 0..{n}",
+                            expr_to_string(idx)
                         ));
                     }
                 }
@@ -3575,7 +3581,8 @@ fn bounds_expr(
             let asm = flow.assumptions();
             if !crate::verify::index_proven_in_bounds(idx, &bound, &asm, params) {
                 return Err(format!(
-                    "function `{fname}`: cannot prove this index is in bounds for slice `{a}`; bound it with a `where`/`requires`/loop condition to 0..{a}.len"
+                    "function `{fname}`: cannot prove `{}` is in bounds for slice `{a}` at line {line}; bound it with a `where`/`requires`/loop condition to 0..{a}.len",
+                    expr_to_string(idx)
                 ));
             }
         } else if let Some(len) = view_len_of(a, params).or_else(|| flow.views.get(a).cloned()) {
@@ -3585,7 +3592,7 @@ fn bounds_expr(
             // catching, since both are just an `i64` at the call site.
             let Some(len) = len else {
                 return Err(format!(
-                    "function `{fname}`: view `{a}` has no declared length, so an index into it \
+                    "function `{fname}`: view `{a}` has no declared length at line {line}, so an index into it \
                      cannot be checked; declare it as `T[n]`, naming the parameter or local that \
                      carries its length"
                 ));
@@ -3598,35 +3605,36 @@ fn bounds_expr(
             let asm = flow.assumptions();
             if !crate::verify::index_proven_in_bounds(idx, &bound, &asm, params) {
                 return Err(format!(
-                    "function `{fname}`: cannot prove this index is in bounds for view `{a}`; bound it with a `where`/`requires`/loop condition to 0..{len}"
+                    "function `{fname}`: cannot prove `{}` is in bounds for view `{a}` at line {line}; bound it with a `where`/`requires`/loop condition to 0..{len}",
+                    expr_to_string(idx)
                 ));
             }
         }
     }
     match e {
         Expr::Binary(_, l, r) | Expr::Index(l, r) => {
-            bounds_expr(l, fname, sizes, flow, params, funcs)?;
-            bounds_expr(r, fname, sizes, flow, params, funcs)
+            bounds_expr(l, fname, sizes, flow, params, funcs, line)?;
+            bounds_expr(r, fname, sizes, flow, params, funcs, line)
         }
         Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
-            bounds_expr(x, fname, sizes, flow, params, funcs)
+            bounds_expr(x, fname, sizes, flow, params, funcs, line)
         }
         Expr::Call(c, args) => {
-            bounds_expr(c, fname, sizes, flow, params, funcs)?;
+            bounds_expr(c, fname, sizes, flow, params, funcs, line)?;
             for a in args {
-                bounds_expr(&a.value, fname, sizes, flow, params, funcs)?;
+                bounds_expr(&a.value, fname, sizes, flow, params, funcs, line)?;
             }
             Ok(())
         }
         Expr::List(items) => {
             for it in items {
-                bounds_expr(it, fname, sizes, flow, params, funcs)?;
+                bounds_expr(it, fname, sizes, flow, params, funcs, line)?;
             }
             Ok(())
         }
         Expr::StructLit(_, fields) => {
             for (_, v) in fields {
-                bounds_expr(v, fname, sizes, flow, params, funcs)?;
+                bounds_expr(v, fname, sizes, flow, params, funcs, line)?;
             }
             Ok(())
         }
@@ -3635,20 +3643,20 @@ fn bounds_expr(
             then_branch,
             else_branch,
         } => {
-            bounds_expr(cond, fname, sizes, flow, params, funcs)?;
+            bounds_expr(cond, fname, sizes, flow, params, funcs, line)?;
             // Each branch reasons under its own guard on a clone; after the `if`, any variable a
             // branch reassigned is unknown.
             let mut then_flow = flow.clone();
             then_flow.facts.push(cond.as_ref().clone());
             let mut t = sizes.clone();
-            bounds_block(then_branch, fname, &mut t, &mut then_flow, params, funcs)?;
+            bounds_block(then_branch, fname, &mut t, &mut then_flow, params, funcs, line)?;
             if let Some(eb) = else_branch {
                 let mut else_flow = flow.clone();
                 if let Some(neg) = negate_cond(cond) {
                     else_flow.facts.push(neg);
                 }
                 let mut e2 = sizes.clone();
-                bounds_block(eb, fname, &mut e2, &mut else_flow, params, funcs)?;
+                bounds_block(eb, fname, &mut e2, &mut else_flow, params, funcs, line)?;
             }
             let mut modified = HashSet::new();
             assigned_vars(then_branch, &mut modified);
@@ -3661,11 +3669,11 @@ fn bounds_expr(
             Ok(())
         }
         Expr::Match { scrutinee, arms } => {
-            bounds_expr(scrutinee, fname, sizes, flow, params, funcs)?;
+            bounds_expr(scrutinee, fname, sizes, flow, params, funcs, line)?;
             for a in arms {
                 let mut m = sizes.clone();
                 let mut arm_flow = flow.clone();
-                bounds_block(&a.body, fname, &mut m, &mut arm_flow, params, funcs)?;
+                bounds_block(&a.body, fname, &mut m, &mut arm_flow, params, funcs, line)?;
             }
             let mut modified = HashSet::new();
             for a in arms {
@@ -3677,6 +3685,44 @@ fn bounds_expr(
             Ok(())
         }
         _ => Ok(()),
+    }
+}
+
+/// Renders an index expression into a short human-readable string for error messages.
+/// Covers the common cases (`Var`, `Int`, `Binary`); falls back to the `Debug` output for
+/// anything more complex.
+fn expr_to_string(e: &Expr) -> String {
+    match e {
+        Expr::Var(v) => v.clone(),
+        Expr::Int(n) => n.to_string(),
+        Expr::Unary(UnOp::Neg, x) => format!("-{}", expr_to_string(x)),
+        Expr::Binary(op, l, r) => {
+            let sym = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
+                BinOp::Shl => "<<",
+                BinOp::Shr => ">>",
+                BinOp::LShr => ">>>",
+                BinOp::BitAnd => "&",
+                BinOp::BitOr => "|",
+                BinOp::BitXor => "^",
+                BinOp::Eq => "==",
+                BinOp::Ne => "!=",
+                BinOp::Lt => "<",
+                BinOp::Le => "<=",
+                BinOp::Gt => ">",
+                BinOp::Ge => ">=",
+                BinOp::And => "&&",
+                BinOp::Or => "||",
+                BinOp::Implies => "implies",
+                BinOp::In => "in",
+            };
+            format!("{} {sym} {}", expr_to_string(l), expr_to_string(r))
+        }
+        other => format!("{other:?}"),
     }
 }
 
@@ -3702,7 +3748,7 @@ fn const_index(e: &Expr) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexer::tokenize;
+    use crate::lexer::{tokenize, tokenize_located};
     use crate::parser::Parser;
 
     fn check(src: &str) -> Result<(), String> {
@@ -3727,10 +3773,143 @@ mod tests {
     }
 
     fn bounds(src: &str) -> Result<(), String> {
-        let mut p = Parser::new(tokenize(src));
+        let (toks, lines) = tokenize_located(src);
+        let mut p = Parser::with_lines(toks, lines);
         let funcs = p.parse_program();
         let globals = p.take_globals();
         check_constant_bounds(&funcs, &globals)
+    }
+
+    // ---------------------------------------------------------------------------
+    // Bounds-check errors carry the exact source line of the index expression.
+    // The line is the one where the index operator `[` appears, for every flavour
+    // of statement (tail, let-value, assign-target).
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn bounds_error_tail_expr_in_function_body_reports_line_of_access() {
+        // Lines:
+        //   1  fn f(i: i64) -> i64 {
+        //   2      let a[4]
+        //   3      a[i]           ← tail of function body, at line 3
+        //   4  }
+        // `a[i]` is the tail of the function body → its line IS the block expression tail.
+        let err = bounds(
+            "fn f(i: i64) -> i64 {\n\
+             let a[4]\n\
+             a[i]\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot prove") && err.contains("is in bounds")
+                && err.contains("at line 3"),
+            "tail expression must report its own line, got: {err}"
+        );
+    }
+
+    #[test]
+    fn bounds_error_tail_expr_explicit_multiline_reports_true_line() {
+        // Lines:
+        //   1  fn f(i: i64) -> i64 {
+        //   2      let mut a[4]
+        //   3      a[f]    ← the failing index (param `f` is unconstrained)
+        //   4  }
+        let err = bounds(
+            "fn f(i: i64) -> i64 {\n\
+             let mut a[4]\n\
+             a[f]\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot prove") && err.contains("is in bounds")
+                && err.contains("at line 3"),
+            "multi-line tail block must report the actual expression line, got: {err}"
+        );
+    }
+
+    #[test]
+    fn bounds_error_in_let_value_reports_line_of_value_expression() {
+        // src:
+        //   1  fn f(i: i64) -> i64 {
+        //   2      let a[4]
+        //   3      let b: i64 = a[i]   ← index in let-value, at line 3
+        //   4      0
+        //   5  }
+        let err = bounds(
+            "fn f(i: i64) -> i64 {\n\
+             let a[4]\n\
+             let b: i64 = a[i]\n\
+             0\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot prove") && err.contains("is in bounds")
+                && err.contains("at line 3"),
+            "let-value index should report line 3, got: {err}"
+        );
+    }
+
+    #[test]
+    fn bounds_error_in_assign_target_reports_line_of_target_expression() {
+        // Lines:
+        //   1  fn f(i: i64) -> i64 {
+        //   2      let a[4]
+        //   3      a[i] = 0       ← index in assign-target, at line 3
+        //   4      a[0]
+        //   5  }
+        let err = bounds(
+            "fn f(i: i64) -> i64 {\n\
+             let a[4]\n\
+             a[i] = 0\n\
+             a[0]\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot prove") && err.contains("is in bounds")
+                && err.contains("at line 3"),
+            "assign target should report line 3, got: {err}"
+        );
+    }
+
+    #[test]
+    fn bounds_error_in_for_body_tail_reports_actual_line() {
+        // Verify that the for-body tail expression's line is correct in stmt_lines.
+        // src:
+        //   1  let mut a[4]
+        //   2  fn f(i: i64) -> i64 {
+        //   3      let mut j = 0
+        //   4      for j < 10 { j = j + 1
+        //   5      a[j] }           ← tail of for body, at line 5
+        //   6      0
+        //   7  }
+        let err = bounds(
+            "let mut a[4]\n\
+             fn f(i: i64) -> i64 {\n\
+             let mut j = 0\n\
+             for j < 10 { j = j + 1\n\
+             a[j] }\n\
+             0\n\
+             }",
+        )
+        .unwrap_err();
+        // With the fix, the for body's tail `a[j]` is tracked with line 5 in stmt_lines.
+        // a[j] is out of bounds for size 4 (j can be 4..9 from the loop condition),
+        // so we get "cannot prove is in bounds at line 5".
+        let found_line = extract_line(&err);
+        assert!(found_line.is_some(), "expected a line number in error: {err}");
+        assert!(found_line == Some(5), "for-body tail should report line 5, got: {err}");
+    }
+
+    fn extract_line(err: &str) -> Option<u32> {
+        err.split("at line ")
+            .nth(1)
+            .and_then(|s| s.split(';').next())
+            .and_then(|s| s.split(')').next())
+            .and_then(|s| s.trim().parse().ok())
     }
 
     #[test]
@@ -4011,8 +4190,13 @@ mod tests {
     fn rejects_an_unproven_variable_index() {
         // Checked-by-default: an index that is not PROVEN in range is a compile error.
         let err = bounds("fn f(i: i64) -> i64 { let a[4]\na[i] }").unwrap_err();
+        // The WHOLE message, not two loose fragments: it is the message that has to name the
+        // index (`i`), the array, its size and the line, and a test that only checks the two ends
+        // would stay green if the middle went away.
         assert!(
-            err.contains("cannot prove this index is in bounds"),
+            err.contains(
+                "function `f`: cannot prove `i` is in bounds for `a` of size 4 at line 2"
+            ),
             "got: {err}"
         );
     }
@@ -4831,7 +5015,9 @@ mod tests {
         // counterpart. `g[i]` with a variable index is unprovable and must error.
         let err = bounds("let mut g: u8[8]\nfn main(i: i64) -> i64 { g[i] }").unwrap_err();
         assert!(
-            err.contains("cannot prove this index is in bounds") && err.contains("0..8"),
+            err.contains(
+                "function `main`: cannot prove `i` is in bounds for `g` of size 8 at line 2"
+            ) && err.contains("0..8"),
             "module view index must be checked like local view; got: {err}"
         );
     }

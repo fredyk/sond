@@ -341,7 +341,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if let Err(msg) = sondc::check::check_constant_bounds(&funcs, &globals) {
-        eprintln!("sondc: {msg}");
+        eprintln!("sondc: {input}: {msg}");
         return ExitCode::FAILURE;
     }
     // Reject inverted range loops: `for i in a..b` where a > b means the body never executes.

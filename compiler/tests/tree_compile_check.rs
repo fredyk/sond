@@ -28,7 +28,7 @@ const PATH_OVERRIDES: &[(&str, &str)] = &[
 
 const KNOWN_EXCEPTIONS: &[(&str, &str)] = &[
     ("examples/host/crypto/x25519-lib/selftest.snd", "variable `x25_A_LIMBS` is not declared in function `test_field_ops`"),
-    ("examples/uefi/net/arp-reply/arp-reply.snd", "cannot prove this index is in bounds"),
+    ("examples/uefi/net/arp-reply/arp-reply.snd", "cannot prove `i` is in bounds for `digits` of size 16 at line 108"),
 ];
 
 const KNOWN_MODULES: &[(&str, &str)] = &[

@@ -585,8 +585,8 @@ fn parse_block_stamps_each_statement_with_its_source_line() {
     assert_eq!(body.stmts.len(), 2, "two statements; `a + b` is the tail");
     assert_eq!(
         body.stmt_lines,
-        vec![2, 3],
-        "each statement stamped with its line"
+        vec![2, 3, 4],
+        "each statement plus the tail stamped with its source line"
     );
 }
 

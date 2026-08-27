@@ -760,6 +760,7 @@ impl Parser {
                         self.skip_semicolons();
                         if self.peek() == Some(&Token::RBrace) {
                             // Last bare expression = the block's tail value.
+                            stmt_lines.push(stmt_line);
                             tail = Some(Box::new(e));
                         } else {
                             stmts.push(Stmt::Expr(e));
