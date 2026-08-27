@@ -219,6 +219,28 @@ pub struct Block {
     pub stmt_lines: Vec<u32>,
 }
 
+impl Block {
+    pub fn push_stmt(&mut self, stmt: Stmt, line: u32) {
+        self.stmts.push(stmt);
+        while self.stmt_lines.len() < self.stmts.len() {
+            self.stmt_lines.push(0);
+        }
+    }
+    pub fn insert_stmt(&mut self, i: usize, stmt: Stmt, line: u32) {
+        self.stmts.insert(i, stmt);
+        self.stmt_lines.insert(i, line);
+    }
+    pub fn assert_len(&self) {
+        assert_eq!(
+            self.stmt_lines.len(),
+            self.stmts.len(),
+            "stmt_lines.len ({}) != stmts.len ({})",
+            self.stmt_lines.len(),
+            self.stmts.len()
+        );
+    }
+}
+
 /// A statement inside a block.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {

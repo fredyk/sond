@@ -1,5 +1,5 @@
 use super::*;
-use crate::ast::{Expr, Function, Param, Stmt, StructDef, Type, Visibility};
+use crate::ast::{Block, Expr, Function, Param, Stmt, StructDef, Type, Visibility};
 use crate::lexer::tokenize;
 
 fn parse_fn(src: &str) -> Function {
@@ -838,4 +838,68 @@ fn a_struct_literal_still_parses_after_a_range_loop() {
         1,
         "a struct literal after a range loop must still parse"
     );
+}
+
+// ---------------------------------------------------------------------------
+// BUG FIX: stmt_lines must always match stmts after the parser runs.
+// These tests establish that no statement ever enters stmts without a
+// synchronized line number.  The Block methods (push_stmt, insert_stmt)
+// are the only way the parser mutates these vectors.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stmt_lines_len_equals_stmts_len_after_parse_function_body() {
+    let src = "fn f() -> i64 {\n\
+               let a[3]\n\
+               a[0] = 1\n\
+               for x in a {\n\
+               s = s + x\n\
+               }\n\
+               for i in 0..3 {\n\
+               if 1 == 1 { continue }\n\
+               s = s + noexiste\n\
+               }\n\
+               0\n\
+               }";
+    let (toks, lines) = crate::lexer::tokenize_located(src);
+    let mut p = Parser::with_lines(toks, lines);
+    let funcs = p.parse_program();
+    for (i, f) in funcs.iter().enumerate() {
+        let tail_count = if f.body.tail.is_some() { 1 } else { 0 };
+        let expected_lines = f.body.stmts.len() + tail_count;
+        assert_eq!(
+            f.body.stmt_lines.len(),
+            expected_lines,
+            "function #{i}: stmt_lines.len ({}) must equal stmts.len ({}) + tail ({}); got stmt_lines={:?}",
+            f.body.stmt_lines.len(),
+            f.body.stmts.len(),
+            tail_count,
+            f.body.stmt_lines
+        );
+        check_block_invariants(&f.body, i);
+    }
+}
+
+fn check_block_invariants(b: &Block, ctx: usize) {
+    let expected_lines = b.stmts.len() + if b.tail.is_some() { 1 } else { 0 };
+    assert_eq!(
+        b.stmt_lines.len(),
+        expected_lines,
+        "block #{ctx}: stmt_lines.len ({}) must equal stmts.len ({}) + tail ({}); got {:?}",
+        b.stmt_lines.len(),
+        b.stmts.len(),
+        if b.tail.is_some() { 1 } else { 0 },
+        b.stmt_lines
+    );
+    if b.stmt_lines.len() == b.stmts.len() {
+        for (i, stmt) in b.stmts.iter().enumerate() {
+            let _line = b.stmt_lines[i];
+            match stmt {
+                Stmt::For { body, .. } => {
+                    check_block_invariants(body, i);
+                }
+                _ => {}
+            }
+        }
+    }
 }
