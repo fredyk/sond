@@ -11,6 +11,49 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// How long a compiled test program may run before it is treated as hung.
+const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Runs `bin`, returning its exit code and whatever it printed, or `None` if it had to be killed
+/// for running past `DEADLINE`.
+///
+/// The deadline lives HERE, in Rust, and not in a `timeout` binary looked up at a fixed path.
+/// Three tests in this file used to do `if Path::new("/usr/bin/timeout").exists()` and, when it
+/// did not, fall through to running with no limit at all — their own comment said so. A machine
+/// that keeps `timeout` anywhere else silently lost the protection, and a test that hangs does
+/// not fail: it holds the whole suite with nothing on screen, which reads as "slow today".
+fn run_with_deadline(bin: &Path) -> Option<(i32, String)> {
+    let salida = bin.with_extension("stdout");
+    let fichero = std::fs::File::create(&salida).expect("the output file must be writable");
+    let mut hijo = Command::new(bin)
+        .stdout(std::process::Stdio::from(fichero))
+        .spawn()
+        .expect("the compiled program must be runnable");
+    let inicio = std::time::Instant::now();
+    let estado = loop {
+        match hijo.try_wait().expect("waiting on the child must work") {
+            Some(estado) => break estado,
+            None => {
+                if inicio.elapsed() >= DEADLINE {
+                    let _ = hijo.kill();
+                    let _ = hijo.wait();
+                    let _ = std::fs::remove_file(&salida);
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    };
+    let impreso = std::fs::read_to_string(&salida).unwrap_or_default();
+    let _ = std::fs::remove_file(&salida);
+    Some((
+        estado
+            .code()
+            .expect("the program must exit normally, not by signal"),
+        impreso,
+    ))
+}
+
 /// Compiles `src` with the binary this `cargo test` just built and returns the program's exit
 /// code. Files are named after the process and the case so two concurrent runs cannot truncate
 /// each other's output.
@@ -33,11 +76,9 @@ fn compile_and_run(case: &str, src: &str) -> i32 {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let code = Command::new(&bin)
-        .status()
-        .expect("the compiled program must be runnable")
-        .code()
-        .expect("the program must exit normally, not by signal");
+    let (code, _) = run_with_deadline(&bin).unwrap_or_else(|| {
+        panic!("`{case}` ran for over {DEADLINE:?} without finishing: the compiled program never terminates")
+    });
     let _ = std::fs::remove_file(&snd);
     let _ = std::fs::remove_file(Path::new(&bin));
     code
@@ -290,39 +331,19 @@ fn lock_break_releases_the_lock() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Run under `timeout` if available (Linux), otherwise run directly.
-    // The `timeout` binary kills the process after 10 seconds, preventing
-    // an infinite hang from a deadlock bug.
-    let run = if Path::new("/usr/bin/timeout").exists() {
-        format!("timeout 10 {}", bin.display())
-    } else {
-        // Fallback: just run directly. If it hangs, the test will be killed
-        // by the CI/CI-like timeout.
-        format!("{}", bin.display())
-    };
-
-    let code = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&run)
-        .output()
-        .expect("the compiled program must be runnable");
-
-    let exit_code_str = code.status.code().map_or("unknown".to_string(), |c| c.to_string());
-
-    if code.status.code() == Some(124) {
-        // timeout returned 124 = process was killed by timeout
-        panic!("the program hung for 10s — a deadlock in lock+break would cause this\n  stderr: {}", String::from_utf8_lossy(&code.stderr));
-    }
+    // A deadlock in lock+break would hang here for ever, so the run carries a deadline.
+    let (exit_code, stdout) = run_with_deadline(&bin).unwrap_or_else(|| {
+        panic!("the program ran past {DEADLINE:?}: a deadlock in lock+break would cause this")
+    });
 
     // The count travels on stdout, NOT in the exit status: an exit status is a single BYTE, so
     // 100000 would arrive as 160 and the assertion could never hold whatever the compiler did.
     // Written against the status, this test was red from the day it was born and stayed red for
     // the right-looking reason -- "the lock was not released" -- while the lock was released fine.
-    let salida = String::from_utf8_lossy(&code.stdout).trim().to_string();
     assert_eq!(
-        salida, "100000",
-        "break released the lock and the second loop ran to the end (exit status was {})",
-        exit_code_str
+        stdout.trim(),
+        "100000",
+        "break released the lock and the second loop ran to the end (exit status was {exit_code})"
     );
 
     let _ = std::fs::remove_file(&snd);
@@ -376,24 +397,10 @@ fn lock_with_two_threads_fairness_futex_wake_path() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Run under timeout to catch deadlocks from missing futex wake.
-    let run = if Path::new("/usr/bin/timeout").exists() {
-        format!("timeout 10 {}", bin.display())
-    } else {
-        format!("{}", bin.display())
-    };
-
-    let code = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&run)
-        .output()
-        .expect("the compiled program must be runnable");
-
-    if code.status.code() == Some(124) {
-        panic!("the program hung for 10s — missing futex wake causes deadlock\n  stderr: {}", String::from_utf8_lossy(&code.stderr));
-    }
-
-    let exit_code = code.status.code().expect("the program must exit normally");
+    // A missing futex wake deadlocks, so the run carries a deadline.
+    let (exit_code, _stdout) = run_with_deadline(&bin).unwrap_or_else(|| {
+        panic!("the program ran past {DEADLINE:?}: a missing futex wake deadlocks like this")
+    });
     assert_eq!(exit_code, 42, "second thread acquired the lock after first released it (futex wake works)");
 
     let _ = std::fs::remove_file(&snd);
@@ -429,22 +436,10 @@ fn foreach_with_continue_compiles_and_runs() {
     assert!(out.status.success(), "compile must succeed: {}",
         String::from_utf8_lossy(&out.stderr));
 
-    let run = if Path::new("/usr/bin/timeout").exists() {
-        format!("timeout 10 {}", bin.display())
-    } else {
-        format!("{}", bin.display())
-    };
-
-    let code = Command::new("sh").arg("-c").arg(&run)
-        .output().expect("binary must run");
-
-    if code.status.code() == Some(124) {
-        panic!("the program hung for 10s — continue inside foreach skips the counter increment\n  stderr: {}",
-            String::from_utf8_lossy(&code.stderr));
-    }
-
-    let salida = String::from_utf8_lossy(&code.stdout).trim().to_string();
-    assert_eq!(salida, "8", "1+3+4=8, skipping 2 (got: {})", salida);
+    let (_exit_code, stdout) = run_with_deadline(&bin).unwrap_or_else(|| {
+        panic!("the program ran past {DEADLINE:?}: continue inside foreach skips the counter increment")
+    });
+    assert_eq!(stdout.trim(), "8", "1+3+4=8, skipping 2");
     let _ = std::fs::remove_file(&snd);
     let _ = std::fs::remove_file(&bin);
 }
@@ -500,4 +495,32 @@ fn nested_for_continue_advances_inner_not_outer() {
                total\n\
                }\n";
     assert_eq!(compile_and_run("nested-continue", src), 4);
+}
+
+/// A compiled program that never terminates must FAIL the test, not hang the suite.
+///
+/// This is the guard for the whole file: several tests here exist precisely to catch loops the
+/// compiler leaves spinning, and a run with no deadline turns such a bug into `cargo test`
+/// sitting there for ever — which reads as "the suite is slow today", not as a failure. It was
+/// measured: with the foreach `continue` bug alive, one test in this file held the suite past
+/// two minutes with nothing on screen.
+#[test]
+fn a_program_that_never_ends_fails_instead_of_hanging_the_suite() {
+    let src = "fn main() -> i64 {\n\
+               for {\n\
+               }\n\
+               0\n\
+               }\n";
+    let inicio = std::time::Instant::now();
+    let r = std::panic::catch_unwind(|| compile_and_run("never-ends", src));
+    assert!(
+        r.is_err(),
+        "a program stuck in `for {{}}` must make the test fail, but it returned {:?}",
+        r.ok()
+    );
+    assert!(
+        inicio.elapsed() < std::time::Duration::from_secs(60),
+        "the deadline must cut the run short; it took {:?}",
+        inicio.elapsed()
+    );
 }
