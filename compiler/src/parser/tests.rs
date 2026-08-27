@@ -903,3 +903,52 @@ fn check_block_invariants(b: &Block, ctx: usize) {
         }
     }
 }
+
+/// Nothing outside `ast.rs` may push or insert into a `Block`'s `stmts` directly.
+///
+/// `stmts` and `stmt_lines` are parallel BY INDEX. A direct `stmts.insert(0, ..)` in the `for`
+/// desugaring shifted every line by one without touching `stmt_lines`, and the error for a bad
+/// name inside a loop body came out pointing at the `for` line instead of at the offending one.
+/// `push_stmt` / `insert_stmt` are the only entry points that keep the two in step.
+///
+/// The guard walks the source TREE rather than a list of files: a list is a thing to maintain,
+/// and the file that reintroduces this will be one nobody remembered to add to it.
+#[test]
+fn nothing_outside_ast_touches_a_block_s_statements_directly() {
+    // Built at run time so this very file does not contain the string it looks for: written out
+    // in full, the guard found ITSELF and failed on a clean tree -- the same way `pgrep -f` finds
+    // its own command line.
+    let empujar = format!(".stmts{}", ".push(");
+    let meter = format!(".stmts{}", ".insert(");
+    fn recorrer(dir: &std::path::Path, culpables: &mut Vec<String>, empujar: &str, meter: &str) {
+        for e in std::fs::read_dir(dir).expect("the source tree must be readable") {
+            let p = e.expect("each entry must be readable").path();
+            if p.is_dir() {
+                recorrer(&p, culpables, empujar, meter);
+                continue;
+            }
+            if p.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            if p.file_name().and_then(|s| s.to_str()) == Some("ast.rs") {
+                continue; // where push_stmt / insert_stmt live
+            }
+            let texto = std::fs::read_to_string(&p).expect("each source file must be readable");
+            for (n, l) in texto.lines().enumerate() {
+                let code = l.split("//").next().unwrap_or("");
+                if code.contains(empujar) || code.contains(meter) {
+                    culpables.push(format!("{}:{}", p.display(), n + 1));
+                }
+            }
+        }
+    }
+    let raiz = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut culpables = Vec::new();
+    recorrer(&raiz, &mut culpables, &empujar, &meter);
+    assert!(
+        culpables.is_empty(),
+        "these push or insert into a Block's `stmts` without its line, which desynchronises \
+         `stmt_lines` and makes error messages point at the wrong line -- use `push_stmt` / \
+         `insert_stmt`: {culpables:?}"
+    );
+}
