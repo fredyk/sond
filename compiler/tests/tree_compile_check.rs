@@ -27,7 +27,10 @@ const PATH_OVERRIDES: &[(&str, &str)] = &[
 ];
 
 const KNOWN_EXCEPTIONS: &[(&str, &str)] = &[
-    ("examples/host/crypto/x25519-lib/selftest.snd", "variable `x25_A_LIMBS` is not declared in function `test_field_ops`"),
+    // x25_A_LIMBS is undeclared in selftest.snd and line 9 in the developer's view.
+    // The checker receives the file with `include` already resolved (line 381 in the
+    // merged source). The line is real but misleading for the developer.
+    ("examples/host/crypto/x25519-lib/selftest.snd", "variable `x25_A_LIMBS` is not declared in function `test_field_ops` at line 381"),
 ];
 
 const KNOWN_MODULES: &[(&str, &str)] = &[
