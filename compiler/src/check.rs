@@ -1171,6 +1171,25 @@ pub fn check_undeclared_variables(
         }
         scopes.push(top);
         check_undeclared_block(&func.body, &mut scopes, &func.name, 0)?;
+        // `requires` lives at the top of the function, so parameters (and
+        // globals) are in scope.  The caller of the function is what
+        // guarantees the preconditions, so the expressions are still valid
+        // Sond and need the normal undeclared-variable check.
+        for e in &func.requires {
+            check_undeclared_expr(e, &mut scopes, &func.name, 0)?;
+        }
+        // `ensures` also sees all parameters; and if the function has a
+        // named return value (`-> (r: T)`) then `r` is bound in the scope
+        // by a `let` placed by the compiler before this check runs (the
+        // desugar pass inserts it).  Until desugaring the name may be
+        // absent from our scope stack, so we add the named return
+        // explicitly when present.
+        if let Some(ref ret_name) = func.ret_name {
+            scopes.last_mut().unwrap().insert(ret_name.clone());
+        }
+        for e in &func.ensures {
+            check_undeclared_expr(e, &mut scopes, &func.name, 0)?;
+        }
         Ok(())
     }
     for f in funcs {
@@ -1206,7 +1225,11 @@ fn check_undeclared_stmt(
 ) -> Result<(), String> {
     match s {
         Stmt::Let {
-            name, value, ..
+            mutable: _,
+            name,
+            ty: _,
+            value,
+            array_len: _,
         } => {
             check_undeclared_expr(value, scopes, fname, line)?;
             scopes.last_mut().unwrap().insert(name.clone());
@@ -1227,7 +1250,11 @@ fn check_undeclared_stmt(
                 check_undeclared_expr(p, scopes, fname, line)?;
             }
         }
-        Stmt::ParLet { names, peers, .. } => {
+        Stmt::ParLet {
+            mutable: _,
+            names,
+            peers,
+        } => {
             for p in peers {
                 check_undeclared_expr(p, scopes, fname, line)?;
             }
@@ -1235,17 +1262,22 @@ fn check_undeclared_stmt(
                 scopes.last_mut().unwrap().insert(n.clone());
             }
         }
-        Stmt::ParReduce { name, peers, .. } => {
+        Stmt::ParReduce {
+            mutable: _,
+            name,
+            op: _,
+            peers,
+        } => {
             for p in peers {
                 check_undeclared_expr(p, scopes, fname, line)?;
             }
             scopes.last_mut().unwrap().insert(name.clone());
         }
         Stmt::GraphLet {
+            mutable: _,
+            name,
             nodes,
             yield_expr,
-            name,
-            ..
         } => {
             // Every node name is declared BEFORE any node body is walked: the source order of
             // `node` lines carries no meaning (RFC-0008 5.1 — the block is evaluated in dependency
@@ -1260,9 +1292,21 @@ fn check_undeclared_stmt(
             check_undeclared_expr(yield_expr, scopes, fname, line)?;
             scopes.last_mut().unwrap().insert(name.clone());
         }
-        Stmt::For { cond, body, .. } => {
+        Stmt::For {
+            cond,
+            invariant,
+            body,
+            is_range_for: _,
+        } => {
             if let Some(c) = cond {
                 check_undeclared_expr(c, scopes, fname, line)?;
+            }
+            // Check every invariant expression so that a typo like `indx`
+            // instead of `idx` does not silently compile (the invariant
+            // is the single mechanism the prover uses for loops).
+            let invariant_line = line; // invariant lives on the for-line
+            for inv in invariant {
+                check_undeclared_expr(inv, scopes, fname, invariant_line)?;
             }
             scopes.push(HashSet::new());
             check_undeclared_block(body, scopes, fname, line)?;
@@ -7459,6 +7503,217 @@ mod pic16_tests {
         assert!(
             err.contains("constant expression") && err.contains("300") && err.contains("8 bits"),
             "200+100 should be rejected; got: {err}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// check_undeclared_variables — invariant typos and ..-blind spots
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod invariant_undeclared {
+    use super::*;
+    use crate::lexer::tokenize_located;
+    use crate::parser::Parser;
+
+    fn check_undeclared(src: &str) -> Result<(), String> {
+        let (toks, lines) = tokenize_located(src);
+        let mut p = Parser::with_lines(toks, lines);
+        let funcs = p.parse_program();
+        let globals = p.take_globals();
+        let enums = p.take_enums();
+        check_undeclared_variables(&funcs, &globals, &enums)
+    }
+
+    /// An identifier that does not exist, used inside an `invariant` clause,
+    /// must be rejected with its exact source line.
+    #[test]
+    fn undeclared_in_invariant_is_rejected_with_line() {
+        // Line numbers:
+        //   1  fn main() -> i64 {
+        //   2      let mut arr[8]
+        //   3      let mut idx = 0
+        //   4      let mut t = 0
+        //   5      for idx < 8 invariant { indx >= 0 && indx <= 8 } {
+        //   6          t = t + arr[idx]
+        //   7          idx = idx + 1
+        //   8      }
+        //   9      0
+        //  10  }
+        let err = check_undeclared(
+            "fn main() -> i64 {\n\
+             let mut arr[8]\n\
+             let mut idx = 0\n\
+             let mut t = 0\n\
+             for idx < 8 invariant { indx >= 0 && indx <= 8 } {\n\
+                 t = t + arr[idx]\n\
+                 idx = idx + 1\n\
+             }\n\
+             0\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("indx") && err.contains("at line 5"),
+            "must name the bad variable and its line, got: {err}"
+        );
+    }
+
+    /// A variable declared inside the loop body must NOT be visible in the
+    /// invariant: the invariant fires at the loop boundary, before the body
+    /// runs, so the body-local does not exist yet.
+    #[test]
+    fn body_local_not_visible_in_invariant() {
+        let err = check_undeclared(
+            "fn main() -> i64 {\n\
+             let mut arr[8]\n\
+             let mut idx = 0\n\
+             for idx < 8 invariant { val >= 0 } {\n\
+                 let val = arr[idx]\n\
+                 idx = idx + 1\n\
+             }\n\
+             0\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("val") && err.contains("at line 4"),
+            "body-local `val` must not be in scope in the invariant, got: {err}"
+        );
+    }
+
+    /// A function parameter IS visible in the invariant — it is the normal
+    /// case for pre-loop guards.
+    #[test]
+    fn function_param_visible_in_invariant() {
+        assert!(
+            check_undeclared(
+                "fn main(n: i64) -> i64 {\n\
+                 let mut idx = 0\n\
+                 for idx < n invariant { n >= 0 } {\n\
+                     idx = idx + 1\n\
+                 }\n\
+                 0\n\
+                 }",
+            )
+            .is_ok(),
+            "parameter `n` must be visible in the invariant"
+        );
+    }
+
+    /// A variable declared BEFORE the loop IS visible in the invariant —
+    /// this is the common case for loop counters and bounds.
+    #[test]
+    fn var_declared_before_loop_visible_in_invariant() {
+        assert!(
+            check_undeclared(
+                "fn main() -> i64 {\n\
+                 let mut arr[8]\n\
+                 let mut idx = 0\n\
+                 let mut t = 0\n\
+                 for idx < 8 invariant { idx >= 0 && idx <= 8 } {\n\
+                     t = t + arr[idx]\n\
+                     idx = idx + 1\n\
+                 }\n\
+                 0\n\
+                 }",
+            )
+            .is_ok(),
+            "variable `idx` declared before the loop must be visible in the invariant"
+        );
+    }
+
+    /// Regression: undeclared variable in the function body is rejected.
+    #[test]
+    fn undeclared_in_body_is_rejected() {
+        let err = check_undeclared("fn main() -> i64 { noexistenada }").unwrap_err();
+        assert!(
+            err.contains("noexistenada"),
+            "body must reject undeclared vars, got: {err}"
+        );
+    }
+
+    /// Regression: undeclared variable in `requires` is rejected.
+    #[test]
+    fn undeclared_in_requires_is_rejected() {
+        let err =
+            check_undeclared("fn f(x: i64) -> i64 requires { noexistenada > 0 } { 0 }")
+                .unwrap_err();
+        assert!(
+            err.contains("noexistenada"),
+            "requires must reject undeclared vars, got: {err}"
+        );
+    }
+
+    /// Regression: undeclared variable in `ensures` is rejected.
+    #[test]
+    fn undeclared_in_ensures_is_rejected() {
+        let err =
+            check_undeclared("fn f(x: i64) -> (r: i64) ensures { noexistenada > 0 } { 0 }")
+                .unwrap_err();
+        assert!(
+            err.contains("noexistenada"),
+            "ensures must reject undeclared vars, got: {err}"
+        );
+    }
+
+    /// Prevents regression: `check_undeclared_stmt` must not contain a bare
+    /// `..` in any `Stmt` arm.  The test reads the source file and fails if
+    /// it finds `..` used as a pattern (absorbing fields).  Expression content
+    /// like `a..b` or `..Default` does not count.
+    #[test]
+    fn no_ellipsis_in_check_undeclared_stmt() {
+        let source = include_str!("check.rs");
+        // Extract ONLY the check_undeclared_stmt function body (not surrounding
+        // text).  We find the function start, then track braces to find where
+        // it ends (a top-level brace pair at depth 0 after the function name).
+        let in_func = source.lines().skip_while(|l| !l.contains("fn check_undeclared_stmt("));
+        let mut found_ellipsis = false;
+        let mut brace_depth: i32 = 0;
+        let mut entered_body = false; // true after the opening `{` of the fn
+        for line in in_func {
+            let trimmed = line.trim();
+            // Track brace depth from the function-level `{`
+            if !entered_body && trimmed.contains("result<(), String>,") {
+                continue; // signature line, not the body
+            }
+            for ch in trimmed.chars() {
+                if ch == '{' {
+                    brace_depth += 1;
+                    if brace_depth == 1 {
+                        entered_body = true; // enter the function body
+                    }
+                } else if ch == '}' {
+                    brace_depth -= 1;
+                    if brace_depth == 0 {
+                        // Function body closed — stop processing
+                        break;
+                    }
+                }
+            }
+            if !entered_body {
+                continue;
+            }
+            if brace_depth == 0 {
+                // We just closed the function body in the loop above
+                break;
+            }
+            // Inside the function body (brace_depth >= 1), look for bare ..
+            // in Stmt pattern contexts (lines containing `Stmt::`).
+            // Exclude comment-only lines.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if brace_depth >= 1 && trimmed.contains("Stmt::") && trimmed.contains("..") {
+                found_ellipsis = true;
+                break;
+            }
+        }
+        assert!(
+            !found_ellipsis,
+            "check_undeclared_stmt must not use `..` in any Stmt arm pattern; \
+             every field must be named explicitly"
         );
     }
 }
