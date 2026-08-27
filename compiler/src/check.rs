@@ -1301,12 +1301,13 @@ fn check_undeclared_stmt(
             if let Some(c) = cond {
                 check_undeclared_expr(c, scopes, fname, line)?;
             }
-            // Check every invariant expression so that a typo like `indx`
-            // instead of `idx` does not silently compile (the invariant
-            // is the single mechanism the prover uses for loops).
-            let invariant_line = line; // invariant lives on the for-line
+            // The invariant is checked in the scope OUTSIDE the body, which is where it is
+            // evaluated: it fires at the loop boundary, before the body has declared anything.
+            // Without this walk a typo like `indx` for `idx` compiled in silence and the loop
+            // was left unverified -- with the programmer believing the opposite, which is the
+            // one thing this language exists to prevent.
             for inv in invariant {
-                check_undeclared_expr(inv, scopes, fname, invariant_line)?;
+                check_undeclared_expr(inv, scopes, fname, line)?;
             }
             scopes.push(HashSet::new());
             check_undeclared_block(body, scopes, fname, line)?;
@@ -7723,62 +7724,55 @@ mod invariant_undeclared {
         );
     }
 
-    /// Prevents regression: `check_undeclared_stmt` must not contain a bare
-    /// `..` in any `Stmt` arm.  The test reads the source file and fails if
-    /// it finds `..` used as a pattern (absorbing fields).  Expression content
-    /// like `a..b` or `..Default` does not count.
+    /// `check_undeclared_stmt` must name every field of every `Stmt` arm, with no bare `..`.
+    ///
+    /// This is the arrangement that made the bug possible: `Stmt::For { cond, body, .. }`
+    /// swallowed the `invariant` field, so the clause was never walked and a typo in it compiled
+    /// in silence. With every field named, adding a field to the enum breaks THIS function at
+    /// compile time and whoever adds it has to decide what checking it means -- instead of the
+    /// new field being born unchecked.
+    ///
+    /// The whole body is searched, not one line at a time: a four-field pattern is written across
+    /// several lines, so `..` and the `Stmt::` it belongs to usually do NOT share a line. A guard
+    /// that only reads single lines passes a saboteur written the normal way -- measured.
     #[test]
     fn no_ellipsis_in_check_undeclared_stmt() {
         let source = include_str!("check.rs");
-        // Extract ONLY the check_undeclared_stmt function body (not surrounding
-        // text).  We find the function start, then track braces to find where
-        // it ends (a top-level brace pair at depth 0 after the function name).
-        let in_func = source.lines().skip_while(|l| !l.contains("fn check_undeclared_stmt("));
-        let mut found_ellipsis = false;
-        let mut brace_depth: i32 = 0;
-        let mut entered_body = false; // true after the opening `{` of the fn
-        for line in in_func {
-            let trimmed = line.trim();
-            // Track brace depth from the function-level `{`
-            if !entered_body && trimmed.contains("result<(), String>,") {
-                continue; // signature line, not the body
-            }
-            for ch in trimmed.chars() {
-                if ch == '{' {
-                    brace_depth += 1;
-                    if brace_depth == 1 {
-                        entered_body = true; // enter the function body
-                    }
-                } else if ch == '}' {
-                    brace_depth -= 1;
-                    if brace_depth == 0 {
-                        // Function body closed — stop processing
+        let desde = source
+            .find("fn check_undeclared_stmt(")
+            .expect("the function this guard protects must exist");
+        let abre = source[desde..]
+            .find(") -> Result<(), String> {")
+            .map(|i| desde + i + ") -> Result<(), String> {".len() - 1)
+            .expect("the function signature must end in an opening brace");
+
+        let mut profundidad = 0usize;
+        let mut fin = abre;
+        for (i, c) in source[abre..].char_indices() {
+            match c {
+                '{' => profundidad += 1,
+                '}' => {
+                    profundidad -= 1;
+                    if profundidad == 0 {
+                        fin = abre + i;
                         break;
                     }
                 }
-            }
-            if !entered_body {
-                continue;
-            }
-            if brace_depth == 0 {
-                // We just closed the function body in the loop above
-                break;
-            }
-            // Inside the function body (brace_depth >= 1), look for bare ..
-            // in Stmt pattern contexts (lines containing `Stmt::`).
-            // Exclude comment-only lines.
-            if trimmed.starts_with("//") {
-                continue;
-            }
-            if brace_depth >= 1 && trimmed.contains("Stmt::") && trimmed.contains("..") {
-                found_ellipsis = true;
-                break;
+                _ => {}
             }
         }
+        assert!(fin > abre, "the function body must be delimited");
+
+        let cuerpo: String = source[abre..fin]
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            !found_ellipsis,
-            "check_undeclared_stmt must not use `..` in any Stmt arm pattern; \
-             every field must be named explicitly"
+            !cuerpo.contains(".."),
+            "check_undeclared_stmt must name every field of every Stmt arm: a bare `..` there \
+             lets a field be added to the enum and never checked, which is how the `invariant` \
+             clause went unwalked"
         );
     }
 }
