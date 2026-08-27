@@ -1102,6 +1102,228 @@ fn sr_expr(e: &mut Expr) {
     }
 }
 
+/// A single pre-codegen pass that gives every shadowing local declaration a binding
+/// of its own, so the backend's name-keyed frame cannot confuse two variables that
+/// happen to share a name.
+///
+/// The x64 codegen reserves one frame slot per local NAME across the whole function
+/// (`frame_layout::collect_locals` keys by name and dedupes), so two `let n` in
+/// different scopes collapse into one stack slot and the inner one writes over the
+/// outer one's value, which then survives the block — and even overwrites a
+/// parameter of the same name. The scope checker (`check::check_undeclared_variables`)
+/// already knows these are two different variables; the frame is what does not.
+/// Giving each declaration a unique name here, and rewriting every reference that
+/// resolves to it, makes the name-keyed frame (and every name-keyed metadata map in
+/// codegen) agree with what the checker already understood, with no change to the
+/// frame machinery itself.
+///
+/// The rewrite mirrors the checker's scope structure exactly: an `if`/`else` branch,
+/// a `for` body, and a `match` arm each open a scope that closes when the block ends,
+/// so a name declared there stops existing at the closing brace. Only shadowed
+/// declarations are renamed; references use the innermost binding in scope at their
+/// point in the walk. Runs on `func.body` only (parameters keep their names and are
+/// the outermost scope); contract propositions are not touched.
+pub fn disambiguate_shadows(funcs: &mut [Function]) {
+    for f in funcs {
+        let mut scopes: Vec<HashMap<String, String>> = Vec::new();
+        let mut top: HashMap<String, String> = HashMap::new();
+        // Parameters are in scope for the whole body and never renamed.
+        for p in &f.params {
+            top.insert(p.name.clone(), p.name.clone());
+        }
+        scopes.push(top);
+        let mut r = ShadowRenamer { counter: 0 };
+        rename_block(&mut f.body, &mut scopes, &mut r);
+    }
+}
+
+/// Node-counters for synthesizing fresh binding names. A `#` cannot appear in a Sond
+/// identifier (the lexer accepts only alphanumerics and `_`), so a generated name can
+/// never collide with a source-spelled one.
+struct ShadowRenamer {
+    counter: u32,
+}
+
+impl ShadowRenamer {
+    fn fresh(&mut self, name: &str) -> String {
+        self.counter += 1;
+        format!("{name}#{}", self.counter)
+    }
+}
+
+/// The scope stack: each frame maps the source name to the binding name it currently
+/// denotes (the binding name is the source name unless the declaration shadows an
+/// enclosing one). Innermost scope is last, mirroring the checker.
+type ShadowScopes = Vec<HashMap<String, String>>;
+
+/// Resolves a source name to its current binding, innermost scope first. `None` when
+/// the name is not a local at all (a global, a module-level constant, a function name).
+fn shadow_resolve<'a>(scopes: &'a ShadowScopes, name: &str) -> Option<&'a str> {
+    for s in scopes.iter().rev() {
+        if let Some(b) = s.get(name) {
+            return Some(b.as_str());
+        }
+    }
+    None
+}
+
+fn rename_block(b: &mut Block, scopes: &mut ShadowScopes, r: &mut ShadowRenamer) {
+    for s in &mut b.stmts {
+        rename_stmt(s, scopes, r);
+    }
+    if let Some(t) = &mut b.tail {
+        rename_expr(t, scopes, r);
+    }
+}
+
+fn rename_stmt(s: &mut Stmt, scopes: &mut ShadowScopes, r: &mut ShadowRenamer) {
+    match s {
+        Stmt::Let { name, value, .. } => {
+            // The initializer resolves against the OLD binding (`let n = n + 1` reads the
+            // outer `n`), so the value is renamed before the new declaration binds.
+            rename_expr(value, scopes, r);
+            shadow_bind(scopes, r, name);
+        }
+        Stmt::Assign { target, value } => {
+            rename_expr(target, scopes, r);
+            rename_expr(value, scopes, r);
+        }
+        Stmt::Return(Some(e)) => rename_expr(e, scopes, r),
+        Stmt::Return(None) => {}
+        Stmt::Expr(e) | Stmt::Spawn(e) => rename_expr(e, scopes, r),
+        Stmt::Par(peers) => {
+            for p in peers {
+                rename_expr(p, scopes, r);
+            }
+        }
+        Stmt::ParLet { names, peers, .. } => {
+            // The peers resolve against the OLD scope; the names bind afterwards.
+            for p in peers {
+                rename_expr(p, scopes, r);
+            }
+            for n in names.iter_mut() {
+                shadow_bind(scopes, r, n);
+            }
+        }
+        Stmt::ParReduce { name, peers, .. } => {
+            for p in peers {
+                rename_expr(p, scopes, r);
+            }
+            shadow_bind(scopes, r, name);
+        }
+        Stmt::GraphLet {
+            name,
+            nodes,
+            yield_expr,
+            ..
+        } => {
+            // A node can depend on an earlier node's binding, so each binds as it is
+            // walked (mirroring the checker).
+            for (n, e) in nodes.iter_mut() {
+                rename_expr(e, scopes, r);
+                shadow_bind(scopes, r, n);
+            }
+            rename_expr(yield_expr, scopes, r);
+            shadow_bind(scopes, r, name);
+        }
+        Stmt::For { cond, body, .. } => {
+            if let Some(c) = cond {
+                rename_expr(c, scopes, r);
+            }
+            scopes.push(HashMap::new());
+            rename_block(body, scopes, r);
+            scopes.pop();
+        }
+        Stmt::Break | Stmt::Continue => {}
+    }
+}
+
+fn rename_expr(e: &mut Expr, scopes: &mut ShadowScopes, r: &mut ShadowRenamer) {
+    match e {
+        Expr::Var(name) => {
+            if let Some(b) = shadow_resolve(scopes, name) {
+                *name = b.to_string();
+            }
+        }
+        Expr::Field(base, _) => rename_expr(base, scopes, r),
+        Expr::Call(callee, args) => {
+            rename_expr(callee, scopes, r);
+            for a in args.iter_mut() {
+                rename_expr(&mut a.value, scopes, r);
+            }
+        }
+        Expr::Index(base, index) => {
+            rename_expr(base, scopes, r);
+            rename_expr(index, scopes, r);
+        }
+        Expr::Unary(_, inner) => rename_expr(inner, scopes, r),
+        Expr::Binary(_, l, rr) => {
+            rename_expr(l, scopes, r);
+            rename_expr(rr, scopes, r);
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            rename_expr(cond, scopes, r);
+            scopes.push(HashMap::new());
+            rename_block(then_branch, scopes, r);
+            scopes.pop();
+            if let Some(eb) = else_branch {
+                scopes.push(HashMap::new());
+                rename_block(eb, scopes, r);
+                scopes.pop();
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            rename_expr(scrutinee, scopes, r);
+            for arm in arms.iter_mut() {
+                scopes.push(HashMap::new());
+                if let Some(binding) = &mut arm.binding {
+                    shadow_bind(scopes, r, binding);
+                }
+                rename_block(&mut arm.body, scopes, r);
+                scopes.pop();
+            }
+        }
+        Expr::Cast(inner, _) => rename_expr(inner, scopes, r),
+        Expr::List(items) => {
+            for it in items.iter_mut() {
+                rename_expr(it, scopes, r);
+            }
+        }
+        Expr::SliceRange(base, lo, hi) => {
+            rename_expr(base, scopes, r);
+            if let Some(l) = lo {
+                rename_expr(l, scopes, r);
+            }
+            if let Some(h) = hi {
+                rename_expr(h, scopes, r);
+            }
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields.iter_mut() {
+                rename_expr(v, scopes, r);
+            }
+        }
+        Expr::Int(_) | Expr::Decimal(_) | Expr::Str(_) | Expr::Bool(_) => {}
+    }
+}
+
+/// Registers a declaration's binding in the top scope, renaming the declaration when it
+/// shadows any enclosing binding (so the frame gives it a slot of its own). The source
+/// name in `name` is replaced by the binding name that references must use from here on.
+fn shadow_bind(scopes: &mut ShadowScopes, r: &mut ShadowRenamer, name: &mut String) {
+    let fresh = if scopes.iter().any(|s| s.contains_key(name.as_str())) {
+        r.fresh(name)
+    } else {
+        name.clone()
+    };
+    scopes.last_mut().unwrap().insert(name.clone(), fresh.clone());
+    *name = fresh;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
