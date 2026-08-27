@@ -907,12 +907,12 @@ fn walk_sizes_in_expr(e: &mut Expr, sizes: &mut Vec<HashMap<String, i64>>) {
     if let Expr::Field(base, field) = e
         && field == "len"
         && let Expr::Var(name) = base.as_ref()
-        && sizes.last().and_then(|m| m.get(name)).is_some()
+        && sizes.iter().rev().flat_map(|m| m.get(name)).copied().next().is_some()
     {
         let Expr::Var(name) = base.as_ref() else {
             return;
         };
-        if let Some(&n) = sizes.last().unwrap().get(name) {
+        if let Some(n) = sizes.iter().rev().flat_map(|m| m.get(name)).copied().next() {
             *e = Expr::Int(n);
             return;
         }

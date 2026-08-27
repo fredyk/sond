@@ -1039,7 +1039,7 @@ struct Codegen {
     /// of zeros, which is RESERVED rather than written out (see `emit_globals`), so a buffer of
     /// millions of elements costs the compiler and the binary nothing per element.
     global_array_data: Vec<(String, Vec<GlobalWord>, usize)>,
-    /// `let NAME: T[N]` at module level — the element type and declared length, so
+    /// `let NAME: T[N]` at module level — the element type and declared element count, so
     /// `emit_globals` can reserve the right number of BYTES (not words) in `.bss`.
     global_view_lengths: HashMap<String, (Ty, i64)>,
     /// The value kind (`Int`/`Float`) of each in-scope local/parameter, so codegen
@@ -1142,8 +1142,9 @@ impl Codegen {
         self.string_vars.clear();
         self.string_assignments.clear();
         // Register module-level view-typed globals so their element width is known.
-        for (name, (elem_kind, _byte_len)) in &self.global_view_lengths {
+        for (name, (elem_kind, _elem_count)) in &self.global_view_lengths {
             self.view_elem.insert(name.clone(), *elem_kind);
+            self.view_len.insert(name.clone(), *_elem_count);
         }
         // The debug agent itself must NOT be instrumented, or `__dbg_step` (and every helper it
         // calls to serve the socket) would re-enter the checkpoint at each statement: unbounded
@@ -1467,7 +1468,7 @@ impl Codegen {
                 assert_ne!(byte_len, 0, "global `{}`: view length must be > 0", g.name);
                 self.global_arrays.insert(g.name.clone());
                 self.global_view_lengths
-                    .insert(g.name.clone(), (elem_kind, byte_len));
+                    .insert(g.name.clone(), (elem_kind, len));
                 continue;
             }
             // An array global `let NAME[N] = [c0, c1, ...]` is a constant table in
@@ -2147,15 +2148,13 @@ impl Codegen {
         if self.global_view_lengths.is_empty() {
             return;
         }
-        // Sorted, and WITHOUT draining the map: `enter_function` reads it to learn each
-        // global's element width, so emptying it here would leave every function compiled
-        // after this point indexing at the wrong stride, depending on the order of two
-        // passes. Same reason it is not a `HashMap` iteration: emitted code is a build
-        // artefact and must not depend on hash order.
         let mut views: Vec<_> = self
             .global_view_lengths
             .iter()
-            .map(|(name, (_, byte_len))| (name.clone(), *byte_len))
+            .map(|(name, (ty, elem_count))| {
+                let byte_len = elem_count * ty.bits() as i64 / 8;
+                (name.clone(), byte_len)
+            })
             .collect();
         views.sort();
         self.line(".bss");

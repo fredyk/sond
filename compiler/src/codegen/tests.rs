@@ -936,6 +936,93 @@ fn compile_and_run_with_globals(src: &str) -> i32 {
     code
 }
 
+fn compile_and_run_with_globals_lowered(src: &str) -> i32 {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let (funcs, globals, _structs) = super::testutil::parse_and_lower(src, "host");
+    let asm = emit_program_g(&globals, &[], &funcs);
+    let dir = std::env::temp_dir();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stem = format!("sondc_g_l_{}_{}", std::process::id(), n);
+    let asm_path = dir.join(format!("{stem}.s"));
+    let bin_path = dir.join(&stem);
+    std::fs::write(&asm_path, asm).unwrap();
+    assert!(
+        Command::new("cc")
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .status()
+            .unwrap()
+            .success(),
+        "compile failed"
+    );
+    let code = Command::new(&bin_path).status().unwrap().code().unwrap();
+    let _ = std::fs::remove_file(&asm_path);
+    let _ = std::fs::remove_file(&bin_path);
+    code
+}
+
+#[test]
+fn global_constant_table_len_returns_the_count() {
+    // `let t[3] = [10,20,30]` is a constant table in .data; `.len` must yield
+    // the element count 3 (not the byte count).
+    assert_eq!(compile_and_run_with_globals_lowered(
+        "let t[3] = [10, 20, 30]\nfn main() -> i64 { t.len }"
+    ), 3);
+}
+
+#[test]
+fn global_mutable_buffer_len_returns_the_count() {
+    // `let mut buf[7]` reserves 7 words in .bss; `.len` yields 7.
+    assert_eq!(compile_and_run_with_globals_lowered(
+        "let mut buf[7]\nfn main() -> i64 { buf.len }"
+    ), 7);
+}
+
+#[test]
+fn global_typed_view_len_returns_the_count() {
+    // `let g: i64[7]` is a typed view that reserves 7 words in .bss;
+    // `.len` must return 7 (element count, not byte count).
+    assert_eq!(compile_and_run_with_globals_lowered(
+        "let mut g: i64[7]\nfn main() -> i64 { g.len }"
+    ), 7);
+}
+
+#[test]
+fn global_len_uses_element_count_not_byte_count() {
+    // u32 is 4 bytes, 8 bits per byte -> 32 bits per element.
+    // `let buf: u32[4]` reserves 4*4=16 bytes but has 4 elements.
+    // .len must return 4, not 16.
+    assert_eq!(compile_and_run_with_globals_lowered(
+        "let buf: u32[4]\nfn main() -> i64 { buf.len }"
+    ), 4);
+}
+
+#[test]
+fn global_len_inside_if_block() {
+    // .len on a global inside an if branch must resolve to the constant.
+    assert_eq!(compile_and_run_with_globals_lowered(
+        "let arr[5] = [1,2,3,4,5]\nfn main() -> i64 {\n    if 1 == 1 { arr.len }\n    else { 0 }\n}"
+    ), 5);
+}
+
+#[test]
+fn global_len_inside_for_loop() {
+    // .len on a global inside a for loop body must resolve to the constant.
+    assert_eq!(compile_and_run_with_globals_lowered(
+        "let arr[4] = [10,20,30,40]\nfn main() -> i64 {\n    let mut i = 0\n    for i < arr.len { arr[i] = i + 1  i = i + 1 }\n    0\n}"
+    ), 0);
+}
+
+#[test]
+fn local_array_len_still_works() {
+    // Verify the fix does not break local arrays: .len on a local should still
+    // return the expected constant.
+    assert_eq!(compile_and_run(
+        "fn main() -> i64 { let a: i64[5] = [0,0,0,0,0]\n    a.len }"
+    ), 5);
+}
+
 #[test]
 fn compiles_and_runs_module_level_globals_on_real_x64() {
     // A constant global read from a function.
