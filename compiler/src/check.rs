@@ -5219,6 +5219,14 @@ mod undeclared_tests {
         (funcs, globals, enums)
     }
 
+    fn bounds(src: &str) -> Result<(), String> {
+        let (toks, lines) = tokenize_located(src);
+        let mut p = Parser::with_lines(toks, lines);
+        let funcs = p.parse_program();
+        let globals = p.take_globals();
+        check_constant_bounds(&funcs, &globals)
+    }
+
     fn extract_line(err: &str) -> Option<u32> {
         err.split("at line ")
             .nth(1)
@@ -5436,6 +5444,222 @@ mod undeclared_tests {
         );
         check_undeclared_variables(&funcs, &globals, &_enums)
             .expect("enum variant `None` must not be rejected");
+    }
+
+    // ---------------------------------------------------------------------------
+    // BUG FIX: foreach `for x in a` desugaring must keep stmt_lines in sync.
+    // Before the fix, stmt_lines was not updated when synthetic statements
+    // were inserted, causing error line numbers to be wrong.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn undeclared_in_foreach_body_stmt_reports_correct_line() {
+        // Lines:
+        //   1  fn main() -> i64 {
+        //   2      let a[3]
+        //   3      a[0] = 1
+        //   4      let mut s = 0
+        //   5      for x in a {
+        //   6          s = s + x
+        //   7          s = s + noexiste     ← here
+        //   8      }
+        //   9      return s
+        //  10  }
+        let (funcs, globals, _enums) = parse_located(
+            "fn main() -> i64 {\n\
+             let a[3]\n\
+             a[0] = 1\n\
+             let mut s = 0\n\
+             for x in a {\n\
+             s = s + x\n\
+             s = s + noexiste\n\
+             }\n\
+             return s\n\
+             }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("noexiste") && err.contains("at line 7"),
+            "foreach body stmt error must report line 7, got: {err}"
+        );
+        assert_eq!(extract_line(&err), Some(7), "line extraction must yield 7");
+    }
+
+    #[test]
+    fn undeclared_in_foreach_body_first_stmt_reports_correct_line() {
+        // Lines:
+        //   1  fn main() -> i64 {
+        //   2      let a[3]
+        //   3      let mut s = 0
+        //   4      for x in a {
+        //   5          noexiste               ← here
+        //   6          s = s + x
+        //   7      }
+        //   8      return s
+        //   9  }
+        let (funcs, globals, _enums) = parse_located(
+            "fn main() -> i64 {\n\
+             let a[3]\n\
+             let mut s = 0\n\
+             for x in a {\n\
+             noexiste\n\
+             s = s + x\n\
+             }\n\
+             return s\n\
+             }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("noexiste") && err.contains("at line 5"),
+            "foreach first stmt error must report line 5, got: {err}"
+        );
+        assert_eq!(extract_line(&err), Some(5), "line extraction must yield 5");
+    }
+
+    #[test]
+    fn undeclared_in_foreach_body_tail_reports_correct_line() {
+        // Lines:
+        //   1  fn main() -> i64 {
+        //   2      let a[3]
+        //   3      let mut s = 0
+        //   4      for x in a {
+        //   5          s = s + x
+        //   6          noexiste               ← tail, at line 6
+        //   7      }
+        //   8      return s
+        //   9  }
+        let (funcs, globals, _enums) = parse_located(
+            "fn main() -> i64 {\n\
+             let a[3]\n\
+             let mut s = 0\n\
+             for x in a {\n\
+             s = s + x\n\
+             noexiste\n\
+             }\n\
+             return s\n\
+             }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("noexiste") && err.contains("at line 6"),
+            "foreach tail error must report line 6, got: {err}"
+        );
+        assert_eq!(extract_line(&err), Some(6), "line extraction must yield 6");
+    }
+
+    #[test]
+    fn undeclared_in_nested_foreach_reports_outer_for_line() {
+        // Lines:
+        //   1  fn main() -> i64 {
+        //   2      let a[3]
+        //   3      let b[3]
+        //   4      for x in a {
+        //   5          for y in b {
+        //   6              let mut s = 0
+        //   7              s = s + noexiste   ← here
+        //   8          }
+        //   9      }
+        //  10      return 0
+        //  11  }
+        let (funcs, globals, _enums) = parse_located(
+            "fn main() -> i64 {\n\
+             let a[3]\n\
+             let b[3]\n\
+             for x in a {\n\
+             for y in b {\n\
+             let mut s = 0\n\
+             s = s + noexiste\n\
+             }\n\
+             }\n\
+             return 0\n\
+             }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("noexiste") && err.contains("at line 7"),
+            "nested foreach error must report line 7, got: {err}"
+        );
+        assert_eq!(extract_line(&err), Some(7), "line extraction must yield 7");
+    }
+
+    #[test]
+    fn undeclared_in_for_i_in_range_with_direct_continue_reports_correct_line() {
+        // Lines:
+        //   1  fn f() -> i64 {
+        //   2      for i in 0..3 {
+        //   3          continue
+        //   4          let mut x = 0
+        //   5          x = missing            ← undeclared at line 5
+        //   6      }
+        //   7      0
+        //   8  }
+        let (funcs, globals, _enums) = parse_located(
+            "fn f() -> i64 {\n\
+             for i in 0..3 {\n\
+             continue\n\
+             let mut x = 0\n\
+             x = missing\n\
+             }\n\
+             0\n\
+             }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("missing") && err.contains("at line 5"),
+            "for i in range with direct continue, error after must report line 5, got: {err}"
+        );
+    }
+
+    // --- Regression: for forms that already work must keep working ---
+
+    #[test]
+    fn undeclared_in_for_i_lt_3_reports_for_line() {
+        // Lines:
+        //   1  fn f() -> i64 {
+        //   2      let mut i = 0
+        //   3      for i < 3 {
+        //   4        noexiste                 ← here
+        //   5      }
+        //   6      0
+        //   7  }
+        let (funcs, globals, _enums) = parse_located(
+            "fn f() -> i64 {\n\
+             let mut i = 0\n\
+             for i < 3 {\n\
+             noexiste\n\
+             }\n\
+             0\n\
+             }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("noexiste") && err.contains("at line 4"),
+            "for i < 3 body error must report line 4, got: {err}"
+        );
+    }
+
+    #[test]
+    fn undeclared_in_for_c_style_reports_correct_line() {
+        // Lines:
+        //   1  fn f() -> i64 {
+        //   2      for let mut i = 0; i < 3; i = i + 1 {
+        //   3        noexiste                 ← here
+        //   4      }
+        //   5      0
+        //   6  }
+        let (funcs, globals, _enums) = parse_located(
+            "fn f() -> i64 {\n\
+             for let mut i = 0; i < 3; i = i + 1 {\n\
+             noexiste\n\
+             }\n\
+             0\n\
+             }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("noexiste") && err.contains("at line 3"),
+            "for C-style body error must report line 3, got: {err}"
+        );
     }
 }
 

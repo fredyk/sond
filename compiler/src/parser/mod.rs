@@ -579,10 +579,11 @@ impl Parser {
                             let value = self.parse_expr();
                             Stmt::Assign { target, value }
                         };
-                        let mut body = self.parse_block();
-                        sink_tail(&mut body); // the step runs AFTER the body, not before
-                        step_before_continues(&mut body, &step); // ...and before every `continue`
-                        body.stmts.push(step);
+let mut body = self.parse_block();
+                         sink_tail(&mut body); // the step runs AFTER the body, not before
+                         let for_line = stmt_line;
+                         step_before_continues(&mut body, &step); // ...and before every `continue`
+                         body.push_stmt(step, for_line);
                         stmts.push(init);
                         stmts.push(Stmt::For {
                             cond: Some(cond),
@@ -621,22 +622,23 @@ impl Parser {
                             // `true` — leaving struct literals suppressed for the rest of the
                             // file.
                             let end = self.parse_expr();
-                            self.no_struct_lit = saved;
-                            let mut body = self.parse_block();
-                            stmts.push(Stmt::Let {
-                                mutable: true,
-                                name: var.clone(),
-                                ty: None,
-                                value: first,
-                                array_len: None,
-                            });
-                            sink_tail(&mut body); // increment must run AFTER the body, not before
-                            // ...and before every `continue`, which jumps past the end of the
-                            // body: without this the iteration that continues never advances `i`
-                            // and the loop spins for ever.
-                            let inc = assign_inc(&var);
-                            step_before_continues(&mut body, &inc);
-                            body.stmts.push(inc);
+self.no_struct_lit = saved;
+                             let mut body = self.parse_block();
+                             let for_line = stmt_line;
+                             stmts.push(Stmt::Let {
+                                 mutable: true,
+                                 name: var.clone(),
+                                 ty: None,
+                                 value: first,
+                                 array_len: None,
+                             });
+                             sink_tail(&mut body); // increment must run AFTER the body, not before
+                             // ...and before every `continue`, which jumps past the end of the
+                             // body: without this the iteration that continues never advances `i`
+                             // and the loop spins for ever.
+                             let inc = assign_inc(&var);
+                             step_before_continues(&mut body, &inc);
+                             body.push_stmt(inc, for_line);
                             stmts.push(Stmt::For {
                                 cond: Some(Expr::Binary(
                                     BinOp::Lt,
@@ -653,7 +655,8 @@ impl Parser {
                             // named by token position so nested loops never collide.
                             let idx = format!("__fe{}", self.pos);
                             let mut body = self.parse_block();
-                            body.stmts.insert(
+                            let for_line = stmt_line;
+                            body.insert_stmt(
                                 0,
                                 Stmt::Let {
                                     mutable: false,
@@ -665,6 +668,7 @@ impl Parser {
                                     ),
                                     array_len: None,
                                 },
+                                for_line,
                             );
                             sink_tail(&mut body);
                             // ...and before every `continue`, which jumps past the end of the
@@ -672,7 +676,7 @@ impl Parser {
                             // __feN and the loop spins for ever.
                             let idx_inc = assign_inc(&idx);
                             step_before_continues(&mut body, &idx_inc);
-                            body.stmts.push(idx_inc);
+                            body.push_stmt(idx_inc, for_line);
                             stmts.push(Stmt::Let {
                                 mutable: true,
                                 name: idx.clone(),
@@ -1164,14 +1168,30 @@ fn assign_inc(name: &str) -> Stmt {
 /// belongs to that loop and stepping the outer counter as well would silently skip an iteration,
 /// which is a wrong answer rather than a hang, and harder to notice.
 fn step_before_continues(block: &mut Block, step: &Stmt) {
+    // Collect continues at the *current* block level before any insertion (inserting shifts all
+    // subsequent positions).  For each direct `continue` insert the increment right before it,
+    // using the continue's source line so error reporting stays correct.
+    let conts: Vec<(usize, u32)> = block
+        .stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| match s {
+            Stmt::Continue => Some((i, block.stmt_lines[i])),
+            _ => None,
+        })
+        .collect();
+    // Insert from back to front so earlier positions don't shift.
+    for (i, line) in conts.iter().rev() {
+        block.insert_stmt(*i, step.clone(), *line);
+    }
+    // Process statements that may contain continues of THE CURRENT loop.
+    // Nested `for` statements are SKIPPED — they own their own continues, which are processed
+    // when the outer loop's body is itself passed to step_before_continues.
     let mut i = 0;
     while i < block.stmts.len() {
         match &mut block.stmts[i] {
-            Stmt::Continue => {
-                block.stmts.insert(i, step.clone());
-                i += 1; // past the step just inserted
-            }
-            Stmt::For { .. } => {} // a nested loop owns its own `continue`
+            // Direct continues (handled above) and nested fors (own block is handled by caller).
+            Stmt::Continue | Stmt::For { .. } => {}
             other => step_in_stmt(other, step),
         }
         i += 1;
@@ -1237,8 +1257,9 @@ fn step_in_expr(e: &mut Expr, step: &Stmt) {
 }
 
 fn sink_tail(body: &mut Block) {
+    let line = body.stmt_lines.last().copied().unwrap_or(0);
     if let Some(t) = body.tail.take() {
-        body.stmts.push(Stmt::Expr(*t));
+        body.push_stmt(Stmt::Expr(*t), line);
     }
 }
 
