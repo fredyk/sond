@@ -8,19 +8,12 @@ use crate::parser::Parser;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Pipeline provenance guard: every helper that emits AND runs code must call
-/// [`parse_and_lower`] (or a function that delegates to it). This means all checks,
-/// desugars, and contract verification run in exactly the same path as `sondc` itself.
-/// Without it, a helper can silently skip the pipeline and test a compiler that no
-/// user ever runs — the kind of silent divergence that has already bitten us.
-///
-/// **Rule:** every `compile_and_*` helper in this file must call `parse_and_lower`.
-/// Any new compilation helper that wants to skip this path must explain why in code.
-///
-/// The guard is a function comment — Rust cannot force callers to follow a pattern.
-/// What we CAN enforce is that the helpers themselves are the ONLY place `emit_program`
-/// (and friends) are called from tests. If a new helper imports emit_* directly, we
-/// will catch it in review.
+// Every helper below that COMPILES AND RUNS a program goes through `parse_and_lower`, the same
+// entry point `main.rs` uses, so the checks, desugars and contract verification a user gets are
+// the ones the tests get. That is not left to whoever writes the next helper to remember: the test
+// `every_compiling_test_helper_goes_through_the_pipeline` reads this file and fails on any
+// `compile_and_run*` / `compile_and_capture*` that does not. Helpers that only parse, or that emit
+// text without running it, are out of scope -- what must not diverge is the path to EXECUTION.
 pub(crate) fn parse_function(src: &str) -> Function {
     Parser::new(tokenize(src)).parse_function()
 }

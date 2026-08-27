@@ -269,7 +269,8 @@ fn lock_break_releases_the_lock() {
                    for i < 100000 {\n\
                        lock (mtx) { i = i + 1 }\n\
                    }\n\
-                   i\n\
+                   print_int(i)\n\
+                   0\n\
                }\n";
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let stem = format!("behaviour-lock-break-{}", std::process::id());
@@ -313,8 +314,16 @@ fn lock_break_releases_the_lock() {
         panic!("the program hung for 10s — a deadlock in lock+break would cause this\n  stderr: {}", String::from_utf8_lossy(&code.stderr));
     }
 
-    let exit_code = code.status.code().expect("the program must exit normally");
-    assert_eq!(exit_code, 100001, "break released the lock, second loop completed all iterations (exit: {})", exit_code_str);
+    // The count travels on stdout, NOT in the exit status: an exit status is a single BYTE, so
+    // 100000 would arrive as 160 and the assertion could never hold whatever the compiler did.
+    // Written against the status, this test was red from the day it was born and stayed red for
+    // the right-looking reason -- "the lock was not released" -- while the lock was released fine.
+    let salida = String::from_utf8_lossy(&code.stdout).trim().to_string();
+    assert_eq!(
+        salida, "100000",
+        "break released the lock and the second loop ran to the end (exit status was {})",
+        exit_code_str
+    );
 
     let _ = std::fs::remove_file(&snd);
     let _ = std::fs::remove_file(&bin);

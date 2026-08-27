@@ -2704,6 +2704,46 @@ fn the_test_helper_compiles_through_the_same_pipeline_as_the_driver() {
     compile_and_run("fn f() -> i64 { let p = \"Hi!\"\nsyscall(60, peek8(p + 2)) }");
 }
 
+/// ...and the guard above only watches ONE helper, by name. `compile_and_run_with_globals` was
+/// added later, went from the parser straight to `emit_program_g`, and skipped the whole pipeline
+/// without anything firing: the guard could not see a helper it did not name. Ten tests were
+/// running against a compiler no user ever runs.
+///
+/// So this one names none. It reads the helper file and demands that EVERY helper which both
+/// compiles AND runs a program goes through `parse_and_lower`, the same entry point `main.rs`
+/// uses. A helper written tomorrow is watched the day it is written, without anyone remembering
+/// to add it here.
+///
+/// A comment asking the next author to be careful is NOT a guard: that is exactly what was in
+/// place, and the second helper walked past it.
+#[test]
+fn every_compiling_test_helper_goes_through_the_pipeline() {
+    let src = include_str!("testutil.rs");
+    // A helper that only parses (`parse_function`) or only emits text without running it is not
+    // in scope: what must not diverge is the path a program takes before it is EXECUTED.
+    let mut offenders: Vec<&str> = Vec::new();
+    for chunk in src.split("\npub(crate) fn ").skip(1) {
+        let name = chunk.split('(').next().unwrap_or("");
+        if !(name.starts_with("compile_and_run") || name.starts_with("compile_and_capture")) {
+            continue;
+        }
+        // The body ends where the next top-level item begins.
+        let body = chunk.split("\npub(crate) fn ").next().unwrap_or("");
+        let body = body.split("\n}\n").next().unwrap_or(body);
+        if !body.contains("parse_and_lower") {
+            offenders.push(name);
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these helpers compile and run a program without going through `parse_and_lower`, so they \
+         test a compiler `sondc` never runs: {:?}. Route them through `parse_and_lower`; if one \
+         genuinely must skip it, it needs a different name, because this guard watches \
+         `compile_and_run*` and `compile_and_capture*` by shape, on purpose.",
+        offenders
+    );
+}
+
 // ---------- lock is a free identifier ----------
 
 /// `lock` is NOT a reserved keyword: it is a contextual keyword that only acts as
@@ -3009,12 +3049,14 @@ fn lock_break_nested_releases_both_locks() {
              let mut cnt_data[1]\n\
              let mut done[1]\n\
              fn breaker() -> i64 {\n\
-                 lock (a) {\n\
-                     lock (b) {\n\
-                         atomic_add64(done, 1)\n\
-                         break\n\
+                 for {\n\
+                     lock (a) {\n\
+                         lock (b) {\n\
+                             atomic_add64(done, 1)\n\
+                             break\n\
+                         }\n\
+                         999\n\
                      }\n\
-                     999\n\
                  }\n\
                  0\n\
              }\n\

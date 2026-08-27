@@ -1260,21 +1260,21 @@ fn check_undeclared_stmt(
             check_undeclared_expr(yield_expr, scopes, fname, line)?;
             scopes.last_mut().unwrap().insert(name.clone());
         }
-Stmt::For { cond, body, .. } => {
-                if let Some(c) = cond {
-                    check_undeclared_expr(c, scopes, fname, line)?;
-                }
-                scopes.push(HashSet::new());
-                check_undeclared_block(body, scopes, fname, line)?;
-                scopes.pop();
+        Stmt::For { cond, body, .. } => {
+            if let Some(c) = cond {
+                check_undeclared_expr(c, scopes, fname, line)?;
             }
-            Stmt::Lock { name, body } => {
-                // The mutex name is a variable reference like any other: check it against scopes.
-                check_undeclared_expr(&Expr::Var(name.clone()), scopes, fname, line)?;
-                scopes.push(HashSet::new());
-                check_undeclared_block(body, scopes, fname, line)?;
-                scopes.pop();
-            }
+            scopes.push(HashSet::new());
+            check_undeclared_block(body, scopes, fname, line)?;
+            scopes.pop();
+        }
+        Stmt::Lock { name, body } => {
+            // The mutex name is a variable reference like any other: check it against scopes.
+            check_undeclared_expr(&Expr::Var(name.clone()), scopes, fname, line)?;
+            scopes.push(HashSet::new());
+            check_undeclared_block(body, scopes, fname, line)?;
+            scopes.pop();
+        }
         Stmt::Break | Stmt::Continue => {}
     }
     Ok(())
