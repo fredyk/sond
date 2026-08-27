@@ -282,7 +282,12 @@ fn lower_match_payload(
 fn arm_block(scrutinee: &Expr, arm: &MatchArm) -> Block {
     let mut b = arm.body.clone();
     if let Some(bind) = &arm.binding {
-        b.stmts.insert(
+        // Through `insert_stmt`, so the arm's own lines do not shift under the binding. This one
+        // is not reporting wrong lines today only because name resolution runs before this pass;
+        // left as a plain `stmts.insert` it is the same trap as the `for` desugaring, armed and
+        // waiting for the day the order of the phases changes.
+        let line = b.stmt_lines.first().copied().unwrap_or(0);
+        b.insert_stmt(
             0,
             Stmt::Let {
                 mutable: false,
@@ -291,6 +296,7 @@ fn arm_block(scrutinee: &Expr, arm: &MatchArm) -> Block {
                 value: Expr::Field(Box::new(scrutinee.clone()), PAYLOAD.to_string()),
                 array_len: None,
             },
+            line,
         );
     }
     b

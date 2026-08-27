@@ -579,11 +579,11 @@ impl Parser {
                             let value = self.parse_expr();
                             Stmt::Assign { target, value }
                         };
-let mut body = self.parse_block();
-                         sink_tail(&mut body); // the step runs AFTER the body, not before
-                         let for_line = stmt_line;
-                         step_before_continues(&mut body, &step); // ...and before every `continue`
-                         body.push_stmt(step, for_line);
+                        let mut body = self.parse_block();
+                        sink_tail(&mut body); // the step runs AFTER the body, not before
+                        let for_line = stmt_line;
+                        step_before_continues(&mut body, &step); // ...and before every `continue`
+                        body.push_stmt(step, for_line);
                         stmts.push(init);
                         stmts.push(Stmt::For {
                             cond: Some(cond),
@@ -622,23 +622,23 @@ let mut body = self.parse_block();
                             // `true` — leaving struct literals suppressed for the rest of the
                             // file.
                             let end = self.parse_expr();
-self.no_struct_lit = saved;
-                             let mut body = self.parse_block();
-                             let for_line = stmt_line;
-                             stmts.push(Stmt::Let {
-                                 mutable: true,
-                                 name: var.clone(),
-                                 ty: None,
-                                 value: first,
-                                 array_len: None,
-                             });
-                             sink_tail(&mut body); // increment must run AFTER the body, not before
-                             // ...and before every `continue`, which jumps past the end of the
-                             // body: without this the iteration that continues never advances `i`
-                             // and the loop spins for ever.
-                             let inc = assign_inc(&var);
-                             step_before_continues(&mut body, &inc);
-                             body.push_stmt(inc, for_line);
+                            self.no_struct_lit = saved;
+                            let mut body = self.parse_block();
+                            let for_line = stmt_line;
+                            stmts.push(Stmt::Let {
+                                mutable: true,
+                                name: var.clone(),
+                                ty: None,
+                                value: first,
+                                array_len: None,
+                            });
+                            sink_tail(&mut body); // increment must run AFTER the body, not before
+                            // ...and before every `continue`, which jumps past the end of the
+                            // body: without this the iteration that continues never advances `i`
+                            // and the loop spins for ever.
+                            let inc = assign_inc(&var);
+                            step_before_continues(&mut body, &inc);
+                            body.push_stmt(inc, for_line);
                             stmts.push(Stmt::For {
                                 cond: Some(Expr::Binary(
                                     BinOp::Lt,
