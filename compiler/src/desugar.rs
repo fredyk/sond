@@ -841,195 +841,126 @@ const SLICE_TYPE: &str = "Slice";
 /// length-carrying slice type would make `.len` a runtime field; for these fixed arrays it is
 /// the known constant. A struct with a field literally named `len` is unaffected: only names
 /// known to be arrays are rewritten.
+/// Replaces every `name.len` in the body (where `name` is a known fixed-size
+/// array in the current scope) with a constant `i64` literal equal to the
+/// array's length. Scopes: variables declared inside an `if`/`else` body don't
+/// leak out, so `m.len` at outer scope resolves to the outer `m`, not the inner one.
 pub fn lower_array_len(funcs: &mut [Function], globals: &[Global]) {
-    let mut global_sizes: HashMap<String, i64> = HashMap::new();
+    let mut global_map: HashMap<String, i64> = HashMap::new();
     for g in globals {
         if let Some(n) = g.array_len {
-            global_sizes.insert(g.name.clone(), n);
+            global_map.insert(g.name.clone(), n);
         }
     }
     for f in funcs {
-        let mut sizes = global_sizes.clone();
-        collect_array_sizes_block(&f.body, &mut sizes);
-        len_block(&mut f.body, &sizes);
+        let mut sizes: Vec<HashMap<String, i64>> = vec![global_map.clone()];
+        walk_sizes_block(&mut f.body, &mut sizes);
     }
 }
 
-/// Collects every `let name[N]` array size reachable in a body (function-scoped, matching the
-/// codegen frame model where each array (including one declared inside a branch or loop) gets
-/// its own reserved slot).
-fn collect_array_sizes_block(b: &Block, out: &mut HashMap<String, i64>) {
-    for s in &b.stmts {
-        match s {
-            Stmt::Let {
-                name,
-                array_len: Some(n),
-                value,
-                ..
-            } => {
-                out.insert(name.clone(), *n);
-                collect_array_sizes_expr(value, out);
-            }
-            // A view whose length is written down (`u32[16]`, and every `let s: string = ".."`
-            // after the parser counts the literal) knows its own `.len` at compile time, exactly
-            // like a fixed array does.
-            Stmt::Let {
-                name,
-                ty: Some(Type::View(_, Some(len))),
-                value,
-                ..
-            } if len.parse::<i64>().is_ok() => {
-                out.insert(name.clone(), len.parse().unwrap());
-                collect_array_sizes_expr(value, out);
-            }
-            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
-                collect_array_sizes_expr(value, out)
-            }
-            Stmt::Assign { target, value } => {
-                collect_array_sizes_expr(target, out);
-                collect_array_sizes_expr(value, out);
-            }
-            Stmt::For {
-                cond,
-                invariant,
-                body,
-                ..
-            } => {
-                if let Some(c) = cond {
-                    collect_array_sizes_expr(c, out);
-                }
-                for inv in invariant {
-                    collect_array_sizes_expr(inv, out);
-                }
-                collect_array_sizes_block(body, out);
-            }
-            _ => {}
-        }
+fn walk_sizes_block(b: &mut Block, sizes: &mut Vec<HashMap<String, i64>>) {
+    for s in &mut b.stmts {
+        // Insert any array declaration into the current scope before processing
+        // the value expression.
+        insert_array_into_scope(s, sizes);
+        // Process the value/init of any statement.
+        walk_sizes_in_expr_for_stmt(s, sizes);
     }
-    if let Some(t) = &b.tail {
-        collect_array_sizes_expr(t, out);
+    if let Some(t) = &mut b.tail {
+        walk_sizes_in_expr(t, sizes);
     }
 }
 
-fn collect_array_sizes_expr(e: &Expr, out: &mut HashMap<String, i64>) {
-    match e {
-        Expr::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            collect_array_sizes_expr(cond, out);
-            collect_array_sizes_block(then_branch, out);
-            if let Some(eb) = else_branch {
-                collect_array_sizes_block(eb, out);
+fn insert_array_into_scope(s: &mut Stmt, sizes: &mut Vec<HashMap<String, i64>>) {
+    if let Stmt::Let { name, array_len: Some(arr_n), .. } = s {
+        sizes.last_mut().unwrap().insert(name.clone(), *arr_n);
+    } else if let Stmt::Let { name, ty: Some(Type::View(_, Some(len_str))), .. } = s
+        && len_str.parse::<i64>().is_ok()
+    {
+        sizes.last_mut().unwrap().insert(name.clone(), len_str.parse().unwrap());
+    }
+}
+
+fn walk_sizes_in_expr_for_stmt(s: &mut Stmt, sizes: &mut Vec<HashMap<String, i64>>) {
+    match s {
+        Stmt::Let { value, .. } => walk_sizes_in_expr(value, sizes),
+        Stmt::Return(Some(v)) | Stmt::Expr(v) => walk_sizes_in_expr(v, sizes),
+        Stmt::Assign { target, value } => {
+            walk_sizes_in_expr(target, sizes);
+            walk_sizes_in_expr(value, sizes);
+        }
+        Stmt::For { cond, invariant, body, .. } => {
+            if let Some(c) = cond {
+                walk_sizes_in_expr(c, sizes);
             }
-        }
-        Expr::Match { scrutinee, arms } => {
-            collect_array_sizes_expr(scrutinee, out);
-            for a in arms {
-                collect_array_sizes_block(&a.body, out);
+            for inv in invariant.iter_mut() {
+                walk_sizes_in_expr(inv, sizes);
             }
+            walk_sizes_block(body, sizes);
         }
-        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
-            collect_array_sizes_expr(l, out);
-            collect_array_sizes_expr(r, out);
-        }
-        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
-            collect_array_sizes_expr(x, out)
-        }
-        Expr::Call(c, args) => {
-            collect_array_sizes_expr(c, out);
-            for a in args {
-                collect_array_sizes_expr(&a.value, out);
-            }
-        }
-        Expr::List(items) => items
-            .iter()
-            .for_each(|it| collect_array_sizes_expr(it, out)),
-        Expr::StructLit(_, fields) => fields
-            .iter()
-            .for_each(|(_, v)| collect_array_sizes_expr(v, out)),
         _ => {}
     }
 }
 
-fn len_block(b: &mut Block, sizes: &HashMap<String, i64>) {
-    for s in &mut b.stmts {
-        match s {
-            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
-                len_expr(value, sizes)
-            }
-            Stmt::Assign { target, value } => {
-                len_expr(target, sizes);
-                len_expr(value, sizes);
-            }
-            Stmt::For {
-                cond,
-                invariant,
-                body,
-                ..
-            } => {
-                if let Some(c) = cond {
-                    len_expr(c, sizes);
-                }
-                for inv in invariant.iter_mut() {
-                    len_expr(inv, sizes);
-                }
-                len_block(body, sizes);
-            }
-            _ => {}
-        }
-    }
-    if let Some(t) = &mut b.tail {
-        len_expr(t, sizes);
-    }
-}
-
-fn len_expr(e: &mut Expr, sizes: &HashMap<String, i64>) {
-    // `a.len` where `a` is a known fixed-size array → the constant size.
+fn walk_sizes_in_expr(e: &mut Expr, sizes: &mut Vec<HashMap<String, i64>>) {
+    // Replace `name.len` if `name` is a known array in the current scope.
     if let Expr::Field(base, field) = e
         && field == "len"
         && let Expr::Var(name) = base.as_ref()
-        && let Some(&n) = sizes.get(name)
+        && sizes.last().and_then(|m| m.get(name)).is_some()
     {
-        *e = Expr::Int(n);
-        return;
+        let Expr::Var(name) = base.as_ref() else {
+            return;
+        };
+        if let Some(&n) = sizes.last().unwrap().get(name) {
+            *e = Expr::Int(n);
+            return;
+        }
     }
     match e {
-        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
-            len_expr(l, sizes);
-            len_expr(r, sizes);
-        }
-        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => len_expr(x, sizes),
-        Expr::Call(c, args) => {
-            len_expr(c, sizes);
-            for a in args.iter_mut() {
-                len_expr(&mut a.value, sizes);
-            }
-        }
-        Expr::List(items) => items.iter_mut().for_each(|it| len_expr(it, sizes)),
-        Expr::StructLit(_, fields) => fields.iter_mut().for_each(|(_, v)| len_expr(v, sizes)),
         Expr::If {
             cond,
             then_branch,
             else_branch,
         } => {
-            len_expr(cond, sizes);
-            len_block(then_branch, sizes);
+            walk_sizes_in_expr(cond, sizes);
+            sizes.push(HashMap::new());
+            walk_sizes_block(then_branch, sizes);
+            sizes.pop();
             if let Some(eb) = else_branch {
-                len_block(eb, sizes);
+                sizes.push(HashMap::new());
+                walk_sizes_block(eb, sizes);
+                sizes.pop();
             }
         }
         Expr::Match { scrutinee, arms } => {
-            len_expr(scrutinee, sizes);
+            walk_sizes_in_expr(scrutinee, sizes);
             for a in arms.iter_mut() {
-                len_block(&mut a.body, sizes);
+                sizes.push(HashMap::new());
+                walk_sizes_block(&mut a.body, sizes);
+                sizes.pop();
             }
+        }
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            walk_sizes_in_expr(l, sizes);
+            walk_sizes_in_expr(r, sizes);
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
+            walk_sizes_in_expr(x, sizes)
+        }
+        Expr::Call(c, args) => {
+            walk_sizes_in_expr(c, sizes);
+            for a in args.iter_mut() {
+                walk_sizes_in_expr(&mut a.value, sizes);
+            }
+        }
+        Expr::List(items) => items.iter_mut().for_each(|it| walk_sizes_in_expr(it, sizes)),
+        Expr::StructLit(_, fields) => {
+            fields.iter_mut().for_each(|(_, v)| walk_sizes_in_expr(v, sizes))
         }
         _ => {}
     }
 }
-
 /// Lowers a slice range `base[lo:hi]` (Python-style) to a sub-`Slice` VIEW (no copy), over the
 /// same backing store: `Slice { ptr: base.ptr + lo*8, len: hi - lo }`. Omitted bounds default to
 /// `lo = 0` and `hi = base.len`. Runs before struct lowering + hoisting, so the produced
@@ -1665,5 +1596,54 @@ mod tests {
              }",
         );
         assert_eq!(out, "42");
+    }
+
+    // Shadowing of `.len` across nested scopes: the fix ensures that a `let m` inside
+    // an `if` block does not shadow the outer `m` for `.len` resolution at the outer level.
+    // These tests go through `lower_array_len` (the full desugar pipeline via compile_and_capture),
+    // so they exercise the scope-aware walk.
+
+    #[test]
+    fn array_len_shadowing_in_if_block_resolves_outer_scope() {
+        // The outer `m: string = "hola"` has length 4. The inner `m: string = "0123456789"` has
+        // length 10 but is in a nested scope, so `m.len` at outer scope must resolve to 4.
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             let m: string = \"hola\"\n\
+             if 1 == 1 { let m: string = \"0123456789\" }\n\
+             print_int(m.len)\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "4");
+    }
+
+    #[test]
+    fn array_len_shadowing_in_dead_branch_does_not_affect_outer() {
+        // Even when the branch is dead (always false), the outer scope must still resolve correctly.
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             let m: string = \"hola\"\n\
+             if 1 == 0 { let m: string = \"0123456789\" }\n\
+             print_int(m.len)\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "4");
+    }
+
+    #[test]
+    fn array_len_earlier_use_not_affected_by_later_shadowing() {
+        // `a.len` is evaluated BEFORE the inner `a` shadows it, so it must resolve to the outer `a` (5).
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             let a: string = \"12345\"\n\
+             let r = a.len\n\
+             if 1 == 1 { let a: string = \"xy\" }\n\
+             print_int(r)\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "5");
     }
 }
