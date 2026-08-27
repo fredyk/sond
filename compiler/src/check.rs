@@ -3705,9 +3705,19 @@ fn bounds_expr(
                 bounds_block(eb, fname, &mut e2, &mut else_flow, params, funcs, line)?;
             }
             let mut modified = HashSet::new();
-            assigned_vars(then_branch, &mut modified);
-            if let Some(eb) = else_branch {
-                assigned_vars(eb, &mut modified);
+            // Only consider assignments from branches that actually fall through: a branch
+            // ending in `continue`/`break`/`return` diverges, so its writes are local to that
+            // path and do NOT escape to the continuation after the `if`.
+            if block_diverges(then_branch) {
+                // then-branch diverges: only consider else-branch assignments
+                if let Some(eb) = else_branch {
+                    assigned_vars(eb, &mut modified);
+                }
+            } else {
+                assigned_vars(then_branch, &mut modified);
+                if let Some(eb) = else_branch {
+                    assigned_vars(eb, &mut modified);
+                }
             }
             for v in &modified {
                 flow.invalidate(v);
@@ -5083,6 +5093,61 @@ mod tests {
             "for i < 8 {{ g[i] }} must compile without where/requires; got: {:?}",
             bounds(src).err()
         );
+    }
+
+    // --- Continue-related bounds tests (Bug 2: continue before break loses bounds) ---
+
+    #[test]
+    fn range_for_with_continue_still_binds_index_bounds() {
+        let src = "let mut a[4]\n\
+                   fn main() -> i64 {\n\
+                   let mut t = 0\n\
+                   for i in 0..4 {\n\
+                       if a[i] == 9 { continue }\n\
+                       t = t + a[i]\n\
+                   }\n\
+                   print_int(t)\n\
+                   0\n\
+                   }";
+        assert!(bounds(src).is_ok(),
+            "continue inside range-for must not kill index bounds; got: {}",
+            bounds(src).unwrap_err());
+    }
+
+    #[test]
+    fn cstyle_for_with_continue_still_binds_index_bounds() {
+        let src = "let mut a[4]\n\
+                   fn main() -> i64 {\n\
+                   let mut t = 0\n\
+                   for let mut i = 0; i < 4; i = i + 1 {\n\
+                       if a[i] == 9 { continue }\n\
+                       t = t + a[i]\n\
+                   }\n\
+                   print_int(t)\n\
+                   0\n\
+                   }";
+        assert!(bounds(src).is_ok(),
+            "continue inside C-style-for must not kill index bounds; got: {}",
+            bounds(src).unwrap_err());
+    }
+
+    #[test]
+    fn while_for_with_continue_still_binds_index_bounds() {
+        let src = "let mut a[4]\n\
+                   fn main() -> i64 {\n\
+                   let mut i = 0\n\
+                   let mut t = 0\n\
+                   for i < 4 {\n\
+                       if a[i] == 9 { continue }\n\
+                       t = t + a[i]\n\
+                       i = i + 1\n\
+                   }\n\
+                   print_int(t)\n\
+                   0\n\
+                   }";
+        assert!(bounds(src).is_ok(),
+            "continue inside while-for must not kill index bounds; got: {}",
+            bounds(src).unwrap_err());
     }
 }
 
