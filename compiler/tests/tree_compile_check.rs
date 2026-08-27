@@ -27,7 +27,17 @@ const PATH_OVERRIDES: &[(&str, &str)] = &[
 ];
 
 const KNOWN_EXCEPTIONS: &[(&str, &str)] = &[
-    ("examples/host/crypto/x25519-lib/selftest.snd", "variable `x25_A_LIMBS` is not declared in function `test_field_ops`"),
+    // `x25_A_LIMBS` sits on line 9 of selftest.snd as the developer sees it, and the error
+    // below says 381. Both numbers are honest and only one of them is useful: the checker runs
+    // after `include` resolution, so it counts lines in the merged source, and this file pulls
+    // in the library ahead of itself.
+    //
+    // That is a trap, not a detail. A number in an error message reads as an instruction to go
+    // look there, and line 381 does not exist in the file the developer has open. The fix is a
+    // line map from the resolver -- merged line -> (file, line) -- so the message can name the
+    // file it really means. Until that exists, this expectation pins the current behaviour so
+    // nobody mistakes it for the intended one.
+    ("examples/host/crypto/x25519-lib/selftest.snd", "variable `x25_A_LIMBS` is not declared in function `test_field_ops` at line 381"),
 ];
 
 const KNOWN_MODULES: &[(&str, &str)] = &[

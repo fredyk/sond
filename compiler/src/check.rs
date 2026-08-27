@@ -1159,7 +1159,7 @@ pub fn check_undeclared_variables(
             top.insert(n.clone());
         }
         scopes.push(top);
-        check_undeclared_block(&func.body, &mut scopes, &func.name)?;
+        check_undeclared_block(&func.body, &mut scopes, &func.name, 0)?;
         Ok(())
     }
     for f in funcs {
@@ -1174,12 +1174,15 @@ fn check_undeclared_block(
     b: &Block,
     scopes: &mut ScopeStack,
     fname: &str,
+    line: u32,
 ) -> Result<(), String> {
-    for s in &b.stmts {
-        check_undeclared_stmt(s, scopes, fname)?;
+    for (i, s) in b.stmts.iter().enumerate() {
+        let stmt_line = b.stmt_lines.get(i).copied().unwrap_or(line);
+        check_undeclared_stmt(s, scopes, fname, stmt_line)?;
     }
     if let Some(tail) = &b.tail {
-        check_undeclared_expr(tail, scopes, fname)?;
+        let tail_line = b.stmt_lines.last().copied().unwrap_or(line);
+        check_undeclared_expr(tail, scopes, fname, tail_line)?;
     }
     Ok(())
 }
@@ -1188,33 +1191,34 @@ fn check_undeclared_stmt(
     s: &Stmt,
     scopes: &mut ScopeStack,
     fname: &str,
+    line: u32,
 ) -> Result<(), String> {
     match s {
         Stmt::Let {
             name, value, ..
         } => {
-            check_undeclared_expr(value, scopes, fname)?;
+            check_undeclared_expr(value, scopes, fname, line)?;
             scopes.last_mut().unwrap().insert(name.clone());
         }
         Stmt::Assign { target, value } => {
-            check_undeclared_expr(target, scopes, fname)?;
-            check_undeclared_expr(value, scopes, fname)?;
+            check_undeclared_expr(target, scopes, fname, line)?;
+            check_undeclared_expr(value, scopes, fname, line)?;
         }
         Stmt::Return(Some(e)) => {
-            check_undeclared_expr(e, scopes, fname)?;
+            check_undeclared_expr(e, scopes, fname, line)?;
         }
         Stmt::Return(None) => {}
         Stmt::Expr(expr) | Stmt::Spawn(expr) => {
-            check_undeclared_expr(expr, scopes, fname)?;
+            check_undeclared_expr(expr, scopes, fname, line)?;
         }
         Stmt::Par(peers) => {
             for p in peers {
-                check_undeclared_expr(p, scopes, fname)?;
+                check_undeclared_expr(p, scopes, fname, line)?;
             }
         }
         Stmt::ParLet { names, peers, .. } => {
             for p in peers {
-                check_undeclared_expr(p, scopes, fname)?;
+                check_undeclared_expr(p, scopes, fname, line)?;
             }
             for n in names {
                 scopes.last_mut().unwrap().insert(n.clone());
@@ -1222,7 +1226,7 @@ fn check_undeclared_stmt(
         }
         Stmt::ParReduce { name, peers, .. } => {
             for p in peers {
-                check_undeclared_expr(p, scopes, fname)?;
+                check_undeclared_expr(p, scopes, fname, line)?;
             }
             scopes.last_mut().unwrap().insert(name.clone());
         }
@@ -1240,17 +1244,17 @@ fn check_undeclared_stmt(
                 scopes.last_mut().unwrap().insert(n.clone());
             }
             for (_, e) in nodes {
-                check_undeclared_expr(e, scopes, fname)?;
+                check_undeclared_expr(e, scopes, fname, line)?;
             }
-            check_undeclared_expr(yield_expr, scopes, fname)?;
+            check_undeclared_expr(yield_expr, scopes, fname, line)?;
             scopes.last_mut().unwrap().insert(name.clone());
         }
         Stmt::For { cond, body, .. } => {
             if let Some(c) = cond {
-                check_undeclared_expr(c, scopes, fname)?;
+                check_undeclared_expr(c, scopes, fname, line)?;
             }
             scopes.push(HashSet::new());
-            check_undeclared_block(body, scopes, fname)?;
+            check_undeclared_block(body, scopes, fname, line)?;
             scopes.pop();
         }
         Stmt::Break | Stmt::Continue => {}
@@ -1262,46 +1266,53 @@ fn check_undeclared_expr(
     e: &Expr,
     scopes: &mut ScopeStack,
     fname: &str,
+    line: u32,
 ) -> Result<(), String> {
     match e {
         Expr::Var(name) => {
             if !scopes.iter().any(|s| s.contains(name.as_str())) {
-                return Err(format!(
-                    "variable `{name}` is not declared in function `{fname}`"
-                ));
+                if line == 0 {
+                    return Err(format!(
+                        "variable `{name}` is not declared in function `{fname}`"
+                    ));
+                } else {
+                    return Err(format!(
+                        "variable `{name}` is not declared in function `{fname}` at line {line}"
+                    ));
+                }
             }
         }
         Expr::Field(base, _) => {
-            check_undeclared_expr(base, scopes, fname)?;
+            check_undeclared_expr(base, scopes, fname, line)?;
         }
         Expr::Call(_callee, args) => {
             for arg in args {
-                check_undeclared_expr(&arg.value, scopes, fname)?;
+                check_undeclared_expr(&arg.value, scopes, fname, line)?;
             }
         }
         Expr::Index(base, index) => {
-            check_undeclared_expr(base, scopes, fname)?;
-            check_undeclared_expr(index, scopes, fname)?;
+            check_undeclared_expr(base, scopes, fname, line)?;
+            check_undeclared_expr(index, scopes, fname, line)?;
         }
         Expr::Unary(_, inner) => {
-            check_undeclared_expr(inner, scopes, fname)?;
+            check_undeclared_expr(inner, scopes, fname, line)?;
         }
         Expr::Binary(_, l, r) => {
-            check_undeclared_expr(l, scopes, fname)?;
-            check_undeclared_expr(r, scopes, fname)?;
+            check_undeclared_expr(l, scopes, fname, line)?;
+            check_undeclared_expr(r, scopes, fname, line)?;
         }
         Expr::If {
             cond,
             then_branch,
             else_branch,
         } => {
-            check_undeclared_expr(cond, scopes, fname)?;
+            check_undeclared_expr(cond, scopes, fname, line)?;
             scopes.push(HashSet::new());
-            check_undeclared_block(then_branch, scopes, fname)?;
+            check_undeclared_block(then_branch, scopes, fname, line)?;
             scopes.pop();
             if let Some(eb) = else_branch {
                 scopes.push(HashSet::new());
-                check_undeclared_block(eb, scopes, fname)?;
+                check_undeclared_block(eb, scopes, fname, line)?;
                 scopes.pop();
             }
         }
@@ -1309,36 +1320,36 @@ fn check_undeclared_expr(
             scrutinee,
             arms,
         } => {
-            check_undeclared_expr(scrutinee, scopes, fname)?;
+            check_undeclared_expr(scrutinee, scopes, fname, line)?;
             for arm in arms {
                 scopes.push(HashSet::new());
                 if let Some(binding) = &arm.binding {
                     scopes.last_mut().unwrap().insert(binding.clone());
                 }
-                check_undeclared_block(&arm.body, scopes, fname)?;
+                check_undeclared_block(&arm.body, scopes, fname, line)?;
                 scopes.pop();
             }
         }
         Expr::Cast(inner, _) => {
-            check_undeclared_expr(inner, scopes, fname)?;
+            check_undeclared_expr(inner, scopes, fname, line)?;
         }
         Expr::List(items) => {
             for it in items {
-                check_undeclared_expr(it, scopes, fname)?;
+                check_undeclared_expr(it, scopes, fname, line)?;
             }
         }
         Expr::SliceRange(base, lo, hi) => {
-            check_undeclared_expr(base, scopes, fname)?;
+            check_undeclared_expr(base, scopes, fname, line)?;
             if let Some(e) = lo {
-                check_undeclared_expr(e, scopes, fname)?;
+                check_undeclared_expr(e, scopes, fname, line)?;
             }
             if let Some(e) = hi {
-                check_undeclared_expr(e, scopes, fname)?;
+                check_undeclared_expr(e, scopes, fname, line)?;
             }
         }
         Expr::StructLit(_, fields) => {
             for (_, expr) in fields {
-                check_undeclared_expr(expr, scopes, fname)?;
+                check_undeclared_expr(expr, scopes, fname, line)?;
             }
         }
         Expr::Int(_) | Expr::Decimal(_) | Expr::Str(_) | Expr::Bool(_) => {}
@@ -5054,7 +5065,7 @@ mod tests {
 #[cfg(test)]
 mod undeclared_tests {
     use super::*;
-    use crate::lexer::tokenize;
+    use crate::lexer::{tokenize, tokenize_located};
     use crate::parser::Parser;
 
     fn parse(src: &str) -> (Vec<Function>, Vec<Global>, Vec<EnumDef>) {
@@ -5065,9 +5076,166 @@ mod undeclared_tests {
         (funcs, globals, enums)
     }
 
+    fn parse_located(src: &str) -> (Vec<Function>, Vec<Global>, Vec<EnumDef>) {
+        let (toks, lines) = tokenize_located(src);
+        let mut p = Parser::with_lines(toks, lines);
+        let funcs = p.parse_program();
+        let globals = p.take_globals();
+        let enums = p.take_enums();
+        (funcs, globals, enums)
+    }
+
+    fn extract_line(err: &str) -> Option<u32> {
+        err.split("at line ")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .and_then(|s| s.split(';').next())
+            .and_then(|s| s.trim().parse().ok())
+    }
+
+    // ---------------------------------------------------------------------------
+    // The two programs from the prompt — measured with `tokenize_located` so
+    // `stmt_lines` is populated and the reported line is the exact source line.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn undeclared_in_tail_expr_reports_line() {
+        // fn main() -> i64 {        // 1
+        //  let a = 1                // 2
+        //  let b = 2                // 3
+        //  a + zz                   // 4  ← here
+        // }
+        let (funcs, globals, _enums) = parse_located(
+            "fn main() -> i64 {\n let a = 1\n let b = 2\n a + zz\n }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("zz") && err.contains("main"),
+            "error must name the variable and function, got: {err}"
+        );
+        assert!(
+            err.contains("at line 4"),
+            "error must report line 4, got: {err}"
+        );
+        assert_eq!(extract_line(&err), Some(4), "line extraction must yield 4");
+    }
+
+    #[test]
+    fn undeclared_in_if_body_reports_line() {
+        // fn main() -> i64 {       // 1
+        //  let q = 3               // 2
+        //  if 1 == 1 {             // 3
+        //   q = ww                 // 4  ← here
+        //  }
+        //  q
+        // }
+        // The `if` body is a parsed block with its own stmt_lines[0] = 4.
+        let (funcs, globals, _enums) = parse_located(
+            "fn main() -> i64 {\n let q = 3\n if 1 == 1 {\n  q = ww\n }\n q\n }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("ww") && err.contains("main"),
+            "error must name the variable and function, got: {err}"
+        );
+        assert!(
+            err.contains("at line 4"),
+            "error must report the if-body line where the undeclared var appears, got: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Line numbers for the different statement forms where an undeclared name
+    // can appear.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn undeclared_in_let_value_reports_line() {
+        // fn f() -> i64 {       // 1
+        //  let x = missing      // 2  ← here
+        //  x                   // 3
+        // }
+        let (funcs, globals, _enums) = parse_located(
+            "fn f() -> i64 {\n let x = missing\n x\n }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("at line 2"),
+            "undeclared in let value must report line 2, got: {err}"
+        );
+    }
+
+    #[test]
+    fn undeclared_in_assign_target_reports_line() {
+        // fn f() -> i64 {       // 1
+        //  let mut x = 0        // 2
+        //  missing = 1          // 3  ← here
+        // }
+        let (funcs, globals, _enums) = parse_located(
+            "fn f() -> i64 {\n let mut x = 0\n missing = 1\n }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("at line 3"),
+            "undeclared in assign target must report line 3, got: {err}"
+        );
+    }
+
+    #[test]
+    fn undeclared_in_assign_value_reports_line() {
+        // fn f() -> i64 {       // 1
+        //  let mut x = 0        // 2
+        //  x = missing          // 3  ← here
+        // }
+        let (funcs, globals, _enums) = parse_located(
+            "fn f() -> i64 {\n let mut x = 0\n x = missing\n }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("at line 3"),
+            "undeclared in assign value must report line 3, got: {err}"
+        );
+    }
+
+    #[test]
+    fn undeclared_in_for_condition_reports_line() {
+        // fn f() -> i64 {       // 1
+        //  let mut i = 0        // 2
+        //  for missing < 10 {}  // 3  ← here
+        // }
+        let (funcs, globals, _enums) = parse_located(
+            "fn f() -> i64 {\n let mut i = 0\n for missing < 10 {}\n }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("at line 3"),
+            "undeclared in for condition must report line 3, got: {err}"
+        );
+    }
+
+    #[test]
+    fn undeclared_in_return_reports_line() {
+        // fn f() -> i64 {       // 1
+        //  return missing       // 2  ← here
+        // }
+        let (funcs, globals, _enums) = parse_located(
+            "fn f() -> i64 {\n return missing\n }",
+        );
+        let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
+        assert!(
+            err.contains("at line 2"),
+            "undeclared in return must report line 2, got: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Existing tests — updated to use tokenize_located so line info is present.
+    // They assert on message content (variable name, function name), not line.
+    // ---------------------------------------------------------------------------
+
     #[test]
     fn rejects_undeclared_variable() {
-        let (funcs, globals, _enums) = parse("fn f() -> i64 { undeclared_name }");
+        let (funcs, globals, _enums) = parse_located("fn f() -> i64 { undeclared_name }");
         let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
         assert!(
             err.contains("undeclared_name"),
@@ -5077,43 +5245,37 @@ mod undeclared_tests {
 
     #[test]
     fn accepts_declared_variables() {
-        let (funcs, globals, _enums) = parse(
-            "fn f() -> i64 {
-                let x = 42
-                x
-            }",
+        let (funcs, globals, _enums) = parse_located(
+            "fn f() -> i64 {\n let x = 42\n x\n }",
         );
         check_undeclared_variables(&funcs, &globals, &_enums).expect("declared var must be accepted");
     }
 
     #[test]
     fn accepts_function_parameters() {
-        let (funcs, globals, _enums) = parse("fn f(x: i64) -> i64 { x }");
+        let (funcs, globals, _enums) = parse_located("fn f(x: i64) -> i64 { x }");
         check_undeclared_variables(&funcs, &globals, &_enums).expect("param must be accepted");
     }
 
     #[test]
     fn accepts_module_level_globals() {
-        let (funcs, globals, _enums) = parse(
-            "let SHARED = 42
-             fn f() -> i64 { SHARED }",
+        let (funcs, globals, _enums) = parse_located(
+            "let SHARED = 42\nfn f() -> i64 { SHARED }",
         );
         check_undeclared_variables(&funcs, &globals, &_enums).expect("global must be accepted");
     }
 
     #[test]
     fn function_call_targets_are_not_checked_as_variables() {
-        // `f` is a function name, not a variable. Only its arguments are checked.
-        let (funcs, globals, _enums) = parse(
-            "fn callee() -> i64 { 0 }
-             fn caller() -> i64 { callee() }",
+        let (funcs, globals, _enums) = parse_located(
+            "fn callee() -> i64 { 0 }\nfn caller() -> i64 { callee() }",
         );
         check_undeclared_variables(&funcs, &globals, &_enums).expect("function callee must be accepted");
     }
 
     #[test]
     fn function_call_arguments_are_checked_against_scope() {
-        let (funcs, globals, _enums) = parse(
+        let (funcs, globals, _enums) = parse_located(
             "fn f() -> i64 { print_int(not_declared) }",
         );
         let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
@@ -5125,7 +5287,7 @@ mod undeclared_tests {
 
     #[test]
     fn reports_error_in_function_name() {
-        let (funcs, globals, _enums) = parse("fn test_field_ops() -> i64 { missing }");
+        let (funcs, globals, _enums) = parse_located("fn test_field_ops() -> i64 { missing }");
         let err = check_undeclared_variables(&funcs, &globals, &_enums).unwrap_err();
         assert!(
             err.contains("test_field_ops"),
@@ -5135,9 +5297,8 @@ mod undeclared_tests {
 
     #[test]
     fn enum_variant_constructors_are_not_rejected() {
-        let (funcs, globals, _enums) = parse(
-            "enum Opt { Some(i64), None }
-             fn f() -> Opt { None }",
+        let (funcs, globals, _enums) = parse_located(
+            "enum Opt { Some(i64), None }\nfn f() -> Opt { None }",
         );
         check_undeclared_variables(&funcs, &globals, &_enums)
             .expect("enum variant `None` must not be rejected");
