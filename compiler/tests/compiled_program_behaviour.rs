@@ -399,3 +399,105 @@ fn lock_with_two_threads_fairness_futex_wake_path() {
     let _ = std::fs::remove_file(&snd);
     let _ = std::fs::remove_file(&bin);
 }
+
+/// A `for x in a` loop with `continue` MUST NOT hang. The counter must advance past the
+/// continue path (Bug: continue inside foreach never increments the hidden counter).
+#[test]
+fn foreach_with_continue_compiles_and_runs() {
+    let src = "fn main() -> i64 {\n\
+               let a[4]\n\
+               a[0] = 1\n\
+               a[1] = 2\n\
+               a[2] = 3\n\
+               a[3] = 4\n\
+               let mut t = 0\n\
+               for x in a {\n\
+                   if x == 2 { continue }\n\
+                   t = t + x\n\
+               }\n\
+               print_int(t)\n\
+               0\n\
+               }\n";
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let stem = format!("continue-foreach-{}", std::process::id());
+    let snd = dir.join(format!("{stem}.snd"));
+    let bin = dir.join(format!("{stem}.bin"));
+    std::fs::write(&snd, src).expect("write source");
+    let out = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(&snd).arg("-o").arg(&bin)
+        .output().expect("sondc must run");
+    assert!(out.status.success(), "compile must succeed: {}",
+        String::from_utf8_lossy(&out.stderr));
+
+    let run = if Path::new("/usr/bin/timeout").exists() {
+        format!("timeout 10 {}", bin.display())
+    } else {
+        format!("{}", bin.display())
+    };
+
+    let code = Command::new("sh").arg("-c").arg(&run)
+        .output().expect("binary must run");
+
+    if code.status.code() == Some(124) {
+        panic!("the program hung for 10s — continue inside foreach skips the counter increment\n  stderr: {}",
+            String::from_utf8_lossy(&code.stderr));
+    }
+
+    let salida = String::from_utf8_lossy(&code.stdout).trim().to_string();
+    assert_eq!(salida, "8", "1+3+4=8, skipping 2 (got: {})", salida);
+    let _ = std::fs::remove_file(&snd);
+    let _ = std::fs::remove_file(&bin);
+}
+
+/// `for i in 0..n` with `continue` must compile and produce correct results.
+#[test]
+fn range_for_with_continue_compiles_and_runs() {
+    // Sum 0..4 = 0+1+2+3 = 6, skip 2 via continue -> 0+1+3 = 4
+    let src = "fn main() -> i64 {\n\
+               let mut t = 0\n\
+               for i in 0..4 {\n\
+                   if i == 2 { continue }\n\
+                   t = t + i\n\
+               }\n\
+               t\n\
+               }\n";
+    assert_eq!(compile_and_run("range-continue", src), 4);
+}
+
+/// `for let mut i=0; i<n; i=i+1` with `continue` must compile and produce correct results.
+#[test]
+fn cstyle_for_with_continue_compiles_and_runs() {
+    // Same sum: 0+1+3 = 4
+    let src = "fn main() -> i64 {\n\
+               let mut t = 0\n\
+               for let mut i = 0; i < 4; i = i + 1 {\n\
+                   if i == 2 { continue }\n\
+                   t = t + i\n\
+               }\n\
+               t\n\
+               }\n";
+    assert_eq!(compile_and_run("cstyle-continue", src), 4);
+}
+
+/// A `continue` inside a nested for targets the INNER loop's counter only.
+#[test]
+fn nested_for_continue_advances_inner_not_outer() {
+    // x=1, y=1: total += 1. x=1, y=2: continue (skip). x=3, y=1: total += 3. x=3, y=2: continue. total=4
+    let src = "fn main() -> i64 {\n\
+               let a[2]\n\
+               a[0] = 1\n\
+               a[1] = 3\n\
+               let mut total = 0\n\
+               for x in a {\n\
+                   let b[2]\n\
+                   b[0] = 1\n\
+                   b[1] = 2\n\
+                   for y in b {\n\
+                       if y == 2 { continue }\n\
+                       total = total + x * y\n\
+                   }\n\
+               }\n\
+               total\n\
+               }\n";
+    assert_eq!(compile_and_run("nested-continue", src), 4);
+}

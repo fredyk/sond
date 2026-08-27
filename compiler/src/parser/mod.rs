@@ -667,7 +667,12 @@ impl Parser {
                                 },
                             );
                             sink_tail(&mut body);
-                            body.stmts.push(assign_inc(&idx));
+                            // ...and before every `continue`, which jumps past the end of the
+                            // body: without this the iteration that continues never advances
+                            // __feN and the loop spins for ever.
+                            let idx_inc = assign_inc(&idx);
+                            step_before_continues(&mut body, &idx_inc);
+                            body.stmts.push(idx_inc);
                             stmts.push(Stmt::Let {
                                 mutable: true,
                                 name: idx.clone(),
