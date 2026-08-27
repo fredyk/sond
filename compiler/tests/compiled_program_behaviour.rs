@@ -76,3 +76,34 @@ fn a_length_read_before_the_shadowing_block_is_the_one_that_was_in_scope() {
         5
     );
 }
+
+#[test]
+fn a_call_the_prover_knows_nothing_about_does_not_erase_what_it_proved() {
+    // Every bound here is provable: the first loop leaves `len <= 16`, so `i = len - 1` is at
+    // most 15, and the loop condition keeps it at 0 or above. `print_int` is a builtin, and the
+    // prover has no contract for it — which used to make it abandon the whole path and forget
+    // both bounds, so `d[i]` was refused inside `arp-reply.snd` while the identical loop with a
+    // user-defined function in place of the builtin compiled clean.
+    assert_eq!(
+        compile_and_run(
+            "opaque-call",
+            "fn main() -> i64 {\n\
+             \x20let mut n = 1234\n\
+             \x20let mut d[16]\n\
+             \x20let mut len = 0\n\
+             \x20for n > 0 && len < 16 invariant { len <= 16 } {\n\
+             \x20 d[len] = n % 10\n\
+             \x20 len = len + 1\n\
+             \x20 n = n / 10\n\
+             \x20}\n\
+             \x20let mut i = len - 1\n\
+             \x20for i >= 0 invariant { i < 16 } {\n\
+             \x20 print_int(d[i])\n\
+             \x20 i = i - 1\n\
+             \x20}\n\
+             \x20len\n\
+             }\n",
+        ),
+        4
+    );
+}

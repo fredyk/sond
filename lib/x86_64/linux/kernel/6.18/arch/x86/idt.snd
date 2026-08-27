@@ -36,7 +36,7 @@ pub fn pic_unmask(n: i64) {
 }
 
 // Program PIT channel 0 as rate generator at `rate` Hz.
-pub fn pit_init(rate: i64) {
+pub fn pit_init(rate: i64) requires { rate > 0 } {
     let divisor = 1193150 / rate
     outb(0x43, 0x36)       // chan 0, lo/hi, mode 3 (square wave)
     outb(0x40, divisor & 0xFF)
