@@ -1232,9 +1232,15 @@ fn check_undeclared_stmt(
             name,
             ..
         } => {
-            for (n, e) in nodes {
-                check_undeclared_expr(e, scopes, fname)?;
+            // Every node name is declared BEFORE any node body is walked: the source order of
+            // `node` lines carries no meaning (RFC-0008 5.1 — the block is evaluated in dependency
+            // order, and reordering the lines changes nothing), so `node z = add(fx, fy)` written
+            // above `node fx = ..` is a normal graph, not a use of an undeclared name.
+            for (n, _) in nodes.iter() {
                 scopes.last_mut().unwrap().insert(n.clone());
+            }
+            for (_, e) in nodes {
+                check_undeclared_expr(e, scopes, fname)?;
             }
             check_undeclared_expr(yield_expr, scopes, fname)?;
             scopes.last_mut().unwrap().insert(name.clone());
@@ -2975,7 +2981,12 @@ fn is_int_expr(e: &Expr, strings: &HashSet<String>) -> bool {
 
 /// Whether a function parameter accepts text at the type level (`string`).
 fn accepts_text(p: &Param) -> bool {
-    is_string_ty(&p.ty)
+    // `holds_code_points`, not `is_string_ty`: the wider test counts a `u8[n]` view as text, and
+    // that is how EVERY plain byte buffer is declared. `fn fill(b: u8[n], n: i64)` filling a
+    // buffer with 0xFF was refused as "takes `b` as text, and `b` is a number", advice that
+    // cannot be followed because `b` was never text. A parameter carries text when it is
+    // `string` or a view of code points; a byte view is a destination for `.utf8`, not text.
+    holds_code_points(&p.ty)
 }
 
 /// Whether a function parameter expects a *raw* integer (not a text-typed parameter).

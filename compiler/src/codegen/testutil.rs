@@ -12,27 +12,34 @@ pub(crate) fn parse_function(src: &str) -> Function {
     Parser::new(tokenize(src)).parse_function()
 }
 
-/// Parses a program and runs the same RFC-0014 port resolution + splicing the
-/// driver does for the hosted target, so a `use Port` program reaches codegen
-/// with its provider's methods present. A program with no ports is unaffected
-/// (resolution returns nothing to splice).
-pub(crate) fn parse_and_resolve_ports(src: &str) -> Vec<Function> {
+/// Parses a program, resolves RFC-0014 ports, and runs the shared compilation
+/// pipeline (`lower_program`), so the returned data is ready for code emission
+/// — exactly what `sondc` does between parsing and codegen.
+pub(crate) fn parse_and_lower(src: &str, target: &str) -> (Vec<Function>, Vec<Global>, Vec<StructDef>) {
     let mut p = Parser::new(tokenize(src));
     let mut funcs = p.parse_program();
+    let mut globals = p.take_globals();
+    let mut structs = p.take_structs();
+    let enums = p.take_enums();
     let ports = p.take_ports();
     let providers = p.take_providers();
     let uses = p.take_uses();
-    let spliced = crate::ports::resolve_ports(&ports, &providers, &uses, "host")
+    let spliced = crate::ports::resolve_ports(&ports, &providers, &uses, target)
         .expect("port resolution should succeed in this test");
     funcs.extend(spliced);
-    funcs
+    crate::lower_program(&mut funcs, &mut globals, &mut structs, &enums, target)
+        .expect("lower_program should succeed in this test");
+    (funcs, globals, structs)
 }
 
 /// Assembles the emitted program into a real Linux/amd64 binary with `cc`,
-/// runs it, and returns its exit code.
+/// runs it, and returns its exit code.  Uses the full compilation pipeline
+/// (`lower_program`) so the test exercises the same checks and desugars as
+/// `sondc`.
 pub(crate) fn compile_and_run(src: &str) -> i32 {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let asm = emit_program(&parse_and_resolve_ports(src));
+    let (funcs, globals, structs) = parse_and_lower(src, "host");
+    let asm = emit_program_g(&globals, &structs, &funcs);
     let dir = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let stem = format!("sondc_cg_{}_{}", std::process::id(), n);
@@ -52,10 +59,12 @@ pub(crate) fn compile_and_run(src: &str) -> i32 {
     code
 }
 
-/// Compiles a hosted program, runs it, and returns its stdout.
+/// Compiles a hosted program, runs it, and returns its stdout.  Uses the full
+/// compilation pipeline (`lower_program`).
 pub(crate) fn compile_and_capture(src: &str) -> String {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let asm = emit_program(&Parser::new(tokenize(src)).parse_program());
+    let (funcs, globals, structs) = parse_and_lower(src, "host");
+    let asm = emit_program_g(&globals, &structs, &funcs);
     let dir = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let stem = format!("sondc_out_{}_{}", std::process::id(), n);
@@ -86,7 +95,8 @@ pub(crate) fn compile_and_capture(src: &str) -> String {
 /// declares nothing. Alone in its section, the emitter's own declaration is all there is.
 pub(crate) fn freestanding_section_alignment(src: &str) -> (u64, u64, u64) {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let asm = emit_freestanding(&Parser::new(tokenize(src)).parse_program());
+    let (funcs, globals, structs) = parse_and_lower(src, "freestanding");
+    let asm = emit_freestanding_g(&globals, &structs, &funcs);
     let dir = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let stem = format!("sondc_align_{}_{}", std::process::id(), n);
@@ -131,9 +141,11 @@ pub(crate) fn freestanding_section_alignment(src: &str) -> (u64, u64, u64) {
 
 /// Compiles a freestanding program (no libc) and runs it. The binary is
 /// statically linked with its own `_start`: the shape of a Sond `/init`.
+/// Uses the full compilation pipeline (`lower_program`).
 pub(crate) fn compile_and_run_freestanding(src: &str) -> (i32, bool) {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let asm = emit_freestanding(&Parser::new(tokenize(src)).parse_program());
+    let (funcs, globals, structs) = parse_and_lower(src, "freestanding");
+    let asm = emit_freestanding_g(&globals, &structs, &funcs);
     let dir = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let stem = format!("sondc_fs_{}_{}", std::process::id(), n);
@@ -166,14 +178,14 @@ pub(crate) fn compile_and_run_freestanding(src: &str) -> (i32, bool) {
 /// Links an emitted Windows program with the mingw toolchain and runs it under wine,
 /// returning its exit code. The whole point of this target is a binary that runs on a machine
 /// none of us has, so the test runs it on the closest thing available rather than reading the
-/// assembly and hoping.
+/// assembly and hoping. Uses the full compilation pipeline (`lower_program`).
 pub(crate) fn compile_and_run_windows(src: &str) -> i32 {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let mut p = Parser::new(tokenize(src));
-    let funcs = p.parse_program();
-    let globals = p.take_globals();
-    let externs = p.take_externs();
-    let asm = emit_windows_g(&globals, &[], &funcs, &externs);
+    let (funcs, globals, structs) = parse_and_lower(src, "windows");
+    let mut p2 = Parser::new(tokenize(src));
+    let _ = p2.parse_program();
+    let externs = p2.take_externs();
+    let asm = emit_windows_g(&globals, &structs, &funcs, &externs);
     let dir = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let stem = format!("sondc_win_{}_{}", std::process::id(), n);

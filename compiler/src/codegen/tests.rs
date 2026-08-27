@@ -1333,10 +1333,11 @@ fn a_string_literals_bytes_are_readable_by_offset() {
     // "Hi!" emits "Hi!\0"; peek8 at offset gives each byte.
     assert_eq!(
         compile_and_run(
-            "fn f() -> i64 { \
-             let p = \"Hi!\"\n\
-             syscall(60, peek8(p + 2)) \
-             }"
+            // The literal is passed straight to `peek8`: binding it to a `let p: string` first
+            // makes `p` a length-carrying view, and raw `peek` into one of those is refused on
+            // purpose (`p[i]` is the checked way to read it). What this test is about is the
+            // bytes a literal emits, so the literal is where the offset is taken.
+            "fn f() -> i64 { syscall(60, peek8(\"Hi!\" + 2)) }"
         ),
         33
     );
@@ -1731,7 +1732,7 @@ fn a_view_passed_to_a_function_keeps_its_element_width() {
     // so a loop over n elements wrote 2n words and ran off the end of the buffer — a segfault on a
     // 2.7M-pixel image, and silent corruption on a small one.
     let src = "\
-        fn write_two(px: u32[n], n: i64) {\n\
+        fn write_two(px: u32[n], n: i64) requires { n >= 2 } {\n\
             px[0] = 0xAAAAAAAA\n\
             px[1] = 0xBBBBBBBB\n\
         }\n\
@@ -2601,4 +2602,16 @@ fn the_same_program_on_two_lines_is_still_two_statements() {
     );
     // It runs to the right answer on real x64: (1 + 2) + (1 + 2) == 6.
     assert_eq!(compile_and_run(src), 6);
+}
+
+#[test]
+#[should_panic(expected = "is given a string literal but is not declared")]
+fn the_test_helper_compiles_through_the_same_pipeline_as_the_driver() {
+    // Not a codegen test: a guard on the helper. `compile_and_run` used to go from the parser
+    // straight to codegen, skipping the checks and desugars that `main.rs` runs in between, so a
+    // program the compiler REFUSES compiled fine in here. Five tests were written against
+    // programs `sondc` rejects, and a shadowing fix once passed four tests while the binary still
+    // returned the wrong number. This program is rejected by a check; if it ever compiles again,
+    // the helper has stopped going through the pipeline.
+    compile_and_run("fn f() -> i64 { let p = \"Hi!\"\nsyscall(60, peek8(p + 2)) }");
 }
