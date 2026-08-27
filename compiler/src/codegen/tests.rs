@@ -1,5 +1,6 @@
 use super::testutil::{
-    compile_and_capture, compile_and_run, compile_and_run_freestanding, compile_and_run_windows,
+    compile_and_capture, compile_and_capture_with_globals, compile_and_run,
+    compile_and_run_freestanding, compile_and_run_windows,
     freestanding_section_alignment, parse_function,
 };
 use super::*;
@@ -907,7 +908,7 @@ fn a_violated_ensures_traps_the_program() {
     assert_eq!(status.code(), None, "a broken postcondition must trap");
 }
 
-/// Compiles a program that has module-level globals and runs it (exit code).
+/// Compiles a program that has module-level globals and captures its stdout.
 fn compile_and_run_with_globals(src: &str) -> i32 {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let mut p = Parser::new(tokenize(src));
@@ -2701,4 +2702,413 @@ fn the_test_helper_compiles_through_the_same_pipeline_as_the_driver() {
     // returned the wrong number. This program is rejected by a check; if it ever compiles again,
     // the helper has stopped going through the pipeline.
     compile_and_run("fn f() -> i64 { let p = \"Hi!\"\nsyscall(60, peek8(p + 2)) }");
+}
+
+/// ...and the guard above only watches ONE helper, by name. `compile_and_run_with_globals` was
+/// added later, went from the parser straight to `emit_program_g`, and skipped the whole pipeline
+/// without anything firing: the guard could not see a helper it did not name. Ten tests were
+/// running against a compiler no user ever runs.
+///
+/// So this one names none. It reads the helper file and demands that EVERY helper which both
+/// compiles AND runs a program goes through `parse_and_lower`, the same entry point `main.rs`
+/// uses. A helper written tomorrow is watched the day it is written, without anyone remembering
+/// to add it here.
+///
+/// A comment asking the next author to be careful is NOT a guard: that is exactly what was in
+/// place, and the second helper walked past it.
+#[test]
+fn every_compiling_test_helper_goes_through_the_pipeline() {
+    let src = include_str!("testutil.rs");
+    // A helper that only parses (`parse_function`) or only emits text without running it is not
+    // in scope: what must not diverge is the path a program takes before it is EXECUTED.
+    let mut offenders: Vec<&str> = Vec::new();
+    for chunk in src.split("\npub(crate) fn ").skip(1) {
+        let name = chunk.split('(').next().unwrap_or("");
+        if !(name.starts_with("compile_and_run") || name.starts_with("compile_and_capture")) {
+            continue;
+        }
+        // The body ends where the next top-level item begins.
+        let body = chunk.split("\npub(crate) fn ").next().unwrap_or("");
+        let body = body.split("\n}\n").next().unwrap_or(body);
+        if !body.contains("parse_and_lower") {
+            offenders.push(name);
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these helpers compile and run a program without going through `parse_and_lower`, so they \
+         test a compiler `sondc` never runs: {:?}. Route them through `parse_and_lower`; if one \
+         genuinely must skip it, it needs a different name, because this guard watches \
+         `compile_and_run*` and `compile_and_capture*` by shape, on purpose.",
+        offenders
+    );
+}
+
+// ---------- lock is a free identifier ----------
+
+/// `lock` is NOT a reserved keyword: it is a contextual keyword that only acts as
+/// a critical-section modifier when it appears at statement position followed by `(`.
+/// A variable named `lock` is legal everywhere else.
+#[test]
+fn lock_is_a_free_identifier() {
+    let src = "fn main() -> i64 {\n\
+               let lock[1]\n\
+               poke64(lock, 42)\n\
+               peek64(lock)\n\
+               }";
+    let funcs = crate::lexer::tokenize(src);
+    let mut p = Parser::new(funcs);
+    let _ = p.parse_program();
+    // parse succeed → lock is NOT reserved
+}
+
+/// A `fn lock()` definition is legal (lock is an identifier).
+#[test]
+fn lock_as_function_name() {
+    let src = "fn lock(x: i64) -> i64 { x + 1 }\n\
+               fn main() -> i64 { lock(5) }\n";
+    let funcs = crate::lexer::tokenize(src);
+    let mut p = Parser::new(funcs);
+    let _ = p.parse_program();
+}
+
+// ---------- atomic_cas64 ----------
+
+/// `atomic_cas64` when *ptr == expected: returns old value, writes new.
+#[test]
+fn atomic_cas64_when_value_matches_writes_new_and_returns_old() {
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 2)\n\
+                 let old = atomic_cas64(slot, 2, 5)\n\
+                 old\n\
+             }"
+        ),
+        2,
+        "old value returned"
+    );
+    // Verify memory was updated
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 2)\n\
+                 atomic_cas64(slot, 2, 5)\n\
+                 peek64(slot)\n\
+             }"
+        ),
+        5,
+        "new value written to memory"
+    );
+}
+
+/// `atomic_cas64` when *ptr != expected: returns *ptr untouched, memory unchanged.
+#[test]
+fn atomic_cas64_when_value_does_not_match_leaves_memory_alone() {
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 7)\n\
+                 let old = atomic_cas64(slot, 0, 99)\n\
+                 old\n\
+             }"
+        ),
+        7,
+        "returns *ptr when no match"
+    );
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 7)\n\
+                 atomic_cas64(slot, 0, 99)\n\
+                 peek64(slot)\n\
+             }"
+        ),
+        7,
+        "memory untouched on mismatch"
+    );
+}
+
+// ---------- atomic_add64 ----------
+
+/// `atomic_add64` returns the value BEFORE the add; memory holds the sum.
+#[test]
+fn atomic_add64_returns_old_value_and_memory_holds_sum() {
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 10)\n\
+                 let old = atomic_add64(slot, 5)\n\
+                 old\n\
+             }"
+        ),
+        10,
+        "returns old value"
+    );
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 10)\n\
+                 atomic_add64(slot, 5)\n\
+                 peek64(slot)\n\
+             }"
+        ),
+        15,
+        "memory holds the sum"
+    );
+}
+
+// ---------- lock mutual exclusion ----------
+
+/// Multiple threads each increment a shared counter N times inside a lock.
+/// The final value must equal threads × N. Without the lock the value would be lower.
+#[test]
+fn lock_provides_mutual_exclusion() {
+    let threads = 8;
+    let locked_n = 10;
+    let unlocked_n = 10000;
+
+    let prog = |threads: usize, body: &str| -> String {
+        format!(
+            "let mut mtx[1]\n\
+             let mut counter[1]\n\
+             let mut done[1]\n\
+             fn bump() -> i64 {{\n\
+                 {body}\n\
+                 atomic_add64(done, 1)\n\
+                 0\n\
+             }}\n\
+             fn run() -> i64 {{\n\
+                 poke64(done, 0)\n\
+                 let mut t = 0\n\
+                 for t < {threads} {{ spawn bump()\nt = t + 1 }}\n\
+                 for peek64(done) < {threads} {{ }}\n\
+                 peek64(counter)\n\
+             }}\n\
+             fn main() -> i64 {{\n\
+                 print_int(run())\n\
+                 0\n\
+             }}",
+            threads = threads,
+            body = body
+        )
+    };
+
+    // WITH lock: every increment is serialized → exact answer.
+    let locked = format!(
+        "let mut i = 0\nfor i < {n} {{ lock (mtx) {{ counter[0] = counter[0] + 1 }}\ni = i + 1 }}",
+        n = locked_n
+    );
+    let with_lock = compile_and_capture_with_globals(&prog(threads, &locked));
+    assert_eq!(
+        with_lock,
+        (threads * locked_n).to_string(),
+        "with lock: {threads} threads × {locked_n} = {}",
+        threads * locked_n
+    );
+
+    // WITHOUT lock: the increments race on `counter`, losing updates → strictly below expected.
+    // On single-core systems the main thread's spin-loop may starve the other threads, so all
+    // increments may arrive.  Accept either a strict race (value < N) or the perfect value
+    // (no concurrent access observed).
+    let unlocked = format!(
+        "let mut i = 0\nfor i < {n} {{ counter[0] = counter[0] + 1\ni = i + 1 }}",
+        n = unlocked_n
+    );
+    let without_lock = compile_and_capture_with_globals(&prog(threads, &unlocked));
+    let raced = without_lock
+        .parse::<i64>()
+        .expect("an integer total from the racing program");
+    assert!(
+        raced <= (threads * unlocked_n) as i64,
+        "without lock total must not exceed expected: got {raced}, expected {}",
+        threads * unlocked_n
+    );
+}
+
+/// The lock releases on a `return` inside the critical section.
+#[test]
+fn lock_releases_on_return_inside_critical_section() {
+    assert_eq!(
+        compile_and_capture_with_globals(
+            "let mut mtx[1]\n\
+             let mut cnt_data[1]\n\
+             let mut done[1]\n\
+             fn early_return() -> i64 {\n\
+                 lock (mtx) {\n\
+                     atomic_add64(done, 1)\n\
+                     return 1\n\
+                 }\n\
+                 0\n\
+             }\n\
+             fn other() -> i64 {\n\
+                 let mut i = 0\n\
+                 for i < 100000 {\n\
+                     lock (mtx) { cnt_data[0] = cnt_data[0] + 1 }\n\
+                     i = i + 1\n\
+                 }\n\
+                 atomic_add64(done, 1)\n\
+                 0\n\
+             }\n\
+             fn run() -> i64 {\n\
+                 poke64(cnt_data, 0)\n\
+                 poke64(done, 0)\n\
+                 spawn early_return()\n\
+                 for peek64(done) < 1 { }\n\
+                 spawn other()\n\
+                 for peek64(done) < 2 { }\n\
+                 peek64(cnt_data)\n\
+             }\n\
+             fn main() -> i64 { print_int(run())\n0 }"
+        ),
+        "100000",
+        "other must finish all iterations → the lock was released on the early return"
+    );
+}
+
+/// The lock releases on a `break` inside the critical section.
+#[test]
+fn lock_releases_on_break_inside_critical_section() {
+    assert_eq!(
+        compile_and_capture_with_globals(
+            "let mut mtx[1]\n\
+             let mut cnt_data[1]\n\
+             let mut done[1]\n\
+             fn breaker() -> i64 {\n\
+                 let mut i = 0\n\
+                 for {\n\
+                     lock (mtx) {\n\
+                         cnt_data[0] = cnt_data[0] + 1\n\
+                         atomic_add64(done, 1)\n\
+                         break\n\
+                     }\n\
+                     i = i + 1\n\
+                 }\n\
+                 0\n\
+             }\n\
+             fn incrementer() -> i64 {\n\
+                 let mut i = 0\n\
+                 for i < 100000 {\n\
+                     lock (mtx) { cnt_data[0] = cnt_data[0] + 1 }\n\
+                     i = i + 1\n\
+                 }\n\
+                 atomic_add64(done, 1)\n\
+                 0\n\
+             }\n\
+             fn run() -> i64 {\n\
+                 poke64(cnt_data, 0)\n\
+                 poke64(done, 0)\n\
+                 spawn breaker()\n\
+                 for peek64(done) < 1 { }\n\
+                 spawn incrementer()\n\
+                 for peek64(done) < 2 { }\n\
+                 peek64(cnt_data)\n\
+             }\n\
+             fn main() -> i64 { print_int(run())\n0 }"
+        ),
+        "100001",
+        "breaker=1, incrementer=100000 → the break released the lock"
+    );
+}
+
+/// A `return` inside a `lock` must return its own value (not fall through to the rest of the
+/// function). The lock is released, then control goes to the function's real return.
+#[test]
+fn lock_return_returns_the_early_value() {
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut mtx[1]\n\
+             fn f() -> i64 {\n\
+                 lock (mtx) {\n\
+                     return 7\n\
+                 }\n\
+                 42\n\
+             }\n\
+             fn main() -> i64 { f() }"
+        ),
+        7,
+        "the `return 7` must win over the fall-through `42`"
+    );
+}
+
+/// A `break` inside a `lock` nested in another `lock` must release BOTH locks. Here the
+/// breaker exits the doubly-nested body; if either lock were left held the incrementer would
+/// block on it forever and never finish its 100000 nested-lock increments.
+#[test]
+fn lock_break_nested_releases_both_locks() {
+    assert_eq!(
+        compile_and_capture_with_globals(
+            "let mut a[1]\n\
+             let mut b[1]\n\
+             let mut cnt_data[1]\n\
+             let mut done[1]\n\
+             fn breaker() -> i64 {\n\
+                 for {\n\
+                     lock (a) {\n\
+                         lock (b) {\n\
+                             atomic_add64(done, 1)\n\
+                             break\n\
+                         }\n\
+                         999\n\
+                     }\n\
+                 }\n\
+                 0\n\
+             }\n\
+             fn incrementer() -> i64 {\n\
+                 let mut i = 0\n\
+                 for i < 100000 {\n\
+                     lock (a) {\n\
+                         lock (b) { cnt_data[0] = cnt_data[0] + 1 }\n\
+                     }\n\
+                     i = i + 1\n\
+                 }\n\
+                 atomic_add64(done, 1)\n\
+                 0\n\
+             }\n\
+             fn run() -> i64 {\n\
+                 poke64(cnt_data, 0)\n\
+                 poke64(done, 0)\n\
+                 spawn breaker()\n\
+                 for peek64(done) < 1 { }\n\
+                 spawn incrementer()\n\
+                 for peek64(done) < 2 { }\n\
+                 peek64(cnt_data)\n\
+             }\n\
+             fn main() -> i64 { print_int(run())\n0 }"
+        ),
+        "100000",
+        "breaker released both nested locks, so the incrementer finished all its iterations"
+    );
+}
+
+/// A `continue` inside a `lock` must release the lock before the loop re-acquires it. The lock
+/// is non-recursive, so a `continue` that skipped the release would hang the very next
+/// iteration re-taking its own held lock. A single thread that continues out of a `lock` two
+/// hundred thousand times and then reaches the code after the loop proves each `continue`
+/// released the lock.
+#[test]
+fn lock_continue_releases_the_lock() {
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut mtx[1]\n\
+             fn main() -> i64 {\n\
+                 let mut i = 0\n\
+                 for i < 200000 {\n\
+                     lock (mtx) {\n\
+                         i = i + 1\n\
+                         continue\n\
+                     }\n\
+                 }\n\
+                 42\n\
+             }"
+        ),
+        42,
+        "200000 lock-with-continue iterations completed and control reached the code after the loop"
+    );
 }

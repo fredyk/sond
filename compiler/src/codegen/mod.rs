@@ -693,6 +693,9 @@ fn collect_locals(block: &Block, out: &mut Vec<String>) {
                 }
                 collect_locals(body, out);
             }
+            Stmt::Lock { body, .. } => {
+                collect_locals(body, out);
+            }
             Stmt::Break | Stmt::Continue => {}
         }
     }
@@ -753,6 +756,9 @@ fn collect_arrays(block: &Block, out: &mut Vec<(String, i64)>) {
                 if let Some(c) = cond {
                     collect_arrays_in_expr(c, out);
                 }
+                collect_arrays(body, out);
+            }
+            Stmt::Lock { body, .. } => {
                 collect_arrays(body, out);
             }
             Stmt::Break | Stmt::Continue => {}
@@ -953,6 +959,19 @@ fn collect_locals_in_expr(expr: &Expr, out: &mut Vec<String>) {
     }
 }
 
+/// One structured scope on the `scopes` stack: either a `for` loop or a `lock` body.
+/// A non-local exit (`break`, `continue`, `return`) unwinds every `Lock` scope it crosses,
+/// running that lock's release code, then jumps to its own destination.
+#[derive(Clone)]
+enum Scope {
+    /// A `for` loop: `start` is the top-of-loop label (a `continue` target) and `end` is the
+    /// label just after the loop (a `break` target).
+    Loop { start: String, end: String },
+    /// A `lock (m) { .. }` body. `name` is the lock variable and `body_cont` is the label
+    /// just after the body's own release code (where a `break` with no enclosing loop lands).
+    Lock { name: String, body_cont: String },
+}
+
 #[derive(Default)]
 struct Codegen {
     out: String,
@@ -963,8 +982,10 @@ struct Codegen {
     strings: Vec<(String, String)>,
     /// UEFI target: `print` lowers to ConOut and strings are UTF-16.
     uefi: bool,
-    /// Stack of `(continue_label, break_label)` for the enclosing loops.
-    loop_labels: Vec<(String, String)>,
+    /// Stack of enclosing structured scopes (`for` loops and `lock` bodies), innermost last.
+    /// A `break`/`continue`/`return` unwinds the `lock`s it crosses — running each one's
+    /// release code — before jumping to its own destination, so no exit can leave a lock held.
+    scopes: Vec<Scope>,
     /// Names of the user-defined functions in the program (to tell a call to a
     /// user function from a call to a builtin).
     fn_names: HashSet<String>,
@@ -1845,6 +1866,153 @@ impl Codegen {
         self.line(&format!("    movq %rax, {off}(%rbp)"));
     }
 
+    /// Futex-based `lock (m) { body }` acquire: Drepper's "Futexes Are Tricky" protocol,
+    /// three states (0=free, 1=held, 2=held+waiters), uses FUTEX_WAKE. The lock
+    /// variable `m` is a single 64-bit word (an lvalue). The body runs under the lock;
+    /// any early exit (`return`, `break`) releases the lock before continuing.
+    ///
+    /// A critical section has three ways out — natural fall-through, `break`, `return` — and
+    /// all three must release the lock and then each go to its own destination. The body is
+    /// emitted while this lock is on the `scopes` stack, so `return`/`break`/`continue`
+    /// inside it unwind the locks they cross (running each one's release) before jumping to
+    /// their real target. The natural fall-through runs this lock's own release and lands on
+    /// `body_cont`, the statement right after the `lock`.
+fn emit_lock(&mut self, name: &str, body: &Block) {
+        let acquired = self.fresh_label("lock_acq");
+        let wait_loop = self.fresh_label("lock_wait_loop");
+        let sleep = self.fresh_label("lock_sleep");
+        let body_cont = self.fresh_label("lock_cont");
+
+        // --- ACQUIRE (fast path: CAS 0→1, then slow path with futex) ---
+        self.line(&format!("    leaq {name}(%rip), %rdi"));
+        self.line("    xorq %rax, %rax");          // rax = 0 (expected: free)
+        self.line("    movq $1, %rsi");           // rsi = 1 (new: held)
+        self.line("    lock cmpxchgq %rsi, (%rdi)");
+        self.line(&format!("    je {acquired}")); // fast path: grabbed it
+        // Slow path
+        self.line(&format!("{wait_loop}:"));
+        self.line("    movq $2, %rsi");  // rsi = 2 (new: held+waiter)
+        self.line("    movq $1, %rax");  // rax = 1 (expected: held)
+        self.line("    lock cmpxchgq %rsi, (%rdi)");
+        self.line(&format!("    je {sleep}")); // still held: sleep
+        // Released to 0: try to grab
+        self.line("    xorq %rax, %rax");   // rax = 0
+        self.line("    movq $1, %rsi");     // rsi = 1
+        self.line("    lock cmpxchgq %rsi, (%rdi)");
+        self.line(&format!("    je {acquired}")); // grabbed it
+        // Sleep until woken
+        self.line(&format!("{sleep}:"));
+        self.line(&format!("    leaq {name}(%rip), %rdi"));
+        self.line("    xorq %rsi, %rsi");     // futex_op = FUTEX_WAIT
+        self.line("    movq $2, %rdx");       // value = 2
+        self.line("    xorq %r10, %r10");     // flags = 0 (no private)
+        self.line("    movq $202, %rax");     // SYS_futex = 202
+        self.line("    syscall");
+        self.line("    cmpq $-11, %rax");     // EAGAIN (value changed): retry
+        self.line(&format!("    je {wait_loop}"));
+        self.line("    cmpq $-4, %rax");      // EINTR: retry
+        self.line(&format!("    jmp {wait_loop}")); // other error: retry
+
+        // --- BODY (early exits unwind this lock via the `scopes` stack) ---
+        self.line(&format!("{acquired}:"));
+        self.scopes.push(Scope::Lock {
+            name: name.to_string(),
+            body_cont: body_cont.clone(),
+        });
+        self.block(body);
+        self.scopes.pop();
+
+        // --- Natural exit (reached only by falling off the end of the body: release,
+        // then continue at `body_cont`. `break`/`return` inside the body already ran their
+        // own release and jump away, so they never reach this. ---
+        self.line("    pushq %rax");         // save body's value across release (clobbers %rax)
+        self.emit_lock_release(name);
+        self.line("    popq %rax");          // restore body's value
+        self.line(&format!("{body_cont}:"));
+    }
+
+    /// Emits the shared release of one `lock`: lower the word to 0, and if it was 2
+    /// (someone was waiting) do a `SYS_futex` with `FUTEX_WAKE` on it. On both paths execution
+    /// falls through to the next line, where the caller continues to its own destination. The
+    /// syscall clobbers `%rax`, so a caller that must preserve a value in `%rax` (a `return`)
+    /// saves it first.
+    fn emit_lock_release(&mut self, name: &str) {
+        let nowake = self.fresh_label("nolockwake");
+        // Release: CAS 1→0. If value was 1, stored 0. If value was 2, need to release + wake.
+        self.line(&format!("    leaq {name}(%rip), %rdi"));
+        self.line("    movq $1, %rax");   // CAS expected: 1
+        self.line("    movq $0, %rsi");   // CAS new: 0
+        self.line("    lock cmpxchgq %rsi, (%rdi)");
+        self.line("    cmpq $2, %rax");   // was value 2? (someone waiting)
+        self.line(&format!("    jne {nowake}"));
+        // Value was 2: CAS 1→0 failed because value is 2. Store 0 to release.
+        // (A plain store is used here instead of CAS 2→0 because: if value is still 2, store 0 releases;
+        //  if value changed (e.g., 2→1 by another thread), store 0 still releases — the other thread
+        //  will CAS 1→0 themselves on their turn, making this a harmless additional release.)
+        self.line("    movq $0, (%rdi)");
+        // Wake 1 futex waiter: SYS_futex(202) with op FUTEX_WAKE(1).
+        self.line("    movq $1, %rsi");    // futex_op: FUTEX_WAKE = 1
+        self.line("    movq $1, %rdx");    // val: wake 1 thread
+        self.line("    xorq %r10, %r10");  // flags = 0
+        self.line("    movq $202, %rax");  // SYS_futex
+        self.line("    syscall");
+        self.line(&format!("{nowake}:"));
+    }
+
+    /// Releases the locks in `inner_first` (given innermost first) in order, then jumps to
+    /// `dest`. When `preserve_rax`, saves `%rax` first and restores it after every release
+    /// (they clobber `%rax` via `syscall`) before jumping to `dest`, so a `return` value
+    /// survives. The save is the FIRST instruction emitted, straight after the caller has put
+    /// the value in `%rax`, and the restore is emitted LAST (reached only by the jump that
+    /// ends the last release), so control never falls into it prematurely.
+    fn emit_release_chain(&mut self, inner_first: &[String], dest: &str, preserve_rax: bool) {
+        if inner_first.is_empty() {
+            self.line(&format!("    jmp {dest}"));
+            return;
+        }
+        let n = inner_first.len();
+        if preserve_rax {
+            self.line("    pushq %rax");
+        }
+        // Emitted in place, so control falls into the innermost release (entries[0]) directly.
+        let entries: Vec<String> = (0..n).map(|_| self.fresh_label("lckrel")).collect();
+        let restored = self.fresh_label("lck_restore");
+        for i in 0..n {
+            let entry = entries[i].clone();
+            let cont = if i == n - 1 {
+                if preserve_rax {
+                    restored.clone()
+                } else {
+                    dest.to_string()
+                }
+            } else {
+                entries[i + 1].clone()
+            };
+            self.line(&format!("{entry}:"));
+            self.emit_lock_release(&inner_first[i]);
+            self.line(&format!("    jmp {cont}"));
+        }
+        if preserve_rax {
+            // Reached only by the last release's jump; restore the return value, then return.
+            self.line(&format!("{restored}:"));
+            self.line("    popq %rax");
+            self.line(&format!("    jmp {dest}"));
+        }
+    }
+
+    /// Collect the names of the locks on the `scopes` stack, innermost first — the order in
+    /// which they must be released (a lock acquired last must be released first).
+    fn locks_inner_first(&self) -> Vec<String> {
+        self.scopes
+            .iter()
+            .rev()
+            .filter_map(|s| match s {
+                Scope::Lock { name, .. } => Some(name.clone()),
+                Scope::Loop { .. } => None,
+            })
+            .collect()
+    }
+
     /// Spawns `call` on a new thread. If `result_cell` is `Some`, the child stores the call's
     /// return value (%rax) into that cell just before it exits, so the parent can read the peer's
     /// result after the join (the `par`-let binding). The store happens strictly before `SYS_exit`,
@@ -1877,7 +2045,7 @@ impl Codegen {
         // thread still running, and that thread would never be joined -- a silent leak, which is
         // why this used to be a compile error. It owns a ring of slots instead, rotating through
         // them and joining the one it is about to reuse.
-        let in_loop = !self.loop_labels.is_empty();
+        let in_loop = self.scopes.iter().any(|s| matches!(s, Scope::Loop { .. }));
         let mut cell = String::new();
         let mut table = String::new();
         if in_loop {
@@ -2526,7 +2694,15 @@ impl Codegen {
                         Some(e) => self.expr(e),
                         None => self.line("    movq $0, %rax"),
                     }
-                    self.line(&format!("    jmp {}", self.ret_label.clone()));
+                    // A `return` must release every lock it leaves held, then return the value
+                    // it has already left in `%rax`. The release code clobbers `%rax` (futex
+                    // `syscall`), so `emit_release_chain` saves and restores it.
+                    let locks = self.locks_inner_first();
+                    if locks.is_empty() {
+                        self.line(&format!("    jmp {}", self.ret_label.clone()));
+                    } else {
+                        self.emit_release_chain(&locks, &self.ret_label.clone(), true);
+                    }
                 }
                 Stmt::For { cond, body, .. } => {
                     /* Track string-variable state before the loop body so we can detect
@@ -2538,7 +2714,10 @@ impl Codegen {
                     let before_loop = self.save_string_state();
                     let start = self.fresh_label("for");
                     let end = self.fresh_label("endfor");
-                    self.loop_labels.push((start.clone(), end.clone()));
+                    self.scopes.push(Scope::Loop {
+                        start: start.clone(),
+                        end: end.clone(),
+                    });
                     self.line(&format!("{start}:"));
                     if let Some(c) = cond {
                         self.expr(c);
@@ -2557,25 +2736,50 @@ impl Codegen {
                     }
                     self.line(&format!("    jmp {start}"));
                     self.line(&format!("{end}:"));
-                    self.loop_labels.pop();
+                    self.scopes.pop();
                 }
+                Stmt::Lock { name, body } => self.emit_lock(name, body),
                 Stmt::Break => {
-                    let end = self
-                        .loop_labels
-                        .last()
-                        .expect("break outside loop")
-                        .1
-                        .clone();
-                    self.line(&format!("    jmp {end}"));
+                    // A `break` releases every `lock` between here and its destination, then
+                    // jumps to the nearest enclosing loop's end. With no enclosing loop it is
+                    // a compile error (as it always was before `lock` existed).
+                    let mut release: Vec<String> = Vec::new();
+                    let mut dest: Option<String> = None;
+                    for scope in self.scopes.iter().rev() {
+                        match scope {
+                            Scope::Lock { name, .. } => release.push(name.clone()),
+                            Scope::Loop { end, .. } => {
+                                dest = Some(end.clone());
+                                break;
+                            }
+                        }
+                    }
+                    match dest {
+                        Some(d) => self.emit_release_chain(&release, &d, false),
+                        None => {
+                            // No enclosing loop: reject, as `break` never had any meaning
+                            // outside a loop before the `lock` feature existed.
+                            panic!("`break` outside a loop")
+                        }
+                    }
                 }
                 Stmt::Continue => {
-                    let start = self
-                        .loop_labels
-                        .last()
-                        .expect("continue outside loop")
-                        .0
-                        .clone();
-                    self.line(&format!("    jmp {start}"));
+                    // A `continue` releases every `lock` inside the loop body it crosses (so
+                    // none is left held as the next iteration begins), then jumps to the loop
+                    // top.
+                    let mut release: Vec<String> = Vec::new();
+                    let mut dest: Option<String> = None;
+                    for scope in self.scopes.iter().rev() {
+                        match scope {
+                            Scope::Lock { name, .. } => release.push(name.clone()),
+                            Scope::Loop { start, .. } => {
+                                dest = Some(start.clone());
+                                break;
+                            }
+                        }
+                    }
+                    let start = dest.expect("continue outside loop");
+                    self.emit_release_chain(&release, &start, false);
                 }
             }
         }

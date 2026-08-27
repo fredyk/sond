@@ -663,6 +663,9 @@ fn desugar_stmt(
             }
             desugar_block(body, fields, sizes, locals, methods);
         }
+        Stmt::Lock { body, .. } => {
+            desugar_block(body, fields, sizes, locals, methods);
+        }
         Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
     }
 }
@@ -1230,6 +1233,11 @@ fn rename_stmt(s: &mut Stmt, scopes: &mut ShadowScopes, r: &mut ShadowRenamer) {
             if let Some(c) = cond {
                 rename_expr(c, scopes, r);
             }
+            scopes.push(HashMap::new());
+            rename_block(body, scopes, r);
+            scopes.pop();
+        }
+        Stmt::Lock { body, .. } => {
             scopes.push(HashMap::new());
             rename_block(body, scopes, r);
             scopes.pop();

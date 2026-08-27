@@ -226,3 +226,176 @@ fn selftest_x25519_rfc7748_vector1() {
         stderr
     );
 }
+
+/// A `return 7` inside a `lock` must return 7, not fall through to the code after the lock.
+/// The lock is released, then control goes to the function's real return.
+#[test]
+fn lock_return_returns_the_early_value() {
+    assert_eq!(
+        compile_and_run(
+            "lock-return",
+            "let mut mtx[1]\n\
+             fn f() -> i64 {\n\
+                 lock (mtx) {\n\
+                     return 7\n\
+                 }\n\
+                 42\n\
+             }\n\
+             fn main() -> i64 { f() }\n"
+        ),
+        7
+    );
+}
+
+/// A `break` inside a `lock` must release the lock before jumping to the loop's end.
+/// If the lock is not released, the second loop will deadlock trying to re-acquire it.
+/// This test uses `cargo test --timeout` or a spawned child killed after 10s to prevent
+/// infinite hangs if the bug reappears.
+///
+/// We run the binary directly and let the test harness's timeout handle it.
+/// If we were to get a deadlock, `cargo test`'s default timeout (or a CI timeout)
+/// would catch it. For local safety, we use `timeout` command if available.
+#[test]
+fn lock_break_releases_the_lock() {
+    let src = "let mut mtx[1]\n\
+               fn main() -> i64 {\n\
+                   let mut i = 0\n\
+                   for {\n\
+                       lock (mtx) {\n\
+                           i = i + 1\n\
+                           break\n\
+                       }\n\
+                   }\n\
+                   for i < 100000 {\n\
+                       lock (mtx) { i = i + 1 }\n\
+                   }\n\
+                   print_int(i)\n\
+                   0\n\
+               }\n";
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let stem = format!("behaviour-lock-break-{}", std::process::id());
+    let snd = dir.join(format!("{stem}.snd"));
+    let bin = dir.join(format!("{stem}.bin"));
+    std::fs::write(&snd, src).expect("the test source must be writable");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(&snd)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("sondc must be runnable");
+    assert!(
+        out.status.success(),
+        "lock-break must compile, but sondc said: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Run under `timeout` if available (Linux), otherwise run directly.
+    // The `timeout` binary kills the process after 10 seconds, preventing
+    // an infinite hang from a deadlock bug.
+    let run = if Path::new("/usr/bin/timeout").exists() {
+        format!("timeout 10 {}", bin.display())
+    } else {
+        // Fallback: just run directly. If it hangs, the test will be killed
+        // by the CI/CI-like timeout.
+        format!("{}", bin.display())
+    };
+
+    let code = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&run)
+        .output()
+        .expect("the compiled program must be runnable");
+
+    let exit_code_str = code.status.code().map_or("unknown".to_string(), |c| c.to_string());
+
+    if code.status.code() == Some(124) {
+        // timeout returned 124 = process was killed by timeout
+        panic!("the program hung for 10s — a deadlock in lock+break would cause this\n  stderr: {}", String::from_utf8_lossy(&code.stderr));
+    }
+
+    // The count travels on stdout, NOT in the exit status: an exit status is a single BYTE, so
+    // 100000 would arrive as 160 and the assertion could never hold whatever the compiler did.
+    // Written against the status, this test was red from the day it was born and stayed red for
+    // the right-looking reason -- "the lock was not released" -- while the lock was released fine.
+    let salida = String::from_utf8_lossy(&code.stdout).trim().to_string();
+    assert_eq!(
+        salida, "100000",
+        "break released the lock and the second loop ran to the end (exit status was {})",
+        exit_code_str
+    );
+
+    let _ = std::fs::remove_file(&snd);
+    let _ = std::fs::remove_file(&bin);
+}
+
+/// Two threads fight over the same lock. One holds it while the other spins. When the first
+/// releases, the second must be woken by the futex wake in the release path (SYS_futex 202 +
+/// FUTEX_WAKE), not by a bogus syscall. Without the correct wake, the waiting thread would
+/// sleep forever and the program deadlocks.
+#[test]
+fn lock_with_two_threads_fairness_futex_wake_path() {
+    let src = "let mut mtx[1]\n\
+               let mut result[1]\n\
+               let mut done[1]\n\
+               fn first() -> i64 {\n\
+                   lock (mtx) {\n\
+                       done[0] = 1\n\
+                   }\n\
+                   0\n\
+               }\n\
+               fn second() -> i64 {\n\
+                   for peek64(done) < 1 { }\n\
+                   lock (mtx) {\n\
+                       result[0] = 42\n\
+                   }\n\
+                   0\n\
+               }\n\
+               fn main() -> i64 {\n\
+                   poke64(done, 0)\n\
+                   poke64(result, 0)\n\
+                   spawn first()\n\
+                   second()\n\
+                   peek64(result)\n\
+               }\n";
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let stem = format!("behaviour-lock-contend-{}", std::process::id());
+    let snd = dir.join(format!("{stem}.snd"));
+    let bin = dir.join(format!("{stem}.bin"));
+    std::fs::write(&snd, src).expect("the test source must be writable");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(&snd)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("sondc must be runnable");
+    assert!(
+        out.status.success(),
+        "lock-contend must compile, but sondc said: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Run under timeout to catch deadlocks from missing futex wake.
+    let run = if Path::new("/usr/bin/timeout").exists() {
+        format!("timeout 10 {}", bin.display())
+    } else {
+        format!("{}", bin.display())
+    };
+
+    let code = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&run)
+        .output()
+        .expect("the compiled program must be runnable");
+
+    if code.status.code() == Some(124) {
+        panic!("the program hung for 10s — missing futex wake causes deadlock\n  stderr: {}", String::from_utf8_lossy(&code.stderr));
+    }
+
+    let exit_code = code.status.code().expect("the program must exit normally");
+    assert_eq!(exit_code, 42, "second thread acquired the lock after first released it (futex wake works)");
+
+    let _ = std::fs::remove_file(&snd);
+    let _ = std::fs::remove_file(&bin);
+}
