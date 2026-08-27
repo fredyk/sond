@@ -231,135 +231,19 @@ fn main() -> ExitCode {
         funcs.retain(|f| !f.is_test);
     }
 
-    // Value/pointer struct rules: a value struct received as a parameter is
-    // read-only (only its creator may mutate it). Reject field mutation of a
-    // value-struct param before lowering, declare it `*Point` to mutate.
-    if let Err(msg) = sondc::check::check_undeclared_variables(&funcs, &globals, &enums) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_no_duplicate_functions(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_spawn_not_in_loop(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_call_arity(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_par_let_arity(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_par_confluence(&funcs, &globals) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_graph_acyclic(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_no_process_exit_in_spawn(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_no_close_fd_after_spawn(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_syscall_retry_has_an_exit(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_no_raw_access_to_declared_buffers(&funcs, &globals) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_receiver_kinds(&funcs) {
+    // The shared compilation pipeline: checks and desugars, used by both the
+    // driver and the codegen test helpers so the two paths can never diverge.
+    let lower_target = if pic16 {
+        "pic16"
+    } else if debug {
+        "host-debug"
+    } else {
+        "host"
+    };
+    if let Err(msg) = sondc::lower_program(&mut funcs, &mut globals, &mut structs, &enums, lower_target) {
         eprintln!("sondc: {msg}");
         return ExitCode::FAILURE;
     }
-    if let Err(msg) = sondc::check::check_declaration_kinds(&funcs) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-    if let Err(msg) = sondc::check::check_struct_mutability(&funcs, &structs) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-    // Exhaustiveness: every `match` must cover all of its enum's variants (checked on
-    // the original `match`, before it is lowered to if/else).
-    if let Err(msg) = sondc::check::check_enum_matches(&funcs, &enums) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-    // The built-in `Slice { ptr, len }` fat pointer is available to every program.
-    sondc::desugar::inject_builtin_structs(&mut structs);
-    // `a.len` on a fixed-size array lowers to its constant size. Done before the constant
-    // checks so `a[a.len]` is seen as `a[N]` (a provable out-of-bounds) and `for i < a.len`
-    // as `for i < N`.
-    sondc::desugar::lower_array_len(&mut funcs, &globals);
-    // A slice range `s[lo:hi]` lowers to a sub-`Slice` view. After `a.len` (so an array's
-    // `.len` is a constant), before the constant checks and struct lowering.
-    sondc::desugar::lower_slice_ranges(&mut funcs);
-    // (C) on-ramp for #3 (RFC-0012): a `+`/`-`/`*` of constants that overflows i64 is a
-    // compile error, the non-breaking first step of checked-by-default arithmetic.
-    if let Err(msg) = sondc::check::check_constant_overflow(&funcs) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-    // (C) on-ramp for #2 (RFC-0012): a constant index outside a known array's bounds is a
-    // compile error, the non-breaking first step of checked array access.
-    // Text has a type: a string literal binds to `string`, never to a bare address.
-    if let Err(msg) = sondc::check::check_string_literal_types(&funcs, &globals) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-    // Module-level strings are byte pointers, not code-point views.
-    // Indexing them multiplies by 4 and reads garbage.
-    // A `let S: string = "..."` has init = Expr::Str(...) — the distinguishing feature.
-    // PIC16-specific constraints: the backend stores each local/parameter in one byte
-    // and only emits 8-bit immediates. Values that do not fit (u16 locals, constants > 255,
-    // u8 = 300) must be rejected before codegen, never silently truncated.
-    if pic16 {
-        if let Err(msg) = sondc::check::check_pic16_constraints(&funcs) {
-            eprintln!("sondc: {msg}");
-            return ExitCode::FAILURE;
-        }
-    }
-
-    let string_globals: std::collections::HashSet<String> = globals
-        .iter()
-        .filter(|g| matches!(g.init, sondc::ast::Expr::Str(_)))
-        .map(|g| g.name.clone())
-        .collect();
-    if let Err(msg) = sondc::check::check_module_string_indexing(&funcs, &string_globals) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-    if let Err(msg) = sondc::check::check_constant_bounds(&funcs, &globals) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-    // Reject inverted range loops: `for i in a..b` where a > b means the body never executes.
-    if let Err(msg) = sondc::check::check_for_range_bounds(&funcs) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-
-    // `--emit-header`: print the module's public interface (contract, no bodies)
-    // and stop. This is the `.snd` header for ~/.local/include/sond and dist/include.
-    // A payloaded enum lowers to a synthetic `{__tag, __payload}` struct, append those
-    // to the struct set so `desugar_structs` lowers the enum's field access and layout.
-    let synth = sondc::desugar::desugar_enums(&mut funcs, &enums);
-    structs.extend(synth);
-    // Materialize struct literals used in expression position (call args, branch tails)
-    // into temps, so a constructor works anywhere, before the struct pass lowers them.
-    sondc::desugar::hoist_struct_literals(&mut funcs);
-    sondc::desugar::desugar_structs(&mut funcs, &structs);
 
     if emit_header {
         print!(
