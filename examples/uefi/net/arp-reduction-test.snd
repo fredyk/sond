@@ -1,0 +1,27 @@
+// Minimal reproduction for prover bounds-check fix:
+// When the prover encounters a call to an unknown builtin function inside
+// a loop body, it was bailing the entire invariant verification, which
+// prevented the bounds checker from trusting the loop's invariant.
+//
+// The fix moves eval_call from returning None (short-circuit) to returning
+// a synthetic result (opaque value) for unknown functions, letting the
+// loop invariant check proceed and the bounds check succeed.
+
+fn efi_main() -> i64 {
+    let mut digits[16]
+    let mut n = 1
+    let mut len = 0
+    serial_print("start")
+    for n > 0 && len < 16 invariant { len <= 16 } {
+        digits[len] = n % 10
+        len = len + 1
+        n = n / 10
+    }
+    let mut i = len - 1
+    for i >= 0 invariant { i < 16 } {
+        serial_putc(digits[i] + 48)
+        i = i - 1
+    }
+    halt()
+    0
+}

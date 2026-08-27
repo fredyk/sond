@@ -1237,7 +1237,25 @@ fn eval_call(
     let Expr::Var(name) = callee else {
         return None;
     };
-    let g = ctx.contracts.get(name).copied()?;
+    let Some(g) = ctx.contracts.get(name) else {
+        // Unknown / builtin function: the verifier cannot reason about its
+        // preconditions or postconditions. Treat it as an opaque operation
+        // (same as an assignment whose RHS evaluates to fresh values, but
+        // without rebinding a variable).  Each argument is still evaluated
+        // for its own obligations; the call's result is a fresh variable.
+        let mut cur = vec![state.clone()];
+        for arg in args {
+            let mut nxt: Vec<State> = Vec::new();
+            for st in cur {
+                for (st2, _) in eval_expr_paths(&arg.value, st, ctx)? {
+                    nxt.push(st2);
+                }
+            }
+            cur = nxt;
+        }
+        if cur.is_empty() { cur.push(state); }
+        return Some(cur.into_iter().map(|s| (s, ctx.fresh_var())).collect());
+    };
     // Evaluate the arguments (they may themselves branch or call), threading the state.
     let mut arg_states: Vec<(State, Vec<Sym>)> = vec![(state, Vec::new())];
     for arg in args {
