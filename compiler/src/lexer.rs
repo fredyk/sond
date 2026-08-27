@@ -393,6 +393,7 @@ fn ends_statement(last: Option<&Token>) -> bool {
                 | Token::Return
                 | Token::Break
                 | Token::Continue
+                | Token::Lock
         )
     )
 }

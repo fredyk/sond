@@ -714,6 +714,9 @@ fn stmts_effects(
                 }
                 block_effects(body, mut_globals, reads, writes, callees);
             }
+            Stmt::Lock { body, .. } => {
+                block_effects(body, mut_globals, reads, writes, callees);
+            }
             Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
         }
     }
@@ -909,6 +912,9 @@ pub fn check_par_confluence(funcs: &[Function], globals: &[Global]) -> Result<()
                     if let Some(c) = cond {
                         walk_expr(c, fname, eff)?;
                     }
+                    walk_block(body, fname, eff)?;
+                }
+                Stmt::Lock { body, .. } => {
                     walk_block(body, fname, eff)?;
                 }
                 Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
@@ -1257,6 +1263,11 @@ fn check_undeclared_stmt(
             check_undeclared_block(body, scopes, fname, line)?;
             scopes.pop();
         }
+        Stmt::Lock { body, .. } => {
+            scopes.push(HashSet::new());
+            check_undeclared_block(body, scopes, fname, line)?;
+            scopes.pop();
+        }
         Stmt::Break | Stmt::Continue => {}
     }
     Ok(())
@@ -1400,6 +1411,9 @@ pub fn check_no_process_exit_in_spawn(funcs: &[Function]) -> Result<(), String> 
                     if let Some(c) = cond {
                         collect_calls_expr(c, out);
                     }
+                    collect_calls(body, out);
+                }
+                Stmt::Lock { body, .. } => {
                     collect_calls(body, out);
                 }
                 Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
@@ -1835,6 +1849,9 @@ fn check_stmt(s: &Stmt, immutable: &HashMap<&str, &str>, fname: &str) -> Result<
             if let Some(c) = cond {
                 check_expr(c, immutable, fname)?;
             }
+            check_block(body, immutable, fname)
+        }
+        Stmt::Lock { body, .. } => {
             check_block(body, immutable, fname)
         }
         Stmt::Return(None) | Stmt::Break | Stmt::Continue => Ok(()),

@@ -226,3 +226,96 @@ fn selftest_x25519_rfc7748_vector1() {
         stderr
     );
 }
+
+/// A `return 7` inside a `lock` must return 7, not fall through to the code after the lock.
+/// The lock is released, then control goes to the function's real return.
+#[test]
+fn lock_return_returns_the_early_value() {
+    assert_eq!(
+        compile_and_run(
+            "lock-return",
+            "let mut mtx[1]\n\
+             fn f() -> i64 {\n\
+                 lock (mtx) {\n\
+                     return 7\n\
+                 }\n\
+                 42\n\
+             }\n\
+             fn main() -> i64 { f() }\n"
+        ),
+        7
+    );
+}
+
+/// A `break` inside a `lock` must release the lock before jumping to the loop's end.
+/// If the lock is not released, the second loop will deadlock trying to re-acquire it.
+/// This test uses `cargo test --timeout` or a spawned child killed after 10s to prevent
+/// infinite hangs if the bug reappears.
+///
+/// We run the binary directly and let the test harness's timeout handle it.
+/// If we were to get a deadlock, `cargo test`'s default timeout (or a CI timeout)
+/// would catch it. For local safety, we use `timeout` command if available.
+#[test]
+fn lock_break_releases_the_lock() {
+    let src = "let mut mtx[1]\n\
+               fn main() -> i64 {\n\
+                   let mut i = 0\n\
+                   for {\n\
+                       lock (mtx) {\n\
+                           i = i + 1\n\
+                           break\n\
+                       }\n\
+                   }\n\
+                   for i < 100000 {\n\
+                       lock (mtx) { i = i + 1 }\n\
+                   }\n\
+                   i\n\
+               }\n";
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let stem = format!("behaviour-lock-break-{}", std::process::id());
+    let snd = dir.join(format!("{stem}.snd"));
+    let bin = dir.join(format!("{stem}.bin"));
+    std::fs::write(&snd, src).expect("the test source must be writable");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(&snd)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("sondc must be runnable");
+    assert!(
+        out.status.success(),
+        "lock-break must compile, but sondc said: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Run under `timeout` if available (Linux), otherwise run directly.
+    // The `timeout` binary kills the process after 10 seconds, preventing
+    // an infinite hang from a deadlock bug.
+    let run = if Path::new("/usr/bin/timeout").exists() {
+        format!("timeout 10 {}", bin.display())
+    } else {
+        // Fallback: just run directly. If it hangs, the test will be killed
+        // by the CI/CI-like timeout.
+        format!("{}", bin.display())
+    };
+
+    let code = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&run)
+        .output()
+        .expect("the compiled program must be runnable");
+
+    let exit_code_str = code.status.code().map_or("unknown".to_string(), |c| c.to_string());
+
+    if code.status.code() == Some(124) {
+        // timeout returned 124 = process was killed by timeout
+        panic!("the program hung for 10s — a deadlock in lock+break would cause this\n  stderr: {}", String::from_utf8_lossy(&code.stderr));
+    }
+
+    let exit_code = code.status.code().expect("the program must exit normally");
+    assert_eq!(exit_code, 100001, "break released the lock, second loop completed all iterations (exit: {})", exit_code_str);
+
+    let _ = std::fs::remove_file(&snd);
+    let _ = std::fs::remove_file(&bin);
+}
