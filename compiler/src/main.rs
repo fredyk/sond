@@ -392,6 +392,11 @@ fn main() -> ExitCode {
     // form (`s.len`, readable), so the runtime guard codegen receives the lowered slot read.
     sondc::desugar::desugar_contracts(&mut funcs, &structs);
 
+    // Give every shadowing `let` a binding (and frame slot) of its own, so an inner
+    // `let n` no longer writes through the outer `n`'s slot and leave its value after
+    // the block closes. Runs last: a pure, semantically-neutral rename of body locals.
+    sondc::desugar::disambiguate_shadows(&mut funcs);
+
     let asm = match std::panic::catch_unwind(|| {
         if pic16 {
             sondc::codegen::pic16::emit_pic16(&funcs)
