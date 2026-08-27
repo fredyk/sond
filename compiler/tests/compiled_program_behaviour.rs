@@ -177,3 +177,52 @@ fn shadowing_is_in_effect_inside_the_block() {
         40
     );
 }
+
+/// Compile the real selftest.snd and return the path to the binary.
+fn compile_selftest() -> PathBuf {
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let repo = PathBuf::from(manifest).parent().unwrap().to_path_buf();
+    let snd = repo.join("examples/host/crypto/x25519-lib/selftest.snd");
+
+    let out_bin = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("behaviour-x25519-selftest-{}.bin", std::process::id()));
+
+    let compile_out = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(&snd)
+        .args(["-o", out_bin.to_str().unwrap()])
+        .output()
+        .expect("sondc must be runnable");
+
+    assert!(
+        compile_out.status.success(),
+        "selftest.snd must compile, but:\n{}",
+        String::from_utf8_lossy(&compile_out.stderr)
+    );
+    out_bin
+}
+
+#[test]
+fn selftest_x25519_rfc7748_vector1() {
+    let bin = compile_selftest();
+
+    let out = Command::new(&bin)
+        .output()
+        .expect("the compiled program must run");
+
+    let _ = std::fs::remove_file(&bin);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "selftest program must exit 0, got {:?}\nstderr: {}",
+        out.status.code(),
+        stderr
+    );
+    assert!(
+        stdout.contains("PASS: output matches RFC 7748 test vector 1"),
+        "expected RFC vector PASS but got:\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+}
