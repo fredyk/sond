@@ -639,6 +639,25 @@ impl Parser {
                             let inc = assign_inc(&var);
                             step_before_continues(&mut body, &inc);
                             body.push_stmt(inc, for_line);
+                            // The bound goes into the loop CONDITION, which is re-read every
+                            // turn. That is wrong for a counting form: `for i in 0..tope()`
+                            // called `tope()` four times to run three turns, and a body that
+                            // raised its own bound never finished -- compiling in silence, and
+                            // walking off the end of a buffer while it spun. Unless the bound
+                            // is stable, it is evaluated ONCE into a local.
+                            let end = if end_is_stable(&end, &body) {
+                                end
+                            } else {
+                                let name = format!("__end{}", self.pos);
+                                stmts.push(Stmt::Let {
+                                    mutable: false,
+                                    name: name.clone(),
+                                    ty: None,
+                                    value: end,
+                                    array_len: None,
+                                });
+                                Expr::Var(name)
+                            };
                             stmts.push(Stmt::For {
                                 cond: Some(Expr::Binary(
                                     BinOp::Lt,
@@ -1272,6 +1291,135 @@ fn looks_like_lock_stmt(tokens: &[Token], pos: usize) -> bool {
         && matches!(tokens.get(pos + 2), Some(Token::Ident(_)))
         && matches!(tokens.get(pos + 3), Some(Token::RParen))
         && matches!(tokens.get(pos + 4), Some(Token::LBrace))
+}
+
+// ---------------------------------------------------------------------------
+// When a `for i in a..b` bound may stay in the condition
+// ---------------------------------------------------------------------------
+
+/// The dotted path a bound names, when it names one: `n`, `s.len`, `cfg.limits.max`. `None` for
+/// anything computed -- a call, arithmetic, an index -- whose value the parser cannot assume is
+/// the same on the next turn.
+///
+/// An index is deliberately NOT a path: `a[i]` reads through a name, and writing to it does not
+/// change the name itself.
+fn named_path(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Var(n) => Some(n.clone()),
+        Expr::Field(base, f) => Some(format!("{}.{}", named_path(base)?, f)),
+        _ => None,
+    }
+}
+
+/// Whether `end` may stay in the loop condition, where it is re-read on every turn, instead of
+/// being evaluated once into a local.
+///
+/// Only two shapes qualify: an integer literal, and a path the body never assigns to.
+///
+/// The asymmetry is deliberate. Lifting costs the prover the NAME it reasons about: it clears an
+/// index by matching `i < s.len` textually, so lifting a stable bound to `__end0` would start
+/// rejecting programs that compile today, across the whole tree. Failing the other way is silent
+/// -- the loop re-reads a bound that moved, and never ends.
+fn end_is_stable(end: &Expr, body: &Block) -> bool {
+    match end {
+        Expr::Int(_) => true,
+        _ => match named_path(end) {
+            Some(path) => !block_assigns_path(body, &path),
+            None => false,
+        },
+    }
+}
+
+/// Whether `block` assigns to `path`, AT ANY DEPTH: inside an `if`, a nested loop, a match arm, a
+/// `lock`. Looking only at the block's own top-level statements is not enough -- moving the very
+/// same assignment one line into an `if` brought the endless loop straight back, measured.
+fn block_assigns_path(block: &Block, path: &str) -> bool {
+    block.stmts.iter().any(|s| stmt_assigns_path(s, path))
+        || block
+            .tail
+            .as_ref()
+            .is_some_and(|t| expr_assigns_path(t, path))
+}
+
+/// Whether assigning to `target` disturbs the bound at `path`. A prefix counts: `s = t` carries
+/// `s.len` with it. Writing through an index does not: `s[i] = 0` leaves both `s` and `s.len`.
+fn assignment_disturbs(target: &Expr, path: &str) -> bool {
+    match named_path(target) {
+        Some(escrito) => path == escrito || path.starts_with(&format!("{escrito}.")),
+        None => false,
+    }
+}
+
+/// Every variant is named on purpose: no `_` arm. A statement added to the language must not be
+/// able to hide an assignment from this walk by simply not being listed -- adding one has to stop
+/// the Rust compiler, which is the only reminder that never gets forgotten.
+fn stmt_assigns_path(s: &Stmt, path: &str) -> bool {
+    match s {
+        Stmt::Assign { target, value } => {
+            assignment_disturbs(target, path)
+                || expr_assigns_path(target, path)
+                || expr_assigns_path(value, path)
+        }
+        Stmt::Let { value, .. } => expr_assigns_path(value, path),
+        Stmt::Return(e) => e.as_ref().is_some_and(|e| expr_assigns_path(e, path)),
+        Stmt::Expr(e) | Stmt::Spawn(e) => expr_assigns_path(e, path),
+        Stmt::For {
+            cond,
+            invariant: _,
+            body,
+            is_range_for: _,
+        } => {
+            cond.as_ref().is_some_and(|c| expr_assigns_path(c, path))
+                || block_assigns_path(body, path)
+        }
+        Stmt::Break | Stmt::Continue => false,
+        Stmt::Par(peers) | Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
+            peers.iter().any(|p| expr_assigns_path(p, path))
+        }
+        Stmt::GraphLet {
+            nodes, yield_expr, ..
+        } => {
+            nodes.iter().any(|(_, e)| expr_assigns_path(e, path))
+                || expr_assigns_path(yield_expr, path)
+        }
+        Stmt::Lock { name: _, body } => block_assigns_path(body, path),
+    }
+}
+
+/// An `if` and a `match` are EXPRESSIONS here, so a body's branches are reached through this one.
+fn expr_assigns_path(e: &Expr, path: &str) -> bool {
+    match e {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_assigns_path(cond, path)
+                || block_assigns_path(then_branch, path)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|b| block_assigns_path(b, path))
+        }
+        Expr::Match { scrutinee, arms } => {
+            expr_assigns_path(scrutinee, path)
+                || arms.iter().any(|a| block_assigns_path(&a.body, path))
+        }
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            expr_assigns_path(l, path) || expr_assigns_path(r, path)
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => expr_assigns_path(x, path),
+        Expr::Call(c, args) => {
+            expr_assigns_path(c, path) || args.iter().any(|a| expr_assigns_path(&a.value, path))
+        }
+        Expr::List(items) => items.iter().any(|it| expr_assigns_path(it, path)),
+        Expr::StructLit(_, fields) => fields.iter().any(|(_, v)| expr_assigns_path(v, path)),
+        Expr::SliceRange(base, lo, hi) => {
+            expr_assigns_path(base, path)
+                || lo.as_ref().is_some_and(|l| expr_assigns_path(l, path))
+                || hi.as_ref().is_some_and(|h| expr_assigns_path(h, path))
+        }
+        Expr::Int(_) | Expr::Decimal(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Var(_) => false,
+    }
 }
 
 mod expr;

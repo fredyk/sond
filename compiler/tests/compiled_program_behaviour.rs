@@ -524,3 +524,64 @@ fn a_program_that_never_ends_fails_instead_of_hanging_the_suite() {
         inicio.elapsed()
     );
 }
+
+/// The upper bound of `for i in a..b` is evaluated ONCE, on entry, however deep the body buries
+/// the assignment that moves it.
+///
+/// The bound used to go straight into the loop condition, where it is re-read every turn: a body
+/// that raised its own bound never finished, and the program compiled without a word. Burying
+/// that same assignment one level in, inside an `if`, is the case a top-level-only check misses --
+/// and the first fix here did miss it.
+#[test]
+fn the_bound_of_a_range_for_is_read_once_even_when_moved_inside_a_branch() {
+    let src = "fn main() -> i64 {\n\
+               let mut n = 4\n\
+               let mut vueltas = 0\n\
+               for i in 0..n {\n\
+                   if vueltas >= 0 {\n\
+                       n = n + 1\n\
+                   }\n\
+                   vueltas = vueltas + 1\n\
+                   if vueltas > 50 { break }\n\
+               }\n\
+               vueltas\n\
+               }\n";
+    assert_eq!(
+        compile_and_run("bound-moved-in-branch", src),
+        4,
+        "the loop must run 4 times: the bound is what `n` was on entry, not what it becomes"
+    );
+}
+
+/// The same, with the assignment at the top level of the body.
+#[test]
+fn the_bound_of_a_range_for_is_read_once() {
+    let src = "fn main() -> i64 {\n\
+               let mut n = 4\n\
+               let mut vueltas = 0\n\
+               for i in 0..n {\n\
+                   n = n + 1\n\
+                   vueltas = vueltas + 1\n\
+                   if vueltas > 50 { break }\n\
+               }\n\
+               vueltas\n\
+               }\n";
+    assert_eq!(compile_and_run("bound-moved", src), 4);
+}
+
+/// A bound that is a CALL is evaluated once, not once per turn.
+#[test]
+fn a_called_bound_is_evaluated_once_not_once_per_turn() {
+    let src = "let mut llamadas = 0\n\
+               fn tope() -> i64 { llamadas = llamadas + 1  3 }\n\
+               fn main() -> i64 {\n\
+                   let mut vueltas = 0\n\
+                   for i in 0..tope() { vueltas = vueltas + 1 }\n\
+                   llamadas * 10 + vueltas\n\
+               }\n";
+    assert_eq!(
+        compile_and_run("called-bound", src),
+        13,
+        "one call (10) and three turns (3); re-reading the bound made it four calls"
+    );
+}
