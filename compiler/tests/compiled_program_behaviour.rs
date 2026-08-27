@@ -687,3 +687,93 @@ fn a_slice_over_its_whole_buffer_still_compiles_and_adds_up() {
     );
     assert_eq!(printed.trim(), "100", "the honest slice must add up its own four words");
 }
+
+/// A local `Slice` with an out-of-bounds constant index must be rejected at compile time.
+/// Before the fix: compiled, printed garbage from an unrelated stack location.
+#[test]
+fn local_slice_out_of_bounds_is_refused() {
+    let dicho = compile_error(
+        "local-slice-oob",
+        "fn main() -> i64 {\n\
+         let a[4]\n\
+         a[0] = 10  a[1] = 20  a[2] = 30  a[3] = 40\n\
+         let s = Slice { ptr: a, len: 4 }\n\
+         print_int(s[7])\n\
+         0\n\
+         }\n",
+    );
+    assert!(
+        dicho.contains("out of bounds") || (dicho.contains("cannot prove") && dicho.contains("slice")),
+        "out-of-bounds index into a local slice must be rejected, but said: {dicho}"
+    );
+}
+
+/// An unbounded variable index into a local slice is rejected.
+#[test]
+fn local_slice_unbounded_variable_index_is_refused() {
+    let dicho = compile_error(
+        "local-slice-unbound",
+        "fn f(s: Slice, i: i64) -> i64 { s[i] }\n\
+         fn main() -> i64 {\n\
+         let a[4]\n\
+         a[0] = 10  a[1] = 20  a[2] = 30  a[3] = 40\n\
+         let s = Slice { ptr: a, len: 4 }\n\
+         print_int(usa(s, 5))\n\
+         0\n\
+         }\n\
+         fn usa(s: Slice, i: i64) -> i64 { let t = s\nt[i] }", // i is a param, unbound
+    );
+    assert!(
+        dicho.contains("cannot prove") && dicho.contains("slice"),
+        "unbounded index into local slice must be rejected, but said: {dicho}"
+    );
+}
+
+/// The canonical loop over a local slice compiles and works correctly.
+#[test]
+fn local_slice_canonical_loop_works() {
+    let printed = compile_and_print(
+        "local-slice-loop",
+        "fn main() -> i64 {\n\
+         let a[4]\n\
+         a[0] = 10  a[1] = 20  a[2] = 30  a[3] = 40\n\
+         let s = Slice { ptr: a, len: 4 }\n\
+         let mut suma = 0\n\
+         for i in 0..s.len { suma = suma + s[i] }\n\
+         print_int(suma)\n\
+         0\n\
+         }\n",
+    );
+    assert_eq!(printed.trim(), "100", "the loop must add up the four slice elements");
+}
+
+/// A constant index within the slice's declared length compiles and works.
+#[test]
+fn local_slice_in_bounds_const_index_works() {
+    let printed = compile_and_print(
+        "local-slice-const-in",
+        "fn main() -> i64 {\n\
+         let a[4]\n\
+         a[0] = 5  a[1] = 15  a[2] = 25  a[3] = 35\n\
+         let s = Slice { ptr: a, len: 4 }\n\
+         print_int(s[3])\n\
+         0\n\
+         }\n",
+    );
+    assert_eq!(printed.trim(), "35", "in-bounds constant index must return the right value");
+}
+
+/// An empty local slice is fine as long as it is not indexed.
+#[test]
+fn empty_local_slice_without_index_compiles() {
+    let printed = compile_and_print(
+        "local-slice-empty",
+        "fn main() -> i64 {\n\
+         let a[4]\n\
+         let s = Slice { ptr: a, len: 0 }\n\
+         print_int(s.len)\n\
+         0\n\
+         }\n",
+    );
+    assert_eq!(printed.trim(), "0", "empty slice with len 0 is fine");
+}
