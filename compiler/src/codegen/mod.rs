@@ -1877,7 +1877,7 @@ impl Codegen {
     /// inside it unwind the locks they cross (running each one's release) before jumping to
     /// their real target. The natural fall-through runs this lock's own release and lands on
     /// `body_cont`, the statement right after the `lock`.
-    fn emit_lock(&mut self, name: &str, body: &Block) {
+fn emit_lock(&mut self, name: &str, body: &Block) {
         let acquired = self.fresh_label("lock_acq");
         let wait_loop = self.fresh_label("lock_wait_loop");
         let sleep = self.fresh_label("lock_sleep");
@@ -1911,7 +1911,6 @@ impl Codegen {
         self.line("    cmpq $-11, %rax");     // EAGAIN (value changed): retry
         self.line(&format!("    je {wait_loop}"));
         self.line("    cmpq $-4, %rax");      // EINTR: retry
-        self.line(&format!("    je {wait_loop}"));
         self.line(&format!("    jmp {wait_loop}")); // other error: retry
 
         // --- BODY (early exits unwind this lock via the `scopes` stack) ---
@@ -1923,28 +1922,39 @@ impl Codegen {
         self.block(body);
         self.scopes.pop();
 
-        // --- Natural exit (reached only by falling off the end of the body): release,
+        // --- Natural exit (reached only by falling off the end of the body: release,
         // then continue at `body_cont`. `break`/`return` inside the body already ran their
         // own release and jump away, so they never reach this. ---
+        self.line("    pushq %rax");         // save body's value across release (clobbers %rax)
         self.emit_lock_release(name);
+        self.line("    popq %rax");          // restore body's value
         self.line(&format!("{body_cont}:"));
     }
 
-    /// Emits the shared release of one `lock`: CAS the word from 1-or-2 to 0, and if it was 2
-    /// (someone was waiting) do a `FUTEX_WAKE`. On both paths execution falls through to the
-    /// next line, where the caller continues to its own destination. The syscall clobbers
-    /// `%rax`, so a caller that must preserve a value in `%rax` (a `return`) saves it first.
+    /// Emits the shared release of one `lock`: lower the word to 0, and if it was 2
+    /// (someone was waiting) do a `SYS_futex` with `FUTEX_WAKE` on it. On both paths execution
+    /// falls through to the next line, where the caller continues to its own destination. The
+    /// syscall clobbers `%rax`, so a caller that must preserve a value in `%rax` (a `return`)
+    /// saves it first.
     fn emit_lock_release(&mut self, name: &str) {
         let nowake = self.fresh_label("nolockwake");
+        // Release: CAS 1→0. If value was 1, stored 0. If value was 2, need to release + wake.
         self.line(&format!("    leaq {name}(%rip), %rdi"));
-        self.line("    movq $1, %rax");  // expected: 1 or 2
-        self.line("    movq $0, %rsi");  // new: 0 (free)
+        self.line("    movq $1, %rax");   // CAS expected: 1
+        self.line("    movq $0, %rsi");   // CAS new: 0
         self.line("    lock cmpxchgq %rsi, (%rdi)");
-        self.line("    cmpq $2, %rax");  // was it 2? (someone was waiting)
+        self.line("    cmpq $2, %rax");   // was value 2? (someone waiting)
         self.line(&format!("    jne {nowake}"));
-        self.line(&format!("    leaq {name}(%rip), %rdi"));
-        self.line("    movq $1, %rsi");  // wake 1 waiter
-        self.line("    movq $203, %rax"); // SYS_futex_wake
+        // Value was 2: CAS 1→0 failed because value is 2. Store 0 to release.
+        // (A plain store is used here instead of CAS 2→0 because: if value is still 2, store 0 releases;
+        //  if value changed (e.g., 2→1 by another thread), store 0 still releases — the other thread
+        //  will CAS 1→0 themselves on their turn, making this a harmless additional release.)
+        self.line("    movq $0, (%rdi)");
+        // Wake 1 futex waiter: SYS_futex(202) with op FUTEX_WAKE(1).
+        self.line("    movq $1, %rsi");    // futex_op: FUTEX_WAKE = 1
+        self.line("    movq $1, %rdx");    // val: wake 1 thread
+        self.line("    xorq %r10, %r10");  // flags = 0
+        self.line("    movq $202, %rax");  // SYS_futex
         self.line("    syscall");
         self.line(&format!("{nowake}:"));
     }
@@ -2731,8 +2741,8 @@ impl Codegen {
                 Stmt::Lock { name, body } => self.emit_lock(name, body),
                 Stmt::Break => {
                     // A `break` releases every `lock` between here and its destination, then
-                    // jumps to the nearest enclosing loop's end. With no enclosing loop it
-                    // releases all enclosing locks and continues after the outermost one.
+                    // jumps to the nearest enclosing loop's end. With no enclosing loop it is
+                    // a compile error (as it always was before `lock` existed).
                     let mut release: Vec<String> = Vec::new();
                     let mut dest: Option<String> = None;
                     for scope in self.scopes.iter().rev() {
@@ -2744,14 +2754,14 @@ impl Codegen {
                             }
                         }
                     }
-                    let dest = match dest {
-                        Some(d) => d,
-                        None => match self.scopes.first() {
-                            Some(Scope::Lock { body_cont, .. }) => body_cont.clone(),
-                            _ => panic!("break outside loop"),
-                        },
-                    };
-                    self.emit_release_chain(&release, &dest, false);
+                    match dest {
+                        Some(d) => self.emit_release_chain(&release, &d, false),
+                        None => {
+                            // No enclosing loop: reject, as `break` never had any meaning
+                            // outside a loop before the `lock` feature existed.
+                            panic!("`break` outside a loop")
+                        }
+                    }
                 }
                 Stmt::Continue => {
                     // A `continue` releases every `lock` inside the loop body it crosses (so

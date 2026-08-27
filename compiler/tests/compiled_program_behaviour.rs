@@ -319,3 +319,74 @@ fn lock_break_releases_the_lock() {
     let _ = std::fs::remove_file(&snd);
     let _ = std::fs::remove_file(&bin);
 }
+
+/// Two threads fight over the same lock. One holds it while the other spins. When the first
+/// releases, the second must be woken by the futex wake in the release path (SYS_futex 202 +
+/// FUTEX_WAKE), not by a bogus syscall. Without the correct wake, the waiting thread would
+/// sleep forever and the program deadlocks.
+#[test]
+fn lock_with_two_threads_fairness_futex_wake_path() {
+    let src = "let mut mtx[1]\n\
+               let mut result[1]\n\
+               let mut done[1]\n\
+               fn first() -> i64 {\n\
+                   lock (mtx) {\n\
+                       done[0] = 1\n\
+                   }\n\
+                   0\n\
+               }\n\
+               fn second() -> i64 {\n\
+                   for peek64(done) < 1 { }\n\
+                   lock (mtx) {\n\
+                       result[0] = 42\n\
+                   }\n\
+                   0\n\
+               }\n\
+               fn main() -> i64 {\n\
+                   poke64(done, 0)\n\
+                   poke64(result, 0)\n\
+                   spawn first()\n\
+                   second()\n\
+                   peek64(result)\n\
+               }\n";
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let stem = format!("behaviour-lock-contend-{}", std::process::id());
+    let snd = dir.join(format!("{stem}.snd"));
+    let bin = dir.join(format!("{stem}.bin"));
+    std::fs::write(&snd, src).expect("the test source must be writable");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(&snd)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("sondc must be runnable");
+    assert!(
+        out.status.success(),
+        "lock-contend must compile, but sondc said: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Run under timeout to catch deadlocks from missing futex wake.
+    let run = if Path::new("/usr/bin/timeout").exists() {
+        format!("timeout 10 {}", bin.display())
+    } else {
+        format!("{}", bin.display())
+    };
+
+    let code = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&run)
+        .output()
+        .expect("the compiled program must be runnable");
+
+    if code.status.code() == Some(124) {
+        panic!("the program hung for 10s — missing futex wake causes deadlock\n  stderr: {}", String::from_utf8_lossy(&code.stderr));
+    }
+
+    let exit_code = code.status.code().expect("the program must exit normally");
+    assert_eq!(exit_code, 42, "second thread acquired the lock after first released it (futex wake works)");
+
+    let _ = std::fs::remove_file(&snd);
+    let _ = std::fs::remove_file(&bin);
+}

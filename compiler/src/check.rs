@@ -714,7 +714,12 @@ fn stmts_effects(
                 }
                 block_effects(body, mut_globals, reads, writes, callees);
             }
-            Stmt::Lock { body, .. } => {
+            Stmt::Lock { name, body } => {
+                // `lock` writes the mutex word (CAS + futex ops). If the mutex is a mutable
+                // global, record that write so `par` confluence checking sees it.
+                if mut_globals.contains(name.as_str()) {
+                    writes.insert(name.clone());
+                }
                 block_effects(body, mut_globals, reads, writes, callees);
             }
             Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
@@ -1255,19 +1260,21 @@ fn check_undeclared_stmt(
             check_undeclared_expr(yield_expr, scopes, fname, line)?;
             scopes.last_mut().unwrap().insert(name.clone());
         }
-        Stmt::For { cond, body, .. } => {
-            if let Some(c) = cond {
-                check_undeclared_expr(c, scopes, fname, line)?;
+Stmt::For { cond, body, .. } => {
+                if let Some(c) = cond {
+                    check_undeclared_expr(c, scopes, fname, line)?;
+                }
+                scopes.push(HashSet::new());
+                check_undeclared_block(body, scopes, fname, line)?;
+                scopes.pop();
             }
-            scopes.push(HashSet::new());
-            check_undeclared_block(body, scopes, fname, line)?;
-            scopes.pop();
-        }
-        Stmt::Lock { body, .. } => {
-            scopes.push(HashSet::new());
-            check_undeclared_block(body, scopes, fname, line)?;
-            scopes.pop();
-        }
+            Stmt::Lock { name, body } => {
+                // The mutex name is a variable reference like any other: check it against scopes.
+                check_undeclared_expr(&Expr::Var(name.clone()), scopes, fname, line)?;
+                scopes.push(HashSet::new());
+                check_undeclared_block(body, scopes, fname, line)?;
+                scopes.pop();
+            }
         Stmt::Break | Stmt::Continue => {}
     }
     Ok(())

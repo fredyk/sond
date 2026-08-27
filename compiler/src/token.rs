@@ -91,12 +91,6 @@ pub enum Token {
     Break,
     /// `continue`
     Continue,
-    /// `lock`: a lexical critical section (futex-based mutual exclusion).
-    /// Treated as `Ident("lock")` by default; only recognized as `Lock` in
-    /// statement position followed by `(` (see `parser::parse_block` and lexer
-    /// postprocessing in `lexer.rs`), so `lock` stays a free identifier
-    /// everywhere else (a common variable name in systems code).
-    Lock,
 
     // --- Word operators (RFC-0001 §4.16) ---
     /// `and`

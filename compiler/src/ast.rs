@@ -287,23 +287,23 @@ pub enum Stmt {
         peers: Vec<Expr>,
     },
     /// `let r = graph { node a = e1  node b = e2  node c = merge(a, b)  yield c }` (RFC-0008 §5.1).
-        /// A dependency graph: each `node` is a single-assignment binding whose only ordering is the
-        /// data dependency on the other nodes it references. The block evaluates to `yield_expr`, bound
-        /// to `name`. The nodes are executed in a topological order of their dependencies (a cycle is a
-        /// compile error); independent nodes are free to run concurrently.
-        GraphLet {
-            mutable: bool,
-            name: String,
-            nodes: Vec<(String, Expr)>,
-            yield_expr: Expr,
-        },
-        /// `lock (m) { .. }`: acquires a futex-based mutex at `m`, runs the body (as a lexical
-        /// critical section), and releases the mutex unconditionally on any exit path (normal,
-        /// return, break). `m` is an lvalue reference to a single 64-bit word used as the futex.
-        Lock {
-            name: String,
-            body: Block,
-        },
+    /// A dependency graph: each `node` is a single-assignment binding whose only ordering is the
+    /// data dependency on the other nodes it references. The block evaluates to `yield_expr`, bound
+    /// to `name`. The nodes are executed in a topological order of their dependencies (a cycle is a
+    /// compile error); independent nodes are free to run concurrently.
+    GraphLet {
+        mutable: bool,
+        name: String,
+        nodes: Vec<(String, Expr)>,
+        yield_expr: Expr,
+    },
+    /// `lock (m) { .. }`: acquires a futex-based mutex at `m`, runs the body (as a lexical
+    /// critical section), and releases the mutex unconditionally on any exit path (normal,
+    /// return, break). `m` is an lvalue reference to a single 64-bit word used as the futex.
+    Lock {
+        name: String,
+        body: Block,
+    },
 }
 
 /// An expression (used in bodies and in `requires`/`ensures` propositions).

@@ -623,7 +623,7 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
                 }
                 live.clear();
                 live.extend(new_states);
-                return Some(live);
+                live
             }
         };
         states_out.extend(advanced);

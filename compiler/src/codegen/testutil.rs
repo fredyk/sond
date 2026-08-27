@@ -8,6 +8,19 @@ use crate::parser::Parser;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Pipeline provenance guard: every helper that emits AND runs code must call
+/// [`parse_and_lower`] (or a function that delegates to it). This means all checks,
+/// desugars, and contract verification run in exactly the same path as `sondc` itself.
+/// Without it, a helper can silently skip the pipeline and test a compiler that no
+/// user ever runs — the kind of silent divergence that has already bitten us.
+///
+/// **Rule:** every `compile_and_*` helper in this file must call `parse_and_lower`.
+/// Any new compilation helper that wants to skip this path must explain why in code.
+///
+/// The guard is a function comment — Rust cannot force callers to follow a pattern.
+/// What we CAN enforce is that the helpers themselves are the ONLY place `emit_program`
+/// (and friends) are called from tests. If a new helper imports emit_* directly, we
+/// will catch it in review.
 pub(crate) fn parse_function(src: &str) -> Function {
     Parser::new(tokenize(src)).parse_function()
 }
@@ -64,10 +77,8 @@ pub(crate) fn compile_and_run(src: &str) -> i32 {
 /// Used by tests that check the return value of a function with globals.
 pub(crate) fn compile_and_run_with_globals(src: &str) -> i32 {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let mut p = Parser::new(tokenize(src));
-    let funcs = p.parse_program();
-    let globals = p.take_globals();
-    let asm = emit_program_g(&globals, &[], &funcs);
+    let (funcs, globals, structs) = parse_and_lower(src, "host");
+    let asm = emit_program_g(&globals, &structs, &funcs);
     let dir = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let stem = format!("sondc_cgout_{}_{}", std::process::id(), n);
@@ -249,10 +260,8 @@ pub(crate) fn compile_and_run_windows(src: &str) -> i32 {
 /// Used by tests that need globals (e.g. lock/atomic tests that share `mtx`, `counter`, and `done`).
 pub(crate) fn compile_and_capture_with_globals(src: &str) -> String {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let mut p = Parser::new(tokenize(src));
-    let funcs = p.parse_program();
-    let globals = p.take_globals();
-    let asm = emit_program_g(&globals, &[], &funcs);
+    let (funcs, globals, structs) = parse_and_lower(src, "host");
+    let asm = emit_program_g(&globals, &structs, &funcs);
     let dir = std::env::temp_dir();
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let stem = format!("sondc_cgout_{}_{}", std::process::id(), n);
