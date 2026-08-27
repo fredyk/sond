@@ -3724,6 +3724,33 @@ fn bounds_expr(
             Ok(())
         }
         Expr::StructLit(_, fields) => {
+            // A `Slice` that promises more elements than its backing array holds is refused
+            // HERE, where it is built, because after this point nothing looks at the promise
+            // again: the checker clears `s[i]` against the `len` field, and a `len` of 9 over
+            // four words reads -- and writes -- somebody else's stack in silence.
+            //
+            // Only the case both halves of which are known: `ptr` is the name of an array whose
+            // size was recorded by `let a[N]`, and `len` is a constant. A length that comes from
+            // a variable, or a pointer with no known size, is not decided either way.
+            let mut apuntado: Option<&str> = None;
+            let mut prometido: Option<i64> = None;
+            for (campo, valor) in fields {
+                if campo == "ptr" {
+                    if let Expr::Var(v) = valor.as_ref() {
+                        apuntado = Some(v.as_str());
+                    }
+                } else if campo == "len" {
+                    prometido = const_index(valor);
+                }
+            }
+            if let (Some(ptr), Some(len)) = (apuntado, prometido)
+                && let Some(&n) = sizes.get(ptr)
+                && len > n
+            {
+                return Err(format!(
+                    "function `{fname}`: slice length {len} is more than `{ptr}` holds (size {n}) at line {line}"
+                ));
+            }
             for (_, v) in fields {
                 bounds_expr(v, fname, sizes, flow, params, funcs, line)?;
             }
@@ -5193,6 +5220,95 @@ mod tests {
         assert!(bounds(src).is_ok(),
             "continue inside while-for must not kill index bounds; got: {}",
             bounds(src).unwrap_err());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Slice promise > backing array size — must be a compile error
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn slice_promises_more_than_its_backing_array_has() {
+        let err = bounds(
+            "fn main() -> i64 {\n\
+             let a[4]\n\
+             let s = Slice { ptr: a, len: 9 }\n\
+             s[0]\n\
+             0\n\
+             }",
+        ).unwrap_err();
+        assert!(
+            err.contains("out of bounds") || err.contains("slice") || err.contains("size"),
+            "must reject Slice with len > array size, got: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Negative controls — these MUST keep compiling
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn slice_exact_len_compiles() {
+        assert!(bounds(
+            "fn main() -> i64 {\n\
+             let a[4]\n\
+             let s = Slice { ptr: a, len: 4 }\n\
+             0\n\
+             }"
+        ).is_ok(), "exact len must compile");
+    }
+
+    #[test]
+    fn slice_less_than_array_compiles() {
+        assert!(bounds(
+            "fn main() -> i64 {\n\
+             let a[4]\n\
+             let s = Slice { ptr: a, len: 2 }\n\
+             0\n\
+             }"
+        ).is_ok(), "len < array size must compile");
+    }
+
+    #[test]
+    fn slice_zero_len_compiles() {
+        assert!(bounds(
+            "fn main() -> i64 {\n\
+             let a[4]\n\
+             let s = Slice { ptr: a, len: 0 }\n\
+             0\n\
+             }"
+        ).is_ok(), "len = 0 must compile");
+    }
+
+    #[test]
+    fn slice_with_variable_len_compiles() {
+        assert!(bounds(
+            "fn main(n: i64) -> i64 {\n\
+             let a[4]\n\
+             let s = Slice { ptr: a, len: n }\n\
+             0\n\
+             }"
+        ).is_ok(), "variable len cannot be checked at compile time");
+    }
+
+    #[test]
+    fn slice_param_compiles() {
+        assert!(bounds(
+            "fn f(s: Slice) -> i64 {\n\
+             0\n\
+             }"
+        ).is_ok(), "Slice parameter must still compile");
+    }
+
+    #[test]
+    fn slice_call_with_variable_len_compiles() {
+        assert!(bounds(
+            "fn takes_slice(s: Slice) -> i64 { 0 }\n\
+             fn main(n: i64) -> i64 {\n\
+             let a[4]\n\
+             takes_slice(Slice { ptr: a, len: n })\n\
+             0\n\
+             }"
+        ).is_ok(), "len from variable cannot be checked at compile time");
     }
 }
 

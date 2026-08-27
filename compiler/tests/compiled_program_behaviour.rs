@@ -84,6 +84,67 @@ fn compile_and_run(case: &str, src: &str) -> i32 {
     code
 }
 
+/// Compiles `src` and returns WHAT IT PRINTED. Same deadline as `compile_and_run`, which is the
+/// point: a program that never ends fails this test instead of hanging the suite.
+///
+/// Printed output, not the exit status: the status is ONE BYTE, so a program answering 100000
+/// reports 160 and the test passes or fails for a reason that has nothing to do with the bug.
+fn compile_and_print(case: &str, src: &str) -> String {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let stem = format!("behaviour-{}-{}", std::process::id(), case);
+    let snd = dir.join(format!("{stem}.snd"));
+    let bin = dir.join(format!("{stem}.bin"));
+    std::fs::write(&snd, src).expect("the test source must be writable");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(&snd)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("sondc must be runnable");
+    assert!(
+        out.status.success(),
+        "`{case}` must compile, but sondc said: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let (_, printed) = run_with_deadline(&bin).unwrap_or_else(|| {
+        panic!("`{case}` ran for over {DEADLINE:?} without finishing: the compiled program never terminates")
+    });
+    let _ = std::fs::remove_file(&snd);
+    let _ = std::fs::remove_file(Path::new(&bin));
+    printed
+}
+
+/// Compiles `src` expecting sondc to REFUSE it, and returns what it said. A program that must not
+/// compile is never run: the whole point is that no binary comes out of it.
+fn compile_error(case: &str, src: &str) -> String {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let stem = format!("behaviour-{}-{}", std::process::id(), case);
+    let snd = dir.join(format!("{stem}.snd"));
+    let bin = dir.join(format!("{stem}.bin"));
+    std::fs::write(&snd, src).expect("the test source must be writable");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(&snd)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("sondc must be runnable");
+    let dicho = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "`{case}` must NOT compile, but sondc accepted it and said: {dicho}"
+    );
+    let _ = std::fs::remove_file(&snd);
+    let _ = std::fs::remove_file(Path::new(&bin));
+    dicho
+}
+
 #[test]
 fn a_string_shadowed_in_an_inner_block_does_not_steal_the_outer_length() {
     // `m.len` on the last line is the OUTER `m` ("hola"), so 4. The inner `m` is a different
@@ -584,4 +645,45 @@ fn a_called_bound_is_evaluated_once_not_once_per_turn() {
         13,
         "one call (10) and three turns (3); re-reading the bound made it four calls"
     );
+}
+
+/// A `Slice` may not promise more elements than its backing array holds. Measured before the fix:
+/// this program compiled without a word and printed 422181705433056 -- five words of somebody
+/// else's stack -- where 100 was the only defensible answer.
+#[test]
+fn a_slice_may_not_promise_more_than_its_buffer_holds() {
+    let dicho = compile_error(
+        "slice-overlong",
+        "fn main() -> i64 {\n\
+         let a[4]\n\
+         a[0] = 10  a[1] = 20  a[2] = 30  a[3] = 40\n\
+         let s = Slice { ptr: a, len: 9 }\n\
+         let mut suma = 0\n\
+         for i in 0..s.len { suma = suma + s[i] }\n\
+         print_int(suma)\n\
+         0\n\
+         }\n",
+    );
+    assert!(
+        dicho.contains("len") || dicho.contains("length") || dicho.contains("size"),
+        "the refusal must say the promised length is the problem, but said: {dicho}"
+    );
+}
+
+/// The control: the same program with the honest length compiles and adds up its own four words.
+#[test]
+fn a_slice_over_its_whole_buffer_still_compiles_and_adds_up() {
+    let printed = compile_and_print(
+        "slice-exact",
+        "fn main() -> i64 {\n\
+         let a[4]\n\
+         a[0] = 10  a[1] = 20  a[2] = 30  a[3] = 40\n\
+         let s = Slice { ptr: a, len: 4 }\n\
+         let mut suma = 0\n\
+         for i in 0..s.len { suma = suma + s[i] }\n\
+         print_int(suma)\n\
+         0\n\
+         }\n",
+    );
+    assert_eq!(printed.trim(), "100", "the honest slice must add up its own four words");
 }
