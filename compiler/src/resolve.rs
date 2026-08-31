@@ -14,6 +14,44 @@ use crate::token::Token;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// Resolves a module name (from `import <name>`) to a file path on disk.
+/// The default implementation searches `lib/` the same way `include` does.
+pub trait ModuleResolver {
+    fn resolve(&self, module_name: &str) -> Result<PathBuf, String>;
+}
+
+/// Default resolver: searches for `<name>.snd` under the project's `lib/` and the
+/// system `~/.local/lib/sond/`, exactly like `include` does today. The `base_dir`
+/// is the parent directory of the importing file, so the search starts there.
+pub struct DefaultResolver {
+    base_dir: PathBuf,
+}
+
+impl DefaultResolver {
+    pub fn new(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+}
+
+impl ModuleResolver for DefaultResolver {
+    fn resolve(&self, module_name: &str) -> Result<PathBuf, String> {
+        for cand in include_candidates(module_name) {
+            if let Some(found) = find_in_roots(&self.base_dir, &cand) {
+                return Ok(found);
+            }
+            if let Some(home) = std::env::var_os("HOME") {
+                let home_path = Path::new(&home);
+                if let Some(found) = find_in_roots(home_path, &cand) {
+                    return Ok(found);
+                }
+            }
+        }
+        Err(format!(
+            "`import {module_name}`: module `{module_name}` not found; declare it or add an `include` of the file that defines it"
+        ))
+    }
+}
+
 /// The PRIVATE (non-`pub`) FREE functions a file defines, i.e. its file-local helpers. A free
 /// function's `fn` keyword sits at brace-depth 0; a method's is inside its `impl { .. }` (depth 1)
 /// and is already mangled `Type_m`, so it is left alone. Uses the lexer, so strings and comments
@@ -150,6 +188,7 @@ struct LineCtx<'a> {
     ids: &'a std::collections::HashMap<PathBuf, u32>,
     ambiguous: &'a std::collections::HashMap<String, Vec<String>>,
     colliding: &'a HashSet<String>,
+    aliases: &'a std::collections::HashMap<String, String>,
 }
 
 /// Rewrites one line: qualified `module::name` references into the symbol they denote, and
@@ -209,7 +248,7 @@ fn rewrite_line(line: &str, ctx: &LineCtx) -> Result<String, String> {
                         j += 1;
                     }
                     let name: String = chars[ns..j].iter().collect();
-                    out.push_str(&resolve_qualified(&ident, &name, ctx)?);
+                    out.push_str(&resolve_qualified(&ident, &name, ctx, ctx.aliases)?);
                     i = j;
                     continue;
                 }
@@ -242,7 +281,14 @@ fn rewrite_line(line: &str, ctx: &LineCtx) -> Result<String, String> {
 /// already pulled in you meant, not a way to reach something you did not. And only its `pub`
 /// surface is reachable: if `::` could see a private helper, the visibility the language already
 /// has would stop meaning anything the moment somebody typed a colon.
-fn resolve_qualified(module: &str, name: &str, ctx: &LineCtx) -> Result<String, String> {
+fn resolve_qualified(
+    module: &str,
+    name: &str,
+    ctx: &LineCtx,
+    _aliases: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    // The module name is looked up directly in the module map. For aliased imports,
+    // the alias replaces the original name in the map (e.g., `str` instead of `strings`).
     let Some(file) = ctx.modules.get(module) else {
         return Err(format!(
             "module `{module}` is not included here: `{module}::{name}` needs an \
@@ -265,7 +311,19 @@ fn resolve_qualified(module: &str, name: &str, ctx: &LineCtx) -> Result<String, 
 /// Reads `entry` and inlines every `include "..."` it (transitively) names, returning
 /// the combined source ready for the lexer.
 pub fn resolve_includes(entry: &Path) -> std::io::Result<String> {
-    Ok(resolve_includes_scoped(entry)?.0)
+    let base = entry
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    resolve_includes_with_resolver(entry, &DefaultResolver::new(base))
+}
+
+/// Like [`resolve_includes`], but uses a custom [`ModuleResolver`] for `import` resolution.
+pub fn resolve_includes_with_resolver(
+    entry: &Path,
+    resolver: &dyn ModuleResolver,
+) -> std::io::Result<String> {
+    resolve_includes_scoped_with_resolver(entry, resolver).map(|(s, _)| s)
 }
 
 /// Like [`resolve_includes`], but also returns the set of function names that COVERAGE should
@@ -275,6 +333,18 @@ pub fn resolve_includes(entry: &Path) -> std::io::Result<String> {
 /// transitively-included dependencies are assumed tested by their own suites, so they do not
 /// drag down the entry's coverage. (The testing library is filtered out downstream.)
 pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet<String>)> {
+    let base = entry
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    resolve_includes_scoped_with_resolver(entry, &DefaultResolver::new(base))
+}
+
+/// Like [`resolve_includes_scoped`], but uses a custom [`ModuleResolver`] for `import` resolution.
+pub fn resolve_includes_scoped_with_resolver(
+    entry: &Path,
+    resolver: &dyn ModuleResolver,
+) -> std::io::Result<(String, HashSet<String>)> {
     // Make the entry ABSOLUTE first. The search for a project's own `lib/` walks up from the
     // entry's PARENT, and the parent of a relative path like `prog.snd` is the empty path, so the
     // walk never starts and the only root left is the one under $HOME. The result is a compiler
@@ -291,7 +361,30 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
     // file) resolves within THAT file's include closure.
     let mut g = IncludeGraph::default();
     let mut gseen = HashSet::new();
-    build_graph(entry, 0, &mut gseen, &mut g);
+    build_graph(entry, 0, &mut gseen, &mut g, resolver);
+
+    // Validate aliases: an alias must not clash with any module name already visible.
+    let visible_modules: HashSet<&String> = g.modules.values().collect();
+    for (alias, _original) in &g.aliases {
+        if visible_modules.contains(alias) {
+            // Find which file introduced this alias to report the line.
+            for (file, lines) in &g.source_lines {
+                for (i, line) in lines.iter().enumerate() {
+                    if parse_import(line.trim()).is_some() && parse_import_alias(line.trim()).as_deref() == Some(alias.as_str()) {
+                        g.import_errors.push((
+                            file.clone(),
+                            i + 1,
+                            format!(
+                                "alias `{alias}` clashes with the module name `{alias}`; \
+                                 rename the import or the module"
+                            ),
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     // A name is colliding if two or more DISTINCT files define it -- privately as before, and
     // now publicly too: two modules are allowed to export the same name, and telling them apart
@@ -384,6 +477,18 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
         }
         for c in &closure {
             if let Some(m) = g.modules.get(c) {
+                // If this module name is hidden by an alias in this file, add the
+                // alias instead of the original name.
+                if let Some(hidden) = g.hidden_modules.get(f) {
+                    if hidden.contains(m) {
+                        for (alias, orig) in &g.aliases {
+                            if orig == m {
+                                mods.insert(alias.clone(), c.clone());
+                            }
+                        }
+                        continue;
+                    }
+                }
                 mods.insert(m.clone(), c.clone());
             }
         }
@@ -408,7 +513,17 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
         ids: &g.ids,
         colliding: &colliding,
     };
-    resolve_into(entry, &mut seen, &mut out, 0, &mut depth0, &mut depth1, &ns)?;
+    resolve_into(
+        entry,
+        &mut seen,
+        &mut out,
+        0,
+        &mut depth0,
+        &mut depth1,
+        &ns,
+        &g.import_errors,
+        &g.aliases,
+    )?;
     // Which functions is this entry on the hook for covering?
     //
     // A file named `*_test.snd` exists to test what it includes, so the subject is its direct
@@ -447,13 +562,28 @@ struct IncludeGraph {
     modules: std::collections::HashMap<PathBuf, String>,
     edges: std::collections::HashMap<PathBuf, Vec<PathBuf>>,
     ctr: u32,
+    /// Errors from failed `import` resolution: (file, line_number, error_message).
+    import_errors: Vec<(PathBuf, usize, String)>,
+    /// Module aliases from `import X as Y`: maps alias -> original module name.
+    aliases: std::collections::HashMap<String, String>,
+    /// Per-file: original module names hidden by aliases. When `import X as Y` is in
+    /// file F, `X` is hidden from F's namespace so only `Y` works.
+    hidden_modules: std::collections::HashMap<PathBuf, HashSet<String>>,
+    /// Source lines per file, for line-number reporting in import errors.
+    source_lines: std::collections::HashMap<PathBuf, Vec<String>>,
 }
 
 /// First pass: walk the include tree once and populate [`IncludeGraph`]. Each visited file records
 /// its private helper names and the canonical paths it directly includes, so the emit pass can
 /// resolve a colliding private to the definition visible in each file's include closure. Read
 /// errors are ignored here; the emit pass reports them.
-fn build_graph(path: &Path, depth: usize, seen: &mut HashSet<PathBuf>, g: &mut IncludeGraph) {
+fn build_graph(
+    path: &Path,
+    depth: usize,
+    seen: &mut HashSet<PathBuf>,
+    g: &mut IncludeGraph,
+    resolver: &dyn ModuleResolver,
+) {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !seen.insert(canon.clone()) {
         return;
@@ -476,14 +606,57 @@ fn build_graph(path: &Path, depth: usize, seen: &mut HashSet<PathBuf>, g: &mut I
     g.modules.insert(canon.clone(), module_name(path));
     g.exports.insert(canon.clone(), exports);
     g.defines.insert(canon.clone(), names);
+    // Store source lines for line-number reporting on import errors.
+    g.source_lines
+        .insert(canon.clone(), src.lines().map(String::from).collect());
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut es = Vec::new();
-    for line in src.lines() {
+    let mut brace_depth: i32 = 0;
+    for (line_idx, line) in src.lines().enumerate() {
+        // Track brace depth to detect imports inside functions.
+        for c in line.chars() {
+            match c {
+                '{' => brace_depth += 1,
+                '}' => brace_depth -= 1,
+                _ => {}
+            }
+        }
         if let Some(rel) = parse_include(line.trim()) {
             let target = resolve_target(dir, rel);
             let tcanon = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
             es.push(tcanon);
-            build_graph(&target, depth + 1, seen, g);
+            build_graph(&target, depth + 1, seen, g, resolver);
+        } else if let Some(mod_name) = parse_import(line.trim()) {
+            // `import` inside braces (inside a function) is invalid.
+            if brace_depth > 0 {
+                g.import_errors.push((
+                    canon.clone(),
+                    line_idx + 1,
+                    "`import` is only valid at the top level, not inside a function".to_string(),
+                ));
+                continue;
+            }
+            // Resolve the module name to a file path using the injectable resolver.
+            match resolver.resolve(mod_name) {
+                Ok(target) => {
+                    let tcanon =
+                        std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+                    es.push(tcanon);
+                    // Register alias if present (validation of clashes happens after graph building).
+                    if let Some(alias) = parse_import_alias(line.trim()) {
+                        g.aliases.insert(alias.to_string(), mod_name.to_string());
+                        g.hidden_modules
+                            .entry(canon.clone())
+                            .or_default()
+                            .insert(mod_name.to_string());
+                    }
+                    build_graph(&target, depth + 1, seen, g, resolver);
+                }
+                Err(msg) => {
+                    g.import_errors
+                        .push((canon.clone(), line_idx + 1, msg));
+                }
+            }
         }
     }
     g.edges.insert(canon, es);
@@ -517,6 +690,8 @@ fn resolve_into(
     depth0: &mut HashSet<String>,
     depth1: &mut HashSet<String>,
     ns: &Namespaces,
+    import_errors: &[(PathBuf, usize, String)],
+    aliases: &std::collections::HashMap<String, String>,
 ) -> std::io::Result<()> {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !seen.insert(canon) {
@@ -545,7 +720,18 @@ fn resolve_into(
         ids: ns.ids,
         ambiguous: ns.ambiguous_maps.get(&canon).unwrap_or(&empty_amb),
         colliding: ns.colliding,
+        aliases,
     };
+    // Report import errors for THIS file before processing lines, so they surface
+    // before any `module::name` rewrite error on a subsequent line.
+    for (err_file, line_num, msg) in import_errors {
+        if err_file == &canon {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{}: line {line_num}: {msg}", path.display()),
+            ));
+        }
+    }
     for line in src.lines() {
         match parse_include(line.trim()) {
             Some(rel) => resolve_into(
@@ -556,7 +742,27 @@ fn resolve_into(
                 depth0,
                 depth1,
                 ns,
+                import_errors,
+                aliases,
             )?,
+            None if let Some(mod_name) = parse_import(line.trim()) => {
+                // Resolve the import: find the module's canonical path and inline it.
+                // For aliased imports, the alias replaces the original name in module_maps.
+                if let Some(file) = ns.module_maps.get(&canon).and_then(|m| m.get(mod_name)) {
+                    resolve_into(
+                        file,
+                        seen,
+                        out,
+                        depth + 1,
+                        depth0,
+                        depth1,
+                        ns,
+                        import_errors,
+                        aliases,
+                    )?;
+                }
+                // If the import had an error, it was already reported above.
+            }
             None => {
                 // A name that cannot be resolved is reported HERE, naming the file it was
                 // written in. Left to the code generator it would surface as an undefined
@@ -671,6 +877,36 @@ fn parse_include(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("include")?.trim_start();
     let rest = rest.strip_prefix('"')?;
     let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+/// If `line` is a top-level `import <name>` directive, returns the module name.
+/// Also matches `import <name> as <alias>` (returns the original name, not the alias).
+fn parse_import(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("import")?.trim_start();
+    let end = rest
+        .chars()
+        .position(|c| c.is_whitespace())
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    Some(&rest[..end])
+}
+
+/// If `line` is a top-level `import <name> as <alias>` directive, returns the alias.
+fn parse_import_alias(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("import")?.trim_start();
+    let after_name = rest.chars().position(|c| c.is_whitespace())?;
+    let rest = rest[after_name..].trim_start();
+    let rest = rest.strip_prefix("as")?.trim_start();
+    let end = rest
+        .chars()
+        .position(|c| c.is_whitespace() || c == '/')
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
     Some(&rest[..end])
 }
 
@@ -1290,5 +1526,227 @@ mod tests {
         .unwrap();
         let err = resolve_includes(&entry).unwrap_err().to_string();
         assert!(err.contains("thing") && err.contains("empty"), "error names both, got: {err}");
+    }
+
+    // ── import directive tests ────────────────────────────────────────────
+
+    // CP1: `import strings` empalma el módulo y `strings::itoa(7)` resuelve.
+    #[test]
+    fn an_import_empalmes_the_module_and_qualified_name_resolves() {
+        let root = std::env::temp_dir().join(format!("sond_imp1_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/strings.snd"),
+            "pub fn itoa(n: i64) -> i64 { n }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "import strings\nfn main() -> i64 { strings::itoa(7) }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry).expect("import must resolve");
+        assert!(
+            !combined.contains("::"),
+            "no `::` survives resolution:\n{combined}"
+        );
+        assert!(
+            combined.contains("itoa(7)"),
+            "it binds to the module's function:\n{combined}"
+        );
+    }
+
+    // CP2: `import strings as str` alias renombra el módulo en ese fichero.
+    #[test]
+    fn an_import_as_alias_renames_the_module_and_original_name_is_gone() {
+        let root = std::env::temp_dir().join(format!("sond_imp2_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/strings.snd"),
+            "pub fn itoa(n: i64) -> i64 { n }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "import strings as str\nfn main() -> i64 { str::itoa(7) }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry).expect("import as must resolve");
+        assert!(
+            !combined.contains("::"),
+            "no `::` survives resolution:\n{combined}"
+        );
+        assert!(
+            combined.contains("itoa(7)"),
+            "alias resolves to the function:\n{combined}"
+        );
+        // The original name `strings` must NOT resolve any more.
+        let entry2 = root.join("main2.snd");
+        std::fs::write(
+            &entry2,
+            "import strings as str\nfn main() -> i64 { strings::itoa(7) }",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry2).unwrap_err().to_string();
+        assert!(
+            err.contains("strings"),
+            "original name is gone, error names it: {err}"
+        );
+    }
+
+    // CP3: A private function of the imported module is NOT reachable via `::`.
+    #[test]
+    fn a_private_fn_of_an_imported_module_is_not_reachable() {
+        let root = std::env::temp_dir().join(format!("sond_imp3_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/math.snd"),
+            "fn secret() -> i64 { 42 }\npub fn answer() -> i64 { secret() }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "import math\nfn main() -> i64 { math::secret() }",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(
+            err.contains("secret") && err.contains("math"),
+            "error names the private name and the module, got: {err}"
+        );
+    }
+
+    // CP4: `import` of an unknown name is a hard error naming the import, its line, and
+    // saying it must be declared.
+    #[test]
+    fn an_import_of_an_unknown_name_is_a_hard_error_with_line() {
+        let root = std::env::temp_dir().join(format!("sond_imp4_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "fn dummy() -> i64 { 0 }\nimport nonexistent\nfn main() -> i64 { 0 }",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(
+            err.contains("import"),
+            "error names the `import` keyword, got: {err}"
+        );
+        assert!(
+            err.contains("nonexistent"),
+            "error names the unknown module, got: {err}"
+        );
+        assert!(
+            err.contains("2"),
+            "error includes the line number (line 2), got: {err}"
+        );
+    }
+
+    // CP5: Importing the same module twice does not duplicate definitions.
+    #[test]
+    fn importing_the_same_module_twice_does_not_duplicate() {
+        let root = std::env::temp_dir().join(format!("sond_imp5_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/strings.snd"),
+            "pub fn itoa(n: i64) -> i64 { n }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "import strings\nimport strings\nfn main() -> i64 { strings::itoa(7) }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry).expect("double import must not fail");
+        assert_eq!(
+            combined.matches("fn itoa(").count(),
+            1,
+            "included once despite two import lines:\n{combined}"
+        );
+    }
+
+    // CP6: An `import` and an `include` of the same file do not define twice.
+    #[test]
+    fn import_and_include_of_the_same_file_dedup() {
+        let root = std::env::temp_dir().join(format!("sond_imp6_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/strings.snd"),
+            "pub fn itoa(n: i64) -> i64 { n }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "import strings\ninclude \"lib/strings.snd\"\nfn main() -> i64 { strings::itoa(7) }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry).expect("import+include must not fail");
+        assert_eq!(
+            combined.matches("fn itoa(").count(),
+            1,
+            "included once despite import + include:\n{combined}"
+        );
+    }
+
+    // CP7: `import` only valid at top level; inside a function is an error with line.
+    #[test]
+    fn an_import_inside_a_function_is_an_error_with_line() {
+        let root = std::env::temp_dir().join(format!("sond_imp7_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/strings.snd"),
+            "pub fn itoa(n: i64) -> i64 { n }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "fn main() -> i64 {\n  import strings\n  strings::itoa(7)\n}",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(
+            err.contains("import"),
+            "error names the `import` keyword, got: {err}"
+        );
+        assert!(
+            err.contains("2"),
+            "error includes the line number (line 2), got: {err}"
+        );
+    }
+
+    // CP8: An alias that clashes with an already-visible module name is an error.
+    #[test]
+    fn an_alias_that_clashes_with_a_visible_module_name_is_an_error() {
+        let root = std::env::temp_dir().join(format!("sond_imp8_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/strings.snd"),
+            "pub fn itoa(n: i64) -> i64 { n }",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("lib/io.snd"),
+            "pub fn read() -> i64 { 1 }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        // Import `strings` as `io` — but `io` is already a visible module.
+        std::fs::write(
+            &entry,
+            "import strings as io\ninclude \"lib/io.snd\"\nfn main() -> i64 { io::read() }",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(
+            err.contains("io"),
+            "error names the clashing name, got: {err}"
+        );
     }
 }
