@@ -205,14 +205,24 @@ pub fn canonical_hash(root: &Path) -> Result<String, String> {
     Ok(sha256::hex(&digest))
 }
 
-/// Return the package cache directory. Uses `SOND_CACHE` env var if set,
-/// otherwise `~/.cache/sond`.
+/// Return the package cache directory rooted at `base` (`<base>/.cache/sond`).
+fn cache_root_at(base: &Path) -> Option<PathBuf> {
+    Some(base.join(".cache/sond"))
+}
+
+/// Return the user's package cache directory (`~/.cache/sond` or `SOND_CACHE`).
 fn cache_root() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("SOND_CACHE") {
         return Some(PathBuf::from(dir));
     }
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".cache/sond"))
+}
+
+/// Return the directory for a cached package identified by its content hash,
+/// rooted at `base` (`<base>/.cache/sond/pkg/sha256-<hash>/`).
+pub fn cache_dir_for_hash_at(hash: &str, base: &Path) -> Option<PathBuf> {
+    Some(cache_root_at(base)?.join("pkg").join(format!("sha256-{hash}")))
 }
 
 /// Return the directory for a cached package identified by its content hash.
@@ -260,13 +270,21 @@ pub fn load_deps(start_dir: &Path) -> Option<DepsFile> {
 /// Falls back to the default resolver when `deps.snd` has no entry for the name.
 pub struct DepsResolver {
     base_dir: PathBuf,
+    cache_root: PathBuf,
     default: crate::resolve::DefaultResolver,
 }
 
 impl DepsResolver {
     pub fn new(base_dir: PathBuf) -> Self {
+        let cache_root = cache_root().unwrap_or_else(|| PathBuf::from("/dev/null"));
         let default = crate::resolve::DefaultResolver::new(base_dir.clone());
-        Self { base_dir, default }
+        Self { base_dir, cache_root, default }
+    }
+
+    /// Create a resolver with an explicit cache root (for testing).
+    pub fn with_cache_root(base_dir: PathBuf, cache_root: PathBuf) -> Self {
+        let default = crate::resolve::DefaultResolver::new(base_dir.clone());
+        Self { base_dir, cache_root, default }
     }
 }
 
@@ -276,7 +294,8 @@ impl crate::resolve::ModuleResolver for DepsResolver {
         if let Some(deps) = load_deps(&self.base_dir) {
             if let Some(entry) = deps.entries.get(module_name) {
                 let cache =
-                    cache_dir_for_hash(&entry.hash).ok_or("cannot determine cache directory")?;
+                    cache_dir_for_hash_at(&entry.hash, &self.cache_root)
+                        .ok_or("cannot determine cache directory")?;
                 if !cache.exists() {
                     let origin = entry.from.as_deref().unwrap_or("");
                     return Err(format!(
@@ -407,6 +426,29 @@ mod tests {
         assert!(err.contains("use"), "got: {err}");
     }
 
+    #[test]
+    fn parse_deps_conformity_vector_format() {
+        let src = "// declared dependencies\n\
+                    \n\
+                    use strings = sond:sha256:923345ba8a4816339aeac609bef11aaa7dd88d46459bf8886ed8cc68833b3a8d\n\
+                    \n\
+                    // fetch origin\n\
+                    from \"github.com/fredyk/sond-strings@3d9f21c\"\n\
+                    \n\
+                    // capabilities\n\
+                    grants {}\n";
+        let deps = parse_deps(src).unwrap();
+        assert_eq!(deps.entries.len(), 1);
+        let e = &deps.entries["strings"];
+        assert_eq!(e.name, "strings");
+        assert_eq!(
+            e.hash,
+            "923345ba8a4816339aeac609bef11aaa7dd88d46459bf8886ed8cc68833b3a8d"
+        );
+        assert_eq!(e.from.as_deref(), Some("github.com/fredyk/sond-strings@3d9f21c"));
+        assert_eq!(e.grants, "{}");
+    }
+
     // ── canonical hash ─────────────────────────────────────────────────
 
     // Conformity vector from the spec:
@@ -480,7 +522,8 @@ mod tests {
 
     #[test]
     fn cache_dir_for_hash_uses_sha256_prefix() {
-        let d = cache_dir_for_hash("abcdef0123456789").unwrap();
+        let base = tmp_dir("cache_prefix");
+        let d = cache_dir_for_hash_at("abcdef0123456789", &base).unwrap();
         assert!(d.to_string_lossy().contains("sha256-abcdef0123456789"));
     }
 
@@ -510,6 +553,7 @@ mod tests {
     fn deps_resolver_import_resolves_to_cache() {
         let root = tmp_dir("cp2_root");
         std::fs::create_dir_all(root.join("project")).unwrap();
+        let cache_base = tmp_dir("cp2_cache");
 
         // Create the "strings" module (what will go in the cache)
         let mod_dir = tmp_dir("cp2_mod");
@@ -520,8 +564,8 @@ mod tests {
         .unwrap();
         let hash = canonical_hash(&mod_dir).unwrap();
 
-        // Copy the module into the cache
-        let cache = cache_dir_for_hash(&hash).unwrap();
+        // Copy the module into the temp cache
+        let cache = cache_dir_for_hash_at(&hash, &cache_base).unwrap();
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::copy(mod_dir.join("strings.snd"), cache.join("strings.snd")).unwrap();
 
@@ -539,7 +583,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = DepsResolver::new(root.join("project"));
+        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base);
         let combined =
             crate::resolve::resolve_includes_with_resolver(&root.join("project/main.snd"), &resolver)
                 .expect("import must resolve");
@@ -558,6 +602,7 @@ mod tests {
     fn deps_resolver_tampered_cache_fails() {
         let root = tmp_dir("cp3_root");
         std::fs::create_dir_all(root.join("project")).unwrap();
+        let cache_base = tmp_dir("cp3_cache");
 
         // Create the "strings" module and compute its hash
         let mod_dir = tmp_dir("cp3_mod");
@@ -568,8 +613,8 @@ mod tests {
         .unwrap();
         let hash = canonical_hash(&mod_dir).unwrap();
 
-        // Put a TAMPERED version in the cache
-        let cache = cache_dir_for_hash(&hash).unwrap();
+        // Put a TAMPERED version in the temp cache
+        let cache = cache_dir_for_hash_at(&hash, &cache_base).unwrap();
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(
             cache.join("strings.snd"),
@@ -589,7 +634,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = DepsResolver::new(root.join("project"));
+        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base);
         let err =
             crate::resolve::resolve_includes_with_resolver(&root.join("project/main.snd"), &resolver)
                 .unwrap_err()
@@ -605,6 +650,7 @@ mod tests {
     fn deps_resolver_missing_from_cache_error_with_sond_get() {
         let root = tmp_dir("cp4_root");
         std::fs::create_dir_all(root.join("project")).unwrap();
+        let cache_base = tmp_dir("cp4_cache");
 
         let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         std::fs::write(
@@ -618,7 +664,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = DepsResolver::new(root.join("project"));
+        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base);
         let err =
             crate::resolve::resolve_includes_with_resolver(&root.join("project/main.snd"), &resolver)
                 .unwrap_err()
@@ -638,6 +684,7 @@ mod tests {
     fn deps_resolver_import_without_use_in_deps_is_error() {
         let root = tmp_dir("cp5_root");
         std::fs::create_dir_all(root.join("project")).unwrap();
+        let cache_base = tmp_dir("cp5_cache");
 
         // deps.snd declares `strings` but not `io`
         std::fs::write(
@@ -651,7 +698,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = DepsResolver::new(root.join("project"));
+        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base);
         let err =
             crate::resolve::resolve_includes_with_resolver(&root.join("project/main.snd"), &resolver)
                 .unwrap_err()
@@ -662,11 +709,12 @@ mod tests {
         );
     }
 
-    // CP7: SOND_CACHE redirect works.
+    // CP7: custom cache root redirect works.
     #[test]
     fn sond_cache_env_redirect() {
         let root = tmp_dir("cp7_root");
         std::fs::create_dir_all(root.join("project")).unwrap();
+        let custom_cache = tmp_dir("cp7_cache");
 
         // Create the "strings" module
         let mod_dir = tmp_dir("cp7_mod");
@@ -677,9 +725,8 @@ mod tests {
         .unwrap();
         let hash = canonical_hash(&mod_dir).unwrap();
 
-        // Use a custom SOND_CACHE dir
-        let custom_cache = tmp_dir("cp7_cache");
-        let cache = custom_cache.join("pkg").join(format!("sha256-{hash}"));
+        // Put module in the custom cache dir (layout: <base>/.cache/sond/pkg/sha256-<hash>)
+        let cache = cache_dir_for_hash_at(&hash, &custom_cache).unwrap();
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::copy(mod_dir.join("strings.snd"), cache.join("strings.snd")).unwrap();
 
@@ -695,25 +742,11 @@ mod tests {
         )
         .unwrap();
 
-        // Temporarily set SOND_CACHE
-        let old = std::env::var("SOND_CACHE").ok();
-        // SAFETY: test runs single-threaded; env is restored immediately after.
-        unsafe { std::env::set_var("SOND_CACHE", &custom_cache) };
-
-        let resolver = DepsResolver::new(root.join("project"));
+        let resolver = DepsResolver::with_cache_root(root.join("project"), custom_cache);
         let result =
             crate::resolve::resolve_includes_with_resolver(&root.join("project/main.snd"), &resolver);
 
-        // Restore
-        // SAFETY: test runs single-threaded; env is restored immediately after.
-        unsafe {
-            match old {
-                Some(v) => std::env::set_var("SOND_CACHE", v),
-                None => std::env::remove_var("SOND_CACHE"),
-            }
-        }
-
-        let combined = result.expect("import must resolve with custom SOND_CACHE");
+        let combined = result.expect("import must resolve with custom cache root");
         assert!(
             combined.contains("itoa(7)"),
             "resolved via custom cache:\n{combined}"
@@ -725,6 +758,7 @@ mod tests {
     fn no_deps_file_is_not_an_error() {
         let root = tmp_dir("cp8_root");
         std::fs::create_dir_all(root.join("project")).unwrap();
+        let cache_base = tmp_dir("cp8_cache");
 
         // No deps.snd at all
         std::fs::write(
@@ -733,7 +767,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = DepsResolver::new(root.join("project"));
+        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base);
         let combined =
             crate::resolve::resolve_includes_with_resolver(&root.join("project/main.snd"), &resolver)
                 .expect("no deps.snd must not be an error");
