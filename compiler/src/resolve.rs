@@ -747,8 +747,10 @@ fn resolve_into(
             )?,
             None if let Some(mod_name) = parse_import(line.trim()) => {
                 // Resolve the import: find the module's canonical path and inline it.
-                // For aliased imports, the alias replaces the original name in module_maps.
-                if let Some(file) = ns.module_maps.get(&canon).and_then(|m| m.get(mod_name)) {
+                // For aliased imports, the alias replaces the original name in module_maps,
+                // so we must look up by the alias if present.
+                let lookup_name = parse_import_alias(line.trim()).unwrap_or(mod_name);
+                if let Some(file) = ns.module_maps.get(&canon).and_then(|m| m.get(lookup_name)) {
                     resolve_into(
                         file,
                         seen,
@@ -1641,7 +1643,7 @@ mod tests {
             "error names the unknown module, got: {err}"
         );
         assert!(
-            err.contains("2"),
+            err.contains("line 2"),
             "error includes the line number (line 2), got: {err}"
         );
     }
