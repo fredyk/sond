@@ -1,0 +1,127 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/pkg/canon.snd: the canonical content hash of a Sond module.
+//
+// THE FORMAT (agreed with the compiler side; the two must produce the same byte):
+//
+//   - Every `.snd` file under the module root enters, with no exceptions or exclusions
+//     (`_test.snd` files too: if a test changes, the module changes, and that is correct).
+//   - Paths are RELATIVE to the module root, `/` separated, no leading `./`.
+//   - Files are ordered by BYTE-wise comparison of the path in UTF-8, never by locale.
+//   - For each file, in that order, concatenate:
+//         u64_le(byte length of the path) || path_utf8 ||
+//         u64_le(byte length of the content) || content
+//   - The hash is the SHA-256 of that concatenation, lowercase hex.
+//   - Content is hashed AS IS, byte for byte: no newline normalization, no BOM handling.
+//
+// Conformance vector (agreed, frozen):
+//   two files, "año.snd" = "fn añadir() -> i64 { 42 }\n" and
+//   "sub/niño.snd" = "fn niño() -> i64 { 7 }\n", hash to
+//   923345ba8a4816339aeac609bef11aaa7dd88d46459bf8886ed8cc68833b3a8d.
+//
+// A module is passed as an array of `n` record pointers, each record [path, data, len]:
+// a NUL-terminated relative path, the address of the content, and the content's byte length.
+// The caller keeps the records and their data alive for the call.
+
+include "any/crypto/hash/sha256.snd"
+include "any/strings.snd"
+include "x86_64/linux/bytes.snd"
+include "x86_64/linux/heap.snd"
+
+// One hex digit for a nibble (0..15).
+fn pkg_hex_digit(v: i64) -> i64 {
+    if v < 10 { return 48 + v }
+    97 + v - 10
+}
+
+// Byte-wise comparison of two NUL-terminated strings: -1, 0 or 1. The ordering is on the
+// raw bytes (a byte over 0x80 sorts after plain ASCII, regardless of locale).
+fn pkg_str_cmp(a: i64, b: i64) -> i64 {
+    let mut i = 0
+    for {
+        let ca = peek8(a + i)
+        let cb = peek8(b + i)
+        if ca != cb {
+            if ca < cb { return 0 - 1 }
+            return 1
+        }
+        if ca == 0 { return 0 }
+        i = i + 1
+    }
+    0
+}
+
+// Records a module's files so [path, data, len] of record j is `files[j]` (files is an
+// array of i64 that the caller owns, big enough for `n` records).
+//
+// Interpreted as an address of a 4-word stack array `let r[4]` (not directly usable as a
+// Sond array), so the tests use the record layout explained above. This helper is what the
+// hash routine reads; keeping the indirection lets a module have thousands of files.
+fn pkg_sort_files(files: i64, n: i64) {
+    let mut i = 1
+    for i < n {
+        let x = peek64(files + i * 8)
+        let mut j = i
+        for j > 0 {
+            let prev = peek64(files + (j - 1) * 8)
+            if pkg_str_cmp(peek64(prev), peek64(x)) <= 0 { break }
+            poke64(files + j * 8, prev)
+            j = j - 1
+        }
+        poke64(files + j * 8, x)
+        i = i + 1
+    }
+}
+
+// Appends `v` as a little-endian u64 to the byte buffer `b` (8 bytes, least significant
+// first). This is the length encoding of the canonical format: a TEXT encoding or a
+// big-endian one would produce a different hash, so the endianness is explicit here.
+fn pkg_put_u64le(b: i64, v: i64) {
+    let mut i = 0
+    for i < 8 {
+        bytes_push(b, (v >> (i * 8)) & 0xFF)
+        i = i + 1
+    }
+}
+
+// The canonical hash of the module held in `files` (n records [path, data, len]), as a
+// NUL-terminated lowercase hex string (64 chars) in the heap. Sorts the records' pointers
+// in place by path, so callers may build the module in any order.
+fn pkg_canon_hash(files: i64, n: i64) -> i64 {
+    pkg_sort_files(files, n)
+    let buf = bytes_new()
+    let mut i = 0
+    for i < n {
+        let r = peek64(files + i * 8)
+        let path = peek64(r)
+        let plen = strlen(path)
+        let data = peek64(r + 8)
+        let clen = peek64(r + 16)
+        pkg_put_u64le(buf, plen)
+        let mut j = 0
+        for j < plen {
+            bytes_push(buf, peek8(path + j))
+            j = j + 1
+        }
+        pkg_put_u64le(buf, clen)
+        j = 0
+        for j < clen {
+            bytes_push(buf, peek8(data + j))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let dg[32]
+    sha256_hash(peek64(buf), bytes_len(buf), dg)
+    let hex = heap_alloc(65)
+    let mut k = 0
+    for k < 32 {
+        let b0 = peek8(dg + k)
+        poke8(hex + k * 2, pkg_hex_digit(b0 >> 4))
+        poke8(hex + k * 2 + 1, pkg_hex_digit(b0 & 0xF))
+        k = k + 1
+    }
+    poke8(hex + 64, 0)
+    hex
+}

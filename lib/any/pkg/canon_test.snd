@@ -1,0 +1,129 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for the canonical module hash (lib/any/pkg/canon.snd). The hash of a module is over
+// its canonical content, byte by byte, and is agreed with the compiler side: two independent
+// implementations MUST produce the same bytes, or a module that one side fetched never
+// verifies on the other. The conformity vector below is the frozen reference; if this test
+// stops passing, the implementation changed, not the format.
+
+include "any/pkg/canon.snd"
+include "x86_64/linux/testing.snd"
+
+// Build a module record array [path_cstr, content_ptr, content_len] on the stack for the
+// two-file conformity vector. The bytes are UTF-8 on purpose: the path comparison is on
+// bytes, never on locale, and the content is hashed as it stands.
+test "canon: the conformity vector hashes to the agreed value" {
+    let mf[2]
+    let rec0[3]
+    let rec1[3]
+
+    let __p0: string = "año.snd"
+    rec0[0] = __p0.utf8
+    let __c0: string = "fn añadir() -> i64 { 42 }\n"
+    rec0[1] = __c0.utf8
+    rec0[2] = strlen(__c0.utf8)
+    mf[0] = rec0
+
+    let __p1: string = "sub/niño.snd"
+    rec1[0] = __p1.utf8
+    let __c1: string = "fn niño() -> i64 { 7 }\n"
+    rec1[1] = __c1.utf8
+    rec1[2] = strlen(__c1.utf8)
+    mf[1] = rec1
+
+    // The two paths sorted bytewise: "año.snd" (0x61...) then "sub/niño.snd" (0x73...).
+    let want: string = "923345ba8a4816339aeac609bef11aaa7dd88d46459bf8886ed8cc68833b3a8d"
+    let h = pkg_canon_hash(mf, 2)
+    assert_eq(streq(h, want.utf8), 1)
+}
+
+test "canon: input order does not matter, the sort is bytewise" {
+    // The same two files presented in the opposite order must hash identically: the hash is
+    // defined over sorted paths, never over whoever happened to list them first.
+    let mf[2]
+    let rec0[3]
+    let rec1[3]
+
+    let __p0: string = "año.snd"
+    rec0[0] = __p0.utf8
+    let __c0: string = "fn añadir() -> i64 { 42 }\n"
+    rec0[1] = __c0.utf8
+    rec0[2] = strlen(__c0.utf8)
+    mf[1] = rec0
+
+    let __p1: string = "sub/niño.snd"
+    rec1[0] = __p1.utf8
+    let __c1: string = "fn niño() -> i64 { 7 }\n"
+    rec1[1] = __c1.utf8
+    rec1[2] = strlen(__c1.utf8)
+    mf[0] = rec1
+
+    let want: string = "923345ba8a4816339aeac609bef11aaa7dd88d46459bf8886ed8cc68833b3a8d"
+    let h = pkg_canon_hash(mf, 2)
+    assert_eq(streq(h, want.utf8), 1)
+}
+
+test "canon: the empty module hashes to the empty sha256" {
+    let mf[1]
+    let h = pkg_canon_hash(mf, 0)
+    let want: string = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    assert_eq(streq(h, want.utf8), 1)
+}
+
+test "canon: one byte shorter in a path changes the hash" {
+    // A module whose content equals the vector's except the first path differs by one byte
+    // must NOT hash the same: byte-for-byte canonicalization is the whole point.
+    let mf[1]
+    let rec0[3]
+    let __p0: string = "ano.snd"
+    let __c0: string = "fn añadir() -> i64 { 42 }\n"
+    rec0[0] = __p0.utf8
+    rec0[1] = __c0.utf8
+    rec0[2] = strlen(__c0.utf8)
+    mf[0] = rec0
+    let h = pkg_canon_hash(mf, 1)
+    let want: string = "923345ba8a4816339aeac609bef11aaa7dd88d46459bf8886ed8cc68833b3a8d"
+    assert_ne(streq(h, want.utf8), 1)
+}
+
+test "canon: a byte order tie-breaks on the byte, not on the locale" {
+    // "á.snd" (U+00E1, bytes 0xC3 0xA1) sorts AFTER "z.snd" because 0xC3 > 0x7A, even though a
+    // locale-aware sort would put an accented letter before plain z. The ordering is on UTF-8
+    // bytes, period.
+    let mf[2]
+    let rec0[3]
+    let rec1[3]
+
+    let __p0: string = "z.snd"
+    rec0[0] = __p0.utf8
+    let __c0: string = "1"
+    rec0[1] = __c0.utf8
+    rec0[2] = strlen(__c0.utf8)
+    mf[0] = rec0
+
+    let __p1: string = "á.snd"
+    rec1[0] = __p1.utf8
+    let __c1: string = "2"
+    rec1[1] = __c1.utf8
+    rec1[2] = strlen(__c1.utf8)
+    mf[1] = rec1
+
+    // Sorted bytewise: "z.snd" first (0x7A < 0xC3). A locale-aware sort would emit the
+    // opposite order (accented letter before z), which hashes to a different digest. The
+    // expected value below is the hash of z-then-á, computed independently.
+    let h = pkg_canon_hash(mf, 2)
+    let want: string = "59521f384f35c2904bd1b836ba7affad090018f190b54220d909a88b78e7bcc3"
+    assert_eq(streq(h, want.utf8), 1)
+}
+test "canon: the byte compare agrees on equal, shorter and longer strings" {
+    let __a1: string = "abc"
+    let __a2: string = "abc"
+    let __b: string = "abd"
+    let __c: string = "ab"
+    assert_eq(pkg_str_cmp(__a1.utf8, __a2.utf8), 0)
+    assert_eq(pkg_str_cmp(__a1.utf8, __b.utf8), 0 - 1)
+    assert_eq(pkg_str_cmp(__b.utf8, __a1.utf8), 1)
+    assert_eq(pkg_str_cmp(__a1.utf8, __c.utf8), 1)
+    assert_eq(pkg_str_cmp(__c.utf8, __a1.utf8), 0 - 1)
+}

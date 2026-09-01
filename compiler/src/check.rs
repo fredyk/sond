@@ -1141,6 +1141,14 @@ pub fn check_undeclared_variables(
     globals: &[Global],
     enums: &[EnumDef],
 ) -> Result<(), String> {
+    // Variables the COVERAGE code generator publishes on its own, with no `let` in the
+    // source: `sond test --coverage` synthesizes a harness `main` (as ordinary Sond source,
+    // which goes through this very check) that reads `__cov_total`/`__cov_nfns` and writes
+    // `__cov_ptr`, and indexes the `__cov_fn_table` array. They are emitted as `.data`
+    // symbols by emit_program_coverage_g, so they are not declared anywhere the check can
+    // see -- but they are real, and a user cannot collide with them by accident (the `__cov_`
+    // prefix is reserved). Treat them as predeclared, like the builtin structs.
+    let cov_reserved: [&str; 4] = ["__cov_total", "__cov_ptr", "__cov_nfns", "__cov_fn_table"];
     // Collect all enum variant names and function names — they are identifiers, not variables.
     let mut known_names: HashSet<String> = HashSet::new();
     for e in enums {
@@ -1157,11 +1165,15 @@ pub fn check_undeclared_variables(
         func: &Function,
         globals: &[Global],
         known_names: &HashSet<String>,
+        cov_reserved: &[&str; 4],
     ) -> Result<(), String> {
         let mut scopes: ScopeStack = Vec::new();
         let mut top: HashSet<String> = HashSet::new();
         for g in globals {
             top.insert(g.name.clone());
+        }
+        for name in cov_reserved {
+            top.insert(name.to_string());
         }
         for p in &func.params {
             top.insert(p.name.clone());
@@ -1193,7 +1205,7 @@ pub fn check_undeclared_variables(
         Ok(())
     }
     for f in funcs {
-        check_func(f, globals, &known_names)?;
+        check_func(f, globals, &known_names, &cov_reserved)?;
     }
     Ok(())
 }
@@ -8113,6 +8125,51 @@ mod invariant_undeclared {
             "check_undeclared_stmt must name every field of every Stmt arm: a bare `..` there \
              lets a field be added to the enum and never checked, which is how the `invariant` \
              clause went unwalked"
+        );
+    }
+}
+
+#[cfg(test)]
+mod coverage_harness_globals {
+    use super::*;
+    use crate::lexer::tokenize;
+    use crate::parser::Parser;
+
+    // The `sond test --coverage` harness is generated as Sond SOURCE and parsed with the
+    // ordinary parser, so its `main` refers to the coverage bookkeeping symbols
+    // (`__cov_total`, `__cov_ptr`, `__cov_nfns`, `__cov_fn_table`) by name. Those are reserved
+    // compiler-internal globals published by the coverage code generator; they are never
+    // user-declared `let`s, so the undeclared-variable check must treat them as predeclared.
+    // Without this, every `sond test` on a coverage build dies with "variable `__cov_total`
+    // is not declared in function `main`".
+    #[test]
+    fn a_coverage_harness_referencing_the_cov_symbols_passes() {
+        // The real harness body is exercised: it reads the total point count, mmaps a shared
+        // buffer, points __cov_ptr at it, and later indexes __cov_fn_table and reads
+        // __cov_nfns. None of the four __cov_* names is a user `let`.
+        let src = "fn main() -> i64 {\n\
+             \x20   let __n = __cov_total\n\
+             \x20   let __buf = 7\n\
+             \x20   __cov_ptr = __buf\n\
+             \x20   let __base = __cov_fn_table + __n * 32\n\
+             \x20   __base + __cov_nfns\n\
+             }";
+        let mut p = Parser::new(tokenize(src));
+        let funcs = p.parse_program();
+        assert_eq!(
+            check_undeclared_variables(&funcs, &[], &[]).map_err(|e| e),
+            Ok(()),
+            "a synthesized coverage harness must not trip the undeclared-variable check"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_unknown_name_is_still_rejected() {
+        let mut p = Parser::new(tokenize("fn f() -> i64 { __cov_totals }"));
+        let funcs = p.parse_program();
+        assert!(
+            check_undeclared_variables(&funcs, &[], &[]).is_err(),
+            "a name that merely resembles the reserved ones is still undeclared"
         );
     }
 }
