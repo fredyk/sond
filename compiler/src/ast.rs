@@ -158,6 +158,11 @@ pub struct Function {
     /// The human-readable name of a `test` block (the string after `test`), for the
     /// runner's report. `None` for ordinary functions.
     pub test_name: Option<String>,
+    /// True for a function the COMPILER synthesized (the `sond test` harness `main`),
+    /// never for one the author wrote. The harness is the only code allowed to reference
+    /// the four reserved `__cov_*` coverage symbols, which `check_undeclared_variables`
+    /// predeclares for it alone; author code may neither read nor bind that prefix.
+    pub is_harness: bool,
     /// The function body.
     pub body: Block,
 }
