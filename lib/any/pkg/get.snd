@@ -168,38 +168,39 @@ fn pkg_parse_spec(spec: i64, host: i64, owner: i64, repo: i64, ref: i64, name: i
         for p < at { if bytes_get(b, p) == 47 { p = p + 1 } else { break } }
     }
     // exactly "host/owner/repo" (3) or "owner/repo" (2, host defaults to github.com)
-    let hoff = 0
-    let hlen = 0
-    let ooff = 0
-    let olen = 0
-    let roff = 0
-    let rlen = 0
+    // seg holds OFFSETS into the bytes buffer b; the copy helpers below want pointers, so
+    // every offset is turned into a pointer via bp (the buffer's data).
+    let bp = peek64(b)
+    let mut hsrc = 0
+    let mut hlen = 0
+    let mut osrc = 0
+    let mut olen = 0
+    let mut rsrc = 0
+    let mut rlen = 0
     if nseg == 2 {
-        let g: string = "github.com"
-        let gl = strlen(g.utf8)
-        hoff = pkg_github_lit()
-        hlen = gl
-        ooff = seg[0]
+        hsrc = pkg_github_lit()
+        hlen = strlen(hsrc)
+        osrc = bp + seg[0]
         olen = seglen[0]
-        roff = seg[1]
+        rsrc = bp + seg[1]
         rlen = seglen[1]
     }
     if nseg == 3 {
-        hoff = seg[0]
+        hsrc = bp + seg[0]
         hlen = seglen[0]
-        ooff = seg[1]
+        osrc = bp + seg[1]
         olen = seglen[1]
-        roff = seg[2]
+        rsrc = bp + seg[2]
         rlen = seglen[2]
     }
     if nseg != 2 && nseg != 3 { return 0 - 1 }
     let mut refb = bytes_slice(b, at + 1, bytes_len(b))
     if bytes_len(refb) == 0 { return 0 - 1 }
-    if pkg_copy_cstr_out(hoff, hlen, host, 128) != 0 { return 0 - 1 }
-    if pkg_copy_cstr_out(ooff, olen, owner, 128) != 0 { return 0 - 1 }
-    if pkg_copy_cstr_out(roff, rlen, repo, 128) != 0 { return 0 - 1 }
+    if pkg_copy_cstr_out(hsrc, hlen, host, 128) != 0 { return 0 - 1 }
+    if pkg_copy_cstr_out(osrc, olen, owner, 128) != 0 { return 0 - 1 }
+    if pkg_copy_cstr_out(rsrc, rlen, repo, 128) != 0 { return 0 - 1 }
     if pkg_copy_cstr_out(peek64(refb), bytes_len(refb), ref, 128) != 0 { return 0 - 1 }
-    if pkg_copy_cstr_out(roff, rlen, name, 128) != 0 { return 0 - 1 }
+    if pkg_copy_cstr_out(rsrc, rlen, name, 128) != 0 { return 0 - 1 }
     0
 }
 
@@ -309,7 +310,10 @@ fn pkg_cat4(a:i64, b:i64, c:i64, d:i64) -> i64 {
 fn pkg_commit_path(owner:i64, repo:i64, ref:i64) -> i64 {
     let a: string = "/repos/"
     let b: string = "/commits/"
-    pkg_cat4(a.utf8, owner, b.utf8, ref)
+    let base = pkg_slash_repo(repo)
+    let h1 = pkg_cat3(a.utf8, owner, base)
+    let h2 = pkg_cat2(h1, b.utf8)
+    pkg_cat2(h2, ref)
 }
 
 // The API request path for the recursive tree of a sha:
@@ -318,9 +322,11 @@ fn pkg_tree_path(owner:i64, repo:i64, sha:i64) -> i64 {
     let a: string = "/repos/"
     let d: string = "/git/trees/"
     let c: string = "?recursive=1"
-    let t = pkg_cat4(a.utf8, owner, d.utf8, repo)
-    let u = pkg_cat2(t, sha)
-    pkg_cat2(u, c.utf8)
+    let base = pkg_slash_repo(repo)
+    let h1 = pkg_cat3(a.utf8, owner, base)
+    let h2 = pkg_cat2(h1, d.utf8)
+    let h3 = pkg_cat2(h2, sha)
+    pkg_cat2(h3, c.utf8)
 }
 
 // The API request path for the repo itself (used to tell "repo missing" from "ref missing"):
@@ -1049,25 +1055,23 @@ fn pkg_get(spec:i64) -> i64 {
     let rr = pkg_resolve_sha(ownerb, repob, refb, sha)
     if rr != 0 { return rr }
     if hit == 1 {
-        if streq(sha, rsha) == 1 {
-            let cache_dir = pkg_join2(pkg_cache_root_resolve(), rhash)
+        let rhashp = peek64(rhash)
+        if streq(sha, peek64(rsha)) == 1 {
+            let cache_dir = pkg_join2(pkg_cache_root_resolve(), rhashp)
             if pkg_dir_exists(cache_dir) == 1 {
                 let m2: string = "sond get: "
                 pkg_puts(m2.utf8)
                 pkg_puts(src)
                 let m3: string = " already cached ("
                 pkg_puts(m3.utf8)
-                pkg_puts(rhash)
+                pkg_puts(rhashp)
                 let m4: string = "); no download needed\n"
                 pkg_puts(m4.utf8)
                 return 0
             }
         }
     }
-    let mut expect_hash = 0
-    if hit == 1 {
-        if streq(sha, rsha) == 1 { expect_hash = rhash }
-    }
+    let expect_hash = if hit == 1 { if streq(sha, peek64(rsha)) == 1 { peek64(rhash) } else { 0 } } else { 0 }
     let paths = heap_alloc(8 * 65536)
     let n = pkg_fetch_tree(ownerb, repob, sha, paths, 65536)
     if n < 0 { return n }
@@ -1147,10 +1151,12 @@ fn pkg_verify() -> i64 {
         let hl[1]
         let no2[1]
         let nl[1]
+        // deps line is "use <src> <sha> <hash> <name>" so the hash is field 3 and the
+        // module name field 4; field 2 is the pinned commit sha, which verify ignores.
         if pkg_field(bob, start, le2, 0, ro, rl) == 1 && rl[0] == 3 && bytes_get(bob, ro[0] + 1) == 115 {
             if pkg_field(bob, start, le2, 1, so, sl) == 1 &&
-                pkg_field(bob, start, le2, 2, ho, hl) == 1 &&
-                pkg_field(bob, start, le2, 3, no2, nl) == 1 {
+                pkg_field(bob, start, le2, 3, ho, hl) == 1 &&
+                pkg_field(bob, start, le2, 4, no2, nl) == 1 {
                 let srcc = pkg_field_cstr(bob, so[0], sl[0])
                 let hash = pkg_field_cstr(bob, ho[0], hl[0])
                 let name = pkg_field_cstr(bob, no2[0], nl[0])

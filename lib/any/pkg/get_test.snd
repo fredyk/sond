@@ -37,16 +37,16 @@ let R_RAW_A_CHANGED: string = "HTTP/1.1 200 OK\r\n\r\nfn añadir() -> i64 { 0 }\
 
 let H_TREE_CHANGED: string = "/repos/fredyk/sond-strings/git/trees/1111222233334444555566667777888899990000?recursive=1"
 
+let R_TREE_NOSND: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"1111222233334444555566667777888899990000\",\"truncated\":false,\"tree\":[{\"path\":\"README.md\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\",\"size\":10,\"url\":\"u\"}]}"
+
 let mut h_rec_cnt = 0
-let mut h_rec_path[16]
-let mut h_rec_resp[16]
 
 fn h_rec_add(path: i64, resp: i64) {
     // La tabla son 16 huecos. Pasarse no se traga en silencio: no se escribe, y el hueco que
     // falta hace que pkg_raw_get devuelva -2 sobre ese target, o sea un test ROJO que se ve.
     if h_rec_cnt >= 0 && h_rec_cnt < 16 {
-        h_rec_path[h_rec_cnt] = path
-        h_rec_resp[h_rec_cnt] = resp
+        pkg_rec_path[h_rec_cnt] = path
+        pkg_rec_resp[h_rec_cnt] = resp
         h_rec_cnt = h_rec_cnt + 1
     }
 }
@@ -136,4 +136,197 @@ test "pkg: url encoding keeps ASCII and percent-encodes the accented bytes" {
     let u = pkg_url_path(o.utf8, r.utf8, TEST_SHA.utf8, p.utf8)
     let wantw: string = "/fredyk/sond-strings/1111222233334444555566667777888899990000/sub/ni%C3%B1o.snd"
     assert_eq(streq(u, wantw.utf8), 1)
+}
+
+// ── recorded-seam integration tests ──────────────────────────────────────────────────────────
+// Every request pkg_get would make against GitHub is answered from the recorded table
+// (pkg_rec_n > 0 arms the seam), so the whole fetch runs with no network and no sockets.
+
+// 1 if a regular file exists at the cstr path `path`.
+fn h_fexists(path: i64) -> i64 {
+    let fd = open_file(path, O_RDONLY, 0)
+    if fd >= 0 { close_fd(fd); return 1 }
+    0
+}
+
+// The exact deps.snd bytes a successful get of the standard fixture must leave behind:
+// "use github.com/fredyk/sond-strings 1111... 9233... sond-strings\n".
+fn h_expect_deps() -> i64 {
+    let b = bytes_new()
+    let u: string = "use "
+    bytes_append_cstr(b, u.utf8)
+    let src: string = "github.com/fredyk/sond-strings"
+    bytes_append_cstr(b, src.utf8)
+    bytes_push(b, 32)
+    bytes_append_cstr(b, TEST_SHA.utf8)
+    bytes_push(b, 32)
+    bytes_append_cstr(b, EXPECTED_HASH.utf8)
+    bytes_push(b, 32)
+    let nm: string = "sond-strings"
+    bytes_append_cstr(b, nm.utf8)
+    bytes_push(b, 10)
+    b
+}
+
+fn pkg_test_anio() -> i64 { let s: string = "año.snd"; s.utf8 }
+fn pkg_test_subnino() -> i64 { let s: string = "sub/niño.snd"; s.utf8 }
+fn pkg_test_readme() -> i64 { let s: string = "README.md"; s.utf8 }
+
+test "pkg: get fetches the module, caches it under the frozen hash, and skips the README" {
+    let troot: string = "/tmp/sond-pkg-t1"
+    let cac: string = "/tmp/sond-pkg-t1/cache"
+    let dep: string = "/tmp/sond-pkg-t1/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_ok()
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0)
+    // exactly four recorded fetches: commits, tree, and the two .snd files. A fifth
+    // request (for the README that sits in the tree) would leave the seam's -2 path.
+    assert_eq(pkg_rec_calls, 4)
+    let mdir = pkg_join2(cac.utf8, EXPECTED_HASH.utf8)
+    assert_eq(pkg_dir_exists(mdir), 1)
+    let f1 = pkg_join2(mdir, pkg_test_anio())
+    assert_eq(h_fexists(f1), 1)
+    let f2 = pkg_join2(mdir, pkg_test_subnino())
+    assert_eq(h_fexists(f2), 1)
+    let f3 = pkg_join2(mdir, pkg_test_readme())
+    assert_eq(h_fexists(f3), 0)
+    // año.snd content is the served body, byte for byte
+    let fbuf = heap_alloc(4096)
+    let flen = read_file(f1, fbuf, 4096)
+    assert(flen > 0)
+    let want: string = "fn añadir() -> i64 { 42 }\n"
+    assert_eq(bytes_eq(bytes_from_raw(fbuf, flen), bytes_from_cstr(want.utf8)), 1)
+    // deps.snd pins the resolved commit and the content hash
+    let dbuf = heap_alloc(4096)
+    let dlen = read_file(dep.utf8, dbuf, 4096)
+    assert(dlen > 0)
+    assert_eq(bytes_eq(bytes_from_raw(dbuf, dlen), h_expect_deps()), 1)
+}
+
+test "pkg: a second get of the same ref downloads nothing and rewrites nothing" {
+    let troot: string = "/tmp/sond-pkg-t2"
+    let cac: string = "/tmp/sond-pkg-t2/cache"
+    let dep: string = "/tmp/sond-pkg-t2/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_ok()
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0)
+    assert_eq(pkg_rec_calls, 4)
+    let dbuf1 = heap_alloc(4096)
+    let dlen1 = read_file(dep.utf8, dbuf1, 4096)
+    assert(dlen1 > 0)
+    let dep1 = bytes_from_raw(dbuf1, dlen1)
+    // second get: only the commit re-resolution is replayed, never the tree or the files
+    assert_eq(pkg_get(spec.utf8), 0)
+    assert_eq(pkg_rec_calls, 5)
+    let dbuf2 = heap_alloc(4096)
+    let dlen2 = read_file(dep.utf8, dbuf2, 4096)
+    assert(dlen2 > 0)
+    assert_eq(bytes_eq(dep1, bytes_from_raw(dbuf2, dlen2)), 1)
+    let mdir = pkg_join2(cac.utf8, EXPECTED_HASH.utf8)
+    assert_eq(pkg_dir_exists(mdir), 1)
+}
+
+test "pkg: a module half written never appears under the hash name" {
+    let troot: string = "/tmp/sond-pkg-t3"
+    let cac: string = "/tmp/sond-pkg-t3/cache"
+    let dep: string = "/tmp/sond-pkg-t3/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    // Two records: the second one (a.snd/b.snd) cannot be created because a.snd exists as a
+    // regular file, so the write fails mid-way. Whatever was written must be cleaned up and
+    // the hash name must never appear.
+    let recs[2]
+    let p1: string = "a.snd"
+    let p2: string = "a.snd/b.snd"
+    let d1: string = "AAA"
+    let d2: string = "BBB"
+    let r1 = heap_alloc(24)
+    poke64(r1, p1.utf8)
+    poke64(r1 + 8, d1.utf8)
+    poke64(r1 + 16, 3)
+    poke64(recs + 0, r1)
+    let r2 = heap_alloc(24)
+    poke64(r2, p2.utf8)
+    poke64(r2 + 8, d2.utf8)
+    poke64(r2 + 16, 3)
+    poke64(recs + 8, r2)
+    assert_eq(pkg_write_cache(EXPECTED_HASH.utf8, recs, 2), 0)
+    let mdir = pkg_join2(cac.utf8, EXPECTED_HASH.utf8)
+    assert_eq(pkg_dir_exists(mdir), 0)
+    let tmp = pkg_cat4(cac.utf8, pkg_slash_lit(), pkg_getdash_lit(), EXPECTED_HASH.utf8)
+    assert_eq(pkg_dir_exists(tmp), 0)
+}
+
+test "pkg: verify is silent when the cache matches and faults when it does not" {
+    let troot: string = "/tmp/sond-pkg-t4"
+    let cac: string = "/tmp/sond-pkg-t4/cache"
+    let dep: string = "/tmp/sond-pkg-t4/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_ok()
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0)
+    assert_eq(pkg_verify(), 0)
+    // rewrite año.snd in the cache with different bytes: the content no longer hashes to
+    // what deps.snd recorded, so verify must flag the module.
+    let mdir = pkg_join2(cac.utf8, EXPECTED_HASH.utf8)
+    let f1 = pkg_join2(mdir, pkg_test_anio())
+    let fd = open_file(f1, O_WRONLY | O_TRUNC, 0)
+    assert(fd >= 0)
+    let junk: string = "fn añadir() -> i64 { 0 }\n"
+    assert_eq(write_buf(fd, junk.utf8, strlen(junk.utf8)), strlen(junk.utf8))
+    close_fd(fd)
+    assert_eq(pkg_verify(), 1)
+}
+
+test "pkg: get reports -2 when the repo does not exist" {
+    let troot: string = "/tmp/sond-pkg-t5"
+    let cac: string = "/tmp/sond-pkg-t5/cache"
+    let dep: string = "/tmp/sond-pkg-t5/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_clear()
+    h_rec_add(H_PATH_COMMITS.utf8, R_404.utf8)
+    h_rec_add(H_PATH_REPO.utf8, R_404.utf8)
+    pkg_rec_n = h_rec_cnt
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0 - 2)
+}
+
+test "pkg: get reports -3 when the ref does not exist" {
+    let troot: string = "/tmp/sond-pkg-t6"
+    let cac: string = "/tmp/sond-pkg-t6/cache"
+    let dep: string = "/tmp/sond-pkg-t6/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_clear()
+    h_rec_add(H_PATH_COMMITS.utf8, R_404.utf8)
+    h_rec_add(H_PATH_REPO.utf8, R_REPO_OK.utf8)
+    pkg_rec_n = h_rec_cnt
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0 - 3)
+}
+
+test "pkg: get reports -4 when the git tree is truncated" {
+    let troot: string = "/tmp/sond-pkg-t7"
+    let cac: string = "/tmp/sond-pkg-t7/cache"
+    let dep: string = "/tmp/sond-pkg-t7/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_clear()
+    h_rec_add(H_PATH_COMMITS.utf8, R_COMMITS_OK.utf8)
+    h_rec_add(H_TREE_CHANGED.utf8, R_TRUNCATED.utf8)
+    pkg_rec_n = h_rec_cnt
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0 - 4)
+}
+
+test "pkg: get reports -9 when the module has no .snd files" {
+    let troot: string = "/tmp/sond-pkg-t8"
+    let cac: string = "/tmp/sond-pkg-t8/cache"
+    let dep: string = "/tmp/sond-pkg-t8/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_clear()
+    h_rec_add(H_PATH_COMMITS.utf8, R_COMMITS_OK.utf8)
+    h_rec_add(H_TREE_CHANGED.utf8, R_TREE_NOSND.utf8)
+    pkg_rec_n = h_rec_cnt
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0 - 9)
 }
