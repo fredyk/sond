@@ -1,0 +1,1202 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/pkg/get.snd: the Sond package manager, written in Sond.
+//
+// `sond get github.com/owner/repo@ref` fetches a module from a GitHub repository over
+// the TLS stack that lives in this same tree: resolve `ref` (a tag, a branch or a SHA)
+// to a commit SHA via the GitHub API, list the `.snd` files of the tree, GET each one
+// raw, canonicalize (see canon.snd), hash, write the module into the package cache under
+// its hash,and record the `use` line in deps.snd so a later build can find it. This file is
+// the ONLY place in the whole system that touches the network: `sond build` and
+// `sond test` never do.
+//
+// THE CACHE  (this is the format `sond get` writes and `sond verify` reads;the two sides
+// must agree on the byte or nothing ever resolves):
+//   root:    $SOND_CACHE/pkg if set, else ~/.cache/sond/pkg
+//   module:  <root>/<content-hash>/     one dir per module content, named by its hash
+//   files:   <root>/<content-hash>/<relative path inside the module>
+// A module appears in the cache ONLY complete: every file goes first to a sibling dir
+// `.get-<hash>` and the dir is renamed to its final hash name only when every byte of every
+// file is on disk. A cache dir named by a hash is therefore trustworthy; a half-fetched
+// module never wears the name of a hash.
+//
+// THE DEPS FILE: deps.snd in the current project, one `use` line per fetched module:
+//   use <source-url> <commit-sha> <content-hash> <module-name>
+// <source-url> is what was asked for minus the ref ("github.com/owner/repo"),
+// <commit-sha> is the RESOLVED commit the ref named (a tag may be moved; what gets pinned
+// here is a commit, which never moves), <content-hash> is the canonical hash over the fetched
+// bytes,and <module-name> is the repo basename. `sond verify` recomputes the hash from the
+// cache and flags any line whose recorded hash no longer matches, with no network at all.
+//
+// `pkg_get` is what a program calls with the ref; `pkg_verify` checks deps. A few module
+// globals (all `pkg_`-prefixed, with production defaults) keep the functions testable:
+// a test points them at a loopback server and a recorded-response table,and the functions
+// never know which world they are in.
+//
+// Every new function here carries the `pkg_` prefix: canon.snd already owns some, and the
+// namespace is flat. This file is included (flat splice), so every name must be unique.
+
+include "any/pkg/canon.snd"
+include "any/json.snd"
+include "any/tls/https.snd"
+include "any/tls/session.snd"
+include "x86_64/linux/io.snd"
+include "x86_64/linux/env.snd"
+include "x86_64/linux/net.snd"
+include "x86_64/linux/dns.snd"
+include "x86_64/linux/syscall-nums.snd"
+include "x86_64/linux/time.snd"
+include "any/x509/roots.snd"
+
+// Endpoints and test seams. Every default is the production GitHub; a test overrides them
+// to point at a loopback server and, when pkg_rec_n > 0, a table of recorded responses.
+let mut pkg_api_host = 0            // cstr; 0 => "api.github.com"
+let mut pkg_api_port = 443
+let mut pkg_raw_host = 0            // cstr; 0 => "raw.githubusercontent.com"
+let mut pkg_raw_port = 443
+let mut pkg_resolve_dns = 1         // 1 = resolve the host name via DNS before TLS; 0 = an IP
+let mut pkg_roots = 0               // ptr array of root DER certs; 0 => built-in store
+let mut pkg_nroots = 0
+let mut pkg_now = 0                 // cstr "YYYYMMDDHHMMSS"; 0 => current clock
+let mut pkg_cache_root = 0          // cstr; 0 => $SOND_CACHE/pkg else ~/.cache/sond/pkg
+let mut pkg_deps_path = 0           // cstr; 0 => "deps.snd"
+let mut pkg_rec_n = 0               // >0 arms the recorded-response seam (tests; no network)
+let mut pkg_rec_calls = 0           // recorded fetches served (tests count them to check no re-download)
+let mut pkg_rec_path[16]            // recorded full request targets (cstr)
+let mut pkg_rec_resp[16]            // recorded full raw HTTP responses (cstr)
+
+// Syscalls and flags this module needs that syscall-nums.snd does not ship; the numbers are
+// Linux x86-64 and are shared with the rest of the target.
+let SYS_rename = 82
+let SYS_rmdir = 84
+let O_DIRECTORY = 65536             // 0o200000
+let PKG_DIR_MODE = 493              // 0o755
+let PKG_FILE_MODE = 420             // 0o644
+
+// ── String and path helpers ─────────────────────────────────────────────────────────────────
+
+// A heap cstr copy of the bytes buffer `b`.
+fn pkg_bytes_cstr(b: i64) -> i64 {
+    let n = bytes_len(b)
+    let out = heap_alloc(n + 1)
+    let mut i = 0
+    for i < n { poke8(out + i, bytes_get(b, i)); i = i + 1 }
+    poke8(out + n, 0)
+    out
+}
+
+// 1 if the bytes buffer `b` starts with the cstr `pre`.
+fn pkg_b_startswith(b: i64, pre: i64) -> i64 {
+    let n = bytes_len(b)
+    let mut i = 0
+    for peek8(pre + i) != 0 {
+        if i >= n { return 0 }
+        if bytes_get(b, i) != peek8(pre + i) { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+// Returns 1 if bytes buffer `b` ends with the cstr `suf`.
+fn pkg_b_endswith(b: i64, suf: i64) -> i64 {
+    let n = bytes_len(b)
+    let sl = strlen(suf)
+    if n < sl { return 0 }
+    let mut i = 0
+    for i < sl {
+        if bytes_get(b, n - sl + i) != peek8(suf + i) { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+// 1 if the cstr `s` (length `sl`) ends with ".snd".
+fn pkg_snd_suffix(s: i64, sl: i64) -> i64 {
+    let lit: string = ".snd"
+    if sl < 4 { return 0 }
+    if peek8(s + sl - 4) != 46 { return 0 }
+    if peek8(s + sl - 3) != 115 { return 0 }
+    if peek8(s + sl - 2) != 110 { return 0 }
+    if peek8(s + sl - 1) != 100 { return 0 }
+    1
+}
+
+// Writes `s` (a cstr, length `sl`) into the output cstr buffer `out` (space for `outcap`),
+// NUL-terminated. Returns 0, or -1 if it does not fit.
+fn pkg_copy_cstr_out(s: i64, sl: i64, out: i64, outcap: i64) -> i64 {
+    if sl + 1 > outcap { return 0 - 1 }
+    let mut i = 0
+    for i < sl { poke8(out + i, peek8(s + i)); i = i + 1 }
+    poke8(out + sl, 0)
+    0
+}
+
+// ── Parsing the ref a user typed ─────────────────────────────────────────────────────────────
+
+// Parses `spec`, a cstr like "github.com/fredyk/sond-strings@v1.4.2" (a leading "https://"
+// is accepted) into host, owner, repo, ref and name -- each written NUL-terminated into the
+// caller's buffers (all at least 128 bytes). src (host/owner/repo joined) is built by the
+// caller. Returns 0, or -1 if the spec does not parse.
+fn pkg_parse_spec(spec: i64, host: i64, owner: i64, repo: i64, ref: i64, name: i64) -> i64 {
+    let b = bytes_from_cstr(spec)
+    let at = bytes_index_of(b, 64)
+    if at < 1 { return 0 - 1 }
+    if at >= bytes_len(b) - 1 { return 0 - 1 }
+    let mut main_start = 0
+    let https = pkg_b_startswith(b, pkg_https_lit())
+    if https == 1 {
+        main_start = 8
+    } else {
+        let http = pkg_b_startswith(b, pkg_http_lit())
+        if http == 1 { main_start = 7 }
+    }
+    // split b[main_start..at] into segments on '/'
+    let seg[16]
+    let seglen[16]
+    let mut nseg = 0
+    let mut p = main_start
+    for p < at {
+        if nseg >= 16 { return 0 - 1 }
+        seg[nseg] = p
+        let mut q = p
+        for q < at { if bytes_get(b, q) == 47 { break } q = q + 1 }
+        if q == p { return 0 - 1 }
+        seglen[nseg] = q - p
+        nseg = nseg + 1
+        p = q
+        for p < at { if bytes_get(b, p) == 47 { p = p + 1 } else { break } }
+    }
+    // exactly "host/owner/repo" (3) or "owner/repo" (2, host defaults to github.com)
+    let hoff = 0
+    let hlen = 0
+    let ooff = 0
+    let olen = 0
+    let roff = 0
+    let rlen = 0
+    if nseg == 2 {
+        let g: string = "github.com"
+        let gl = strlen(g.utf8)
+        hoff = pkg_github_lit()
+        hlen = gl
+        ooff = seg[0]
+        olen = seglen[0]
+        roff = seg[1]
+        rlen = seglen[1]
+    }
+    if nseg == 3 {
+        hoff = seg[0]
+        hlen = seglen[0]
+        ooff = seg[1]
+        olen = seglen[1]
+        roff = seg[2]
+        rlen = seglen[2]
+    }
+    if nseg != 2 && nseg != 3 { return 0 - 1 }
+    let mut refb = bytes_slice(b, at + 1, bytes_len(b))
+    if bytes_len(refb) == 0 { return 0 - 1 }
+    if pkg_copy_cstr_out(hoff, hlen, host, 128) != 0 { return 0 - 1 }
+    if pkg_copy_cstr_out(ooff, olen, owner, 128) != 0 { return 0 - 1 }
+    if pkg_copy_cstr_out(roff, rlen, repo, 128) != 0 { return 0 - 1 }
+    if pkg_copy_cstr_out(peek64(refb), bytes_len(refb), ref, 128) != 0 { return 0 - 1 }
+    if pkg_copy_cstr_out(roff, rlen, name, 128) != 0 { return 0 - 1 }
+    0
+}
+
+// The literal "https://" as a cstr, boxed so it can be returned from a helper.
+fn pkg_https_lit() -> i64 {
+    let s: string = "https://"
+    s.utf8
+}
+
+fn pkg_http_lit() -> i64 {
+    let s: string = "http://"
+    s.utf8
+}
+
+fn pkg_github_lit() -> i64 {
+    let s: string = "github.com"
+    s.utf8
+}
+
+// ── Building request paths and URLs ─────────────────────────────────────────────────────────
+
+// One uppercase hex digit for a nibble (for URL percent-encoding).
+fn pkg_url_hx(v: i64) -> i64 {
+    if v < 10 { return 48 + v }
+    65 + v - 10
+}
+
+// 1 if byte `c` may appear verbatim in a URL path segment (RFC 3986 unreserved plus the
+// path separator; everything else is percent-encoded).
+fn pkg_url_safe(c:i64) -> i64 {
+    if c >= 48 && c <=57 { return1 }
+    if c >=65 && c <=90 { return1 }
+    if c >=97 && c <=122 { return1 }
+    if c ==45 { return1 }                 // -
+    if c ==46 { return1 }                 // .
+    if c ==95 { return1 }                 // _
+    if c ==126 { return1 }                // ~
+    if c ==47 { return1 }                 // /
+    0
+}
+
+// A heap cstr for the raw.githubusercontent URL of one module file:
+// "/owner/repo/sha/percent-encoded-path". Non-ASCII bytes of the path (an "año.snd"
+// really carries UTF-8) are percent-encoded so the URL is valid ASCII on the wire.
+fn pkg_url_path(owner:i64, repo:i64, sha:i64, path:i64) -> i64 {
+    let ob = bytes_from_cstr(owner)
+    let rb = bytes_from_cstr(repo)
+    let sb = bytes_from_cstr(sha)
+    let pb = bytes_from_cstr(path)
+    let out = bytes_new()
+    bytes_push(out, 47)
+    bytes_append(out, ob)
+    bytes_push(out, 47)
+    bytes_append(out, rb)
+    bytes_push(out, 47)
+    bytes_append(out, sb)
+    bytes_push(out, 47)
+    let n = bytes_len(pb)
+    let mut i = 0
+    for i < n {
+        let c = bytes_get(pb, i)
+        if pkg_url_safe(c) == 1 {
+            bytes_push(out, c)
+        } else {
+            bytes_push(out, 37)                       // '%'
+            bytes_push(out, pkg_url_hx((c >> 4) & 15))
+            bytes_push(out, pkg_url_hx(c & 15))
+        }
+        i = i + 1
+    }
+    poke8(peek64(out) + bytes_len(out), 0)
+    peek64(out)
+}
+
+// A heap cstr built by appending a literal and a cstr with no separator, e.g. the API paths
+// "/repos/" + owner + "/commits/" + ref. Callers build URLs out of literals and dynamic parts
+// without hand-counting lengths.
+fn pkg_cat2(a:i64, b:i64) -> i64 {
+    let r = bytes_new()
+    bytes_append_cstr(r, a)
+    bytes_append_cstr(r, b)
+    poke8(peek64(r) + bytes_len(r), 0)
+    peek64(r)
+}
+
+fn pkg_cat3(a:i64, b:i64, c:i64) -> i64 {
+    let r = bytes_new()
+    bytes_append_cstr(r, a)
+    bytes_append_cstr(r, b)
+    bytes_append_cstr(r, c)
+    poke8(peek64(r) + bytes_len(r), 0)
+    peek64(r)
+}
+
+fn pkg_cat4(a:i64, b:i64, c:i64, d:i64) -> i64 {
+    let r = bytes_new()
+    bytes_append_cstr(r, a)
+    bytes_append_cstr(r, b)
+    bytes_append_cstr(r, c)
+    bytes_append_cstr(r, d)
+    poke8(peek64(r) + bytes_len(r), 0)
+    peek64(r)
+}
+
+// The API request path for the commit a ref names:
+// "/repos/{owner}/{repo}/commits/{ref}".
+fn pkg_commit_path(owner:i64, repo:i64, ref:i64) -> i64 {
+    let a: string = "/repos/"
+    let b: string = "/commits/"
+    pkg_cat4(a.utf8, owner, b.utf8, ref)
+}
+
+// The API request path for the recursive tree of a sha:
+// "/repos/{owner}/{repo}/git/trees/{sha}?recursive=1".
+fn pkg_tree_path(owner:i64, repo:i64, sha:i64) -> i64 {
+    let a: string = "/repos/"
+    let d: string = "/git/trees/"
+    let c: string = "?recursive=1"
+    let t = pkg_cat4(a.utf8, owner, d.utf8, repo)
+    let u = pkg_cat2(t, sha)
+    pkg_cat2(u, c.utf8)
+}
+
+// The API request path for the repo itself (used to tell "repo missing" from "ref missing"):
+// "/repos/{owner}/{repo}".
+fn pkg_repo_path(owner:i64, repo:i64) -> i64 {
+    let a: string = "/repos/"
+    let u = pkg_slash_repo(repo)
+    pkg_cat3(a.utf8, owner, u)
+}
+
+// helper: "/" + repo
+fn pkg_slash_repo(repo:i64) -> i64 {
+    let s: string = "/"
+    pkg_cat2(s.utf8, repo)
+}
+
+// ── Bytes output helpers used by error messages ─────────────────────────────────────────────
+
+// Writes `n` bytes of `src` to stdout via write(1): the portable way to print a run-time
+// string (the print builtin only accepts a literal).
+fn pkg_write_out(src:i64, n:i64) {
+    if n >0 { syscall(SYS_write, 1, src, n) }
+}
+
+// Prints a cstr.
+fn pkg_puts(s:i64) {
+    pkg_write_out(s, strlen(s))
+}
+
+// Prints a bytes buffer.
+fn pkg_puts_bytes(b:i64) {
+    pkg_write_out(peek64(b), bytes_len(b))
+}
+
+// ── The single network call ──────────────────────────────────────────────────────────────────
+
+// Fetches `path` (a cstr request target, e.g. "/repos/...") over HTTPS from `host` with server
+// name `sni`, writing the RAW response (headers+body) into `out` (up to `cap` bytes). Returns
+// the byte count placed in `out`, or a negative value on transport/response failure.
+//
+// When the recorded-response seam is armed (pkg_rec_n > 0), this serves the table instead of
+// touching any socket: same shape, same callers, no network. The tests live entirely there;
+// the live path is proven by the loopback TLS test.But user: https:// - i.e. the empty body case
+// is impossible here (every recorded and live response has a status line), so 0 means
+// "the peer sent zero bytes", an error.
+fn pkg_raw_get(host:i64, port:i64, sni:i64, snilen:i64, path:i64,
+               out:i64, cap:i64, roots:i64, nroots:i64, now14:i64) -> i64 {
+    if pkg_rec_n >0 {
+        pkg_rec_calls = pkg_rec_calls + 1
+        // recorded seam: serve the first entry whose recorded target equals `path`.
+        let mut i = 0
+        for i < pkg_rec_n {
+            if streq(pkg_rec_path[i], path) == 1 {
+                let r = pkg_rec_resp[i]
+                let rl = strlen(r)
+                if rl > cap { return 0 - 3 }
+                let mut j = 0
+                for j < rl { poke8(out + j, peek8(r + j)); j = j + 1 }
+                return rl
+            }
+            i = i + 1
+        }
+        // No recorded response for this exact target: the caller asked for something the fixture
+        // does not know, which is a programming error in the test, not a real 404.
+        return 0 - 2
+    }
+    // live path: build a GET with a User-Agent (GitHub refuses requests without one),
+    // connect (resolving the host first iff the caller wants it), handshake, and read the
+    // whole response until the server closes.the
+    let ua_name: string = "User-Agent"
+    let ua_val: string = "sond-get"
+    let m: string = "GET"
+    let req = heap_alloc(4096)
+    let mut o = tls_req_start(req, m.utf8, path, sni)
+    o = tls_req_header(req, o, ua_name.utf8, ua_val.utf8)
+    o = tls_req_end(req, o, 0, 0)
+    if o <= 0 { return 0 - 1 }
+    let alpn: string = "http/1.1"
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { return 0 - 1 }
+    let sa[2]
+    let mut ip = 0
+    if pkg_resolve_dns == 1 {
+        ip = dns_resolve(host)
+        if ip < 0 { close_fd(fd); return 0 - 1 }
+    } else {
+        ip = tls_ipv4(host)
+    }
+    sockaddr_in_build(sa, ip, port)
+    if connect_sock(fd, sa, 16) < 0 { close_fd(fd); return 0 - 1 }
+    let sess = tls_connect_fd(fd, sni, snilen, alpn.utf8, 8, roots, nroots, now14)
+    if sess == 0 { return 0 - 1 }            // handshake or chain failure; fd already closed
+    if tls_write(sess, req, o) < 0 { tls_close(sess); return 0 - 1 }
+    let mut olen = 0
+    let mut reads = 0
+    for reads < 2048 {
+        let n = tls_read(sess, out + olen, cap - olen)
+        if n <= 0 { break }
+        olen = olen + n
+        if olen >= cap { tls_close(sess); return 0 - 3 }
+        reads = reads + 1
+    }
+    tls_close(sess)
+    if olen <= 0 { return 0 - 1 }
+    olen
+}
+
+// ── Endpoint configuration and one-time credential load ──────────────────────────────────────
+
+fn pkg_api_host_resolve() -> i64 {
+    if pkg_api_host != 0 { return pkg_api_host }
+    let s: string = "api.github.com"
+    s.utf8
+}
+
+fn pkg_raw_host_resolve() -> i64 {
+    if pkg_raw_host != 0 { return pkg_raw_host }
+    let s: string = "raw.githubusercontent.com"
+    s.utf8
+}
+
+// Loads the built-in trust store and the current clock once, unless a test already supplied
+// its own roots and/or a fixed date. Returns 0.
+fn pkg_ensure_creds() {
+    if pkg_roots == 0 {
+        let store = heap_alloc(5 * 1391)
+        let ptrs = heap_alloc(5 * 8)
+        pkg_nroots = x509_load_default_roots(store, 1391, ptrs)
+        pkg_roots = ptrs
+    }
+    if pkg_now == 0 {
+        let nb = heap_alloc(16)
+        format_now14(nb)
+        pkg_now = nb
+    }
+}
+
+// Returns a heap cstr for the package cache root (the dir that holds one subdir per module
+// hash). $SOND_CACHE/pkg if the variable is set, else ~/.cache/sond/pkg.
+fn pkg_cache_root_resolve() -> i64 {
+    if pkg_cache_root != 0 { return pkg_cache_root }
+    let envn: string = "SOND_CACHE"
+    let sc = env_get(envn.utf8)
+    if sc != 0 {
+        let lit2: string = "/pkg"
+        pkg_cache_root = pkg_cat2(sc, lit2.utf8)
+        return pkg_cache_root
+    }
+    let homen: string = "HOME"
+    let hd = env_get(homen.utf8)
+    if hd != 0 {
+        let lit1: string = "/.cache/sond/pkg"
+        pkg_cache_root = pkg_cat2(hd, lit1.utf8)
+        return pkg_cache_root
+    }
+    let fb: string = "/tmp/sond-pkg-cache"
+    pkg_cache_root = fb.utf8
+    pkg_cache_root
+}
+
+// Returns a heap cstr for the deps file path: the caller's override, or "deps.snd".
+fn pkg_deps_path_resolve() -> i64 {
+    if pkg_deps_path != 0 { return pkg_deps_path }
+    let d: string = "deps.snd"
+    d.utf8
+}
+
+// A heap cstr for a cache path: root + "/" + name (name may itself contain '/', e.g. a
+// module-relative path).
+fn pkg_join2(root:i64, name:i64) -> i64 {
+    let s: string = "/"
+    pkg_cat3(root, s.utf8, name)
+}
+
+// ── HTTP response reading ────────────────────────────────────────────────────────────────────
+
+// The HTTP status code of the raw response in `out` (length `olen`).
+fn pkg_status(out:i64, olen:i64) -> i64 {
+    http_status(out, olen)
+}
+
+// The body pointer and length (via `lp`) of the raw response; 0 if the headers never ended.
+fn pkg_body(out:i64, olen:i64, lp:i64) -> i64 {
+    http_body(out, olen, lp)
+}
+
+// ── Ref resolution ───────────────────────────────────────────────────────────────────────────
+
+// Resolves `ref` to the SHA of the commit it names via the GitHub API and writes the 40 hex
+// digits (plus NUL) into `sha_out`. Returns 0; -1 transport or bad response; -2 repo not found;
+// -3 ref not found; -6 unexpected HTTP status. On a 404 it checks whether the repo itself
+// exists, so the error names the one that is actually missing.
+fn pkg_resolve_sha(owner:i64, repo:i64, ref:i64, sha_out:i64) -> i64 {
+    pkg_ensure_creds()
+    let path = pkg_commit_path(owner, repo, ref)
+    let out = heap_alloc(1 << 22)
+    let host = pkg_api_host_resolve()
+    let olen = pkg_raw_get(host, pkg_api_port, host, strlen(host), path, out, 1 << 22,
+        pkg_roots, pkg_nroots, pkg_now)
+    if olen < 0 { return 0 - 1 }
+    let st = http_status(out, olen)
+    if st == 200 {
+        let lp[1]
+        let body = http_body(out, olen, lp)
+        if body == 0 { return 0 - 1 }
+        let root = json_parse(body, peek32(lp))
+        if root <= 0 { return 0 - 1 }
+        if json_type(root) != JSON_OBJ { return 0 - 1 }
+        let sv = json_get(root, pkg_sha_lit())
+        if sv <= 0 { return 0 - 1 }
+        if json_type(sv) != JSON_STR { return 0 - 1 }
+        if json_str_len(sv) != 40 { return 0 - 1 }
+        if pkg_copy_cstr_out(json_str(sv), 40, sha_out, 64) != 0 { return 0 - 1 }
+        return 0
+    }
+    if st == 404 {
+        if pkg_repo_exists(owner, repo) != 1 { return 0 - 2 }
+        return 0 - 3
+    }
+    0 - 6
+}
+
+fn pkg_sha_lit() -> i64 {
+    let s: string = "sha"
+    s.utf8
+}
+
+// 1 if the repo answers a GET /repos/{owner}/{repo} with 200.
+fn pkg_repo_exists(owner:i64, repo:i64) -> i64 {
+    let path = pkg_repo_path(owner, repo)
+    let out = heap_alloc(1 << 20)
+    let host = pkg_api_host_resolve()
+    let olen = pkg_raw_get(host, pkg_api_port, host, strlen(host), path, out, 1 << 20,
+        pkg_roots, pkg_nroots, pkg_now)
+    if olen < 0 { return 0 }
+    if http_status(out, olen) == 200 { return 1 }
+    0
+}
+
+// ── Tree listing ──────────────────────────────────────────────────────────────────────────────
+
+// Fetches the recursive git tree for `sha` and writes one heap cstr per `.snd` blob path (a
+// module-relative path, e.g. "año.snd" or "sub/niño.snd") into the caller's `paths` array.
+// Returns the number of paths, or a negative error: -1 transport/bad response, -4 tree truncated
+// (the repo is too big for the recursive listing; a half tree must not become half a module),
+// -6 unexpected HTTP status.
+fn pkg_fetch_tree(owner:i64, repo:i64, sha:i64, paths:i64, cap:i64) -> i64 {
+    pkg_ensure_creds()
+    let path = pkg_tree_path(owner, repo, sha)
+    let out = heap_alloc(1 << 22)
+    let host = pkg_api_host_resolve()
+    let olen = pkg_raw_get(host, pkg_api_port, host, strlen(host), path, out, 1 << 22,
+        pkg_roots, pkg_nroots, pkg_now)
+    if olen < 0 { return 0 - 1 }
+    let st = http_status(out, olen)
+    if st != 200 { return 0 - 6 }
+    let lp[1]
+    let body = http_body(out, olen, lp)
+    if body == 0 { return 0 - 1 }
+    let root = json_parse(body, peek32(lp))
+    if root <= 0 { return 0 - 1 }
+    if json_type(root) != JSON_OBJ { return 0 - 1 }
+    let tr = json_get(root, pkg_truncated_lit())
+    if tr > 0 {
+        if json_type(tr) == JSON_BOOL && json_bool(tr) == 1 {
+            let m: string = "sond get: the git tree is truncated (recursive listing did not fit); the module is too big to fetch reliably\n"
+            pkg_puts(m.utf8)
+            return 0 - 4
+        }
+    }
+    let tv = json_get(root, pkg_tree_lit())
+    if tv <= 0 { return 0 - 1 }
+    if json_type(tv) != JSON_ARR { return 0 - 1 }
+    let tn = json_arr_len(tv)
+    let mut c = 0
+    let mut i = 0
+    for i < tn {
+        let e = json_arr_get(tv, i)
+        if json_type(e) != JSON_OBJ { i = i + 1; continue }
+        let ty = json_get(e, pkg_type_lit())
+        if ty <= 0 { i = i + 1; continue }
+        if json_type(ty) != JSON_STR { i = i + 1; continue }
+        let blob: string = "blob"
+        if streq(json_str(ty), blob.utf8) != 1 { i = i + 1; continue }
+        let pv = json_get(e, pkg_path_lit())
+        if pv <= 0 { i = i + 1; continue }
+        if json_type(pv) != JSON_STR { i = i + 1; continue }
+        if pkg_snd_suffix(json_str(pv), json_str_len(pv)) == 1 {
+            if c >= cap { return 0 - 6 }
+            poke64(paths + c * 8, json_str(pv))
+            c = c + 1
+        }
+        i = i + 1
+    }
+    c
+}
+
+fn pkg_truncated_lit() -> i64 { let s: string = "truncated"; s.utf8 }
+fn pkg_tree_lit() -> i64 { let s: string = "tree"; s.utf8 }
+fn pkg_type_lit() -> i64 { let s: string = "type"; s.utf8 }
+fn pkg_path_lit() -> i64 { let s: string = "path"; s.utf8 }
+
+// ── Fetching the files and hashing the module ────────────────────────────────────────────────
+
+// Fetches the file at each of the `n` tree paths (cstrs in `paths`) and prepares the module
+// records `[path, data, len]` in `recs` (n entries), then canonical-hashes the whole module.
+// Returns a heap cstr of the 64-hex content hash, or 0 on any failure (a message was printed).
+fn pkg_fetch_and_hash(owner:i64, repo:i64, sha:i64, paths:i64, n:i64, recs:i64) -> i64 {
+    pkg_ensure_creds()
+    let host = pkg_raw_host_resolve()
+    let mut i = 0
+    for i < n {
+        let p = peek64(paths + i * 8)
+        let url = pkg_url_path(owner, repo, sha, p)
+        let out = heap_alloc(1 << 24)
+        let olen = pkg_raw_get(host, pkg_raw_port, host, strlen(host), url, out, 1 << 24,
+            pkg_roots, pkg_nroots, pkg_now)
+        if olen < 0 {
+            let m: string = "sond get: cannot fetch "
+            pkg_puts(m.utf8)
+            pkg_puts(p)
+            let m2: string = " (transport)\n"
+            pkg_puts(m2.utf8)
+            return 0
+        }
+        let st = http_status(out, olen)
+        if st != 200 {
+            let m: string = "sond get: cannot fetch "
+            pkg_puts(m.utf8)
+            pkg_puts(p)
+            let m2: string = ": HTTP "
+            pkg_puts(m2.utf8)
+            print_int(st)
+            let m3: string = "\n"
+            pkg_puts(m3.utf8)
+            return 0
+        }
+        let lp[1]
+        let body = http_body(out, olen, lp)
+        if body == 0 { return 0 }
+        let blen = peek32(lp)
+        let data = heap_alloc(blen + 8)
+        let mut k = 0
+        for k < blen { poke8(data + k, peek8(body + k)); k = k + 1 }
+        let rec = heap_alloc(24)
+        poke64(rec, p)
+        poke64(rec + 8, data)
+        poke64(rec + 16, blen)
+        poke64(recs + i * 8, rec)
+        i = i + 1
+    }
+    pkg_canon_hash(recs, n)
+}
+
+// ── Filesystem helpers for the cache ────────────────────────────────────────────────────────
+
+fn pkg_dot_lit() -> i64 { let s: string = "."; s.utf8 }
+fn pkg_dotdot_lit() -> i64 { let s: string = ".."; s.utf8 }
+fn pkg_slash_lit() -> i64 { let s: string = "/"; s.utf8 }
+
+// 1 if `path` is an existing directory.
+fn pkg_dir_exists(path:i64) -> i64 {
+    let fd = open_file(path, O_RDONLY | O_DIRECTORY, 0)
+    if fd >= 0 { close_fd(fd); return 1 }
+    0
+}
+
+// Removes a file, or a directory tree, at `path` (a cstr). Returns 0.
+fn pkg_rmtree(path:i64) {
+    let fd = open_file(path, O_RDONLY | O_DIRECTORY, 0)
+    if fd >= 0 {
+        let buf = heap_alloc(8192)
+        for {
+            let r = syscall(SYS_getdents64, fd, buf, 8192)
+            if r <= 0 { break }
+            let mut off = 0
+            for off < r {
+                let reclen = peek16(buf + off + 16)
+                if reclen <= 0 { break }
+                let dt = peek8(buf + off + 18)
+                let namep = buf + off + 19
+                if streq(namep, pkg_dot_lit()) != 1 && streq(namep, pkg_dotdot_lit()) != 1 {
+                    let child = pkg_join2(path, namep)
+                    if dt == 4 { pkg_rmtree(child) } else { syscall(SYS_unlink, child) }
+                }
+                off = off + reclen
+            }
+        }
+        close_fd(fd)
+        syscall(SYS_rmdir, path)
+        return
+    }
+    syscall(SYS_unlink, path)
+}
+
+// Creates any missing parent directories of the file path `file` (a cstr), so a cache file can
+// be written into a not-yet-existing subdir. Existing dirs (EEXIST) are fine.
+fn pkg_mkdir_parents(file:i64) {
+    let b = bytes_from_cstr(file)
+    let n = bytes_len(b)
+    let mut i = 0
+    for i < n {
+        if bytes_get(b, i) == 47 {
+            if i > 0 {
+                let p = pkg_bytes_cstr(bytes_slice(b, 0, i))
+                let r = syscall(SYS_mkdir, p, PKG_DIR_MODE)
+                if r != 0 && r != 0 - 17 {
+                    // a real mkdir error other than EEXIST: nothing sensible to do but continue;
+                    // the file write that follows will fail and the temp dir gets cleaned up.
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Writes the module held in `recs` (n records of [path_cstr, data, len]) into the cache under
+// `<root>/<hash>` ATOMICALLY: every file goes first to a fresh `.get-<hash>` sibling dir and
+// the dir is renamed to its final hash name only when all bytes are on disk. A cache dir that
+// already wears the hash is left untouched. Returns 1, or 0 on any failure (the temp dir is
+// removed, so no half module survives under any name).
+fn pkg_write_cache(hash:i64, recs:i64, n:i64) -> i64 {
+    if n <= 0 { return 0 }
+    let root = pkg_cache_root_resolve()
+    let fin = pkg_join2(root, hash)
+    if pkg_dir_exists(fin) == 1 { return 1 }
+    let tmp = pkg_cat4(root, pkg_slash_lit(), pkg_getdash_lit(), hash)
+    pkg_rmtree(tmp)
+    pkg_mkdir_parents(tmp)
+    syscall(SYS_mkdir, tmp, PKG_DIR_MODE)
+    let mut i = 0
+    for i < n {
+        let r = peek64(recs + i * 8)
+        let rel = peek64(r)
+        let data = peek64(r + 8)
+        let clen = peek64(r + 16)
+        let f = pkg_join2(tmp, rel)
+        pkg_mkdir_parents(f)
+        let fd = open_file(f, O_WRONLY | O_CREAT | O_TRUNC, PKG_FILE_MODE)
+        if fd < 0 { pkg_rmtree(tmp); return 0 }
+        if write_buf(fd, data, clen) < 0 {
+            close_fd(fd)
+            pkg_rmtree(tmp)
+            return 0
+        }
+        close_fd(fd)
+        i = i + 1
+    }
+    let rr = syscall(SYS_rename, tmp, fin)
+    if rr != 0 { pkg_rmtree(tmp); return 0 }
+    1
+}
+
+fn pkg_getdash_lit() -> i64 { let s: string = ".get-"; s.utf8 }
+
+// ── deps.snd parsing and rewriting ───────────────────────────────────────────────────────────
+
+// The offset just past the newline at/after `start` in bytes buffer `b` (written to `le_out`),
+// returning the next line start, or -1 when there is no more.
+fn pkg_line_end(b:i64, start:i64, le_out:i64) -> i64 {
+    let n = bytes_len(b)
+    let mut e = start
+    for e < n { if bytes_get(b, e) == 10 { break } e = e + 1 }
+    poke64(le_out, e)
+    if e >= n { return 0 - 1 }
+    e + 1
+}
+
+// Writes the offset and length of the k-th space-separated field of the bytes line `b[ls,le)`
+// into `o`/`l`. Returns 1, or 0 if the field does not exist.
+fn pkg_field(b:i64, ls:i64, le:i64, k:i64, o:i64, l:i64) -> i64 {
+    let mut p = ls
+    let mut t = 0
+    for t <= k {
+        for p < le { if bytes_get(b, p) == 32 { p = p + 1 } else { break } }
+        let ts = p
+        for p < le { if bytes_get(b, p) == 32 { break } p = p + 1 }
+        if t == k {
+            if p == ts { return 0 }
+            poke64(o, ts)
+            poke64(l, p - ts)
+            return 1
+        }
+        if p == ts { return 0 }
+        t = t + 1
+    }
+    1
+}
+
+// A heap cstr copy of the bytes range b[o, o+l).
+fn pkg_field_cstr(b:i64, o:i64, l:i64) -> i64 {
+    let out = heap_alloc(l + 1)
+    let mut i = 0
+    for i < l { poke8(out + i, bytes_get(b, o + i)); i = i + 1 }
+    poke8(out + l, 0)
+    out
+}
+
+// 1 if the bytes line b[ls,le) is a "use <src> ..." line.
+fn pkg_deps_line_use_src(b:i64, ls:i64, le:i64, src:i64) -> i64 {
+    let fo[1]
+    let fl[1]
+    if pkg_field(b, ls, le, 0, fo, fl) == 0 { return 0 }
+    if fl[0] != 3 { return 0 }
+    if bytes_get(b, fo[0]) != 117 { return 0 }
+    if bytes_get(b, fo[0] + 1) != 115 { return 0 }
+    if bytes_get(b, fo[0] + 2) != 101 { return 0 }
+    if pkg_field(b, ls, le, 1, fo, fl) == 0 { return 0 }
+    let f1 = pkg_field_cstr(b, fo[0], fl[0])
+    if streq(f1, src) != 1 { return 0 }
+    1
+}
+
+// If the deps bytes buffer `b` has a "use <src> ..." line, writes that line's sha and hash
+// (heap cstrs) into `sha_out`/`hash_out` and returns 1; else 0.
+fn pkg_deps_find(b:i64, src:i64, sha_out:i64, hash_out:i64) -> i64 {
+    let n = bytes_len(b)
+    let mut start = 0
+    for start < n {
+        let le_out[1]
+        let nxt = pkg_line_end(b, start, le_out)
+        let le = peek64(le_out)
+        let mut le2 = le
+        if le2 > start { if bytes_get(b, le2 - 1) == 13 { le2 = le2 - 1 } }
+        let so[1]
+        let sl[1]
+        let ho[1]
+        let hl[1]
+        if pkg_deps_line_use_src(b, start, le2, src) == 1 {
+            if pkg_field(b, start, le2, 2, so, sl) == 1 && pkg_field(b, start, le2, 3, ho, hl) == 1 {
+                poke64(sha_out, pkg_field_cstr(b, so[0], sl[0]))
+                poke64(hash_out, pkg_field_cstr(b, ho[0], hl[0]))
+                return 1
+            }
+        }
+        if nxt < 0 { break }
+        start = nxt
+    }
+    0
+}
+
+// Rewrites the old deps bytes buffer `old` into the new buffer `nb`: every line is kept
+// verbatim except a "use <src>" line, which is dropped (it is replaced by the caller's new
+// line). Lines are re-emitted each ending with a newline.
+fn pkg_deps_rewrite(old:i64, src:i64, nb:i64) {
+    let n = bytes_len(old)
+    let mut start = 0
+    for start < n {
+        let le_out[1]
+        let nxt = pkg_line_end(old, start, le_out)
+        let le = peek64(le_out)
+        let mut le2 = le
+        if le2 > start { if bytes_get(old, le2 - 1) == 13 { le2 = le2 - 1 } }
+        if pkg_deps_line_use_src(old, start, le2, src) != 1 {
+            let mut k = start
+            for k < le { bytes_push(nb, bytes_get(old, k)); k = k + 1 }
+            bytes_push(nb, 10)
+        }
+        if nxt < 0 { break }
+        start = nxt
+    }
+}
+
+// Writes deps.snd so it pins (src, sha, hash, name): any previous `use` line for `src` is
+// replaced, otherwise the line is appended. The file is written to a temp name and renamed over
+// the real one, so an interrupted write never leaves deps.snd half-edited. Returns 1, or 0.
+fn pkg_deps_put(src:i64, sha:i64, hash:i64, name:i64) -> i64 {
+    let dp = pkg_deps_path_resolve()
+    let old = heap_alloc(1 << 20)
+    let olen = read_file(dp, old, 1 << 20)
+    let nb = bytes_new()
+    if olen > 0 {
+        let ob = bytes_from_raw(old, olen)
+        pkg_deps_rewrite(ob, src, nb)
+    } else {
+        if olen == 0 - EFBIG {
+            let m: string = "sond get: deps.snd is too big to rewrite\n"
+            pkg_puts(m.utf8)
+            return 0
+        }
+    }
+    let u: string = "use "
+    bytes_append_str(nb, u)
+    bytes_append_cstr(nb, src)
+    bytes_push(nb, 32)
+    bytes_append_cstr(nb, sha)
+    bytes_push(nb, 32)
+    bytes_append_cstr(nb, hash)
+    bytes_push(nb, 32)
+    bytes_append_cstr(nb, name)
+    bytes_push(nb, 10)
+    let tp = pkg_cat2(dp, pkg_tmpsuf_lit())
+    syscall(SYS_unlink, tp)
+    pkg_mkdir_parents(tp)
+    let fd = open_file(tp, O_WRONLY | O_CREAT | O_TRUNC, PKG_FILE_MODE)
+    if fd < 0 { return 0 }
+    let w = write_buf(fd, peek64(nb), bytes_len(nb))
+    close_fd(fd)
+    if w < 0 { syscall(SYS_unlink, tp); return 0 }
+    if syscall(SYS_rename, tp, dp) != 0 { syscall(SYS_unlink, tp); return 0 }
+    1
+}
+
+fn pkg_tmpsuf_lit() -> i64 { let s: string = ".pkgtmp"; s.utf8 }
+
+// ── The module walker (for verify) ───────────────────────────────────────────────────────────
+
+// A relative join that keeps the root prefix empty: reljoin("", "a") is "a", reljoin("sub",
+// "niño.snd") is "sub/niño.snd". Keeps canonical paths free of a leading "/".
+fn pkg_reljoin(base:i64, name:i64) -> i64 {
+    if strlen(base) == 0 {
+        let nl = strlen(name)
+        let out = heap_alloc(nl + 1)
+        let mut i = 0
+        for i < nl { poke8(out + i, peek8(name + i)); i = i + 1 }
+        poke8(out + nl, 0)
+        return out
+    }
+    pkg_join2(base, name)
+}
+
+fn pkg_empty_lit() -> i64 { let s: string = ""; s.utf8 }
+
+// Recursively walks `dir` (an absolute dir path) and appends one [relpath_cstr, data, len]
+// record per `.snd` file into `recs` (a pointer array of `cap` entries). `base` is the
+// module-relative prefix ("" for the root). `idx` is an in/out counter (a pointer).
+fn pkg_walk(dir:i64, base:i64, recs:i64, cap:i64, idx:i64) {
+    let fd = open_file(dir, O_RDONLY | O_DIRECTORY, 0)
+    if fd < 0 { return }
+    let buf = heap_alloc(8192)
+    for {
+        let rcount = syscall(SYS_getdents64, fd, buf, 8192)
+        if rcount <= 0 { break }
+        let mut off = 0
+        for off < rcount {
+            let reclen = peek16(buf + off + 16)
+            if reclen <= 0 { break }
+            let dt = peek8(buf + off + 18)
+            let namep = buf + off + 19
+            if streq(namep, pkg_dot_lit()) != 1 && streq(namep, pkg_dotdot_lit()) != 1 {
+                if dt == 4 {
+                    let subdir = pkg_join2(dir, namep)
+                    let subbase = pkg_reljoin(base, namep)
+                    pkg_walk(subdir, subbase, recs, cap, idx)
+                } else {
+                    let nl = strlen(namep)
+                    if pkg_snd_suffix(namep, nl) == 1 {
+                        let ci = peek64(idx)
+                        if ci < cap {
+                            let fpath = pkg_join2(dir, namep)
+                            let rel = pkg_reljoin(base, namep)
+                            let data = heap_alloc(1 << 24)
+                            let flen = read_file(fpath, data, 1 << 24)
+                            let rec = heap_alloc(24)
+                            poke64(rec, rel)
+                            poke64(rec + 8, data)
+                            poke64(rec + 16, flen)
+                            poke64(recs + ci * 8, rec)
+                            poke64(idx, ci + 1)
+                        }
+                    }
+                }
+            }
+            off = off + reclen
+        }
+    }
+    close_fd(fd)
+}
+
+// The canonical hash of the `.snd` files under the module dir `dir`, exactly as pkg_get wrote
+// them: every file, paths relative to `dir`, sorted byte-wise, SHA-256 over the concatenation.
+// Returns a heap 64-hex cstr, or 0 if the dir has no `.snd` files (or cannot be read).
+fn pkg_dir_hash(dir:i64) -> i64 {
+    let recs = heap_alloc(8 * 65536)
+    let idx[1]
+    poke64(idx, 0)
+    pkg_walk(dir, pkg_empty_lit(), recs, 65536, idx)
+    let count = peek64(idx)
+    if count == 0 { return 0 }
+    pkg_canon_hash(recs, count)
+}
+
+// ── pkg_get: the whole fetch ─────────────────────────────────────────────────────────────────
+
+// `sond get spec`: fetches the module `spec` names, caches it under its content hash and pins
+// the resolved commit in deps.snd. Returns 0 on success; a negative code otherwise (a message
+// was already printed). Codes: -1 transport/parse/bad response, -2 repo not found, -3 ref not
+// found, -4 tree truncated, -5 module content moved, -6 unexpected HTTP status, -7 cache/deps
+// write failed, -8 malformed spec, -9 the module has no .snd files.
+//
+// Running it twice is idempotent: a second get of the same ref, with the same content already
+// pinned and cached, downloads nothing and edits nothing.
+fn pkg_get(spec:i64) -> i64 {
+    pkg_ensure_creds()
+    let hostb[128]
+    let ownerb[128]
+    let repob[128]
+    let refb[128]
+    let nameb[128]
+    if pkg_parse_spec(spec, hostb, ownerb, repob, refb, nameb) != 0 {
+        let m: string = "sond get: cannot parse \""
+        pkg_puts(m.utf8)
+        pkg_puts(spec)
+        let m2: string = "\": want github.com/owner/repo@ref\n"
+        pkg_puts(m2.utf8)
+        return 0 - 8
+    }
+    let hz = pkg_cat3(hostb, pkg_slash_lit(), ownerb)
+    let src = pkg_cat3(hz, pkg_slash_lit(), repob)
+    let dp = pkg_deps_path_resolve()
+    let old = heap_alloc(1 << 20)
+    let olen = read_file(dp, old, 1 << 20)
+    if olen == 0 - EFBIG {
+        let m: string = "sond get: deps.snd is too big to read\n"
+        pkg_puts(m.utf8)
+        return 0 - 7
+    }
+    let rsha = heap_alloc(64)
+    let rhash = heap_alloc(128)
+    let mut hit = 0
+    if olen > 0 {
+        let ob = bytes_from_raw(old, olen)
+        if pkg_deps_find(ob, src, rsha, rhash) == 1 { hit = 1 }
+    }
+    let sha[64]
+    let rr = pkg_resolve_sha(ownerb, repob, refb, sha)
+    if rr != 0 { return rr }
+    if hit == 1 {
+        if streq(sha, rsha) == 1 {
+            let cache_dir = pkg_join2(pkg_cache_root_resolve(), rhash)
+            if pkg_dir_exists(cache_dir) == 1 {
+                let m2: string = "sond get: "
+                pkg_puts(m2.utf8)
+                pkg_puts(src)
+                let m3: string = " already cached ("
+                pkg_puts(m3.utf8)
+                pkg_puts(rhash)
+                let m4: string = "); no download needed\n"
+                pkg_puts(m4.utf8)
+                return 0
+            }
+        }
+    }
+    let mut expect_hash = 0
+    if hit == 1 {
+        if streq(sha, rsha) == 1 { expect_hash = rhash }
+    }
+    let paths = heap_alloc(8 * 65536)
+    let n = pkg_fetch_tree(ownerb, repob, sha, paths, 65536)
+    if n < 0 { return n }
+    if n == 0 {
+        let m: string = "sond get: the module has no .snd files; nothing to cache\n"
+        pkg_puts(m.utf8)
+        return 0 - 9
+    }
+    let recs = heap_alloc(8 * n)
+    let hashp = pkg_fetch_and_hash(ownerb, repob, sha, paths, n, recs)
+    if hashp == 0 { return 0 - 1 }
+    if expect_hash != 0 {
+        if streq(hashp, expect_hash) != 1 {
+            let m: string = "sond get: the content behind "
+            pkg_puts(m.utf8)
+            pkg_puts(src)
+            let m2: string = " changed: fetched it and it hashes to "
+            pkg_puts(m2.utf8)
+            pkg_puts(hashp)
+            let m3: string = " but deps.snd pins "
+            pkg_puts(m3.utf8)
+            pkg_puts(expect_hash)
+            let m4: string = "; aborting and writing nothing (the module moved; re-pin it explicitly)\n"
+            pkg_puts(m4.utf8)
+            return 0 - 5
+        }
+    }
+    if pkg_write_cache(hashp, recs, n) != 1 {
+        let m: string = "sond get: could not write the package cache\n"
+        pkg_puts(m.utf8)
+        return 0 - 7
+    }
+    if pkg_deps_put(src, sha, hashp, nameb) != 1 { return 0 - 7 }
+    let m: string = "sond get: "
+    pkg_puts(m.utf8)
+    pkg_puts(src)
+    let m2: string = " resolved to "
+    pkg_puts(m2.utf8)
+    pkg_puts(sha)
+    let m3: string = " and is cached as "
+    pkg_puts(m3.utf8)
+    pkg_puts(hashp)
+    let m4: string = "\n"
+    pkg_puts(m4.utf8)
+    0
+}
+
+// ── pkg_verify: check the cache against deps.snd, no network ─────────────────────────────────
+
+// Recomputes the canonical hash of every module `use`-lined in deps.snd from its cache dir and
+// names any whose content no longer matches the recorded hash. Returns 0 when everything
+// matches, else the number of mismatches (each got a line on stdout).
+fn pkg_verify() -> i64 {
+    let dp = pkg_deps_path_resolve()
+    let old = heap_alloc(1 << 20)
+    let olen = read_file(dp, old, 1 << 20)
+    if olen <= 0 {
+        let m: string = "sond verify: no deps.snd; nothing to verify\n"
+        pkg_puts(m.utf8)
+        return 0
+    }
+    let bob = bytes_from_raw(old, olen)
+    let mut fails = 0
+    let n = bytes_len(bob)
+    let mut start = 0
+    for start < n {
+        let le_out[1]
+        let nxt = pkg_line_end(bob, start, le_out)
+        let le = peek64(le_out)
+        let mut le2 = le
+        if le2 > start { if bytes_get(bob, le2 - 1) == 13 { le2 = le2 - 1 } }
+        let ro[1]
+        let rl[1]
+        let so[1]
+        let sl[1]
+        let ho[1]
+        let hl[1]
+        let no2[1]
+        let nl[1]
+        if pkg_field(bob, start, le2, 0, ro, rl) == 1 && rl[0] == 3 && bytes_get(bob, ro[0] + 1) == 115 {
+            if pkg_field(bob, start, le2, 1, so, sl) == 1
+                && pkg_field(bob, start, le2, 2, ho, hl) == 1
+                && pkg_field(bob, start, le2, 3, no2, nl) == 1 {
+                let srcc = pkg_field_cstr(bob, so[0], sl[0])
+                let hash = pkg_field_cstr(bob, ho[0], hl[0])
+                let name = pkg_field_cstr(bob, no2[0], nl[0])
+                let root = pkg_cache_root_resolve()
+                let mdir = pkg_join2(root, hash)
+                let got = pkg_dir_hash(mdir)
+                let mut ok = 0
+                if got != 0 {
+                    if streq(got, hash) == 1 { ok = 1 }
+                }
+                if ok == 0 {
+                    fails = fails + 1
+                    let m: string = "sond verify: "
+                    pkg_puts(m.utf8)
+                    pkg_puts(name)
+                    let m2: string = " ("
+                    pkg_puts(m2.utf8)
+                    pkg_puts(srcc)
+                    let m3: string = ") does not match "
+                    pkg_puts(m3.utf8)
+                    pkg_puts(hash)
+                    if got == 0 {
+                        let m4: string = ": its cache dir is missing or empty\n"
+                        pkg_puts(m4.utf8)
+                    } else {
+                        let m5: string = "; its content hashes to "
+                        pkg_puts(m5.utf8)
+                        pkg_puts(got)
+                        let m6: string = "\n"
+                        pkg_puts(m6.utf8)
+                    }
+                }
+            }
+        }
+        if nxt < 0 { break }
+        start = nxt
+    }
+    if fails == 0 {
+        let m: string = "sond verify: every module matches its recorded hash\n"
+        pkg_puts(m.utf8)
+    } else {
+        let m: string = "sond verify: "
+        pkg_puts(m.utf8)
+        print_int(fails)
+        let m2: string = " module(s) failed\n"
+        pkg_puts(m2.utf8)
+    }
+    fails
+}

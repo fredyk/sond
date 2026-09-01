@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for the package manager (lib/any/pkg/get.snd). None of them leave the machine:
+// the GitHub API is answered either by a table of recorded responses the seam in get.snd
+// serves, or by a minimal TLS server on loopback whose certificates chain to a test root.
+// A test that depended on the real GitHub would go red on its own one day, without anyone
+// having touched anything.
+//
+// The module under the hammer is the two-file conformance vector of canon.snd: "año.snd"
+// ("fn añadir() -> i64 { 42 }\n") and "sub/niño.snd" ("fn niño() -> i64 { 7 }\n"), whose
+// canonical SHA-256 is the frozen value below. If a served tree does not hash to it, the
+// hash moved, not the test.
+
+include "any/pkg/get.snd"
+include "x86_64/linux/testing.snd"
+
+let TEST_SHA: string = "1111222233334444555566667777888899990000"
+let EXPECTED_HASH: string = "923345ba8a4816339aeac609bef11aaa7dd88d46459bf8886ed8cc68833b3a8d"
+
+// Recorded request targets (what pkg_raw_get asks for) and the raw responses it must answer.
+let H_PATH_COMMITS: string = "/repos/fredyk/sond-strings/commits/v1.4.2"
+let H_PATH_REPO: string = "/repos/fredyk/sond-strings"
+let H_PATH_TREE_BASE: string = "/repos/fredyk/sond-strings/git/trees/"
+let H_PATH_RAW_A: string = "/fredyk/sond-strings/1111222233334444555566667777888899990000/a%C3%B1o.snd"
+let H_PATH_RAW_SUB: string = "/fredyk/sond-strings/1111222233334444555566667777888899990000/sub/ni%C3%B1o.snd"
+let H_PATH_RAW_BAD: string = "/fredyk/sond-strings/1111222233334444555566667777888899990000/a%C3%B1o.snd"
+
+let R_COMMITS_OK: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"1111222233334444555566667777888899990000\"}"
+let R_REPO_OK: string = "HTTP/1.1 200 OK\r\n\r\n{\"full_name\":\"fredyk/sond-strings\"}"
+let R_404: string = "HTTP/1.1 404 Not Found\r\n\r\n{\"message\":\"Not Found\"}"
+let R_TREE_OK: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"1111222233334444555566667777888899990000\",\"truncated\":false,\"tree\":[{\"path\":\"año.snd\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"size\":27,\"url\":\"u\"},{\"path\":\"sub/niño.snd\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":24,\"url\":\"u\"},{\"path\":\"README.md\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\",\"size\":10,\"url\":\"u\"}]}"
+let R_TRUNCATED: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"1111222233334444555566667777888899990000\",\"truncated\":true,\"tree\":[]}"
+let R_RAW_A: string = "HTTP/1.1 200 OK\r\n\r\nfn añadir() -> i64 { 42 }\n"
+let R_RAW_SUB: string = "HTTP/1.1 200 OK\r\n\r\nfn niño() -> i64 { 7 }\n"
+let R_RAW_A_CHANGED: string = "HTTP/1.1 200 OK\r\n\r\nfn añadir() -> i64 { 0 }\n"
+
+let H_TREE_CHANGED: string = "/repos/fredyk/sond-strings/git/trees/1111222233334444555566667777888899990000?recursive=1"
+
+let mut h_rec_cnt = 0
+let mut h_rec_path[16]
+let mut h_rec_resp[16]
+
+fn h_rec_add(path: i64, resp: i64) {
+    h_rec_path[h_rec_cnt] = path
+    h_rec_resp[h_rec_cnt] = resp
+    h_rec_cnt = h_rec_cnt + 1
+}
+
+fn h_rec_clear() {
+    h_rec_cnt = 0
+    pkg_rec_n = 0
+    pkg_rec_calls = 0
+}
+
+// Arms the recorded-response seam with the standard success fixture: the commits endpoint,
+// the recursive tree and the two module files (a non-.snd README.md is in the tree but must
+// NOT end up fetched or cached).
+fn h_rec_ok() {
+    h_rec_clear()
+    h_rec_add(H_PATH_COMMITS.utf8, R_COMMITS_OK.utf8)
+    h_rec_add(H_TREE_CHANGED.utf8, R_TREE_OK.utf8)
+    h_rec_add(H_PATH_RAW_A.utf8, R_RAW_A.utf8)
+    h_rec_add(H_PATH_RAW_SUB.utf8, R_RAW_SUB.utf8)
+    pkg_rec_n = h_rec_cnt
+}
+
+// Points the managed globals at the given test dir and clears that dir.
+fn h_cfg(troot: i64, cache: i64, deps: i64) {
+    pkg_resolve_dns = 0
+    pkg_roots = 0
+    pkg_nroots = 0
+    pkg_now = 0
+    pkg_cache_root = cache
+    pkg_deps_path = deps
+    pkg_rmtree(troot)
+}
+
+// ── plain unit tests ────────────────────────────────────────────────────────────────────────
+
+test "pkg: parse splits host/owner/repo/ref/name" {
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    let hb[128]
+    let ob[128]
+    let rb[128]
+    let fb[128]
+    let nb[128]
+    assert_eq(pkg_parse_spec(spec.utf8, hb, ob, rb, fb, nb), 0)
+    let hostw: string = "github.com"
+    assert_eq(streq(hb, hostw.utf8), 1)
+    let ow: string = "fredyk"
+    assert_eq(streq(ob, ow.utf8), 1)
+    let rw: string = "sond-strings"
+    assert_eq(streq(rb, rw.utf8), 1)
+    let fw: string = "v1.4.2"
+    assert_eq(streq(fb, fw.utf8), 1)
+    assert_eq(streq(nb, rw.utf8), 1)
+}
+
+test "pkg: a spec without a host defaults to github.com" {
+    let spec: string = "fredyk/sond-strings@v1.4.2"
+    let hb[128]
+    let ob[128]
+    let rb[128]
+    let fb[128]
+    let nb[128]
+    assert_eq(pkg_parse_spec(spec.utf8, hb, ob, rb, fb, nb), 0)
+    let hostw: string = "github.com"
+    assert_eq(streq(hb, hostw.utf8), 1)
+}
+
+test "pkg: malformed specs are refused" {
+    let hb[128]
+    let ob[128]
+    let rb[128]
+    let fb[128]
+    let nb[128]
+    let s1: string = "no-at-sign-here"
+    let s2: string = "owner/repo"                 // no @ref
+    let s3: string = "owner/repo@"                // empty ref
+    let s4: string = "@ref"                       // no path
+    assert_ne(pkg_parse_spec(s1.utf8, hb, ob, rb, fb, nb), 0)
+    assert_ne(pkg_parse_spec(s2.utf8, hb, ob, rb, fb, nb), 0)
+    assert_ne(pkg_parse_spec(s3.utf8, hb, ob, rb, fb, nb), 0)
+    assert_ne(pkg_parse_spec(s4.utf8, hb, ob, rb, fb, nb), 0)
+}
+
+test "pkg: url encoding keeps ASCII and percent-encodes the accented bytes" {
+    let o: string = "fredyk"
+    let r: string = "sond-strings"
+    let p: string = "sub/niño.snd"
+    let u = pkg_url_path(o.utf8, r.utf8, TEST_SHA.utf8, p.utf8)
+    let wantw: string = "/fredyk/sond-strings/1111222233334444555566667777888899990000/sub/ni%C3%B1o.snd"
+    assert_eq(streq(u, wantw.utf8), 1)
+}
