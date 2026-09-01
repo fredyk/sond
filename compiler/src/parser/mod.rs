@@ -379,6 +379,7 @@ impl Parser {
             is_wrapping,
             is_test: false,
             test_name: None,
+            is_harness: false,
             body,
         }
     }

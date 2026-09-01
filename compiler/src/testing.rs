@@ -36,12 +36,17 @@ fn fork_test_block(k: usize, sym: &str, label: &str) -> String {
 }
 
 /// Parses a synthesized `fn main() { .. }` source into a Function (always well-formed, since
-/// it goes through the ordinary parser).
+/// it goes through the ordinary parser). The result is marked `is_harness`: it is compiler
+/// output, not author code, and that mark is what lets the undeclared-variable check accept
+/// its references to the reserved `__cov_*` coverage symbols while refusing them everywhere
+/// else.
 fn parse_main(src: &str) -> Function {
-    Parser::new(tokenize(src))
+    let mut f = Parser::new(tokenize(src))
         .parse_program()
         .pop()
-        .expect("synthesized harness must parse to one function")
+        .expect("synthesized harness must parse to one function");
+    f.is_harness = true;
+    f
 }
 
 /// Builds the `main` that `sond test` runs. It forks each test into its own child, waits,

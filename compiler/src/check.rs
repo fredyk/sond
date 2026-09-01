@@ -1128,6 +1128,31 @@ pub fn check_no_duplicate_functions(funcs: &[Function]) -> Result<(), String> {
     Ok(())
 }
 
+/// The `__cov_` prefix is RESERVED for the compiler's coverage bookkeeping: `sond test
+/// --coverage` publishes `__cov_total`, `__cov_ptr`, `__cov_nfns` and `__cov_fn_table` as
+/// `.data` symbols on its own, and its synthesized harness reads and writes them. Author
+/// code may neither USE nor BIND an identifier with that prefix — any such name would
+/// either reach into compiler internals as if it were an ordinary variable, or collide
+/// with an emitted symbol as an opaque link error. This is the check that makes the
+/// reservation real rather than a promise in a comment.
+const COV_RESERVED_PREFIX: &str = "__cov_";
+
+/// Rejects one identifier for wearing the reserved `__cov_` prefix. `kind` names what is
+/// being declared (variable, parameter, global, function, …) so the error says what to
+/// rename, not just that something is wrong.
+fn reject_cov_prefix(kind: &str, name: &str) -> Result<(), String> {
+    if name.starts_with(COV_RESERVED_PREFIX) {
+        Err(format!(
+            "cannot declare {kind} `{name}`: the `__cov_` prefix is reserved for the coverage \
+             bookkeeping the compiler publishes itself (`__cov_total`, `__cov_ptr`, \
+             `__cov_nfns`, `__cov_fn_table`, for `sond test --coverage`). Rename it without \
+             the `__cov_` prefix."
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Rejects function-body references to variables that are never declared and do not exist.
 /// A variable used in any sub-expression must have been declared at some enclosing scope
 /// (parameter, `let`, or module-level global). The check is intentionally simple and
@@ -1141,13 +1166,33 @@ pub fn check_undeclared_variables(
     globals: &[Global],
     enums: &[EnumDef],
 ) -> Result<(), String> {
+    // The `__cov_` reservation is program-wide, so it is imposed here on every program-level
+    // name the author controls: globals (a `let __cov_ptr` at module scope would collide with
+    // the `.data` symbol the coverage build emits), function names (an assembler label equal
+    // to a coverage symbol), and enum names and variant constructors (identifiers like any
+    // other).
+    for g in globals {
+        reject_cov_prefix("global", &g.name)?;
+    }
+    for f in funcs {
+        reject_cov_prefix("function", &f.name)?;
+    }
+    for e in enums {
+        reject_cov_prefix("enum", &e.name)?;
+        for v in &e.variants {
+            reject_cov_prefix("enum variant", &v.name)?;
+        }
+    }
+
     // Variables the COVERAGE code generator publishes on its own, with no `let` in the
     // source: `sond test --coverage` synthesizes a harness `main` (as ordinary Sond source,
     // which goes through this very check) that reads `__cov_total`/`__cov_nfns` and writes
     // `__cov_ptr`, and indexes the `__cov_fn_table` array. They are emitted as `.data`
     // symbols by emit_program_coverage_g, so they are not declared anywhere the check can
-    // see -- but they are real, and a user cannot collide with them by accident (the `__cov_`
-    // prefix is reserved). Treat them as predeclared, like the builtin structs.
+    // see. They are predeclared ONLY for the synthesized harness (marked `is_harness`):
+    // everywhere else the names are refused, by the prefix rejection on binds above and by
+    // the reserved-prefix error on unresolved uses below. Predeclaring them in every
+    // function of every program is what let a user program read `__cov_ptr` in silence.
     let cov_reserved: [&str; 4] = ["__cov_total", "__cov_ptr", "__cov_nfns", "__cov_fn_table"];
     // Collect all enum variant names and function names — they are identifiers, not variables.
     let mut known_names: HashSet<String> = HashSet::new();
@@ -1172,10 +1217,13 @@ pub fn check_undeclared_variables(
         for g in globals {
             top.insert(g.name.clone());
         }
-        for name in cov_reserved {
-            top.insert(name.to_string());
+        if func.is_harness {
+            for name in cov_reserved {
+                top.insert(name.to_string());
+            }
         }
         for p in &func.params {
+            reject_cov_prefix("parameter", &p.name)?;
             top.insert(p.name.clone());
         }
         for n in known_names {
@@ -1197,6 +1245,7 @@ pub fn check_undeclared_variables(
         // absent from our scope stack, so we add the named return
         // explicitly when present.
         if let Some(ref ret_name) = func.ret_name {
+            reject_cov_prefix("return value", ret_name)?;
             scopes.last_mut().unwrap().insert(ret_name.clone());
         }
         for e in &func.ensures {
@@ -1244,6 +1293,7 @@ fn check_undeclared_stmt(
             array_len: _,
         } => {
             check_undeclared_expr(value, scopes, fname, line)?;
+            reject_cov_prefix("variable", name)?;
             scopes.last_mut().unwrap().insert(name.clone());
         }
         Stmt::Assign { target, value } => {
@@ -1271,6 +1321,7 @@ fn check_undeclared_stmt(
                 check_undeclared_expr(p, scopes, fname, line)?;
             }
             for n in names {
+                reject_cov_prefix("variable", n)?;
                 scopes.last_mut().unwrap().insert(n.clone());
             }
         }
@@ -1283,6 +1334,7 @@ fn check_undeclared_stmt(
             for p in peers {
                 check_undeclared_expr(p, scopes, fname, line)?;
             }
+            reject_cov_prefix("variable", name)?;
             scopes.last_mut().unwrap().insert(name.clone());
         }
         Stmt::GraphLet {
@@ -1296,12 +1348,14 @@ fn check_undeclared_stmt(
             // order, and reordering the lines changes nothing), so `node z = add(fx, fy)` written
             // above `node fx = ..` is a normal graph, not a use of an undeclared name.
             for (n, _) in nodes.iter() {
+                reject_cov_prefix("graph node", n)?;
                 scopes.last_mut().unwrap().insert(n.clone());
             }
             for (_, e) in nodes {
                 check_undeclared_expr(e, scopes, fname, line)?;
             }
             check_undeclared_expr(yield_expr, scopes, fname, line)?;
+            reject_cov_prefix("variable", name)?;
             scopes.last_mut().unwrap().insert(name.clone());
         }
         Stmt::For {
@@ -1346,6 +1400,29 @@ fn check_undeclared_expr(
     match e {
         Expr::Var(name) => {
             if !scopes.iter().any(|s| s.contains(name.as_str())) {
+                if name.starts_with(COV_RESERVED_PREFIX) {
+                    // An unresolved `__cov_*` name is never a typo to report as "not
+                    // declared": the prefix is reserved, and in the one function allowed
+                    // to use the four real symbols they resolve, so reaching here means
+                    // author code is reaching for compiler internals. Say so, and name
+                    // the fix (the same one for every `__cov_` identifier: rename).
+                    if line == 0 {
+                        return Err(format!(
+                            "`{name}` starts with the reserved `__cov_` prefix: those names \
+                             are the coverage bookkeeping the compiler publishes itself for \
+                             `sond test --coverage`, so a program that read one would reach \
+                             into compiler internals. Rename it without the `__cov_` prefix."
+                        ));
+                    } else {
+                        return Err(format!(
+                            "`{name}` starts with the reserved `__cov_` prefix: those names \
+                             are the coverage bookkeeping the compiler publishes itself for \
+                             `sond test --coverage`, so a program that read one would reach \
+                             into compiler internals. Rename it without the `__cov_` prefix \
+                             (function `{fname}`, line {line})."
+                        ));
+                    }
+                }
                 if line == 0 {
                     return Err(format!(
                         "variable `{name}` is not declared in function `{fname}`"
@@ -1399,6 +1476,7 @@ fn check_undeclared_expr(
             for arm in arms {
                 scopes.push(HashSet::new());
                 if let Some(binding) = &arm.binding {
+                    reject_cov_prefix("match binding", binding)?;
                     scopes.last_mut().unwrap().insert(binding.clone());
                 }
                 check_undeclared_block(&arm.body, scopes, fname, line)?;
@@ -8139,14 +8217,17 @@ mod coverage_harness_globals {
     // ordinary parser, so its `main` refers to the coverage bookkeeping symbols
     // (`__cov_total`, `__cov_ptr`, `__cov_nfns`, `__cov_fn_table`) by name. Those are reserved
     // compiler-internal globals published by the coverage code generator; they are never
-    // user-declared `let`s, so the undeclared-variable check must treat them as predeclared.
-    // Without this, every `sond test` on a coverage build dies with "variable `__cov_total`
-    // is not declared in function `main`".
+    // user-declared `let`s, so the undeclared-variable check must treat them as predeclared —
+    // but ONLY in the harness, which is marked `is_harness` by `testing::parse_main`.
+    // Without the mark (and the predeclaration it unlocks), every `sond test` on a coverage
+    // build dies with "variable `__cov_total` is not declared in function `main`".
     #[test]
     fn a_coverage_harness_referencing_the_cov_symbols_passes() {
         // The real harness body is exercised: it reads the total point count, mmaps a shared
         // buffer, points __cov_ptr at it, and later indexes __cov_fn_table and reads
-        // __cov_nfns. None of the four __cov_* names is a user `let`.
+        // __cov_nfns. None of the four __cov_* names is a user `let`. The mark is what the
+        // driver's `parse_main` sets on the synthesized harness; this test parses the same
+        // source directly, so it sets it by hand.
         let src = "fn main() -> i64 {\n\
              \x20   let __n = __cov_total\n\
              \x20   let __buf = 7\n\
@@ -8154,8 +8235,10 @@ mod coverage_harness_globals {
              \x20   let __base = __cov_fn_table + __n * 32\n\
              \x20   __base + __cov_nfns\n\
              }";
-        let mut p = Parser::new(tokenize(src));
-        let funcs = p.parse_program();
+        let mut funcs = Parser::new(tokenize(src)).parse_program();
+        for f in &mut funcs {
+            f.is_harness = true;
+        }
         assert_eq!(
             check_undeclared_variables(&funcs, &[], &[]).map_err(|e| e),
             Ok(()),
@@ -8167,9 +8250,162 @@ mod coverage_harness_globals {
     fn an_unrelated_unknown_name_is_still_rejected() {
         let mut p = Parser::new(tokenize("fn f() -> i64 { __cov_totals }"));
         let funcs = p.parse_program();
+        let err = check_undeclared_variables(&funcs, &[], &[]).unwrap_err();
         assert!(
-            check_undeclared_variables(&funcs, &[], &[]).is_err(),
-            "a name that merely resembles the reserved ones is still undeclared"
+            err.contains("reserved"),
+            "a name that merely resembles the reserved ones still wears the reserved prefix, \
+             and the error says so rather than suggesting to declare it: {err}"
         );
+    }
+
+    #[test]
+    fn the_same_harness_source_without_the_harness_mark_is_rejected() {
+        // The exemption belongs to the synthesized harness, not to the source text: the
+        // very same body written by an author is refused, or the mark would be decorative.
+        let src = "fn main() -> i64 {\n\
+             \x20   let __n = __cov_total\n\
+             \x20   __n\n\
+             }";
+        let funcs = Parser::new(tokenize(src)).parse_program();
+        let err = check_undeclared_variables(&funcs, &[], &[]).unwrap_err();
+        assert!(
+            err.contains("reserved"),
+            "unmarked code reading the symbols must be refused as reserved: {err}"
+        );
+    }
+
+    // ── the `__cov_` reservation is ENFORCED, not just documented ────────────
+    //
+    // Predeclaring the four symbols in EVERY function of EVERY program meant a user
+    // program could read one (silently reaching into compiler internals: the names
+    // resolved as ordinary variables) or declare its own (colliding with the `.data`
+    // symbols the coverage build emits, as an opaque link error). The reservation the
+    // comment promised has to exist in code: user code may neither USE nor DECLARE a
+    // `__cov_` identifier, at any nesting level or program position.
+
+    #[test]
+    fn a_user_function_reading_an_undeclared_cov_name_is_rejected() {
+        let funcs = parse_fns("fn f() -> i64 { __cov_ptr }");
+        let err = check_undeclared_variables(&funcs, &[], &[]).unwrap_err();
+        assert!(
+            err.contains("reserved"),
+            "the error must name the reservation, not just say undeclared: {err}"
+        );
+    }
+
+    #[test]
+    fn a_user_function_declaring_a_cov_name_is_rejected() {
+        let funcs = parse_fns("fn f() -> i64 {\n    let __cov_ptr = 5\n    __cov_ptr\n}");
+        let err = check_undeclared_variables(&funcs, &[], &[]).unwrap_err();
+        assert!(
+            err.contains("reserved"),
+            "declaring the name must be refused, a local must not shadow the symbol: {err}"
+        );
+    }
+
+    #[test]
+    fn a_cov_name_declared_inside_a_nested_block_is_rejected() {
+        // The reservation is not a top-level formality: a `__cov_` `let` buried in an
+        // `if` inside a `for` is just as refused, or the prefix is only mostly reserved.
+        // (The loop counter is declared before the loop, as Sond requires.)
+        let funcs = parse_fns(
+            "fn f() -> i64 {\n\
+             \x20   let mut n = 0\n\
+             \x20   let mut i = 0\n\
+             \x20   for i < 3 {\n\
+             \x20       if i == 1 {\n\
+             \x20           let __cov_total = 7\n\
+             \x20           n = __cov_total\n\
+             \x20       }\n\
+             \x20       n = n + i\n\
+             \x20   }\n\
+             \x20   n\n\
+             }",
+        );
+        let err = check_undeclared_variables(&funcs, &[], &[]).unwrap_err();
+        assert!(err.contains("reserved"), "nested bind must be refused: {err}");
+    }
+
+    #[test]
+    fn a_cov_parameter_name_is_rejected() {
+        let funcs = parse_fns("fn f(__cov_ptr: i64) -> i64 { __cov_ptr }");
+        let err = check_undeclared_variables(&funcs, &[], &[]).unwrap_err();
+        assert!(err.contains("reserved"), "a parameter is a bind too: {err}");
+    }
+
+    #[test]
+    fn a_cov_named_global_is_rejected() {
+        let g = Global {
+            vis: crate::ast::Visibility::Priv,
+            mutable: false,
+            name: "__cov_ptr".to_string(),
+            array_len: None,
+            ty: None,
+            init: Expr::Int(0),
+        };
+        let funcs = parse_fns("fn f() -> i64 { 0 }");
+        let err = check_undeclared_variables(&funcs, &[g], &[]).unwrap_err();
+        assert!(
+            err.contains("reserved"),
+            "a global of that name would collide with the emitted `.data` symbol: {err}"
+        );
+    }
+
+    #[test]
+    fn a_cov_named_function_is_rejected() {
+        // `fn __cov_total` would emit an assembler label equal to a coverage symbol.
+        let funcs = parse_fns("fn __cov_total() -> i64 { 0 }");
+        let err = check_undeclared_variables(&funcs, &[], &[]).unwrap_err();
+        assert!(err.contains("reserved"), "the prefix covers fn names too: {err}");
+    }
+
+    #[test]
+    fn a_cov_named_enum_variant_is_rejected() {
+        // A variant constructor is an identifier in expression position; it must not
+        // wear the reserved prefix either.
+        let e = EnumDef {
+            vis: crate::ast::Visibility::Priv,
+            name: "E".to_string(),
+            variants: vec![crate::ast::EnumVariant {
+                name: "__cov_ptr".to_string(),
+                payload: None,
+            }],
+        };
+        let funcs = parse_fns("fn f() -> i64 { 0 }");
+        let err = check_undeclared_variables(&funcs, &[], &[e]).unwrap_err();
+        assert!(err.contains("reserved"), "variant names are identifiers: {err}");
+    }
+
+    #[test]
+    fn the_real_synth_coverage_harness_passes_the_check() {
+        // End to end over the seam the driver uses: `sond test --coverage` synthesizes
+        // the harness and runs it through this very check. It must keep passing. The
+        // `SYS_*` names are globals the included `syscall-nums.snd` declares (spliced in
+        // before the harness is built), so this fixture carries them; every other name
+        // the harness touches (`syscall`, `peek64`, `print`, `__test_report`) is a call
+        // target, which this check does not police.
+        let tests = parse_fns("test \"a\" { let x = 1 }\ntest \"b\" { let y = 2 }");
+        let main = crate::testing::synth_coverage_harness(&tests, 80);
+        let sys_globals: Vec<Global> = ["SYS_mmap", "SYS_fork", "SYS_exit", "SYS_wait4", "SYS_write"]
+            .iter()
+            .map(|n| Global {
+                vis: crate::ast::Visibility::Priv,
+                mutable: false,
+                name: n.to_string(),
+                array_len: None,
+                ty: None,
+                init: Expr::Int(0),
+            })
+            .collect();
+        assert_eq!(
+            check_undeclared_variables(&[main], &sys_globals, &[]),
+            Ok(()),
+            "the harness the driver actually ships must pass the check it is subject to"
+        );
+    }
+
+    /// Parses a whole program (functions, `test` blocks) the way the driver does.
+    fn parse_fns(src: &str) -> Vec<Function> {
+        Parser::new(tokenize(src)).parse_program()
     }
 }
