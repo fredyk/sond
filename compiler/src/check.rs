@@ -3913,7 +3913,7 @@ mod tests {
     }
 
     fn bounds(src: &str) -> Result<(), String> {
-        let (toks, lines) = tokenize_located(src);
+        let (toks, lines, _) = tokenize_located(src);
         let mut p = Parser::with_lines(toks, lines);
         let funcs = p.parse_program();
         let globals = p.take_globals();
@@ -5339,7 +5339,7 @@ mod undeclared_tests {
     }
 
     fn parse_located(src: &str) -> (Vec<Function>, Vec<Global>, Vec<EnumDef>) {
-        let (toks, lines) = tokenize_located(src);
+        let (toks, lines, _) = tokenize_located(src);
         let mut p = Parser::with_lines(toks, lines);
         let funcs = p.parse_program();
         let globals = p.take_globals();
@@ -5348,7 +5348,7 @@ mod undeclared_tests {
     }
 
     fn bounds(src: &str) -> Result<(), String> {
-        let (toks, lines) = tokenize_located(src);
+        let (toks, lines, _) = tokenize_located(src);
         let mut p = Parser::with_lines(toks, lines);
         let funcs = p.parse_program();
         let globals = p.take_globals();
@@ -7936,7 +7936,7 @@ mod invariant_undeclared {
     use crate::parser::Parser;
 
     fn check_undeclared(src: &str) -> Result<(), String> {
-        let (toks, lines) = tokenize_located(src);
+        let (toks, lines, _) = tokenize_located(src);
         let mut p = Parser::with_lines(toks, lines);
         let funcs = p.parse_program();
         let globals = p.take_globals();

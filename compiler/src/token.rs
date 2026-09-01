@@ -177,3 +177,99 @@ pub enum Token {
     /// implicitly at end of line (RFC-0002 §3.5, Go-style).
     Semicolon,
 }
+
+impl Token {
+    /// The token written the way a person writes it: `` `{` ``, `` `;` ``, `` `+` ``,
+    /// an identifier by its name, a literal by its value. Its own comment above each variant
+    /// is the source of truth for the spelling.
+    ///
+    /// Error messages go through here and never through `Debug`, whose names (`LBrace`,
+    /// `Semicolon`) are lexer internals: an author told "expected LBrace, got Semicolon" has to
+    /// look up a vocabulary they never used.
+    pub fn describe(&self) -> String {
+        let text: String = match self {
+            Token::Int(v) => v.to_string(),
+            Token::Decimal(raw) => raw.clone(),
+            Token::Str(s) => format!("\"{s}\""),
+            Token::Bool(b) => b.to_string(),
+            Token::Ident(name) => name.clone(),
+            Token::Let => "let".into(),
+            Token::Fn => "fn".into(),
+            Token::Interrupt => "interrupt".into(),
+            Token::Wrapping => "wrapping".into(),
+            Token::Struct => "struct".into(),
+            Token::Test => "test".into(),
+            Token::Spawn => "spawn".into(),
+            Token::Par => "par".into(),
+            Token::Graph => "graph".into(),
+            Token::Enum => "enum".into(),
+            Token::Iface => "iface".into(),
+            Token::Use => "use".into(),
+            Token::As => "as".into(),
+            Token::Match => "match".into(),
+            Token::FatArrow => "=>".into(),
+            Token::Impl => "impl".into(),
+            Token::Pub => "pub".into(),
+            Token::Priv => "priv".into(),
+            Token::Requires => "requires".into(),
+            Token::Where => "where".into(),
+            Token::Ensures => "ensures".into(),
+            Token::Invariant => "invariant".into(),
+            Token::Effects => "effects".into(),
+            Token::Return => "return".into(),
+            Token::If => "if".into(),
+            Token::Else => "else".into(),
+            Token::For => "for".into(),
+            Token::While => "while".into(),
+            Token::Break => "break".into(),
+            Token::Continue => "continue".into(),
+            Token::And => "and".into(),
+            Token::Or => "or".into(),
+            Token::Not => "not".into(),
+            Token::Implies => "implies".into(),
+            Token::In => "in".into(),
+            Token::Eq => "=".into(),
+            Token::EqEq => "==".into(),
+            Token::Ne => "!=".into(),
+            Token::Lt => "<".into(),
+            Token::Gt => ">".into(),
+            Token::Le => "<=".into(),
+            Token::Ge => ">=".into(),
+            Token::Plus => "+".into(),
+            Token::Minus => "-".into(),
+            Token::Star => "*".into(),
+            Token::Slash => "/".into(),
+            Token::Percent => "%".into(),
+            Token::Amp => "&".into(),
+            Token::Pipe => "|".into(),
+            Token::Caret => "^".into(),
+            Token::AmpAmp => "&&".into(),
+            Token::PipePipe => "||".into(),
+            Token::Tilde => "~".into(),
+            Token::TildeTilde => "~~".into(),
+            Token::Shl => "<<".into(),
+            Token::Shr => ">>".into(),
+            Token::LShr => ">>>".into(),
+            Token::LParen => "(".into(),
+            Token::RParen => ")".into(),
+            Token::LBrace => "{".into(),
+            Token::RBrace => "}".into(),
+            Token::LBracket => "[".into(),
+            Token::RBracket => "]".into(),
+            Token::Comma => ",".into(),
+            Token::Colon => ":".into(),
+            Token::Dot => ".".into(),
+            Token::DotDot => "..".into(),
+            Token::Arrow => "->".into(),
+            Token::Semicolon => ";".into(),
+        };
+        format!("`{text}`")
+    }
+}
+
+/// A token prints as its human spelling (`` `{` ``), so diagnostics can just format it.
+impl std::fmt::Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.describe())
+    }
+}
