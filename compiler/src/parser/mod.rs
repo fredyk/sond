@@ -8,13 +8,44 @@ use crate::ast::{
 };
 use crate::token::Token;
 use std::collections::HashMap;
+use std::fmt;
+
+/// Why the parser stopped, and WHERE. The line and column are positions in the text the parser
+/// was given: a driver that spliced several files into that text is the one who knows which file
+/// each position belongs to, so it translates them before printing (and prints the bare position
+/// if it cannot). The message names tokens the way a person writes them (`` `{` ``), never by
+/// their lexer-internal name.
+#[derive(Debug)]
+pub struct ParsePanic {
+    /// 1-based line in the parsed text, or 0 when the parser has no line info at all.
+    pub line: u32,
+    /// 1-based character column in the parsed text, or 0 when unknown.
+    pub col: u32,
+    /// What was wrong, as a sentence.
+    pub message: String,
+}
+
+impl fmt::Display for ParsePanic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.line == 0 {
+            return write!(f, "{}", self.message);
+        }
+        if self.col == 0 {
+            return write!(f, "{} at line {}", self.message, self.line);
+        }
+        write!(f, "{} at line {}:{}", self.message, self.line, self.col)
+    }
+}
 
 /// A recursive-descent parser over a flat token stream.
 pub struct Parser {
     tokens: Vec<Token>,
     /// The source line of each token (parallel to `tokens`), or empty when the parser was built
-    /// from tokens alone. Used to stamp each statement with its line for the `--debug` checkpoint.
+    /// from tokens alone. Used to stamp each statement with its line for the `--debug` checkpoint,
+    /// and to say where a parse error sits in the text being parsed.
     lines: Vec<u32>,
+    /// The source column of each token (parallel to `tokens`), or empty when unknown.
+    cols: Vec<u32>,
     pos: usize,
     /// Module-level `let` bindings collected while parsing the program.
     globals: Vec<Global>,
@@ -54,15 +85,24 @@ fn split_conjuncts(e: Expr, out: &mut Vec<Expr>) {
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Parser::with_lines(tokens, Vec::new())
+        Parser::with_positions(tokens, Vec::new(), Vec::new())
     }
 
     /// Builds a parser that also knows each token's source line (from `tokenize_located`), so the
     /// blocks it parses carry per-statement line info for the `--debug` checkpoint.
     pub fn with_lines(tokens: Vec<Token>, lines: Vec<u32>) -> Self {
+        let cols = vec![0; lines.len()];
+        Parser::with_positions(tokens, lines, cols)
+    }
+
+    /// Builds a parser that knows each token's source line AND column, so a rejected token can be
+    /// pointed at exactly. Columns are 1-based character positions in the parsed text; they may
+    /// all be 0, which reads as "the column is not known" and simply leaves it out of the message.
+    pub fn with_positions(tokens: Vec<Token>, lines: Vec<u32>, cols: Vec<u32>) -> Self {
         Parser {
             tokens,
             lines,
+            cols,
             pos: 0,
             globals: Vec::new(),
             structs: Vec::new(),
@@ -80,6 +120,28 @@ impl Parser {
     /// The source line of the current token, or 0 if line info is absent.
     fn cur_line(&self) -> u32 {
         self.lines.get(self.pos).copied().unwrap_or(0)
+    }
+
+    /// The reported position of the token at index `n` (clamped into the stream so a refusal at
+    /// end of input points at the LAST line of the text rather than a line past it).
+    fn pos_at(&self, n: usize) -> (u32, u32) {
+        let n = n.min(self.tokens.len().saturating_sub(1));
+        (
+            self.lines.get(n).copied().unwrap_or(0),
+            self.cols.get(n).copied().unwrap_or(0),
+        )
+    }
+
+    /// Refuses the program: panics with the parse error message and the position of the token at
+    /// index `n`. Every rejection the parser issues goes through here, so no "expected X, got Y"
+    /// can reach a person without saying where.
+    pub(crate) fn fail_at(&self, n: usize, message: String) -> ! {
+        let (line, col) = self.pos_at(n);
+        std::panic::panic_any(ParsePanic {
+            line,
+            col,
+            message,
+        });
     }
 
     /// Parses a whole program: top-level `fn` declarations, `let` globals and
@@ -211,12 +273,14 @@ impl Parser {
         // the fence: that one was closed for characters that cannot be Sond, this one for
         // words made of ordinary letters that the lexer accepts and the parser cannot use.
         if let Some(tok) = self.peek() {
-            panic!(
-                "unrecognised top-level declaration at line {}: {:?}. \
-                 Expected one of: fn, let, struct, enum, iface, use, impl, test \
-                 (a named constant is `let NAME = ...`, Sond has no `const`).",
-                self.cur_line(),
-                tok
+            self.fail_at(
+                self.pos,
+                format!(
+                    "unrecognised top-level declaration {tok}. \
+                     Expected one of: `fn`, `let`, `struct`, `enum`, `iface`, `use`, `impl`, `test` \
+                     (a named constant is `let NAME = ...`, Sond has no `const`).",
+                    tok = tok.describe()
+                ),
             );
         }
         funcs
@@ -513,9 +577,13 @@ impl Parser {
     /// readable name for the runner. `idx` makes the generated symbol unique across a file.
     fn parse_test(&mut self, idx: usize) -> Function {
         self.expect(Token::Test);
+        let name_pos = self.pos;
         let name = match self.advance() {
             Token::Str(s) => s,
-            other => panic!("expected a test name string after `test`, got {other:?}"),
+            other => self.fail_at(
+                name_pos,
+                format!("expected a test name string after `test`, got {other}"),
+            ),
         };
         let body = self.parse_block();
         Function {
@@ -854,9 +922,10 @@ impl Parser {
         }
         // `let name[N]`: a fixed-size stack array of N words (N a literal).
         let array_len = if self.eat(Token::LBracket) {
+            let n_pos = self.pos;
             let n = match self.advance() {
                 Token::Int(n) => n,
-                other => panic!("array size must be an integer literal, got {other:?}"),
+                other => self.fail_at(n_pos, format!("array size must be an integer literal, got {other}")),
             };
             self.expect(Token::RBracket);
             Some(n)
@@ -875,6 +944,7 @@ impl Parser {
             self.expect(Token::Eq);
             self.expect(Token::Par);
             self.expect(Token::LParen);
+            let op_pos = self.pos;
             let op = match self.advance() {
                 Token::Plus => BinOp::Add,
                 Token::Star => BinOp::Mul,
@@ -884,7 +954,7 @@ impl Parser {
                 // Parsed so the checker can reject it with a clear message; not in the monoid set.
                 Token::Minus => BinOp::Sub,
                 Token::Slash => BinOp::Div,
-                other => panic!("`par(op)` reducer must be an operator, got {other:?}"),
+                other => self.fail_at(op_pos, format!("`par(op)` reducer must be an operator, got {other}")),
             };
             self.expect(Token::RParen);
             let mut peers = vec![self.parse_expr()];
@@ -927,9 +997,13 @@ impl Parser {
                         yield_expr: y,
                     };
                 } else {
-                    panic!(
-                        "graph block: expected `node NAME = ..` or `yield ..`, got {:?}",
-                        self.peek()
+                    let got = match self.peek() {
+                        Some(t) => t.describe(),
+                        None => "end of input".to_string(),
+                    };
+                    self.fail_at(
+                        self.pos,
+                        format!("graph block: expected `node NAME = ..` or `yield ..`, got {got}"),
                     );
                 }
             }

@@ -80,16 +80,18 @@ fn main() -> ExitCode {
     // the user's. The hook used to be set further down, after this phase.
     std::panic::set_hook(Box::new(|_| {}));
     let input_for_resolve = input.clone();
-    let (mut src, cov_scope) = match std::panic::catch_unwind(move || {
-        sondc::resolve::resolve_includes_scoped(std::path::Path::new(&input_for_resolve))
+    let resolved = match std::panic::catch_unwind(move || {
+        sondc::resolve::resolve_includes_scoped_located(std::path::Path::new(
+            &input_for_resolve,
+        ))
     })
     .unwrap_or_else(|e| {
         Err(std::io::Error::other(format!(
-            "lex error while reading {input}: {}",
+            "cannot resolve the includes of {input}: {}",
             panic_message(&e)
         )))
     }) {
-        Ok(s) => s,
+        Ok(r) => r,
         Err(e) => {
             // `e` already names the file that failed (the entry, or the nested include that
             // could not be resolved), so it is not re-blamed on `input` here.
@@ -97,6 +99,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let mut src = resolved.src;
+    let cov_scope = resolved.cov_scope;
+    let spans = resolved.spans;
     // RFC-0016: in a --debug build, append the debug agent, WRITTEN IN SOND (see `debug_agent`). The
     // per-statement checkpoint (emitted by codegen) calls `__dbg_step(line)`; the agent is the Sond
     // that serves the socket step protocol. Appended after include resolution, so it depends only on
@@ -153,11 +158,11 @@ fn main() -> ExitCode {
     let src_for_parse = src.clone();
     let (mut funcs, mut globals, mut structs, externs, enums, ports, providers, uses) =
         match std::panic::catch_unwind(move || {
-            let (toks, lines) = tokenize_located(&src_for_parse);
+            let (toks, lines, cols) = tokenize_located(&src_for_parse);
             // Keep the token stream: it is the only count of `test` blocks the parser cannot
             // influence, and comparing the two is what catches a parse that quietly dropped some.
             let declared_tests = toks.clone();
-            let mut p = Parser::with_lines(toks, lines);
+            let mut p = Parser::with_positions(toks, lines, cols);
             let funcs = p.parse_program();
             let globals = p.take_globals();
             let structs = p.take_structs();
@@ -174,7 +179,22 @@ fn main() -> ExitCode {
         }) {
             Ok(fg) => fg,
             Err(e) => {
-                eprintln!("sondc: parse error in {input}: {}", panic_message(&e));
+                // The parser and lexer refuse with a POSITION: a line of the spliced text means
+                // nothing to the author of the file it came from, so translate it back before
+                // printing (and name the file it turns out to be, which may not be `input`).
+                if let Some(pp) = e.downcast_ref::<sondc::parser::ParsePanic>() {
+                    report_positioned(&spans, input, pp.line, pp.col, &pp.message);
+                } else if let Some(lp) = e.downcast_ref::<sondc::lexer::LexPanic>() {
+                    report_positioned(
+                        &spans,
+                        input,
+                        lp.line,
+                        lp.col,
+                        &format!("unexpected character {:?}", lp.ch),
+                    );
+                } else {
+                    eprintln!("sondc: parse error in {input}: {}", panic_message(&e));
+                }
                 return ExitCode::FAILURE;
             }
         };
@@ -243,8 +263,18 @@ fn main() -> ExitCode {
     // The file is named on every pipeline error, not just on the bounds one that used to carry
     // it: the checks now share one exit, and a compiler that says which file it is talking about
     // is the behaviour worth keeping when the two spellings meet.
-    if let Err(msg) = sondc::lower_program(&mut funcs, &mut globals, &mut structs, &enums, lower_target) {
-        eprintln!("sondc: {input}: {msg}");
+    if let Err(msg) =
+        sondc::lower_program(&mut funcs, &mut globals, &mut structs, &enums, lower_target)
+    {
+        // The line numbers these checks carry are lines of the SPLICED text. Translate them back
+        // into the file the line was written in, and name that file when it is not the entry --
+        // `at line 7572` in a program whose longest file is 1201 lines is not a location.
+        let (msg, named) = spans.fix_message_lines(&msg);
+        if named {
+            eprintln!("sondc: {msg}");
+        } else {
+            eprintln!("sondc: {input}: {msg}");
+        }
         return ExitCode::FAILURE;
     }
 
@@ -456,6 +486,41 @@ fn panic_message(e: &Box<dyn std::any::Any + Send>) -> String {
         .cloned()
         .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
         .unwrap_or_else(|| "unsupported construct".to_string())
+}
+
+/// Prints one refusal of the source with its position translated into the files the author wrote
+/// (the compiler parsed a splice of them all). When nothing maps the position -- a lone file, or
+/// text appended after resolution -- the parsed-text number is printed against the named input,
+/// which is still better than saying nothing about where.
+fn report_positioned(
+    spans: &sondc::resolve::SpanMap,
+    input: &str,
+    line: u32,
+    col: u32,
+    message: &str,
+) {
+    match spans.locate(line, col) {
+        Some(loc) if loc.col > 0 => eprintln!(
+            "sondc: parse error in {}:{}:{}: {message}",
+            loc.file.display(),
+            loc.line,
+            loc.col
+        ),
+        Some(loc) => eprintln!(
+            "sondc: parse error in {}:{}: {message}",
+            loc.file.display(),
+            loc.line
+        ),
+        None => {
+            if line > 0 && col > 0 {
+                eprintln!("sondc: parse error in {input}:{line}:{col}: {message}");
+            } else if line > 0 {
+                eprintln!("sondc: parse error in {input}:{line}: {message}");
+            } else {
+                eprintln!("sondc: parse error in {input}: {message}");
+            }
+        }
+    }
 }
 
 fn parse_output_flag(args: &[String]) -> Option<String> {

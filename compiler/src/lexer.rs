@@ -1,11 +1,84 @@
 //! The Sond lexer (tokenizer).
 
 use crate::token::Token;
+use std::fmt;
 use std::iter::Peekable;
 use std::str::Chars;
 
+/// Why the lexer stopped: a character with no meaning in Sond, and WHERE it sits in the text
+/// being read. It is the panic payload of [`tokenize_located`], so a driver that owns the source
+/// text can translate these coordinates into a file, a line and a column of its own; the
+/// `Display` form is the stand-alone message when nobody can translate.
+#[derive(Debug)]
+pub struct LexPanic {
+    /// The refused character.
+    pub ch: char,
+    /// The 1-based line of the text being read where it sits.
+    pub line: u32,
+    /// The 1-based column (counted in characters) of it.
+    pub col: u32,
+}
+
+impl fmt::Display for LexPanic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unexpected character {:?} at line {}:{}",
+            self.ch, self.line, self.col
+        )
+    }
+}
+
+/// The position a token starts at: a 1-based line, and a 1-based column counted in CHARACTERS
+/// (not bytes: Sond source may carry accents and `ñ`, and a column is something a person counts
+/// with their eyes).
+#[derive(Debug, Clone, Copy)]
+pub struct Pos {
+    pub line: u32,
+    pub col: u32,
+}
+
+/// A character cursor that knows where it is: line and column advance with every consumed
+/// character (a newline moves to the first column of the next line), so every token can be
+/// stamped with where it started without any arm having to remember to count.
+#[derive(Clone)]
+struct Scanner<'a> {
+    chars: Peekable<Chars<'a>>,
+    line: u32,
+    col: u32,
+}
+
+impl<'a> Scanner<'a> {
+    fn new(input: &'a str) -> Self {
+        Scanner {
+            chars: input.chars().peekable(),
+            line: 1,
+            col: 1,
+        }
+    }
+    fn peek(&mut self) -> Option<char> {
+        self.chars.peek().copied()
+    }
+    fn next(&mut self) -> Option<char> {
+        let c = self.chars.next()?;
+        if c == '\n' {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 1;
+        }
+        Some(c)
+    }
+    fn pos(&self) -> Pos {
+        Pos {
+            line: self.line,
+            col: self.col,
+        }
+    }
+}
+
 /// Consumes the current character and pushes a single-character token.
-fn push1(chars: &mut Peekable<Chars>, tokens: &mut Vec<Token>, tok: Token) {
+fn push1(chars: &mut Scanner, tokens: &mut Vec<Token>, tok: Token) {
     chars.next();
     tokens.push(tok);
 }
@@ -15,18 +88,19 @@ pub fn tokenize(input: &str) -> Vec<Token> {
     tokenize_located(input).0
 }
 
-/// Tokenizes AND returns the 1-based source LINE of each token (parallel to the tokens). The line
-/// is what a `--debug` build stamps on each statement's checkpoint and what a diagnostic can point
-/// at. Captured per loop iteration and padded to the token count, so an arm that pushes several
-/// tokens attributes them all to the line it started on (close enough for statement granularity).
-pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
+/// Tokenizes AND returns the 1-based source LINE and COLUMN of each token (parallel to the
+/// tokens). The line is what a `--debug` build stamps on each statement's checkpoint; the line
+/// and column together are what a parse-error message points at. Captured per loop iteration and
+/// padded to the token count, so an arm that pushes several tokens attributes them all to the
+/// position it started on (close enough for statement granularity).
+pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>, Vec<u32>) {
     let mut tokens = Vec::new();
     let mut lines: Vec<u32> = Vec::new();
-    let mut line: u32 = 1;
-    let mut chars = input.chars().peekable();
+    let mut cols: Vec<u32> = Vec::new();
+    let mut chars = Scanner::new(input);
 
-    while let Some(&c) = chars.peek() {
-        let start_line = line;
+    while let Some(c) = chars.peek() {
+        let start = chars.pos();
         match c {
             // End of line: insert an implicit `;` if the line ends in a token
             // that can terminate a statement (RFC-0002 §3.5, Go-style).
@@ -35,7 +109,6 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
                     tokens.push(Token::Semicolon);
                 }
                 chars.next();
-                line += 1;
             }
 
             // Other whitespace is skipped.
@@ -57,7 +130,7 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
                     chars.next(); // '0'
                     chars.next(); // 'x'
                     let mut hex = String::new();
-                    while let Some(&d) = chars.peek() {
+                    while let Some(d) = chars.peek() {
                         if d.is_ascii_hexdigit() {
                             hex.push(d);
                             chars.next();
@@ -70,11 +143,15 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
                     let value =
                         u64::from_str_radix(&hex, 16).expect("valid hex digits after 0x") as i64;
                     tokens.push(Token::Int(value));
+                    // `continue` skips the padding at the bottom of the loop, so stamp this
+                    // token here or its line silently belongs to whatever token comes next.
+                    lines.push(start.line);
+                    cols.push(start.col);
                     continue;
                 }
 
                 let mut lexeme = String::new();
-                while let Some(&d) = chars.peek() {
+                while let Some(d) = chars.peek() {
                     if d.is_ascii_digit() {
                         lexeme.push(d);
                         chars.next();
@@ -86,7 +163,7 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
                 // Fractional part: a `.` followed by at least one digit makes it
                 // a decimal. We look two chars ahead by cloning the iterator, so
                 // `42.foo` (a future field access) is not mistaken for a decimal.
-                let is_decimal = chars.peek() == Some(&'.') && {
+                let is_decimal = chars.peek() == Some('.') && {
                     let mut lookahead = chars.clone();
                     lookahead.next(); // skip the '.'
                     lookahead.peek().is_some_and(|d| d.is_ascii_digit())
@@ -95,7 +172,7 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
                 if is_decimal {
                     lexeme.push('.');
                     chars.next(); // consume the '.'
-                    while let Some(&d) = chars.peek() {
+                    while let Some(d) = chars.peek() {
                         if d.is_ascii_digit() {
                             lexeme.push(d);
                             chars.next();
@@ -127,7 +204,7 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
                 } else {
                     c as i64
                 };
-                if chars.peek() == Some(&'\'') {
+                if chars.peek() == Some('\'') {
                     chars.next(); // closing quote
                 }
                 tokens.push(Token::Int(code));
@@ -163,7 +240,7 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
             // (RFC-0001 §3.4: includes accents and `ñ` via is_alphabetic).
             _ if c.is_alphabetic() || c == '_' => {
                 let mut ident = String::new();
-                while let Some(&d) = chars.peek() {
+                while let Some(d) = chars.peek() {
                     if d.is_alphanumeric() || d == '_' {
                         ident.push(d);
                         chars.next();
@@ -179,8 +256,8 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
             // trigger implicit semicolon insertion, just like a code line.
             '/' => {
                 chars.next();
-                if chars.peek() == Some(&'/') {
-                    while let Some(&d) = chars.peek() {
+                if chars.peek() == Some('/') {
+                    while let Some(d) = chars.peek() {
                         if d == '\n' {
                             break;
                         }
@@ -194,7 +271,7 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
             // `-`: arrow `->` or subtraction `-`.
             '-' => {
                 chars.next();
-                if chars.peek() == Some(&'>') {
+                if chars.peek() == Some('>') {
                     chars.next();
                     tokens.push(Token::Arrow);
                 } else {
@@ -206,11 +283,11 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
             '=' => {
                 chars.next();
                 match chars.peek() {
-                    Some(&'=') => {
+                    Some('=') => {
                         chars.next();
                         tokens.push(Token::EqEq);
                     }
-                    Some(&'>') => {
+                    Some('>') => {
                         chars.next();
                         tokens.push(Token::FatArrow);
                     }
@@ -228,7 +305,7 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
             // its argument. Nothing failed to compile and nothing said a word.
             '!' => {
                 chars.next();
-                if chars.peek() == Some(&'=') {
+                if chars.peek() == Some('=') {
                     chars.next();
                     tokens.push(Token::Ne);
                 } else {
@@ -240,11 +317,11 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
             '<' => {
                 chars.next();
                 match chars.peek() {
-                    Some(&'=') => {
+                    Some('=') => {
                         chars.next();
                         tokens.push(Token::Le);
                     }
-                    Some(&'<') => {
+                    Some('<') => {
                         chars.next();
                         tokens.push(Token::Shl);
                     }
@@ -256,14 +333,14 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
             '>' => {
                 chars.next();
                 match chars.peek() {
-                    Some(&'=') => {
+                    Some('=') => {
                         chars.next();
                         tokens.push(Token::Ge);
                     }
-                    Some(&'>') => {
+                    Some('>') => {
                         chars.next();
                         // A third `>` makes it `>>>` (logical/zero-fill shift).
-                        if chars.peek() == Some(&'>') {
+                        if chars.peek() == Some('>') {
                             chars.next();
                             tokens.push(Token::LShr);
                         } else {
@@ -277,7 +354,7 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
             // `&` (bitwise) or `&&` (logical and).
             '&' => {
                 chars.next();
-                if chars.peek() == Some(&'&') {
+                if chars.peek() == Some('&') {
                     chars.next();
                     tokens.push(Token::AmpAmp);
                 } else {
@@ -287,7 +364,7 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
             // `|` (bitwise) or `||` (logical or).
             '|' => {
                 chars.next();
-                if chars.peek() == Some(&'|') {
+                if chars.peek() == Some('|') {
                     chars.next();
                     tokens.push(Token::PipePipe);
                 } else {
@@ -303,7 +380,7 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
             // `~` (bitwise NOT) or `~~` (the `par` peer delimiter, a distinct token).
             '~' => {
                 chars.next();
-                if chars.peek() == Some(&'~') {
+                if chars.peek() == Some('~') {
                     chars.next();
                     tokens.push(Token::TildeTilde);
                 } else {
@@ -320,7 +397,7 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
             ':' => push1(&mut chars, &mut tokens, Token::Colon),
             '.' => {
                 chars.next();
-                if chars.peek() == Some(&'.') {
+                if chars.peek() == Some('.') {
                     chars.next();
                     tokens.push(Token::DotDot);
                 } else {
@@ -349,14 +426,21 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
             // A compiler whose whole claim is that it rejects what it cannot
             // prove cannot also accept what it cannot read.
             _ => {
-                // With the line: a program is usually built from includes, so "unexpected
+                // With the position: a program is usually built from includes, so "unexpected
                 // character" alone sends the author searching a file they may not have written.
-                panic!("unexpected character {c:?} at line {start_line}");
+                // The payload is structured (not bare text) so the driver can translate line and
+                // column into the file they DID write.
+                std::panic::panic_any(LexPanic {
+                    ch: c,
+                    line: start.line,
+                    col: start.col,
+                });
             }
         }
-        // Attribute every token pushed this iteration to the line it started on.
+        // Attribute every token pushed this iteration to the position it started on.
         while lines.len() < tokens.len() {
-            lines.push(start_line);
+            lines.push(start.line);
+            cols.push(start.col);
         }
     }
 
@@ -371,7 +455,7 @@ pub fn tokenize_located(input: &str) -> (Vec<Token>, Vec<u32>) {
         }
     }
 
-    (tokens, lines)
+    (tokens, lines, cols)
 }
 
 /// Whether the given (last-emitted) token can terminate a statement, and thus
@@ -456,6 +540,9 @@ mod lex_error_tests {
         if let Some(s) = e.downcast_ref::<String>() {
             return s.clone();
         }
+        if let Some(p) = e.downcast_ref::<LexPanic>() {
+            return p.to_string();
+        }
         String::new()
     }
 
@@ -474,5 +561,9 @@ mod lex_error_tests {
         let msg = panic_text(&err);
         assert!(msg.contains("'?'"), "name the character: {msg}");
         assert!(msg.contains("line 2"), "name the line it is on: {msg}");
+        let p = err
+            .downcast_ref::<LexPanic>()
+            .expect("the refusal must carry a translatable position");
+        assert_eq!((p.ch, p.line, p.col), ('?', 2, 15), "exact position: {msg}");
     }
 }

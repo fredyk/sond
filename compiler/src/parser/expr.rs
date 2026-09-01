@@ -65,7 +65,12 @@ impl Parser {
                     match &lhs {
                         Expr::Var(_) | Expr::Field(_, _) => {}
                         other => {
-                            panic!("a call can only target a function name, found {other:?}")
+                            self.fail_at(
+                                self.pos - 1,
+                                format!(
+                                    "a call can only target a function name, found {other:?}"
+                                ),
+                            )
                         }
                     }
                     lhs = Expr::Call(Box::new(lhs), self.parse_arg_list());
@@ -258,7 +263,7 @@ impl Parser {
                 self.expect(Token::RBrace);
                 Expr::Match { scrutinee, arms }
             }
-            other => panic!("unexpected token in expression: {other:?}"),
+            other => self.fail_at(self.pos - 1, format!("unexpected token in expression: {other}")),
         }
     }
 
@@ -299,22 +304,26 @@ impl Parser {
     }
 
     pub(crate) fn advance(&mut self) -> Token {
-        let tok = self
-            .tokens
-            .get(self.pos)
-            .cloned()
-            .expect("unexpected end of input");
+        if self.pos >= self.tokens.len() {
+            // End of input is a position too: the last line of the text, not one past it.
+            self.fail_at(self.tokens.len().saturating_sub(1), "unexpected end of input".to_string());
+        }
+        let tok = self.tokens[self.pos].clone();
         self.pos += 1;
         tok
     }
 
     /// Consumes the next token, asserting it equals `expected`.
     pub(crate) fn expect(&mut self, expected: Token) {
+        let got_pos = self.pos;
         let got = self.advance();
         if got != expected {
-            // A plain panic (not assert_eq!) gives the qwen workers a readable
-            // "expected X, got Y" instead of a left/right assertion dump.
-            panic!("expected {expected:?}, got {got:?}");
+            // The text a person reads: the tokens as WRITTEN (`{`, `;`) and the place they were
+            // written, not the lexer's internal variant names at nothing-in-particular.
+            self.fail_at(
+                got_pos,
+                format!("expected {expected}, got {got}"),
+            );
         }
     }
 
@@ -330,9 +339,10 @@ impl Parser {
 
     /// Consumes an identifier token and returns its name.
     pub(crate) fn expect_ident(&mut self) -> String {
+        let got_pos = self.pos;
         match self.advance() {
             Token::Ident(name) => name,
-            other => panic!("expected identifier, got {other:?}"),
+            other => self.fail_at(got_pos, format!("expected identifier, got {other}")),
         }
     }
 }

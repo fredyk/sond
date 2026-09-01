@@ -261,19 +261,39 @@ fn no_semicolon_after_open_brace_or_blank_lines() {
 }
 
 #[test]
-#[should_panic(expected = "unexpected character")]
 fn rejects_a_character_it_does_not_know() {
     // A character with no meaning in Sond must stop the build, not vanish.
     // Silently dropping it is how `#[no_main]` in an included file became an
     // index expression that swallowed the declaration after it, with the
     // compiler reporting nothing at all.
-    tokenize("#");
+    //
+    // The refusal is a structured position, not a bare sentence: it is the only form a driver
+    // can translate into the file and line the author actually wrote.
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let err = std::panic::catch_unwind(|| tokenize("#"))
+        .expect_err("a character with no meaning must stop the build");
+    std::panic::set_hook(prev);
+    let p = err
+        .downcast_ref::<LexPanic>()
+        .expect("the refusal must carry the character and its position");
+    assert_eq!(p.ch, '#');
+    assert_eq!((p.line, p.col), (1, 1), "first character of the first line");
+    assert!(p.to_string().contains("unexpected character"));
 }
 
 #[test]
-#[should_panic(expected = "unexpected character")]
 fn rejects_an_unknown_attribute_before_a_declaration() {
-    tokenize("#[no_main]\nfn f() -> i64 { 0 }");
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let err = std::panic::catch_unwind(|| tokenize("#[no_main]\nfn f() -> i64 { 0 }"))
+        .expect_err("a Rust attribute copied into Sond is not Sond");
+    std::panic::set_hook(prev);
+    let p = err
+        .downcast_ref::<LexPanic>()
+        .expect("the refusal must carry the character and its position");
+    assert_eq!(p.ch, '#');
+    assert_eq!((p.line, p.col), (1, 1));
 }
 
 #[test]
@@ -286,7 +306,7 @@ fn spawn_is_a_keyword() {
 #[test]
 fn tokenize_located_reports_the_line_of_each_token() {
     // Line tracking is the foundation of the --debug checkpoint and of source-pointing diagnostics.
-    let (tokens, lines) = tokenize_located("let x = 1\nlet y = 2\n");
+    let (tokens, lines, _cols) = tokenize_located("let x = 1\nlet y = 2\n");
     assert_eq!(tokens.len(), lines.len(), "one line per token");
     // First `let` is on line 1, the second `let` is on line 2.
     let let_lines: Vec<u32> = tokens
@@ -296,6 +316,55 @@ fn tokenize_located_reports_the_line_of_each_token() {
         .map(|(_, &l)| l)
         .collect();
     assert_eq!(let_lines, vec![1, 2], "the two `let`s are on lines 1 and 2");
+}
+
+#[test]
+fn tokenize_located_reports_the_column_of_each_token() {
+    // A parse error must say "column 26" of the line, not just the line: the whole file of a
+    // `if` can fit on one line, and "go look at line 1" says nothing then.
+    let src = "fn main() -> i64 { if a == 1; }";
+    let (tokens, lines, cols) = tokenize_located(src);
+    assert_eq!(
+        tokens.len(),
+        cols.len(),
+        "one column per token, as per line"
+    );
+    assert!(lines.iter().all(|l| *l == 1), "every token is on line 1");
+    let semi = tokens
+        .iter()
+        .position(|t| *t == Token::Semicolon)
+        .expect("the explicit `;` is a token");
+    assert_eq!(cols[semi] as usize, src.find(';').unwrap() + 1);
+    assert_eq!(cols[0], 1, "the first token sits at column 1");
+    assert_eq!(
+        cols[tokens.len() - 1],
+        src.find('}').unwrap() as u32 + 1,
+        "the closing brace sits at its own column"
+    );
+    // Columns count CHARACTERS, not bytes: Sond identifiers may carry accents.
+    let uni = tokenize_located("let donnée = 0x3F8 // àccented\nx = naïve");
+    // `0x3F8` starts at character column 14 of line 1.
+    let hex = uni
+        .0
+        .iter()
+        .position(|t| matches!(t, Token::Int(v) if *v == 1016))
+        .expect("the hex literal is there");
+    assert_eq!((uni.1[hex], uni.2[hex]), (1, 14), "line and column of the hex token");
+    // `naïve` sits at character column 5 of line 2.
+    let naive = uni.0.iter().position(|t| matches!(t, Token::Ident(w) if w == "naïve")).unwrap();
+    assert_eq!((uni.1[naive], uni.2[naive]), (2, 5), "column counts characters");
+}
+
+#[test]
+fn an_implicit_semicolon_at_end_of_line_sits_where_the_line_ends() {
+    // Statements are newline-terminated: the inserted `;` has no character under it, and its
+    // honest position is the column the line ends at (one past the last character).
+    let (tokens, lines, cols) = tokenize_located("let x = 1\n");
+    let semi = tokens
+        .iter()
+        .position(|t| *t == Token::Semicolon)
+        .expect("newline-terminated statement got its implicit `;`");
+    assert_eq!((lines[semi], cols[semi]), (1, 10));
 }
 
 #[test]

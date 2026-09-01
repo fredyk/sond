@@ -6,6 +6,44 @@ fn parse_fn(src: &str) -> Function {
     Parser::new(tokenize(src)).parse_function()
 }
 
+#[test]
+fn a_rejected_token_carries_its_line_and_column() {
+    // The parser refuses the `;` where the `if` wanted a `{`; the refusal must say EXACTLY
+    // where, in the text that was parsed: line 2, the column of the `;` (column 13), and the
+    // tokens written the way a person writes them.
+    let src = "fn main() -> i64 {\n  if a == 1;\n}\n";
+    let (toks, lines, cols) = crate::lexer::tokenize_located(src);
+    let mut p = Parser::with_positions(toks, lines, cols);
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.parse_program()))
+        .expect_err("a `;` where a `{` belongs must be refused");
+    std::panic::set_hook(prev);
+    let p = err
+        .downcast_ref::<ParsePanic>()
+        .expect("a parse refusal must carry a structured position");
+    assert_eq!(p.line, 2, "line of the `;`: {p:?}");
+    assert_eq!(p.col as usize, src[src.find('\n').unwrap() + 1..].find(';').unwrap() + 1);
+    assert_eq!(p.message, "expected `{`, got `;`");
+}
+
+#[test]
+fn end_of_input_refuses_at_the_last_token_not_one_line_past_it() {
+    // An unterminated block: the honest position is where the text stops -- the last token's
+    // line -- never a line index the file does not have.
+    let (toks, lines, cols) = crate::lexer::tokenize_located("fn main() -> i64 {\nif a == 1");
+    let mut p = Parser::with_positions(toks, lines, cols);
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.parse_program()))
+        .expect_err("end of input is a parse error");
+    std::panic::set_hook(prev);
+    let p = err
+        .downcast_ref::<ParsePanic>()
+        .expect("a parse refusal must carry a structured position");
+    assert_eq!(p.line, 2, "the file has two lines: {p:?}");
+}
+
 fn named(t: &str) -> Type {
     Type::Named(t.to_string())
 }
@@ -468,7 +506,6 @@ fn parses_field_access_and_call() {
 }
 
 #[test]
-#[should_panic(expected = "a call can only target a function name")]
 fn rejects_a_call_whose_callee_is_not_a_name() {
     // `let mut b = 2 (a + b) + (a + b)` on ONE line: with no semicolons the parser has
     // to decide where `2` ends, and it used to decide that `(a + b)` was a CALL of the
@@ -478,7 +515,18 @@ fn rejects_a_call_whose_callee_is_not_a_name() {
     let mut p = Parser::new(tokenize(
         "fn main() {\n let mut a = 1\n let mut b = 2 (a + b) + (a + b)\n}",
     ));
-    let _ = p.parse_program();
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.parse_program()))
+        .expect_err("a call of a literal must be refused");
+    std::panic::set_hook(prev);
+    let rejection = err
+        .downcast_ref::<ParsePanic>()
+        .expect("a parse refusal carries a position");
+    assert!(
+        rejection.message.contains("a call can only target a function name"),
+        "{rejection:?}"
+    );
 }
 
 #[test]
@@ -577,7 +625,7 @@ fn parses_a_par_reduce() {
 #[test]
 fn parse_block_stamps_each_statement_with_its_source_line() {
     // Line 1: `fn f() {`; line 2: `let a = 1`; line 3: `let b = 2`; line 4: `a + b` (the tail).
-    let (toks, lines) =
+    let (toks, lines, _) =
         crate::lexer::tokenize_located("fn f() -> i64 {\nlet a = 1\nlet b = 2\na + b\n}");
     let mut p = Parser::with_lines(toks, lines);
     let funcs = p.parse_program();
@@ -750,7 +798,6 @@ fn parses_a_use_directive() {
 }
 
 #[test]
-#[should_panic(expected = "unrecognised top-level declaration")]
 fn rejects_an_unrecognised_top_level_declaration() {
     // A top-level declaration the parser does not know must be a syntax ERROR, never a
     // silent stop.
@@ -770,8 +817,21 @@ fn rejects_an_unrecognised_top_level_declaration() {
     //
     // A compiler whose whole claim is that it rejects what it cannot prove cannot also
     // accept what it cannot read.
-    let mut p = Parser::new(tokenize("const X = 1\ntest \"t\" { let y = 1 }"));
-    let _ = p.parse_program();
+    let (toks, lines, cols) = crate::lexer::tokenize_located("const X = 1\ntest \"t\" { let y = 1 }");
+    let mut p = Parser::with_positions(toks, lines, cols);
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.parse_program()))
+        .expect_err("an unknown top-level word must stop the parse, not end it quietly");
+    std::panic::set_hook(prev);
+    let rejection = err
+        .downcast_ref::<ParsePanic>()
+        .expect("a parse refusal carries a position");
+    assert!(
+        rejection.message.contains("unrecognised top-level declaration"),
+        "{rejection:?}"
+    );
+    assert_eq!((rejection.line, rejection.col), (1, 1), "it points at `const`");
 }
 
 #[test]
@@ -861,7 +921,7 @@ fn stmt_lines_len_equals_stmts_len_after_parse_function_body() {
                }\n\
                0\n\
                }";
-    let (toks, lines) = crate::lexer::tokenize_located(src);
+    let (toks, lines, _) = crate::lexer::tokenize_located(src);
     let mut p = Parser::with_lines(toks, lines);
     let funcs = p.parse_program();
     for (i, f) in funcs.iter().enumerate() {

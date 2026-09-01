@@ -9,10 +9,114 @@
 //! toward the RFC-0006 package format, not a full module system: one flat namespace,
 //! no visibility, but it makes real multi-file programs (an SSH stack) buildable.
 
-use crate::lexer::tokenize_located;
+use crate::lexer::{LexPanic, tokenize_located};
 use crate::token::Token;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+/// Where one line of the spliced text came from: the file a person wrote, the line within that
+/// file, and (only when the name-rewriting made the line differ) a per-character map back to the
+/// columns of the original line.
+#[derive(Debug)]
+struct SpliceLine {
+    file: PathBuf,
+    line: u32,
+    /// Index = 0-based column in the spliced line; value = 1-based column in the source line.
+    /// `None` means the line was copied verbatim, so the columns are the same.
+    cols: Option<Vec<u32>>,
+}
+
+/// A position in the files a person wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Loc {
+    pub file: PathBuf,
+    pub line: u32,
+    pub col: u32,
+}
+
+/// Position-en-el-empalme -> (file, line, column) of the sources. The compiler parses ONE buffer
+/// built by splicing every `include`d file, so a position inside it means nothing to the author
+/// of the file where the problem actually is: `at line 7572` in a program whose every file is
+/// shorter than that is not a location, it is a search task. The splicing knows where every line
+/// came from; this carries that knowledge to the other end.
+#[derive(Debug)]
+pub struct SpanMap {
+    entry: PathBuf,
+    lines: Vec<SpliceLine>,
+}
+
+impl SpanMap {
+    /// The source position of `(line, column)` in the spliced text, or `None` when the line is
+    /// outside everything that got spliced (0 = "unknown", or text appended after resolution).
+    pub fn locate(&self, line: u32, col: u32) -> Option<Loc> {
+        let origin = self.lines.get(line.checked_sub(1)? as usize)?;
+        let col = match &origin.cols {
+            None => col,
+            Some(m) => {
+                if col == 0 {
+                    0
+                } else if (col as usize) <= m.len() {
+                    m[col as usize - 1]
+                } else {
+                    // One past the rewritten text (an end-of-line position): keep counting from
+                    // where the original line ended.
+                    m.last().copied().unwrap_or(col) + (col as usize - m.len()) as u32
+                }
+            }
+        };
+        Some(Loc {
+            file: origin.file.clone(),
+            line: origin.line,
+            col,
+        })
+    }
+
+    /// The source position of a spliced LINE (columns unknown).
+    pub fn locate_line(&self, line: u32) -> Option<Loc> {
+        self.locate(line, 0)
+    }
+
+    /// Rewrites `"at line N"` inside an already-formatted message to the line of the file the N
+    /// was spliced out of, naming that file when it is not the one being compiled. `true` means a
+    /// foreign file had to be named, so the caller must not re-blame its own entry file.
+    pub fn fix_message_lines(&self, msg: &str) -> (String, bool) {
+        const PAT: &str = "at line ";
+        let mut out = String::new();
+        let mut rest = msg;
+        let mut named_elsewhere = false;
+        while let Some(k) = rest.find(PAT) {
+            out.push_str(&rest[..k]);
+            let after = &rest[k + PAT.len()..];
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let located = if digits.is_empty() {
+                None
+            } else {
+                digits.parse::<u32>().ok().and_then(|n| self.locate_line(n))
+            };
+            match located {
+                Some(loc) => {
+                    if loc.file == self.entry {
+                        out.push_str(&format!("at line {}", loc.line));
+                    } else {
+                        named_elsewhere = true;
+                        out.push_str(&format!(
+                            "at line {} of {}",
+                            loc.line,
+                            loc.file.display()
+                        ));
+                    }
+                    rest = &after[digits.len()..];
+                }
+                None => {
+                    out.push_str(PAT);
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        (out, named_elsewhere)
+    }
+}
 
 /// Resolves a module name (from `import <name>`) to a file path on disk.
 /// The default implementation searches `lib/` the same way `include` does.
@@ -52,13 +156,42 @@ impl ModuleResolver for DefaultResolver {
     }
 }
 
+/// Tokenizes a whole file for name extraction, CATCHING the refusal a character the lexer cannot
+/// read raises. The position in that refusal is a position in THIS file -- which nothing knows
+/// once the refusal escapes the per-file pass and lands in a driver holding only the spliced
+/// text -- so it is translated to (file, line, message) here, at the one moment the file name and
+/// the per-file line are both at hand.
+fn lex_tokens(src: &str) -> (Vec<Token>, Option<(u32, String)>) {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let r = std::panic::catch_unwind(|| tokenize_located(src));
+    std::panic::set_hook(prev);
+    match r {
+        Ok((toks, _, _)) => (toks, None),
+        Err(e) => {
+            if let Some(p) = e.downcast_ref::<LexPanic>() {
+                (
+                    Vec::new(),
+                    Some((p.line, format!("unexpected character {:?}", p.ch))),
+                )
+            } else {
+                let text = e
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "cannot read this file".to_string());
+                (Vec::new(), Some((0, text)))
+            }
+        }
+    }
+}
+
 /// The PRIVATE (non-`pub`) FREE functions a file defines, i.e. its file-local helpers. A free
 /// function's `fn` keyword sits at brace-depth 0; a method's is inside its `impl { .. }` (depth 1)
-/// and is already mangled `Type_m`, so it is left alone. Uses the lexer, so strings and comments
-/// never false-match. Modifiers (`wrapping`/`interrupt`) between the visibility and `fn` are
-/// skipped when checking for `pub`.
-fn private_free_fn_names(src: &str) -> HashSet<String> {
-    let (toks, _) = tokenize_located(src);
+/// and is already mangled `Type_m`, so it is left alone. Takes the token stream, so strings and
+/// comments never false-match. Modifiers (`wrapping`/`interrupt`) between the visibility and `fn`
+/// are skipped when checking for `pub`.
+fn private_free_fn_names(toks: &[Token]) -> HashSet<String> {
     let mut names = HashSet::new();
     let mut depth: i32 = 0;
     for (i, t) in toks.iter().enumerate() {
@@ -86,8 +219,7 @@ fn private_free_fn_names(src: &str) -> HashSet<String> {
 /// body (depth > 0) is a local and is ignored. An optional `mut` (lexed as an identifier) between
 /// `let` and the name is skipped. These are file-scoped on collision exactly like private helper
 /// functions, so two bignum modules can each define `let BN_MASK16 = 0xFFFF`.
-fn module_global_names(src: &str) -> HashSet<String> {
-    let (toks, _) = tokenize_located(src);
+fn module_global_names(toks: &[Token]) -> HashSet<String> {
     let mut names = HashSet::new();
     let mut depth: i32 = 0;
     for (i, t) in toks.iter().enumerate() {
@@ -114,8 +246,7 @@ fn module_global_names(src: &str) -> HashSet<String> {
 
 /// The PUBLIC (`pub fn` / `pub let`) names a file exports: its module surface. These are what a
 /// `module::name` may reach, and what has to stay reachable unqualified while the tree migrates.
-fn public_names(src: &str) -> HashSet<String> {
-    let (toks, _) = tokenize_located(src);
+fn public_names(toks: &[Token]) -> HashSet<String> {
     let mut names = HashSet::new();
     let mut depth: i32 = 0;
     for (i, t) in toks.iter().enumerate() {
@@ -200,9 +331,14 @@ struct LineCtx<'a> {
 /// the parser, the type checker and the code generator keep working on the flat namespace they
 /// already understand, and the module system is a rewriting of names rather than a second
 /// meaning for them.
-fn rewrite_line(line: &str, ctx: &LineCtx) -> Result<String, String> {
+///
+/// Also returns the column map: when the line was rewritten, every character of the result knows
+/// the column of the source character it came from (a replacement names the column its original
+/// started at, so a position landing anywhere inside a mangled name points at the name the
+/// author typed). `None` when the rewriting was, in fact, a copy.
+fn rewrite_line_mapped(line: &str, ctx: &LineCtx) -> Result<(String, Option<Vec<u32>>), String> {
     let chars: Vec<char> = line.chars().collect();
-    let mut out = String::new();
+    let mut out = Rewriter::default();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -210,12 +346,12 @@ fn rewrite_line(line: &str, ctx: &LineCtx) -> Result<String, String> {
             '"' | '\'' => {
                 // Copy the literal verbatim (respecting `\` escapes) without rewriting inside it.
                 let quote = c;
-                out.push(c);
+                out.push_verbatim(c, i);
                 i += 1;
                 while i < chars.len() {
-                    out.push(chars[i]);
+                    out.push_verbatim(chars[i], i);
                     if chars[i] == '\\' && i + 1 < chars.len() {
-                        out.push(chars[i + 1]);
+                        out.push_verbatim(chars[i + 1], i + 1);
                         i += 2;
                         continue;
                     }
@@ -227,7 +363,9 @@ fn rewrite_line(line: &str, ctx: &LineCtx) -> Result<String, String> {
                 }
             }
             '/' if i + 1 < chars.len() && chars[i + 1] == '/' => {
-                out.extend(&chars[i..]); // rest of the line is a comment
+                for k in i..chars.len() {
+                    out.push_verbatim(chars[k], k); // rest of the line is a comment
+                }
                 break;
             }
             _ if c.is_alphabetic() || c == '_' => {
@@ -248,7 +386,10 @@ fn rewrite_line(line: &str, ctx: &LineCtx) -> Result<String, String> {
                         j += 1;
                     }
                     let name: String = chars[ns..j].iter().collect();
-                    out.push_str(&resolve_qualified(&ident, &name, ctx, ctx.aliases)?);
+                    out.push_replacement(
+                        &resolve_qualified(&ident, &name, ctx, ctx.aliases)?,
+                        start,
+                    );
                     i = j;
                     continue;
                 }
@@ -261,18 +402,49 @@ fn rewrite_line(line: &str, ctx: &LineCtx) -> Result<String, String> {
                     ));
                 }
                 if let Some(id) = ctx.map.get(&ident) {
-                    out.push_str(&format!("{ident}__f{id}"));
+                    out.push_replacement(&format!("{ident}__f{id}"), start);
                 } else {
-                    out.push_str(&ident);
+                    out.push_str_verbatim(&ident, start);
                 }
             }
             _ => {
-                out.push(c);
+                out.push_verbatim(c, i);
                 i += 1;
             }
         }
     }
-    Ok(out)
+    let Rewriter { out, map } = out;
+    let colmap = if out == line { None } else { Some(map) };
+    Ok((out, colmap))
+}
+
+/// The characters a rewritten line produces, each remembering the column of the source character
+/// it came from. A replacement (a mangled or qualified name) maps every one of its characters to
+/// the column where the name it replaces was written: a diagnostic landing anywhere inside it
+/// points the author at the name THEY wrote, not at whatever prefix `_f2` the rewriter appended.
+#[derive(Default)]
+struct Rewriter {
+    out: String,
+    /// Parallel to the CHARACTERS of `out` (not bytes): 1-based column in the source line.
+    map: Vec<u32>,
+}
+
+impl Rewriter {
+    fn push_verbatim(&mut self, c: char, src_index: usize) {
+        self.out.push(c);
+        self.map.push(src_index as u32 + 1);
+    }
+    fn push_str_verbatim(&mut self, s: &str, src_index: usize) {
+        for (k, c) in s.chars().enumerate() {
+            self.push_verbatim(c, src_index + k);
+        }
+    }
+    fn push_replacement(&mut self, s: &str, src_index: usize) {
+        for c in s.chars() {
+            self.out.push(c);
+            self.map.push(src_index as u32 + 1);
+        }
+    }
 }
 
 /// The symbol `module::name` denotes, or why it denotes nothing.
@@ -345,6 +517,34 @@ pub fn resolve_includes_scoped_with_resolver(
     entry: &Path,
     resolver: &dyn ModuleResolver,
 ) -> std::io::Result<(String, HashSet<String>)> {
+    let r = resolve_includes_located_with_resolver(entry, resolver)?;
+    Ok((r.src, r.cov_scope))
+}
+
+/// The resolved program: the spliced text, the coverage scope, and the map from positions in that
+/// text back to the files a person wrote.
+pub struct ResolvedProgram {
+    pub src: String,
+    pub cov_scope: HashSet<String>,
+    pub spans: SpanMap,
+}
+
+/// Like [`resolve_includes_scoped`], but also hands back the [`SpanMap`] every diagnostic needs:
+/// the spliced text on its own carries line numbers nobody's editor has.
+pub fn resolve_includes_scoped_located(entry: &Path) -> std::io::Result<ResolvedProgram> {
+    let base = entry
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    resolve_includes_located_with_resolver(entry, &DefaultResolver::new(base))
+}
+
+/// Like [`resolve_includes_scoped_located`], but uses a custom [`ModuleResolver`] for `import`
+/// resolution.
+pub fn resolve_includes_located_with_resolver(
+    entry: &Path,
+    resolver: &dyn ModuleResolver,
+) -> std::io::Result<ResolvedProgram> {
     // Make the entry ABSOLUTE first. The search for a project's own `lib/` walks up from the
     // entry's PARENT, and the parent of a relative path like `prog.snd` is the empty path, so the
     // walk never starts and the only root left is the one under $HOME. The result is a compiler
@@ -362,6 +562,20 @@ pub fn resolve_includes_scoped_with_resolver(
     let mut g = IncludeGraph::default();
     let mut gseen = HashSet::new();
     build_graph(entry, 0, &mut gseen, &mut g, resolver);
+
+    // A file that cannot even be lexed is reported naming ITS OWN path and line, now, while they
+    // are known; after splicing they are gone.
+    if let Some((f, l, m)) = g.lex_errors.first() {
+        let place = if *l > 0 {
+            format!("{}: line {l}", f.display())
+        } else {
+            format!("{}", f.display())
+        };
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{place}: {m}"),
+        ));
+    }
 
     // Validate aliases: an alias must not clash with any module name already visible.
     let visible_modules: HashSet<&String> = g.modules.values().collect();
@@ -503,6 +717,7 @@ pub fn resolve_includes_scoped_with_resolver(
 
     let mut seen = HashSet::new();
     let mut out = String::new();
+    let mut spans: Vec<SpliceLine> = Vec::new();
     let mut depth0 = HashSet::new();
     let mut depth1 = HashSet::new();
     let ns = Namespaces {
@@ -523,6 +738,7 @@ pub fn resolve_includes_scoped_with_resolver(
         &ns,
         &g.import_errors,
         &g.aliases,
+        &mut spans,
     )?;
     // Which functions is this entry on the hook for covering?
     //
@@ -545,7 +761,14 @@ pub fn resolve_includes_scoped_with_resolver(
     } else {
         depth0
     };
-    Ok((out, scope))
+    Ok(ResolvedProgram {
+        src: out,
+        cov_scope: scope,
+        spans: SpanMap {
+            entry: entry.to_path_buf(),
+            lines: spans,
+        },
+    })
 }
 
 /// The include graph gathered in the first pass, keyed by canonical file path: each file's
@@ -571,6 +794,9 @@ struct IncludeGraph {
     hidden_modules: std::collections::HashMap<PathBuf, HashSet<String>>,
     /// Source lines per file, for line-number reporting in import errors.
     source_lines: std::collections::HashMap<PathBuf, Vec<String>>,
+    /// Files that hold a character the lexer refuses: (canonical file, line in THAT file, message).
+    /// Reported before any splicing, because the splice is what loses the file the line belongs to.
+    lex_errors: Vec<(PathBuf, u32, String)>,
 }
 
 /// First pass: walk the include tree once and populate [`IncludeGraph`]. Each visited file records
@@ -591,11 +817,18 @@ fn build_graph(
     let Ok(src) = std::fs::read_to_string(path) else {
         return;
     };
-    let mut names = private_free_fn_names(&src);
+    // A character the lexer refuses is not a reason to stop WALKING the graph (the emit pass
+    // reads every file again by hand), but it is a reason to remember it with the place it lives:
+    // this is the only moment the file name and this file's own line number are known together.
+    let (toks, lex_err) = lex_tokens(&src);
+    if let Some((line, msg)) = lex_err {
+        g.lex_errors.push((canon.clone(), line, msg));
+    }
+    let mut names = private_free_fn_names(&toks);
     // Module-level private globals are file-scoped on collision too (e.g. two bignum modules
     // both defining `let BN_MASK16 = 0xFFFF`), so fold them into the same defined-name set.
-    names.extend(module_global_names(&src));
-    let exports = public_names(&src);
+    names.extend(module_global_names(&toks));
+    let exports = public_names(&toks);
     // A file needs a mangling id if anything it defines might have to be told apart from
     // somebody else's name of the same spelling -- which now includes its PUBLIC surface, since
     // two modules are allowed to export the same name and be separated by qualification.
@@ -692,6 +925,7 @@ fn resolve_into(
     ns: &Namespaces,
     import_errors: &[(PathBuf, usize, String)],
     aliases: &std::collections::HashMap<String, String>,
+    spans: &mut Vec<SpliceLine>,
 ) -> std::io::Result<()> {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !seen.insert(canon) {
@@ -732,7 +966,7 @@ fn resolve_into(
             ));
         }
     }
-    for line in src.lines() {
+    for (idx, line) in src.lines().enumerate() {
         match parse_include(line.trim()) {
             Some(rel) => resolve_into(
                 &resolve_target(dir, rel),
@@ -744,6 +978,7 @@ fn resolve_into(
                 ns,
                 import_errors,
                 aliases,
+                spans,
             )?,
             None if let Some(mod_name) = parse_import(line.trim()) => {
                 // Resolve the import: find the module's canonical path and inline it.
@@ -761,6 +996,7 @@ fn resolve_into(
                         ns,
                         import_errors,
                         aliases,
+                        spans,
                     )?;
                 }
                 // If the import had an error, it was already reported above.
@@ -769,7 +1005,7 @@ fn resolve_into(
                 // A name that cannot be resolved is reported HERE, naming the file it was
                 // written in. Left to the code generator it would surface as an undefined
                 // mangled symbol, which names nothing anybody typed.
-                let owned = rewrite_line(line, &ctx).map_err(|e| {
+                let (owned, colmap) = rewrite_line_mapped(line, &ctx).map_err(|e| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("{}: {e}", path.display()),
@@ -789,6 +1025,12 @@ fn resolve_into(
                 }
                 out.push_str(line);
                 out.push('\n');
+                // One spliced line, one origin: this file, this line, and where the columns went.
+                spans.push(SpliceLine {
+                    file: path.to_path_buf(),
+                    line: idx as u32 + 1,
+                    cols: colmap,
+                });
             }
         }
     }
@@ -1749,6 +1991,148 @@ mod tests {
         assert!(
             err.contains("io"),
             "error names the clashing name, got: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The spliced-position -> written-position map.
+    // ---------------------------------------------------------------------
+
+    /// `include a`, `include b`, `include c` and a main, each file multiple lines; returns
+    /// entry path + combined text + a handle to the map.
+    fn three_include_fixture() -> (PathBuf, ResolvedProgram) {
+        let root =
+            std::env::temp_dir().join(format!("sond_spans_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.snd"), "fn a_ok() -> i64 { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("b.snd"),
+            "fn b_ok() -> i64 { 2 }\nfn b_two() -> i64 { 3 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("c.snd"),
+            "fn c_ok() -> i64 { 1 }\nfn c_bad() -> i64 { if x == 1; }\n",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"a.snd\"\ninclude \"b.snd\"\ninclude \"c.snd\"\nfn main() -> i64 { 0 }\n",
+        )
+        .unwrap();
+        let rp = resolve_includes_scoped_located(&entry).unwrap();
+        (entry, rp)
+    }
+
+    #[test]
+    fn the_splice_map_points_each_line_at_the_file_it_was_written_in() {
+        let (entry, rp) = three_include_fixture();
+        // Combined: 1 = a's line 1, 2-3 = b's lines, 4-5 = c's lines, 6 = main's own line 4.
+        assert_eq!(rp.src.lines().count(), 6);
+        let loc = rp.spans.locate(5, 30).expect("line 5 is c's second line");
+        assert_eq!(loc.file, entry.parent().unwrap().join("c.snd"));
+        assert_eq!(loc.line, 2, "c's OWN line, not the spliced offset 5");
+        let loc = rp.spans.locate(6, 1).expect("line 6 is main's own code");
+        assert_eq!(loc.file, entry);
+        assert_eq!(loc.line, 4, "the spliced main line is main's line 4");
+        // Identity line, not rewritten: columns pass through untouched.
+        assert_eq!(loc.col, 1);
+        assert_eq!(rp.spans.locate(7, 1), None);
+    }
+
+    #[test]
+    fn an_error_named_by_spliced_line_is_fixed_to_the_written_file_and_line() {
+        let (_entry, rp) = three_include_fixture();
+        let msg = "variable `return1` is not declared in function `c_bad` at line 5";
+        let (fixed, named) = rp.spans.fix_message_lines(msg);
+        assert!(named, "the blamed file is not the entry, so it must be named: {fixed}");
+        assert!(fixed.contains("at line 2 of "), "c's own line: {fixed}");
+        assert!(fixed.contains("c.snd"), "the file is named: {fixed}");
+        assert!(!fixed.contains("line 5"), "the spliced offset is gone: {fixed}");
+
+        // A line that came from the entry itself keeps the entry as the only name it needs.
+        let msg = "cannot prove `i` is in bounds at line 6; bound it";
+        let (fixed, named) = rp.spans.fix_message_lines(msg);
+        assert!(!named, "same file as the entry: {fixed}");
+        assert_eq!(fixed, "cannot prove `i` is in bounds at line 4; bound it");
+
+        // An unmappable line (0, or past the splice) is left exactly as it is.
+        let (fixed, named) = rp.spans.fix_message_lines("no location here at all");
+        assert_eq!(fixed, "no location here at all");
+        assert!(!named);
+        let (fixed, _) = rp.spans.fix_message_lines("problem at line 99");
+        assert_eq!(fixed, "problem at line 99", "nothing maps line 99, nothing changes");
+    }
+
+    #[test]
+    fn a_rewritten_line_maps_its_columns_back_to_the_name_that_was_written() {
+        // The one case WHERE the columns can lie: name resolution rewrites `shared` into
+        // `shared__f<id>`, and every column after it shifts. The map has to undo that, so a
+        // position landing anywhere inside the mangled name points at the name the author wrote.
+        let root =
+            std::env::temp_dir().join(format!("sond_spancol_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.snd"), "fn shared() -> i64 { 1 }\n").unwrap();
+        std::fs::write(root.join("b.snd"), "fn shared() -> i64 { 2 }\n").unwrap();
+        std::fs::write(
+            root.join("c.snd"),
+            "include \"b.snd\"\npub fn c_call() -> i64 { 7 + shared() }\n",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"a.snd\"\ninclude \"c.snd\"\nfn main() -> i64 { c_call() }\n",
+        )
+        .unwrap();
+        let rp = resolve_includes_scoped_located(&entry).unwrap();
+        // Spliced: 1 = a's line, 2 = b's line, 3 = c's REWRITTEN line 2, 4 = main's line 3.
+        let rewritten = rp.src.lines().nth(2).unwrap();
+        assert!(rewritten.contains("shared__f"), "{rewritten}");
+        let orig = "pub fn c_call() -> i64 { 7 + shared() }";
+        let written_col = orig.find("shared").unwrap() + 1; // 1-based column in c.snd
+
+        // A position on the mangled SUFFIX (`__f...`) -- which exists only after the rewriting --
+        // still answers with the column of `shared`.
+        let suffix = rewritten.find("__f").unwrap() + 2;
+        let loc = rp.spans.locate(3, suffix as u32 + 1).unwrap();
+        assert_eq!(loc.file, root.join("c.snd"));
+        assert_eq!(loc.line, 2);
+        assert_eq!(
+            loc.col as usize, written_col,
+            "a position inside the rewritten name must point at the written name"
+        );
+
+        // And a position PAST the rewriting (the end of the `}`) keeps mapping sanely: it exists
+        // in both texts at the same character, shifted by the longer name.
+        let tail = rewritten.chars().count();
+        let loc = rp.spans.locate(3, tail as u32).unwrap();
+        assert_eq!(loc.file, root.join("c.snd"));
+        assert_eq!(loc.col as usize, orig.find('}').unwrap() + 1);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_lexed_is_named_with_its_own_line() {
+        // The graph pass tokenizes every file to learn the names it defines; the refusal used to
+        // escape with a line number in a nameless file, which the driver then blamed on the entry.
+        let root =
+            std::env::temp_dir().join(format!("sond_spanlex_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bad = root.join("bad.snd");
+        std::fs::write(&bad, "fn ok() -> i64 { 1 }\nfn bad() -> i64 { 1 ? 2 }\n").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"bad.snd\"\nfn main() -> i64 { ok() }\n",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(err.contains("bad.snd"), "it must name the file, got: {err}");
+        assert!(err.contains("line 2"), "and the line IN THAT FILE, got: {err}");
+        assert!(
+            !err.contains("main.snd"),
+            "not the entry file it was included from, got: {err}"
         );
     }
 }

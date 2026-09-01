@@ -2204,6 +2204,10 @@ mod tests {
             s.clone()
         } else if let Some(s) = err.downcast_ref::<&str>() {
             (*s).to_string()
+        } else if let Some(p) = err.downcast_ref::<crate::parser::ParsePanic>() {
+            p.to_string()
+        } else if let Some(p) = err.downcast_ref::<crate::lexer::LexPanic>() {
+            p.to_string()
         } else {
             panic!("the rejection carried no message the user could read");
         }
