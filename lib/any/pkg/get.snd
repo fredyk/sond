@@ -7,7 +7,7 @@
 // the TLS stack that lives in this same tree: resolve `ref` (a tag, a branch or a SHA)
 // to a commit SHA via the GitHub API, list the `.snd` files of the tree, GET each one
 // raw, canonicalize (see canon.snd), hash, write the module into the package cache under
-// its hash,and record the `use` line in deps.snd so a later build can find it. This file is
+// its hash,and record the `use` block in deps.snd so a later build can find it. This file is
 // the ONLY place in the whole system that touches the network: `sond build` and
 // `sond test` never do.
 //
@@ -21,13 +21,17 @@
 // file is on disk. A cache dir named by a hash is therefore trustworthy; a half-fetched
 // module never wears the name of a hash.
 //
-// THE DEPS FILE: deps.snd in the current project, one `use` line per fetched module:
-//   use <source-url> <commit-sha> <content-hash> <module-name>
-// <source-url> is what was asked for minus the ref ("github.com/owner/repo"),
-// <commit-sha> is the RESOLVED commit the ref named (a tag may be moved; what gets pinned
-// here is a commit, which never moves), <content-hash> is the canonical hash over the fetched
-// bytes,and <module-name> is the repo basename. `sond verify` recomputes the hash from the
-// cache and flags any line whose recorded hash no longer matches, with no network at all.
+// THE DEPS FILE: deps.snd in the current project, one `use` block per fetched module:
+//   use <module-name> = sond:sha256:<content-hash>
+//       from "<source-url>@<commit-sha>"
+//       grants {}
+// <module-name> is the friendly name the module is imported under (the repo basename),
+// <content-hash> is the canonical hash over the fetched bytes, <source-url> is what was
+// asked for minus the ref ("github.com/owner/repo"), and <commit-sha> is the RESOLVED
+// commit the ref named (a tag may be moved; what gets pinned here is a commit, which never
+// moves). `grants {}` is always written, empty: it is the slot the capability manifest
+// (§3.4 of RFC-0006) will fill. `sond verify` recomputes the hash from the cache and flags
+// any block whose recorded hash no longer matches, with no network at all.
 //
 // `pkg_get` is what a program calls with the ref; `pkg_verify` checks deps. A few module
 // globals (all `pkg_`-prefixed, with production defaults) keep the functions testable:
@@ -825,23 +829,97 @@ fn pkg_field_cstr(b:i64, o:i64, l:i64) -> i64 {
     out
 }
 
-// 1 if the bytes line b[ls,le) is a "use <src> ..." line.
-fn pkg_deps_line_use_src(b:i64, ls:i64, le:i64, src:i64) -> i64 {
+// 1 if the bytes line b[ls,le2) is a "use <name> = sond:sha256:<hash>" line; writes the
+// name and hash byte ranges into (no2,nl) and (ho,hl). The hash is returned WITHOUT its
+// "sond:sha256:" prefix (the cache is named by the bare hash).
+fn pkg_parse_use(b:i64, ls:i64, le2:i64, no2:i64, nl:i64, ho:i64, hl:i64) -> i64 {
     let fo[1]
     let fl[1]
-    if pkg_field(b, ls, le, 0, fo, fl) == 0 { return 0 }
+    if pkg_field(b, ls, le2, 0, fo, fl) == 0 { return 0 }
     if fl[0] != 3 { return 0 }
     if bytes_get(b, fo[0]) != 117 { return 0 }
     if bytes_get(b, fo[0] + 1) != 115 { return 0 }
     if bytes_get(b, fo[0] + 2) != 101 { return 0 }
-    if pkg_field(b, ls, le, 1, fo, fl) == 0 { return 0 }
-    let f1 = pkg_field_cstr(b, fo[0], fl[0])
-    if streq(f1, src) != 1 { return 0 }
+    let mut p = fo[0] + 3
+    for p < le2 { let c = bytes_get(b, p); if c == 32 { p = p + 1 } else { break } }
+    let ns = p
+    for p < le2 { let c = bytes_get(b, p); if c == 32 || c == 61 { break } p = p + 1 }
+    if p == ns { return 0 }
+    poke64(no2, ns)
+    poke64(nl, p - ns)
+    for p < le2 { let c = bytes_get(b, p); if c == 32 { p = p + 1 } else { break } }
+    if p >= le2 { return 0 }
+    if bytes_get(b, p) != 61 { return 0 }
+    p = p + 1
+    for p < le2 { let c = bytes_get(b, p); if c == 32 { p = p + 1 } else { break } }
+    // expect the "sond:sha256:" scheme prefix (12 bytes)
+    if p + 12 > le2 { return 0 }
+    if bytes_get(b, p + 0) != 115 { return 0 }
+    if bytes_get(b, p + 1) != 111 { return 0 }
+    if bytes_get(b, p + 2) != 110 { return 0 }
+    if bytes_get(b, p + 3) != 100 { return 0 }
+    if bytes_get(b, p + 4) != 58 { return 0 }
+    if bytes_get(b, p + 5) != 115 { return 0 }
+    if bytes_get(b, p + 6) != 104 { return 0 }
+    if bytes_get(b, p + 7) != 97 { return 0 }
+    if bytes_get(b, p + 8) != 50 { return 0 }
+    if bytes_get(b, p + 9) != 53 { return 0 }
+    if bytes_get(b, p + 10) != 54 { return 0 }
+    if bytes_get(b, p + 11) != 58 { return 0 }
+    let hs = p + 12
+    let mut hp = hs
+    for hp < le2 { let c = bytes_get(b, hp); if c == 32 { break } hp = hp + 1 }
+    if hp == hs { return 0 }
+    poke64(ho, hs)
+    poke64(hl, hp - hs)
     1
 }
 
-// If the deps bytes buffer `b` has a "use <src> ..." line, writes that line's sha and hash
-// (heap cstrs) into `sha_out`/`hash_out` and returns 1; else 0.
+// 1 if b[ls,le2) is a "from <value>" line; writes the value byte range (quotes around it, if
+// any, stripped) into (vo,vl).
+fn pkg_line_is_from(b:i64, ls:i64, le2:i64, vo:i64, vl:i64) -> i64 {
+    let fo[1]
+    let fl[1]
+    if pkg_field(b, ls, le2, 0, fo, fl) == 0 { return 0 }
+    if fl[0] != 4 { return 0 }
+    if bytes_get(b, fo[0]) != 102 { return 0 }
+    if bytes_get(b, fo[0] + 1) != 114 { return 0 }
+    if bytes_get(b, fo[0] + 2) != 111 { return 0 }
+    if bytes_get(b, fo[0] + 3) != 109 { return 0 }
+    let mut p = fo[0] + 4
+    for p < le2 { let c = bytes_get(b, p); if c == 32 { p = p + 1 } else { break } }
+    let mut vs = p
+    let mut ve = le2
+    for ve > vs { if bytes_get(b, ve - 1) == 32 { ve = ve - 1 } else { break } }
+    if ve <= vs { return 0 }
+    if bytes_get(b, vs) == 34 && bytes_get(b, ve - 1) == 34 {
+        vs = vs + 1
+        ve = ve - 1
+    }
+    if ve <= vs { return 0 }
+    poke64(vo, vs)
+    poke64(vl, ve - vs)
+    1
+}
+
+// 1 if b[ls,le2) is a "grants ..." line.
+fn pkg_line_is_grants(b:i64, ls:i64, le2:i64) -> i64 {
+    let fo[1]
+    let fl[1]
+    if pkg_field(b, ls, le2, 0, fo, fl) == 0 { return 0 }
+    if fl[0] != 6 { return 0 }
+    if bytes_get(b, fo[0]) != 103 { return 0 }
+    if bytes_get(b, fo[0] + 1) != 114 { return 0 }
+    if bytes_get(b, fo[0] + 2) != 97 { return 0 }
+    if bytes_get(b, fo[0] + 3) != 110 { return 0 }
+    if bytes_get(b, fo[0] + 4) != 116 { return 0 }
+    if bytes_get(b, fo[0] + 5) != 115 { return 0 }
+    1
+}
+
+// If the deps bytes buffer `b` has a "use <name> = sond:sha256:<hash>" block whose `from`
+// line names `src` (the source URL, before the "@<commit>"), writes that block's commit sha
+// and content hash (heap cstrs) into `sha_out`/`hash_out` and returns 1; else 0.
 fn pkg_deps_find(b:i64, src:i64, sha_out:i64, hash_out:i64) -> i64 {
     let n = bytes_len(b)
     let mut start = 0
@@ -851,15 +929,39 @@ fn pkg_deps_find(b:i64, src:i64, sha_out:i64, hash_out:i64) -> i64 {
         let le = peek64(le_out)
         let mut le2 = le
         if le2 > start { if bytes_get(b, le2 - 1) == 13 { le2 = le2 - 1 } }
-        let so[1]
-        let sl[1]
+        let no2[1]
+        let nl[1]
         let ho[1]
         let hl[1]
-        if pkg_deps_line_use_src(b, start, le2, src) == 1 {
-            if pkg_field(b, start, le2, 2, so, sl) == 1 && pkg_field(b, start, le2, 3, ho, hl) == 1 {
-                poke64(sha_out, pkg_field_cstr(b, so[0], sl[0]))
-                poke64(hash_out, pkg_field_cstr(b, ho[0], hl[0]))
-                return 1
+        if pkg_parse_use(b, start, le2, no2, nl, ho, hl) == 1 {
+            // walk the contiguous continuation lines looking for the `from`
+            let mut sub = nxt
+            for sub != -1 {
+                let sle_out[1]
+                let snxt = pkg_line_end(b, sub, sle_out)
+                let sle = peek64(sle_out)
+                let mut sle2 = sle
+                if sle2 > sub { if bytes_get(b, sle2 - 1) == 13 { sle2 = sle2 - 1 } }
+                let vo[1]
+                let vl[1]
+                if pkg_line_is_from(b, sub, sle2, vo, vl) == 1 {
+                    let fv = pkg_field_cstr(b, vo[0], vl[0])
+                    let fbb = bytes_from_cstr(fv)
+                    let at = bytes_index_of(fbb, 64)
+                    if at > 0 && at + 1 < bytes_len(fbb) {
+                        let spre = bytes_slice(fbb, 0, at)
+                        let spc = pkg_bytes_cstr(spre)
+                        if streq(spc, src) == 1 {
+                            let shp = bytes_slice(fbb, at + 1, bytes_len(fbb))
+                            poke64(sha_out, pkg_bytes_cstr(shp))
+                            poke64(hash_out, pkg_field_cstr(b, ho[0], hl[0]))
+                            return 1
+                        }
+                    }
+                    break
+                }
+                if pkg_line_is_grants(b, sub, sle2) == 1 { sub = snxt; continue }
+                break
             }
         }
         if nxt < 0 { break }
@@ -869,8 +971,9 @@ fn pkg_deps_find(b:i64, src:i64, sha_out:i64, hash_out:i64) -> i64 {
 }
 
 // Rewrites the old deps bytes buffer `old` into the new buffer `nb`: every line is kept
-// verbatim except a "use <src>" line, which is dropped (it is replaced by the caller's new
-// line). Lines are re-emitted each ending with a newline.
+// verbatim except the whole block of a `use` whose `from` names `src`, which is dropped (it
+// is replaced by the caller's new block). Comments and other entries around it survive intact.
+// Lines are re-emitted each ending with a newline.
 fn pkg_deps_rewrite(old:i64, src:i64, nb:i64) {
     let n = bytes_len(old)
     let mut start = 0
@@ -880,20 +983,58 @@ fn pkg_deps_rewrite(old:i64, src:i64, nb:i64) {
         let le = peek64(le_out)
         let mut le2 = le
         if le2 > start { if bytes_get(old, le2 - 1) == 13 { le2 = le2 - 1 } }
-        if pkg_deps_line_use_src(old, start, le2, src) != 1 {
-            let mut k = start
-            for k < le { bytes_push(nb, bytes_get(old, k)); k = k + 1 }
-            bytes_push(nb, 10)
+        let no2[1]
+        let nl[1]
+        let ho[1]
+        let hl[1]
+        if pkg_parse_use(old, start, le2, no2, nl, ho, hl) == 1 {
+            // find the block extent and whether it belongs to `src`
+            let mut sub = nxt
+            let mut drop = 0
+            for sub != -1 {
+                let sle_out[1]
+                let snxt = pkg_line_end(old, sub, sle_out)
+                let sle = peek64(sle_out)
+                let mut sle2 = sle
+                if sle2 > sub { if bytes_get(old, sle2 - 1) == 13 { sle2 = sle2 - 1 } }
+                let vo[1]
+                let vl[1]
+                if pkg_line_is_from(old, sub, sle2, vo, vl) == 1 {
+                    if drop == 0 {
+                        let fv = pkg_field_cstr(old, vo[0], vl[0])
+                        let fbb = bytes_from_cstr(fv)
+                        let at = bytes_index_of(fbb, 64)
+                        if at > 0 {
+                            let spre = bytes_slice(fbb, 0, at)
+                            let spc = pkg_bytes_cstr(spre)
+                            if streq(spc, src) == 1 { drop = 1 }
+                        }
+                    }
+                    sub = snxt
+                    continue
+                }
+                if pkg_line_is_grants(old, sub, sle2) == 1 { sub = snxt; continue }
+                break
+            }
+            if drop == 1 {
+                if sub == -1 { break }
+                start = sub
+                continue
+            }
         }
+        let mut k = start
+        for k < le { bytes_push(nb, bytes_get(old, k)); k = k + 1 }
+        bytes_push(nb, 10)
         if nxt < 0 { break }
         start = nxt
     }
 }
 
-// Writes deps.snd so it pins (src, sha, hash, name): any previous `use` line for `src` is
-// replaced, otherwise the line is appended. The file is written to a temp name and renamed over
-// the real one, so an interrupted write never leaves deps.snd half-edited. Returns 1, or 0.
-fn pkg_deps_put(src:i64, sha:i64, hash:i64, name:i64) -> i64 {
+// Writes deps.snd so it pins (src, sha, hash, name) as a `use` block: any previous block for
+// `src` is replaced, otherwise the block is appended. The file is written to a temp name and
+// renamed over the real one, so an interrupted write never leaves deps.snd half-edited.
+// Returns 1, or 0.
+fn pkg_deps_write(src:i64, sha:i64, hash:i64, name:i64) -> i64 {
     let dp = pkg_deps_path_resolve()
     let old = heap_alloc(1 << 20)
     let olen = read_file(dp, old, 1 << 20)
@@ -910,13 +1051,20 @@ fn pkg_deps_put(src:i64, sha:i64, hash:i64, name:i64) -> i64 {
     }
     let u: string = "use "
     bytes_append_str(nb, u)
-    bytes_append_cstr(nb, src)
-    bytes_push(nb, 32)
-    bytes_append_cstr(nb, sha)
-    bytes_push(nb, 32)
-    bytes_append_cstr(nb, hash)
-    bytes_push(nb, 32)
     bytes_append_cstr(nb, name)
+    let eq: string = " = sond:sha256:"
+    bytes_append_str(nb, eq)
+    bytes_append_cstr(nb, hash)
+    bytes_push(nb, 10)
+    let fr: string = "    from \""
+    bytes_append_str(nb, fr)
+    bytes_append_cstr(nb, src)
+    bytes_push(nb, 64)
+    bytes_append_cstr(nb, sha)
+    bytes_push(nb, 34)
+    bytes_push(nb, 10)
+    let gr: string = "    grants {}"
+    bytes_append_str(nb, gr)
     bytes_push(nb, 10)
     let tp = pkg_cat2(dp, pkg_tmpsuf_lit())
     syscall(SYS_unlink, tp)
@@ -1104,7 +1252,7 @@ fn pkg_get(spec:i64) -> i64 {
         pkg_puts(m.utf8)
         return 0 - 7
     }
-    if pkg_deps_put(src, sha, hashp, nameb) != 1 { return 0 - 7 }
+    if pkg_deps_write(src, sha, hashp, nameb) != 1 { return 0 - 7 }
     let m: string = "sond get: "
     pkg_puts(m.utf8)
     pkg_puts(src)
@@ -1143,51 +1291,65 @@ fn pkg_verify() -> i64 {
         let le = peek64(le_out)
         let mut le2 = le
         if le2 > start { if bytes_get(bob, le2 - 1) == 13 { le2 = le2 - 1 } }
-        let ro[1]
-        let rl[1]
-        let so[1]
-        let sl[1]
-        let ho[1]
-        let hl[1]
         let no2[1]
         let nl[1]
-        // deps line is "use <src> <sha> <hash> <name>" so the hash is field 3 and the
-        // module name field 4; field 2 is the pinned commit sha, which verify ignores.
-        if pkg_field(bob, start, le2, 0, ro, rl) == 1 && rl[0] == 3 && bytes_get(bob, ro[0] + 1) == 115 {
-            if pkg_field(bob, start, le2, 1, so, sl) == 1 &&
-                pkg_field(bob, start, le2, 3, ho, hl) == 1 &&
-                pkg_field(bob, start, le2, 4, no2, nl) == 1 {
-                let srcc = pkg_field_cstr(bob, so[0], sl[0])
-                let hash = pkg_field_cstr(bob, ho[0], hl[0])
-                let name = pkg_field_cstr(bob, no2[0], nl[0])
-                let root = pkg_cache_root_resolve()
-                let mdir = pkg_join2(root, hash)
-                let got = pkg_dir_hash(mdir)
-                let mut ok = 0
-                if got != 0 {
-                    if streq(got, hash) == 1 { ok = 1 }
+        let ho[1]
+        let hl[1]
+        // deps block is "use <name> = sond:sha256:<hash>" plus optional from/grants lines;
+        // verify keys on the name and the bare hash.
+        if pkg_parse_use(bob, start, le2, no2, nl, ho, hl) == 1 {
+            let name = pkg_field_cstr(bob, no2[0], nl[0])
+            let hash = pkg_field_cstr(bob, ho[0], hl[0])
+            // the optional "from" of the same block, just for the message
+            let srs = 0
+            let mut sub = nxt
+            for sub != -1 {
+                let sle_out[1]
+                let snxt = pkg_line_end(bob, sub, sle_out)
+                let sle = peek64(sle_out)
+                let mut sle2 = sle
+                if sle2 > sub { if bytes_get(bob, sle2 - 1) == 13 { sle2 = sle2 - 1 } }
+                let vo[1]
+                let vl[1]
+                if pkg_line_is_from(bob, sub, sle2, vo, vl) == 1 {
+                    srs = pkg_field_cstr(bob, vo[0], vl[0])
+                    break
                 }
-                if ok == 0 {
-                    fails = fails + 1
-                    let m: string = "sond verify: "
-                    pkg_puts(m.utf8)
-                    pkg_puts(name)
-                    let m2: string = " ("
-                    pkg_puts(m2.utf8)
-                    pkg_puts(srcc)
-                    let m3: string = ") does not match "
-                    pkg_puts(m3.utf8)
-                    pkg_puts(hash)
-                    if got == 0 {
-                        let m4: string = ": its cache dir is missing or empty\n"
-                        pkg_puts(m4.utf8)
-                    } else {
-                        let m5: string = "; its content hashes to "
-                        pkg_puts(m5.utf8)
-                        pkg_puts(got)
-                        let m6: string = "\n"
-                        pkg_puts(m6.utf8)
-                    }
+                if pkg_line_is_grants(bob, sub, sle2) == 1 { sub = snxt; continue }
+                break
+            }
+            let root = pkg_cache_root_resolve()
+            let mdir = pkg_join2(root, hash)
+            let got = pkg_dir_hash(mdir)
+            let mut ok = 0
+            if got != 0 {
+                if streq(got, hash) == 1 { ok = 1 }
+            }
+            if ok == 0 {
+                fails = fails + 1
+                let m: string = "sond verify: "
+                pkg_puts(m.utf8)
+                pkg_puts(name)
+                let m1: string = " ("
+                pkg_puts(m1.utf8)
+                if srs == 0 {
+                    let m0: string = "no origin"
+                    pkg_puts(m0.utf8)
+                } else {
+                    pkg_puts(srs)
+                }
+                let m2: string = ") does not match "
+                pkg_puts(m2.utf8)
+                pkg_puts(hash)
+                if got == 0 {
+                    let m4: string = ": its cache dir is missing or empty\n"
+                    pkg_puts(m4.utf8)
+                } else {
+                    let m5: string = "; its content hashes to "
+                    pkg_puts(m5.utf8)
+                    pkg_puts(got)
+                    let m6: string = "\n"
+                    pkg_puts(m6.utf8)
                 }
             }
         }

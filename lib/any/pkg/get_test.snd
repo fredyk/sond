@@ -39,6 +39,15 @@ let H_TREE_CHANGED: string = "/repos/fredyk/sond-strings/git/trees/1111222233334
 
 let R_TREE_NOSND: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"1111222233334444555566667777888899990000\",\"truncated\":false,\"tree\":[{\"path\":\"README.md\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\",\"size\":10,\"url\":\"u\"}]}"
 
+// A SECOND commit of the same repo (what "sond get ...@v1.4.3" would resolve to), with its
+// own tree and raw-file targets: same content, different commit pin in the from URL.
+let TEST_SHA2: string = "4444555566667777888899990000111122223333"
+let H_COMMITS2: string = "/repos/fredyk/sond-strings/commits/v1.4.3"
+let H_TREE2: string = "/repos/fredyk/sond-strings/git/trees/4444555566667777888899990000111122223333?recursive=1"
+let H_RAW_A2: string = "/fredyk/sond-strings/4444555566667777888899990000111122223333/a%C3%B1o.snd"
+let H_RAW_SUB2: string = "/fredyk/sond-strings/4444555566667777888899990000111122223333/sub/ni%C3%B1o.snd"
+let R_COMMITS_OK2: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"4444555566667777888899990000111122223333\"}"
+
 let mut h_rec_cnt = 0
 
 fn h_rec_add(path: i64, resp: i64) {
@@ -67,6 +76,27 @@ fn h_rec_ok() {
     h_rec_add(H_PATH_RAW_A.utf8, R_RAW_A.utf8)
     h_rec_add(H_PATH_RAW_SUB.utf8, R_RAW_SUB.utf8)
     pkg_rec_n = h_rec_cnt
+}
+
+// Arms the same module at a different ref (v1.4.3 -> TEST_SHA2), for the "replace the block
+// of another ref" test.
+fn h_rec_ok2() {
+    h_rec_clear()
+    h_rec_add(H_COMMITS2.utf8, R_COMMITS_OK2.utf8)
+    h_rec_add(H_TREE2.utf8, R_TREE_OK.utf8)
+    h_rec_add(H_RAW_A2.utf8, R_RAW_A.utf8)
+    h_rec_add(H_RAW_SUB2.utf8, R_RAW_SUB.utf8)
+    pkg_rec_n = h_rec_cnt
+}
+
+// Writes the bytes buffer `nb` to `path` (creating the parents first).
+fn h_write_file(path: i64, nb: i64) {
+    pkg_mkdir_parents(path)
+    let fd = open_file(path, O_WRONLY | O_CREAT | O_TRUNC, PKG_FILE_MODE)
+    assert(fd >= 0)
+    let w = write_buf(fd, peek64(nb), bytes_len(nb))
+    close_fd(fd)
+    assert_eq(w, bytes_len(nb))
 }
 
 // Points the managed globals at the given test dir and clears that dir.
@@ -150,20 +180,28 @@ fn h_fexists(path: i64) -> i64 {
 }
 
 // The exact deps.snd bytes a successful get of the standard fixture must leave behind:
-// "use github.com/fredyk/sond-strings 1111... 9233... sond-strings\n".
+// "use sond-strings = sond:sha256:<hash>\n    from \"github.com/fredyk/sond-strings@<sha>\"\n
+//     grants {}\n".
 fn h_expect_deps() -> i64 {
     let b = bytes_new()
     let u: string = "use "
-    bytes_append_cstr(b, u.utf8)
-    let src: string = "github.com/fredyk/sond-strings"
-    bytes_append_cstr(b, src.utf8)
-    bytes_push(b, 32)
-    bytes_append_cstr(b, TEST_SHA.utf8)
-    bytes_push(b, 32)
-    bytes_append_cstr(b, EXPECTED_HASH.utf8)
-    bytes_push(b, 32)
+    bytes_append_str(b, u)
     let nm: string = "sond-strings"
-    bytes_append_cstr(b, nm.utf8)
+    bytes_append_str(b, nm)
+    let e1: string = " = sond:sha256:"
+    bytes_append_str(b, e1)
+    bytes_append_cstr(b, EXPECTED_HASH.utf8)
+    bytes_push(b, 10)
+    let f1: string = "    from \""
+    bytes_append_str(b, f1)
+    let src: string = "github.com/fredyk/sond-strings"
+    bytes_append_str(b, src)
+    bytes_push(b, 64)
+    bytes_append_cstr(b, TEST_SHA.utf8)
+    bytes_push(b, 34)
+    bytes_push(b, 10)
+    let g1: string = "    grants {}"
+    bytes_append_str(b, g1)
     bytes_push(b, 10)
     b
 }
@@ -171,6 +209,30 @@ fn h_expect_deps() -> i64 {
 fn pkg_test_anio() -> i64 { let s: string = "año.snd"; s.utf8 }
 fn pkg_test_subnino() -> i64 { let s: string = "sub/niño.snd"; s.utf8 }
 fn pkg_test_readme() -> i64 { let s: string = "README.md"; s.utf8 }
+fn pkg_test_modname() -> i64 { let s: string = "sond-strings"; s.utf8 }
+
+// Builds the exact `use` block bytes pkg_deps_write produces, for hand-written fixtures.
+fn h_block(name: i64, src: i64, sha: i64, hash: i64) -> i64 {
+    let b = bytes_new()
+    let u: string = "use "
+    bytes_append_str(b, u)
+    bytes_append_cstr(b, name)
+    let e1: string = " = sond:sha256:"
+    bytes_append_str(b, e1)
+    bytes_append_cstr(b, hash)
+    bytes_push(b, 10)
+    let f1: string = "    from \""
+    bytes_append_str(b, f1)
+    bytes_append_cstr(b, src)
+    bytes_push(b, 64)
+    bytes_append_cstr(b, sha)
+    bytes_push(b, 34)
+    bytes_push(b, 10)
+    let g1: string = "    grants {}"
+    bytes_append_str(b, g1)
+    bytes_push(b, 10)
+    b
+}
 
 test "pkg: get fetches the module, caches it under the frozen hash, and skips the README" {
     let troot: string = "/tmp/sond-pkg-t1"
@@ -329,4 +391,58 @@ test "pkg: get reports -9 when the module has no .snd files" {
     pkg_rec_n = h_rec_cnt
     let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
     assert_eq(pkg_get(spec.utf8), 0 - 9)
+}
+
+test "pkg: a get of another ref replaces that block and leaves comments and other entries intact" {
+    let troot: string = "/tmp/sond-pkg-t9"
+    let cac: string = "/tmp/sond-pkg-t9/cache"
+    let dep: string = "/tmp/sond-pkg-t9/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    // hand-write a deps.snd with a comment, module A pinned at TEST_SHA, and a second module
+    let b = bytes_new()
+    let c: string = "// first batch of dependencies\n"
+    bytes_append_str(b, c)
+    let srcA: string = "github.com/fredyk/sond-strings"
+    let srcB: string = "github.com/fredyk/sond-json"
+    let nameB: string = "sond-json"
+    let hashB: string = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    let shaB: string = "9999999999999999999999999999999999999999"
+    let blkA = h_block(pkg_test_modname(), srcA.utf8, TEST_SHA.utf8, EXPECTED_HASH.utf8)
+    let blkB = h_block(nameB.utf8, srcB.utf8, shaB.utf8, hashB.utf8)
+    bytes_append(b, blkA)
+    bytes_append(b, blkB)
+    h_write_file(dep.utf8, b)
+    // now get the SAME module at a different ref: only its block moves
+    h_rec_ok2()
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.3"
+    assert_eq(pkg_get(spec.utf8), 0)
+    let want = bytes_new()
+    bytes_append_str(want, c)
+    bytes_append(want, blkB)
+    let blkA2 = h_block(pkg_test_modname(), srcA.utf8, TEST_SHA2.utf8, EXPECTED_HASH.utf8)
+    bytes_append(want, blkA2)
+    let dbuf = heap_alloc(4096)
+    let dlen = read_file(dep.utf8, dbuf, 4096)
+    assert(dlen > 0)
+    assert_eq(bytes_eq(bytes_from_raw(dbuf, dlen), want), 1)
+}
+
+test "pkg: verify reads several blocks, including one without a from" {
+    let troot: string = "/tmp/sond-pkg-t10"
+    let cac: string = "/tmp/sond-pkg-t10/cache"
+    let dep: string = "/tmp/sond-pkg-t10/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_ok()
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0)
+    // a from-less entry shares the same content hash, so no extra cache dir is needed
+    let b = bytes_new()
+    let srcA: string = "github.com/fredyk/sond-strings"
+    bytes_append(b, h_block(pkg_test_modname(), srcA.utf8, TEST_SHA.utf8, EXPECTED_HASH.utf8))
+    let u2: string = "use sond-json = sond:sha256:"
+    bytes_append_str(b, u2)
+    bytes_append_cstr(b, EXPECTED_HASH.utf8)
+    bytes_push(b, 10)
+    h_write_file(dep.utf8, b)
+    assert_eq(pkg_verify(), 0)
 }
