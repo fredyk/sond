@@ -144,76 +144,98 @@ new contract. If it breaks, it does not compile.
 
 The full format is large; it lands in slices, each one useful on its own and each keeping the
 existing flat `include` working (additive, never a breaking migration). The FIRST slice delivers
-the thing a reader notices immediately: **qualified referencing** (`module.function` instead of a
+the thing a reader notices immediately: **qualified referencing** (`module::name` instead of a
 flat C-style global namespace), which is exactly the friendly-name layer of §3.5. Content
 hashing (§3.1), contract re-verification (§3.3) and the capability manifest (§3.4) ride on top of
 it in later slices; none of them changes the call-site surface, so the namespacing designed here
 is stable.
 
-### 7.1 Increment 1 --- namespaced `import` and qualified calls (the §3.5 friendly-name layer)
+### 7.1 Increment 1 --- namespaced `import` and qualified names (the §3.5 friendly-name layer)
+
+*Built and merged. This section describes what the compiler does, not a proposal.*
 
 **Surface.** A new top-level directive, additive alongside `include`:
 
 ```sond
-import "any/strings"            // namespace = the file's basename -> strings.itoa(x)
-import "any/strings" as str     // explicit alias                 -> str.itoa(x)
+import strings                  // namespace = the module's own name -> strings::itoa(x)
+import strings as str           // explicit alias                    -> str::itoa(x)
 ```
 
-A call through a namespace is ordinary field-call syntax the parser already produces
-(`str.itoa(x)` parses as `Call(Field(Var("str"), "itoa"), [x])`), so **no new call syntax** is
-introduced --- only a resolution step that rewrites it.
+The module name is resolved to a file the way `include` already resolves one: upward from the
+importing file to the project's `lib/`. Where the file sits is a **hint**, not the module's
+identity --- §3.1 replaces the hint with a content hash without touching a single call site.
 
-**Visibility finally means something.** Only `pub` functions of the imported module are reachable
-through its namespace; a `priv` function is invisible to importers (today `include` flattens
-everything into one namespace with no enforcement --- RFC-0001 §4.2's module privacy becomes real).
+**Visibility finally means something.** Only `pub fn` and `pub let` are reachable through a
+namespace. Everything else is private to its file, and RFC-0001 §4.2's module privacy stops being
+a comment: `include` flattens a tree into one namespace and enforces nothing.
 
-**Resolution model (the mechanism, no new backend).** A namespaced module's functions are
-*mangled* to globally-unique names, and calls are rewritten to them. The split is deliberate:
-**definition names are mangled in the spliced text** (a safe, unambiguous edit --- the identifier
-right after `fn`), while **call sites are rewritten on the AST** (robust --- text call-rewriting
-would hit variables, strings and comments):
+**Resolution model: `module::name` dies before the lexer.** The whole feature lives in
+`resolve.rs`, ahead of tokenization, so the parser, the type checker, the prover and every backend
+keep seeing exactly the flat program they saw before --- no new AST node, no new call syntax, no
+backend work. Two rewrites do it:
 
-1. `resolve.rs`, on an `import "P" as ns`, splices `P` but rewrites every **definition** line
-   (`fn`/`pub fn`/`priv fn`) so `f` becomes the mangled `ns__f`. The separator is `__` because the
-   mangled name must itself lex as an identifier (the spliced text goes back through the lexer,
-   which admits only `[A-Za-z0-9_]` --- so a sigil like `$` is NOT usable here). Collisions are
-   made impossible by a **check**: if a mangled name coincides with any other function name in the
-   program, that is a hard error (in practice `strings__itoa` never clashes). Two modules that both
-   define `f` therefore coexist as `a__f` and `b__f` --- the flat-namespace collision that plagues
-   `include` disappears. resolve.rs records the map `ns.f -> ns__f` with each function's
-   visibility.
-2. A post-parse **resolution pass** rewrites calls on the AST:
-   - a qualified `ns.f(args)` where `ns` is a known import alias -> `Call(Var("ns__f"), args)`,
-     erroring if `f` is not `pub` in `ns` (or does not exist);
-   - inside a namespaced module's own function `ns__g`, a bare sibling call `f(args)` for which
-     `ns__f` exists -> `ns__f(args)` (intra-module calls resolve to the module's mangled names ---
-     the module's bodies were text-mangled only at their DEFINITION sites, never at their calls);
-   - an import alias `ns` is tracked so it is never mistaken for a struct value in the existing
-     `x.m()` method-call desugar (an alias colliding with a local variable name is an error).
+1. **Qualified names are substituted.** `str::itoa` becomes the name `itoa` denotes in that
+   module. An alias binds in the importing file only: after `import strings as str`, the name
+   `strings` no longer resolves there, and saying so is an error that names it.
+2. **Private names are made unique.** A name that is not `pub` and collides across the include
+   closure is rewritten, at its definition and at every whole-identifier use, to `name__f<id>`,
+   where `<id>` identifies the file that defines it. The separator is `__` because the rewritten
+   text goes back through the lexer, which admits only `[A-Za-z0-9_]`. Two files that each define
+   a private `f` therefore coexist --- the flat-namespace collision that plagues `include`
+   disappears --- while a `pub` name keeps the spelling its module published.
 
-Because definition mangling is a text-safe edit and call rewriting is on the AST, the model is
-sound and needs no lexer/parser change beyond recognizing the `import` directive. `include` (flat
-splice) stays for backward compatibility; `import` is the namespaced path forward.
+`::` and not `.`: a dot would be ambiguous against field access on a struct value, and the
+disambiguation would have to happen after parsing, which is precisely the machinery this design
+avoids. `include` (flat splice, deduped by canonical path) stays for compatibility.
 
-**TDD checkpoints:** an `import ... as ns` mangles the module's defs and exposes only `pub`;
-`ns.f()` resolves and runs; a `priv` function is unreachable through the namespace; an unaliased
-`import "a/b"` namespaces under `b`; two modules defining the same `f` no longer collide. New
-language surface, so it passes the qwen3.6 gate before merge.
+**What it cost to get wrong.** The first delivery passed eight tests and did not work: every
+assertion read the *resolved text* (`!combined.contains("::")`), so an aliased import whose module
+body was never spliced still looked perfect. A test that never compiles and never runs the program
+is not a test of a compiler. The tests now execute the produced binary.
 
-### 7.2 Later increments (ride on Increment 1, do not change the call surface)
+### 7.2 Increment 2 --- the manifest and the content-addressed cache
 
-2. **Manifest + content hashing (§3.1):** a `package`/`require { name = sond:<hash> }` block;
-   `import name` resolves the friendly name to the pinned hash; the module's identity becomes the
-   hash of its normalized AST+contract. Open question #1 (per-definition vs per-module granularity)
-   is decided here --- proposal stands: per definition internally, friendly package names on top.
-3. **Contract re-verification on update (§3.3):** re-pointing a hash re-checks contract-against-
+Two files, and neither is a `go.mod`. Go's manifest is a build configuration that grew a lock
+file; here the manifest is a **ledger of what was pinned**, and the identity it pins is not a
+version string:
+
+```
+use github.com/fredyk/sond-strings 4f2c…  923345ba…  strings
+    └─ where it was found          commit   content   the name
+       (a hint, may rot)           (moves    hash      it answers
+                                    never)   (identity) to
+```
+
+`deps.snd` sits in the project, one `use` line per module. The **content hash** is what the build
+resolves; the URL is how `sond get` found it once, and the commit is what a moved tag can no
+longer lie about. A tag can be repointed, a repository can be renamed or deleted, a mirror can
+serve different bytes --- none of that can silently change what compiles, because none of that is
+the identity.
+
+The **canonical form** the hash is taken over is fixed in `lib/any/pkg/canon.snd`: every `.snd`
+file under the module root, paths relative with `/`, sorted bytewise as UTF-8, each contributed as
+`u64_le(len(path)) || path || u64_le(len(content)) || content`, SHA-256 over the whole, contents
+untouched. Not the AST: a hash over the bytes is one thing both a fetcher and a verifier can agree
+on today, and the AST-level identity of §3.1 is a later refinement that changes what is hashed,
+never the shape of the ledger.
+
+The **cache** is `$SOND_CACHE/pkg` (else `~/.cache/sond/pkg`), one directory per module content,
+named by its hash. A module appears there **only complete**: files are written to a sibling
+`.get-<hash>` that is renamed into place when the last byte lands. A directory wearing the name of
+a hash is therefore trustworthy, and `sond verify` recomputes every hash from the cache with no
+network at all. `sond get` is the only place in the system that opens a socket; `sond build` and
+`sond test` never do.
+
+### 7.3 Later increments (ride on the above, do not change the call surface)
+
+3. **Contract re-verification on update (§3.3):** re-pointing a hash re-checks contract against
    contract at every usage; an observable-behavior change does not compile.
 4. **Capability manifest (§3.4):** each package declares its capabilities; the compiler propagates
    and audits them (RFC-0000 Pillar 4).
 
-Increment 1 is the one that answers "there is no way to reference by namespace/module.function" ---
-it is the friendly-name layer, usable immediately with path resolution, and the stable surface the
-hash/contract/capability layers attach to.
+Increment 1 answered "there is no way to reference by namespace"; Increment 2 moves identity from
+the path to the bytes. Neither touched a call site, which was the point: the contract and
+capability layers attach to a surface that is already stable.
 
 ---
 
