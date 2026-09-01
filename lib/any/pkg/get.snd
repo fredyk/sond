@@ -230,14 +230,14 @@ fn pkg_url_hx(v: i64) -> i64 {
 // 1 if byte `c` may appear verbatim in a URL path segment (RFC 3986 unreserved plus the
 // path separator; everything else is percent-encoded).
 fn pkg_url_safe(c:i64) -> i64 {
-    if c >= 48 && c <=57 { return1 }
-    if c >=65 && c <=90 { return1 }
-    if c >=97 && c <=122 { return1 }
-    if c ==45 { return1 }                 // -
-    if c ==46 { return1 }                 // .
-    if c ==95 { return1 }                 // _
-    if c ==126 { return1 }                // ~
-    if c ==47 { return1 }                 // /
+    if c >= 48 && c <=57 { return 1 }
+    if c >=65 && c <=90 { return 1 }
+    if c >=97 && c <=122 { return 1 }
+    if c ==45 { return 1 }                 // -
+    if c ==46 { return 1 }                 // .
+    if c ==95 { return 1 }                 // _
+    if c ==126 { return 1 }                // ~
+    if c ==47 { return 1 }                 // /
     0
 }
 
@@ -372,7 +372,7 @@ fn pkg_raw_get(host:i64, port:i64, sni:i64, snilen:i64, path:i64,
         pkg_rec_calls = pkg_rec_calls + 1
         // recorded seam: serve the first entry whose recorded target equals `path`.
         let mut i = 0
-        for i < pkg_rec_n {
+        for i < pkg_rec_n && i < 16 {
             if streq(pkg_rec_path[i], path) == 1 {
                 let r = pkg_rec_resp[i]
                 let rl = strlen(r)
@@ -1148,9 +1148,9 @@ fn pkg_verify() -> i64 {
         let no2[1]
         let nl[1]
         if pkg_field(bob, start, le2, 0, ro, rl) == 1 && rl[0] == 3 && bytes_get(bob, ro[0] + 1) == 115 {
-            if pkg_field(bob, start, le2, 1, so, sl) == 1
-                && pkg_field(bob, start, le2, 2, ho, hl) == 1
-                && pkg_field(bob, start, le2, 3, no2, nl) == 1 {
+            if pkg_field(bob, start, le2, 1, so, sl) == 1 &&
+                pkg_field(bob, start, le2, 2, ho, hl) == 1 &&
+                pkg_field(bob, start, le2, 3, no2, nl) == 1 {
                 let srcc = pkg_field_cstr(bob, so[0], sl[0])
                 let hash = pkg_field_cstr(bob, ho[0], hl[0])
                 let name = pkg_field_cstr(bob, no2[0], nl[0])

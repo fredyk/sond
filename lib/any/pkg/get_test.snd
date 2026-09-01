@@ -42,9 +42,13 @@ let mut h_rec_path[16]
 let mut h_rec_resp[16]
 
 fn h_rec_add(path: i64, resp: i64) {
-    h_rec_path[h_rec_cnt] = path
-    h_rec_resp[h_rec_cnt] = resp
-    h_rec_cnt = h_rec_cnt + 1
+    // La tabla son 16 huecos. Pasarse no se traga en silencio: no se escribe, y el hueco que
+    // falta hace que pkg_raw_get devuelva -2 sobre ese target, o sea un test ROJO que se ve.
+    if h_rec_cnt >= 0 && h_rec_cnt < 16 {
+        h_rec_path[h_rec_cnt] = path
+        h_rec_resp[h_rec_cnt] = resp
+        h_rec_cnt = h_rec_cnt + 1
+    }
 }
 
 fn h_rec_clear() {
