@@ -687,3 +687,148 @@ fn a_slice_over_its_whole_buffer_still_compiles_and_adds_up() {
     );
     assert_eq!(printed.trim(), "100", "the honest slice must add up its own four words");
 }
+
+/// An `import ... as <alias>` must actually link the module's code, not just resolve names.
+/// Regression: the alias rewrote names but the module body never reached codegen.
+#[test]
+fn an_import_alias_compiles_and_runs() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let root = dir.join(format!("behaviour-import-alias-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::write(
+        root.join("lib/strings.snd"),
+        "pub fn itoa(n: i64) -> i64 { n }",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.snd"),
+        "import strings as st\nfn main() -> i64 { print_int(st::itoa(7))\n 0 }",
+    )
+    .unwrap();
+    let bin = root.join("main.bin");
+    let out = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(root.join("main.snd"))
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("sondc must be runnable");
+    assert!(
+        out.status.success(),
+        "import alias must compile, but sondc said: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (code, printed) = run_with_deadline(&bin).unwrap_or_else(|| {
+        panic!("import alias program ran for over {DEADLINE:?} without finishing")
+    });
+    assert_eq!(code, 0, "the program must exit 0");
+    assert_eq!(printed.trim(), "7", "st::itoa(7) must print 7");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A plain `import` must compile and run, not just resolve names in text.
+#[test]
+fn an_import_compiles_and_runs() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let root = dir.join(format!("behaviour-import-plain-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::write(
+        root.join("lib/strings.snd"),
+        "pub fn itoa(n: i64) -> i64 { n }",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.snd"),
+        "import strings\nfn main() -> i64 { print_int(strings::itoa(7))\n 0 }",
+    )
+    .unwrap();
+    let bin = root.join("main.bin");
+    let out = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(root.join("main.snd"))
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("sondc must be runnable");
+    assert!(
+        out.status.success(),
+        "import must compile, but sondc said: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (code, printed) = run_with_deadline(&bin).unwrap_or_else(|| {
+        panic!("import program ran for over {DEADLINE:?} without finishing")
+    });
+    assert_eq!(code, 0, "the program must exit 0");
+    assert_eq!(printed.trim(), "7", "strings::itoa(7) must print 7");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Double-importing the same module must compile and run (no duplicate definitions).
+#[test]
+fn double_import_compiles_and_runs() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let root = dir.join(format!("behaviour-import-double-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::write(
+        root.join("lib/strings.snd"),
+        "pub fn itoa(n: i64) -> i64 { n }",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.snd"),
+        "import strings\nimport strings\nfn main() -> i64 { print_int(strings::itoa(7))\n 0 }",
+    )
+    .unwrap();
+    let bin = root.join("main.bin");
+    let out = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(root.join("main.snd"))
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("sondc must be runnable");
+    assert!(
+        out.status.success(),
+        "double import must compile, but sondc said: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (code, printed) = run_with_deadline(&bin).unwrap_or_else(|| {
+        panic!("double import program ran for over {DEADLINE:?} without finishing")
+    });
+    assert_eq!(code, 0, "the program must exit 0");
+    assert_eq!(printed.trim(), "7", "strings::itoa(7) must print 7");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Import + include of the same file must compile and run (no duplicate definitions).
+#[test]
+fn import_and_include_compiles_and_runs() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let root = dir.join(format!("behaviour-import-include-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::write(
+        root.join("lib/strings.snd"),
+        "pub fn itoa(n: i64) -> i64 { n }",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.snd"),
+        "import strings\ninclude \"lib/strings.snd\"\nfn main() -> i64 { print_int(strings::itoa(7))\n 0 }",
+    )
+    .unwrap();
+    let bin = root.join("main.bin");
+    let out = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(root.join("main.snd"))
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("sondc must be runnable");
+    assert!(
+        out.status.success(),
+        "import+include must compile, but sondc said: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (code, printed) = run_with_deadline(&bin).unwrap_or_else(|| {
+        panic!("import+include program ran for over {DEADLINE:?} without finishing")
+    });
+    assert_eq!(code, 0, "the program must exit 0");
+    assert_eq!(printed.trim(), "7", "strings::itoa(7) must print 7");
+    let _ = std::fs::remove_dir_all(&root);
+}
