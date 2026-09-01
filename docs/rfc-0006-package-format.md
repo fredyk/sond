@@ -199,18 +199,24 @@ Two files, and neither is a `go.mod`. Go's manifest is a build configuration tha
 file; here the manifest is a **ledger of what was pinned**, and the identity it pins is not a
 version string:
 
-```
-use github.com/fredyk/sond-strings 4f2c…  923345ba…  strings
-    └─ where it was found          commit   content   the name
-       (a hint, may rot)           (moves    hash      it answers
-                                    never)   (identity) to
+```sond
+use strings = sond:sha256:923345ba8a4816339aeac609bef11aaa7dd88d46459bf8886ed8cc68833b3a8d
+    from "github.com/fredyk/sond-strings@3d9f21c"
+    grants {}
 ```
 
-`deps.snd` sits in the project, one `use` line per module. The **content hash** is what the build
-resolves; the URL is how `sond get` found it once, and the commit is what a moved tag can no
-longer lie about. A tag can be repointed, a repository can be renamed or deleted, a mirror can
-serve different bytes --- none of that can silently change what compiles, because none of that is
-the identity.
+`deps.snd` sits in the project, one `use` per module, and every part of it is deliberate. The
+**hash is the identity**, and it says which function produced it (`sond:sha256:`) so a later
+algorithm can arrive without a flag day. The **`from` is a hint** --- where `sond get` found these
+bytes once, pinned to a commit that a moved tag can no longer lie about --- and the build resolves
+without ever reading it. The **`grants`** is where §3.4's capabilities land; it is written from the
+first day, empty, so adding them later is filling a block in rather than changing the shape of
+every line already on disk.
+
+A tag can be repointed, a repository renamed or deleted, a mirror made to serve different bytes:
+none of that can silently change what compiles, because none of that is the identity. This format
+is what the compiler parses (`compiler/src/deps.rs`) and what `sond get` writes
+(`lib/any/pkg/get.snd`) --- one shape, two implementations that a conformance vector keeps honest.
 
 The **canonical form** the hash is taken over is fixed in `lib/any/pkg/canon.snd`: every `.snd`
 file under the module root, paths relative with `/`, sorted bytewise as UTF-8, each contributed as
