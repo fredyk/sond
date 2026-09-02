@@ -1073,7 +1073,7 @@ fn resolve_target(dir: &Path, rel: &str) -> PathBuf {
 /// `any/serial.snd` resolves immediately and unchanged), then `.snd`-appended, then
 /// the same two under `any/`. The `any/` prefix makes `"serial"` an alias of
 /// `"any/serial"` when the exact path is not found.
-fn include_candidates(rel: &str) -> Vec<String> {
+pub(crate) fn include_candidates(rel: &str) -> Vec<String> {
     let has_ext = rel.ends_with(".snd");
     let mut cands = vec![rel.to_string()];
     if !has_ext {

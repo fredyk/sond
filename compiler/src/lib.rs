@@ -16,6 +16,8 @@ pub mod header;
 pub mod lexer;
 pub mod parser;
 pub mod ports;
+pub mod deps;
+pub mod sha256;
 pub mod resolve;
 pub mod testing;
 pub mod token;
