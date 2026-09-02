@@ -1,0 +1,448 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for the package manager (lib/any/pkg/get.snd). None of them leave the machine:
+// the GitHub API is answered either by a table of recorded responses the seam in get.snd
+// serves, or by a minimal TLS server on loopback whose certificates chain to a test root.
+// A test that depended on the real GitHub would go red on its own one day, without anyone
+// having touched anything.
+//
+// The module under the hammer is the two-file conformance vector of canon.snd: "año.snd"
+// ("fn añadir() -> i64 { 42 }\n") and "sub/niño.snd" ("fn niño() -> i64 { 7 }\n"), whose
+// canonical SHA-256 is the frozen value below. If a served tree does not hash to it, the
+// hash moved, not the test.
+
+include "any/pkg/get.snd"
+include "x86_64/linux/testing.snd"
+
+let TEST_SHA: string = "1111222233334444555566667777888899990000"
+let EXPECTED_HASH: string = "923345ba8a4816339aeac609bef11aaa7dd88d46459bf8886ed8cc68833b3a8d"
+
+// Recorded request targets (what pkg_raw_get asks for) and the raw responses it must answer.
+let H_PATH_COMMITS: string = "/repos/fredyk/sond-strings/commits/v1.4.2"
+let H_PATH_REPO: string = "/repos/fredyk/sond-strings"
+let H_PATH_TREE_BASE: string = "/repos/fredyk/sond-strings/git/trees/"
+let H_PATH_RAW_A: string = "/fredyk/sond-strings/1111222233334444555566667777888899990000/a%C3%B1o.snd"
+let H_PATH_RAW_SUB: string = "/fredyk/sond-strings/1111222233334444555566667777888899990000/sub/ni%C3%B1o.snd"
+let H_PATH_RAW_BAD: string = "/fredyk/sond-strings/1111222233334444555566667777888899990000/a%C3%B1o.snd"
+
+let R_COMMITS_OK: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"1111222233334444555566667777888899990000\"}"
+let R_REPO_OK: string = "HTTP/1.1 200 OK\r\n\r\n{\"full_name\":\"fredyk/sond-strings\"}"
+let R_404: string = "HTTP/1.1 404 Not Found\r\n\r\n{\"message\":\"Not Found\"}"
+let R_TREE_OK: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"1111222233334444555566667777888899990000\",\"truncated\":false,\"tree\":[{\"path\":\"año.snd\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"size\":27,\"url\":\"u\"},{\"path\":\"sub/niño.snd\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":24,\"url\":\"u\"},{\"path\":\"README.md\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\",\"size\":10,\"url\":\"u\"}]}"
+let R_TRUNCATED: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"1111222233334444555566667777888899990000\",\"truncated\":true,\"tree\":[]}"
+let R_RAW_A: string = "HTTP/1.1 200 OK\r\n\r\nfn añadir() -> i64 { 42 }\n"
+let R_RAW_SUB: string = "HTTP/1.1 200 OK\r\n\r\nfn niño() -> i64 { 7 }\n"
+let R_RAW_A_CHANGED: string = "HTTP/1.1 200 OK\r\n\r\nfn añadir() -> i64 { 0 }\n"
+
+let H_TREE_CHANGED: string = "/repos/fredyk/sond-strings/git/trees/1111222233334444555566667777888899990000?recursive=1"
+
+let R_TREE_NOSND: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"1111222233334444555566667777888899990000\",\"truncated\":false,\"tree\":[{\"path\":\"README.md\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"cccccccccccccccccccccccccccccccccccccccc\",\"size\":10,\"url\":\"u\"}]}"
+
+// A SECOND commit of the same repo (what "sond get ...@v1.4.3" would resolve to), with its
+// own tree and raw-file targets: same content, different commit pin in the from URL.
+let TEST_SHA2: string = "4444555566667777888899990000111122223333"
+let H_COMMITS2: string = "/repos/fredyk/sond-strings/commits/v1.4.3"
+let H_TREE2: string = "/repos/fredyk/sond-strings/git/trees/4444555566667777888899990000111122223333?recursive=1"
+let H_RAW_A2: string = "/fredyk/sond-strings/4444555566667777888899990000111122223333/a%C3%B1o.snd"
+let H_RAW_SUB2: string = "/fredyk/sond-strings/4444555566667777888899990000111122223333/sub/ni%C3%B1o.snd"
+let R_COMMITS_OK2: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"4444555566667777888899990000111122223333\"}"
+
+let mut h_rec_cnt = 0
+
+fn h_rec_add(path: i64, resp: i64) {
+    // La tabla son 16 huecos. Pasarse no se traga en silencio: no se escribe, y el hueco que
+    // falta hace que pkg_raw_get devuelva -2 sobre ese target, o sea un test ROJO que se ve.
+    if h_rec_cnt >= 0 && h_rec_cnt < 16 {
+        pkg_rec_path[h_rec_cnt] = path
+        pkg_rec_resp[h_rec_cnt] = resp
+        h_rec_cnt = h_rec_cnt + 1
+    }
+}
+
+fn h_rec_clear() {
+    h_rec_cnt = 0
+    pkg_rec_n = 0
+    pkg_rec_calls = 0
+}
+
+// Arms the recorded-response seam with the standard success fixture: the commits endpoint,
+// the recursive tree and the two module files (a non-.snd README.md is in the tree but must
+// NOT end up fetched or cached).
+fn h_rec_ok() {
+    h_rec_clear()
+    h_rec_add(H_PATH_COMMITS.utf8, R_COMMITS_OK.utf8)
+    h_rec_add(H_TREE_CHANGED.utf8, R_TREE_OK.utf8)
+    h_rec_add(H_PATH_RAW_A.utf8, R_RAW_A.utf8)
+    h_rec_add(H_PATH_RAW_SUB.utf8, R_RAW_SUB.utf8)
+    pkg_rec_n = h_rec_cnt
+}
+
+// Arms the same module at a different ref (v1.4.3 -> TEST_SHA2), for the "replace the block
+// of another ref" test.
+fn h_rec_ok2() {
+    h_rec_clear()
+    h_rec_add(H_COMMITS2.utf8, R_COMMITS_OK2.utf8)
+    h_rec_add(H_TREE2.utf8, R_TREE_OK.utf8)
+    h_rec_add(H_RAW_A2.utf8, R_RAW_A.utf8)
+    h_rec_add(H_RAW_SUB2.utf8, R_RAW_SUB.utf8)
+    pkg_rec_n = h_rec_cnt
+}
+
+// Writes the bytes buffer `nb` to `path` (creating the parents first).
+fn h_write_file(path: i64, nb: i64) {
+    pkg_mkdir_parents(path)
+    let fd = open_file(path, O_WRONLY | O_CREAT | O_TRUNC, PKG_FILE_MODE)
+    assert(fd >= 0)
+    let w = write_buf(fd, peek64(nb), bytes_len(nb))
+    close_fd(fd)
+    assert_eq(w, bytes_len(nb))
+}
+
+// Points the managed globals at the given test dir and clears that dir.
+fn h_cfg(troot: i64, cache: i64, deps: i64) {
+    pkg_resolve_dns = 0
+    pkg_roots = 0
+    pkg_nroots = 0
+    pkg_now = 0
+    pkg_cache_root = cache
+    pkg_deps_path = deps
+    pkg_rmtree(troot)
+}
+
+// ── plain unit tests ────────────────────────────────────────────────────────────────────────
+
+test "pkg: parse splits host/owner/repo/ref/name" {
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    let hb[128]
+    let ob[128]
+    let rb[128]
+    let fb[128]
+    let nb[128]
+    assert_eq(pkg_parse_spec(spec.utf8, hb, ob, rb, fb, nb), 0)
+    let hostw: string = "github.com"
+    assert_eq(streq(hb, hostw.utf8), 1)
+    let ow: string = "fredyk"
+    assert_eq(streq(ob, ow.utf8), 1)
+    let rw: string = "sond-strings"
+    assert_eq(streq(rb, rw.utf8), 1)
+    let fw: string = "v1.4.2"
+    assert_eq(streq(fb, fw.utf8), 1)
+    assert_eq(streq(nb, rw.utf8), 1)
+}
+
+test "pkg: a spec without a host defaults to github.com" {
+    let spec: string = "fredyk/sond-strings@v1.4.2"
+    let hb[128]
+    let ob[128]
+    let rb[128]
+    let fb[128]
+    let nb[128]
+    assert_eq(pkg_parse_spec(spec.utf8, hb, ob, rb, fb, nb), 0)
+    let hostw: string = "github.com"
+    assert_eq(streq(hb, hostw.utf8), 1)
+}
+
+test "pkg: malformed specs are refused" {
+    let hb[128]
+    let ob[128]
+    let rb[128]
+    let fb[128]
+    let nb[128]
+    let s1: string = "no-at-sign-here"
+    let s2: string = "owner/repo"                 // no @ref
+    let s3: string = "owner/repo@"                // empty ref
+    let s4: string = "@ref"                       // no path
+    assert_ne(pkg_parse_spec(s1.utf8, hb, ob, rb, fb, nb), 0)
+    assert_ne(pkg_parse_spec(s2.utf8, hb, ob, rb, fb, nb), 0)
+    assert_ne(pkg_parse_spec(s3.utf8, hb, ob, rb, fb, nb), 0)
+    assert_ne(pkg_parse_spec(s4.utf8, hb, ob, rb, fb, nb), 0)
+}
+
+test "pkg: url encoding keeps ASCII and percent-encodes the accented bytes" {
+    let o: string = "fredyk"
+    let r: string = "sond-strings"
+    let p: string = "sub/niño.snd"
+    let u = pkg_url_path(o.utf8, r.utf8, TEST_SHA.utf8, p.utf8)
+    let wantw: string = "/fredyk/sond-strings/1111222233334444555566667777888899990000/sub/ni%C3%B1o.snd"
+    assert_eq(streq(u, wantw.utf8), 1)
+}
+
+// ── recorded-seam integration tests ──────────────────────────────────────────────────────────
+// Every request pkg_get would make against GitHub is answered from the recorded table
+// (pkg_rec_n > 0 arms the seam), so the whole fetch runs with no network and no sockets.
+
+// 1 if a regular file exists at the cstr path `path`.
+fn h_fexists(path: i64) -> i64 {
+    let fd = open_file(path, O_RDONLY, 0)
+    if fd >= 0 { close_fd(fd); return 1 }
+    0
+}
+
+// The exact deps.snd bytes a successful get of the standard fixture must leave behind:
+// "use sond-strings = sond:sha256:<hash>\n    from \"github.com/fredyk/sond-strings@<sha>\"\n
+//     grants {}\n".
+fn h_expect_deps() -> i64 {
+    let b = bytes_new()
+    let u: string = "use "
+    bytes_append_str(b, u)
+    let nm: string = "sond-strings"
+    bytes_append_str(b, nm)
+    let e1: string = " = sond:sha256:"
+    bytes_append_str(b, e1)
+    bytes_append_cstr(b, EXPECTED_HASH.utf8)
+    bytes_push(b, 10)
+    let f1: string = "    from \""
+    bytes_append_str(b, f1)
+    let src: string = "github.com/fredyk/sond-strings"
+    bytes_append_str(b, src)
+    bytes_push(b, 64)
+    bytes_append_cstr(b, TEST_SHA.utf8)
+    bytes_push(b, 34)
+    bytes_push(b, 10)
+    let g1: string = "    grants {}"
+    bytes_append_str(b, g1)
+    bytes_push(b, 10)
+    b
+}
+
+fn pkg_test_anio() -> i64 { let s: string = "año.snd"; s.utf8 }
+fn pkg_test_subnino() -> i64 { let s: string = "sub/niño.snd"; s.utf8 }
+fn pkg_test_readme() -> i64 { let s: string = "README.md"; s.utf8 }
+fn pkg_test_modname() -> i64 { let s: string = "sond-strings"; s.utf8 }
+
+// Builds the exact `use` block bytes pkg_deps_write produces, for hand-written fixtures.
+fn h_block(name: i64, src: i64, sha: i64, hash: i64) -> i64 {
+    let b = bytes_new()
+    let u: string = "use "
+    bytes_append_str(b, u)
+    bytes_append_cstr(b, name)
+    let e1: string = " = sond:sha256:"
+    bytes_append_str(b, e1)
+    bytes_append_cstr(b, hash)
+    bytes_push(b, 10)
+    let f1: string = "    from \""
+    bytes_append_str(b, f1)
+    bytes_append_cstr(b, src)
+    bytes_push(b, 64)
+    bytes_append_cstr(b, sha)
+    bytes_push(b, 34)
+    bytes_push(b, 10)
+    let g1: string = "    grants {}"
+    bytes_append_str(b, g1)
+    bytes_push(b, 10)
+    b
+}
+
+test "pkg: get fetches the module, caches it under the frozen hash, and skips the README" {
+    let troot: string = "/tmp/sond-pkg-t1"
+    let cac: string = "/tmp/sond-pkg-t1/cache"
+    let dep: string = "/tmp/sond-pkg-t1/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_ok()
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0)
+    // exactly four recorded fetches: commits, tree, and the two .snd files. A fifth
+    // request (for the README that sits in the tree) would leave the seam's -2 path.
+    assert_eq(pkg_rec_calls, 4)
+    let mdir = pkg_join2(cac.utf8, EXPECTED_HASH.utf8)
+    assert_eq(pkg_dir_exists(mdir), 1)
+    let f1 = pkg_join2(mdir, pkg_test_anio())
+    assert_eq(h_fexists(f1), 1)
+    let f2 = pkg_join2(mdir, pkg_test_subnino())
+    assert_eq(h_fexists(f2), 1)
+    let f3 = pkg_join2(mdir, pkg_test_readme())
+    assert_eq(h_fexists(f3), 0)
+    // año.snd content is the served body, byte for byte
+    let fbuf = heap_alloc(4096)
+    let flen = read_file(f1, fbuf, 4096)
+    assert(flen > 0)
+    let want: string = "fn añadir() -> i64 { 42 }\n"
+    assert_eq(bytes_eq(bytes_from_raw(fbuf, flen), bytes_from_cstr(want.utf8)), 1)
+    // deps.snd pins the resolved commit and the content hash
+    let dbuf = heap_alloc(4096)
+    let dlen = read_file(dep.utf8, dbuf, 4096)
+    assert(dlen > 0)
+    assert_eq(bytes_eq(bytes_from_raw(dbuf, dlen), h_expect_deps()), 1)
+}
+
+test "pkg: a second get of the same ref downloads nothing and rewrites nothing" {
+    let troot: string = "/tmp/sond-pkg-t2"
+    let cac: string = "/tmp/sond-pkg-t2/cache"
+    let dep: string = "/tmp/sond-pkg-t2/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_ok()
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0)
+    assert_eq(pkg_rec_calls, 4)
+    let dbuf1 = heap_alloc(4096)
+    let dlen1 = read_file(dep.utf8, dbuf1, 4096)
+    assert(dlen1 > 0)
+    let dep1 = bytes_from_raw(dbuf1, dlen1)
+    // second get: only the commit re-resolution is replayed, never the tree or the files
+    assert_eq(pkg_get(spec.utf8), 0)
+    assert_eq(pkg_rec_calls, 5)
+    let dbuf2 = heap_alloc(4096)
+    let dlen2 = read_file(dep.utf8, dbuf2, 4096)
+    assert(dlen2 > 0)
+    assert_eq(bytes_eq(dep1, bytes_from_raw(dbuf2, dlen2)), 1)
+    let mdir = pkg_join2(cac.utf8, EXPECTED_HASH.utf8)
+    assert_eq(pkg_dir_exists(mdir), 1)
+}
+
+test "pkg: a module half written never appears under the hash name" {
+    let troot: string = "/tmp/sond-pkg-t3"
+    let cac: string = "/tmp/sond-pkg-t3/cache"
+    let dep: string = "/tmp/sond-pkg-t3/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    // Two records: the second one (a.snd/b.snd) cannot be created because a.snd exists as a
+    // regular file, so the write fails mid-way. Whatever was written must be cleaned up and
+    // the hash name must never appear.
+    let recs[2]
+    let p1: string = "a.snd"
+    let p2: string = "a.snd/b.snd"
+    let d1: string = "AAA"
+    let d2: string = "BBB"
+    let r1 = heap_alloc(24)
+    poke64(r1, p1.utf8)
+    poke64(r1 + 8, d1.utf8)
+    poke64(r1 + 16, 3)
+    poke64(recs + 0, r1)
+    let r2 = heap_alloc(24)
+    poke64(r2, p2.utf8)
+    poke64(r2 + 8, d2.utf8)
+    poke64(r2 + 16, 3)
+    poke64(recs + 8, r2)
+    assert_eq(pkg_write_cache(EXPECTED_HASH.utf8, recs, 2), 0)
+    let mdir = pkg_join2(cac.utf8, EXPECTED_HASH.utf8)
+    assert_eq(pkg_dir_exists(mdir), 0)
+    let tmp = pkg_cat4(cac.utf8, pkg_slash_lit(), pkg_getdash_lit(), EXPECTED_HASH.utf8)
+    assert_eq(pkg_dir_exists(tmp), 0)
+}
+
+test "pkg: verify is silent when the cache matches and faults when it does not" {
+    let troot: string = "/tmp/sond-pkg-t4"
+    let cac: string = "/tmp/sond-pkg-t4/cache"
+    let dep: string = "/tmp/sond-pkg-t4/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_ok()
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0)
+    assert_eq(pkg_verify(), 0)
+    // rewrite año.snd in the cache with different bytes: the content no longer hashes to
+    // what deps.snd recorded, so verify must flag the module.
+    let mdir = pkg_join2(cac.utf8, EXPECTED_HASH.utf8)
+    let f1 = pkg_join2(mdir, pkg_test_anio())
+    let fd = open_file(f1, O_WRONLY | O_TRUNC, 0)
+    assert(fd >= 0)
+    let junk: string = "fn añadir() -> i64 { 0 }\n"
+    assert_eq(write_buf(fd, junk.utf8, strlen(junk.utf8)), strlen(junk.utf8))
+    close_fd(fd)
+    assert_eq(pkg_verify(), 1)
+}
+
+test "pkg: get reports -2 when the repo does not exist" {
+    let troot: string = "/tmp/sond-pkg-t5"
+    let cac: string = "/tmp/sond-pkg-t5/cache"
+    let dep: string = "/tmp/sond-pkg-t5/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_clear()
+    h_rec_add(H_PATH_COMMITS.utf8, R_404.utf8)
+    h_rec_add(H_PATH_REPO.utf8, R_404.utf8)
+    pkg_rec_n = h_rec_cnt
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0 - 2)
+}
+
+test "pkg: get reports -3 when the ref does not exist" {
+    let troot: string = "/tmp/sond-pkg-t6"
+    let cac: string = "/tmp/sond-pkg-t6/cache"
+    let dep: string = "/tmp/sond-pkg-t6/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_clear()
+    h_rec_add(H_PATH_COMMITS.utf8, R_404.utf8)
+    h_rec_add(H_PATH_REPO.utf8, R_REPO_OK.utf8)
+    pkg_rec_n = h_rec_cnt
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0 - 3)
+}
+
+test "pkg: get reports -4 when the git tree is truncated" {
+    let troot: string = "/tmp/sond-pkg-t7"
+    let cac: string = "/tmp/sond-pkg-t7/cache"
+    let dep: string = "/tmp/sond-pkg-t7/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_clear()
+    h_rec_add(H_PATH_COMMITS.utf8, R_COMMITS_OK.utf8)
+    h_rec_add(H_TREE_CHANGED.utf8, R_TRUNCATED.utf8)
+    pkg_rec_n = h_rec_cnt
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0 - 4)
+}
+
+test "pkg: get reports -9 when the module has no .snd files" {
+    let troot: string = "/tmp/sond-pkg-t8"
+    let cac: string = "/tmp/sond-pkg-t8/cache"
+    let dep: string = "/tmp/sond-pkg-t8/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_clear()
+    h_rec_add(H_PATH_COMMITS.utf8, R_COMMITS_OK.utf8)
+    h_rec_add(H_TREE_CHANGED.utf8, R_TREE_NOSND.utf8)
+    pkg_rec_n = h_rec_cnt
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0 - 9)
+}
+
+test "pkg: a get of another ref replaces that block and leaves comments and other entries intact" {
+    let troot: string = "/tmp/sond-pkg-t9"
+    let cac: string = "/tmp/sond-pkg-t9/cache"
+    let dep: string = "/tmp/sond-pkg-t9/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    // hand-write a deps.snd with a comment, module A pinned at TEST_SHA, and a second module
+    let b = bytes_new()
+    let c: string = "// first batch of dependencies\n"
+    bytes_append_str(b, c)
+    let srcA: string = "github.com/fredyk/sond-strings"
+    let srcB: string = "github.com/fredyk/sond-json"
+    let nameB: string = "sond-json"
+    let hashB: string = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    let shaB: string = "9999999999999999999999999999999999999999"
+    let blkA = h_block(pkg_test_modname(), srcA.utf8, TEST_SHA.utf8, EXPECTED_HASH.utf8)
+    let blkB = h_block(nameB.utf8, srcB.utf8, shaB.utf8, hashB.utf8)
+    bytes_append(b, blkA)
+    bytes_append(b, blkB)
+    h_write_file(dep.utf8, b)
+    // now get the SAME module at a different ref: only its block moves
+    h_rec_ok2()
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.3"
+    assert_eq(pkg_get(spec.utf8), 0)
+    let want = bytes_new()
+    bytes_append_str(want, c)
+    bytes_append(want, blkB)
+    let blkA2 = h_block(pkg_test_modname(), srcA.utf8, TEST_SHA2.utf8, EXPECTED_HASH.utf8)
+    bytes_append(want, blkA2)
+    let dbuf = heap_alloc(4096)
+    let dlen = read_file(dep.utf8, dbuf, 4096)
+    assert(dlen > 0)
+    assert_eq(bytes_eq(bytes_from_raw(dbuf, dlen), want), 1)
+}
+
+test "pkg: verify reads several blocks, including one without a from" {
+    let troot: string = "/tmp/sond-pkg-t10"
+    let cac: string = "/tmp/sond-pkg-t10/cache"
+    let dep: string = "/tmp/sond-pkg-t10/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_ok()
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0)
+    // a from-less entry shares the same content hash, so no extra cache dir is needed
+    let b = bytes_new()
+    let srcA: string = "github.com/fredyk/sond-strings"
+    bytes_append(b, h_block(pkg_test_modname(), srcA.utf8, TEST_SHA.utf8, EXPECTED_HASH.utf8))
+    let u2: string = "use sond-json = sond:sha256:"
+    bytes_append_str(b, u2)
+    bytes_append_cstr(b, EXPECTED_HASH.utf8)
+    bytes_push(b, 10)
+    h_write_file(dep.utf8, b)
+    assert_eq(pkg_verify(), 0)
+}
