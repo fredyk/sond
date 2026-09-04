@@ -2450,6 +2450,32 @@ fn elem_bytes(elem: &Type) -> i64 {
     }
 }
 
+/// How many BYTES a raw `peek`/`poke` touches, and `None` for anything that is not one of them.
+/// The widths are the machine's, not a choice: `peek8` reads a byte, `poke64` writes a word.
+fn raw_access_bytes(name: &str) -> Option<i64> {
+    Some(match name {
+        "peek8" | "poke8" => 1,
+        "peek16" | "poke16" => 2,
+        "peek32" | "poke32" => 4,
+        "peek64" | "poke64" => 8,
+        _ => return None,
+    })
+}
+
+/// Splits `a` or `a + K` into the buffer's name and the constant byte offset. Anything else — an
+/// offset computed at runtime, an address that arrived from elsewhere — carries no constant to
+/// decide with, and says so instead of guessing one.
+fn const_offset_from_buffer(e: &Expr) -> Option<(String, i64)> {
+    match e {
+        Expr::Var(n) => Some((n.clone(), 0)),
+        Expr::Binary(BinOp::Add, l, r) => match (l.as_ref(), const_index(r)) {
+            (Expr::Var(n), Some(k)) => Some((n.clone(), k)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The builtins that take a string LITERAL directly: the console primitives, which write the
 /// bytes they are given and never hand the address to anyone. A literal is text there too, but
 /// there is nothing it can decay into.
@@ -2983,6 +3009,29 @@ fn bounds_expr(
     params: &[Param],
     funcs: &[Function],
 ) -> Result<(), String> {
+    // A raw `peek`/`poke` at a CONSTANT offset from a buffer whose length the compiler knows is an
+    // access it can already decide: `a + 16` on two words reaches past the end however it is
+    // spelled, and `a[2]` and `poke64(a + 16, ..)` are the same bytes with only one of them
+    // watched. This refuses ONLY the provable overrun, so nothing that compiles today stops
+    // compiling; a variable offset (`a + i`) and a bare pointer stay outside, where there is no
+    // declared length to check against and pretending otherwise would invent a bound.
+    if let Expr::Call(callee, args) = e
+        && let Expr::Var(cname) = callee.as_ref()
+        && let Some(width) = raw_access_bytes(cname)
+        && let Some(first) = args.first()
+        && let Some((buf, off)) = const_offset_from_buffer(&first.value)
+        && let Some(&words) = sizes.get(&buf)
+    {
+        let total = words.saturating_mul(8);
+        if off < 0 || off.saturating_add(width) > total {
+            let last = (total - width).max(0);
+            return Err(format!(
+                "function `{fname}`: `{cname}` at offset {off} touches {width} byte(s) of `{buf}`, \
+                 which is {total} bytes long, so this access is out of bounds (offsets 0..={last} \
+                 reach inside it)"
+            ));
+        }
+    }
     if let Expr::Index(base, idx) = e
         && let Expr::Var(a) = base.as_ref()
     {
@@ -4585,6 +4634,10 @@ mod exit_in_spawn_tests {
 /// buffer a syscall filled. That is the boundary where there is no declared length to check
 /// against, and pretending otherwise would only push the same hole one call deeper.
 ///
+/// What a classic array does get is the half that costs nothing: a raw access at a CONSTANT
+/// offset past its end is refused by `check_constant_bounds`, since the compiler can decide that
+/// one without a migration. What stays legal here is the raw access it cannot decide.
+///
 /// Scoped to VIEWS for now, not to classic `let a[N]` arrays. Measured, not assumed: extending it
 /// to arrays refuses 35 sites across the standard library's own tests (`pad`, `one`, `buf`, `tmp`
 /// and friends), so landing it would break the library and every program built on it until each
@@ -4777,4 +4830,117 @@ mod raw_access_tests {
         let ok = check("fn f(a: i64) -> i64 { let x = peek8(a)\nlet a[4]\nx }");
         assert!(ok.is_ok(), "the parameter `a` is a raw pointer at that point, got {ok:?}");
     }
+
+mod raw_constant_offset_bounds_tests {
+    use super::*;
+    use crate::lexer::tokenize_located;
+    use crate::parser::Parser;
+
+    fn raw_bounds(src: &str) -> Result<(), String> {
+        let (toks, lines) = tokenize_located(src);
+        let mut p = Parser::with_lines(toks, lines);
+        let funcs = p.parse_program();
+        let globals = p.take_globals();
+        check_constant_bounds(&funcs, &globals)
+    }
+
+    #[test]
+    fn peek8_past_end_of_known_array_is_a_compile_error() {
+        let err = raw_bounds(
+            "fn f() -> i64 {\n                 let a[2]\n                 let x = peek8(a + 100)\n                 0\n                 }",
+        )
+        .unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("a") || err.contains("bounds"),
+            "peek8 past end must error; got: {err}");
+    }
+
+    #[test]
+    fn poke8_past_end_of_known_array_is_a_compile_error() {
+        let err = raw_bounds(
+            "fn f() -> i64 {\n                 let a[2]\n                 poke8(a + 100, 66)\n                 0\n                 }",
+        )
+        .unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("a") || err.contains("bounds"),
+            "poke8 past end must error; got: {err}");
+    }
+
+    #[test]
+    fn peek64_past_end_of_known_array_is_a_compile_error() {
+        let err = raw_bounds(
+            "fn f() -> i64 {\n                 let a[2]\n                 let x = peek64(a + 4096)\n                 0\n                 }",
+        )
+        .unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("a") || err.contains("bounds"),
+            "peek64 past end must error; got: {err}");
+    }
+
+    #[test]
+    fn poke64_past_end_of_known_array_is_a_compile_error() {
+        let err = raw_bounds(
+            "fn f() -> i64 {\n                 let a[2]\n                 poke64(a + 4096, 42)\n                 0\n                 }",
+        )
+        .unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("a") || err.contains("bounds"),
+            "poke64 past end must error; got: {err}");
+    }
+
+    #[test]
+    fn poke8_first_and_last_byte_compile() {
+        assert!(raw_bounds(
+            "fn f() -> i64 {\n                 let a[2]\n                 poke8(a + 0, 65)\n                 poke8(a + 15, 77)\n                 0\n                 }",
+        ).is_ok(), "poke8(a+0) and poke8(a+15) must compile");
+    }
+
+    #[test]
+    fn poke64_within_array_bounds_compiles() {
+        assert!(raw_bounds(
+            "fn f() -> i64 {\n                 let a[2]\n                 poke64(a + 8, 1)\n                 0\n                 }",
+        ).is_ok(), "poke64(a+8) must compile");
+    }
+
+    #[test]
+    fn poke8_variable_offset_compiles() {
+        assert!(raw_bounds(
+            "fn f(i: i64) -> i64 {\n                 let a[2]\n                 poke8(a + i, 1)\n                 0\n                 }",
+        ).is_ok(), "poke8 with variable offset must compile");
+    }
+
+    #[test]
+    fn poke8_pointer_param_compiles() {
+        assert!(raw_bounds(
+            "fn f(p: i64) -> i64 {\n                 peek8(p + 100)\n                 0\n                 }",
+        ).is_ok(), "pointer param must compile");
+    }
+
+    #[test]
+    fn peek64_last_word_compiles_for_a2() {
+        assert!(raw_bounds(
+            "fn f() -> i64 {\n                 let a[2]\n                 let x = peek64(a + 8)\n                 0\n                 }",
+        ).is_ok(), "peek64(a+8) must compile");
+    }
+
+    #[test]
+    fn poke8_at_exact_bound_compiles_plus_one_fails() {
+        assert!(raw_bounds(
+            "fn f() -> i64 {\n                 let a[2]\n                 poke8(a + 15, 99)\n                 0\n                 }",
+        ).is_ok(), "poke8(a+15) must compile");
+        let err = raw_bounds(
+            "fn f() -> i64 {\n                 let a[2]\n                 poke8(a + 16, 99)\n                 0\n                 }",
+        ).unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("a") || err.contains("bounds"),
+            "poke8(a+16) must error; got: {err}");
+    }
+
+    #[test]
+    fn peek64_at_exact_end_compiles_plus_eight_fails() {
+        assert!(raw_bounds(
+            "fn f() -> i64 {\n                 let a[3]\n                 let x = peek64(a + 16)\n                 0\n                 }",
+        ).is_ok(), "peek64(a+16) must compile");
+        let err = raw_bounds(
+            "fn f() -> i64 {\n                 let a[3]\n                 peek64(a + 24)\n                 0\n                 }",
+        ).unwrap_err();
+        assert!(err.contains("out of bounds") || err.contains("a") || err.contains("bounds"),
+            "peek64(a+24) must error; got: {err}");
+    }
+}
 }
