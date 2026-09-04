@@ -288,11 +288,11 @@ fn build_graph(path: &Path, depth: usize, seen: &mut HashSet<PathBuf>, g: &mut I
 /// The set of files reachable from `start` through include edges, including `start` itself: the
 /// file's include closure, i.e. everything it can see in Sond's single flat namespace.
 fn include_closure(
-    start: &PathBuf,
+    start: &Path,
     edges: &std::collections::HashMap<PathBuf, Vec<PathBuf>>,
 ) -> HashSet<PathBuf> {
     let mut seen = HashSet::new();
-    let mut stack = vec![start.clone()];
+    let mut stack = vec![start.to_path_buf()];
     while let Some(p) = stack.pop() {
         if !seen.insert(p.clone()) {
             continue;
@@ -575,7 +575,7 @@ mod tests {
         // not found, NOT the entry file. Before this, every read failure was blamed on the entry,
         // so a missing `any/json.snd` read as "cannot read main.snd", which is deeply misleading.
         let main = tmp(
-            &format!("sond_missinginc.snd"),
+            "sond_missinginc.snd",
             "include \"any/does_not_exist_xyz.snd\"\nfn main() -> i64 { 0 }",
         );
         let err = resolve_includes(&main).unwrap_err().to_string();
@@ -712,11 +712,11 @@ mod tests {
 
     #[test]
     fn inlines_an_included_file_once() {
-        let lib = tmp(&format!("sond_lib.snd"), "fn helper() -> i64 { 42 }");
+        let lib = tmp("sond_lib.snd", "fn helper() -> i64 { 42 }");
         let libname = lib.file_name().unwrap().to_str().unwrap();
         // main includes the lib TWICE; it must appear only once.
         let main = tmp(
-            &format!("sond_main.snd"),
+            "sond_main.snd",
             &format!(
                 "include \"{libname}\"\ninclude \"{libname}\"\nfn main() -> i64 {{ helper() }}"
             ),
@@ -733,12 +733,12 @@ mod tests {
         // to define a helper of its own must not shrink the denominator to that helper: that
         // turns "1 of 5 library functions covered" into a green "1 of 1".
         let lib = tmp(
-            &format!("sond_covlib.snd"),
+            "sond_covlib.snd",
             "fn a1() -> i64 { 1 }\nfn a2() -> i64 { 2 }\nfn a3() -> i64 { 3 }",
         );
         let libname = lib.file_name().unwrap().to_str().unwrap();
         let entry = tmp(
-            &format!("sond_covscope_test.snd"),
+            "sond_covscope_test.snd",
             &format!("include \"{libname}\"\nfn helper() -> i64 {{ 7 }}\ntest \"t\" {{ }}"),
         );
         let (_, scope) = resolve_includes_scoped(&entry).unwrap();
@@ -754,10 +754,10 @@ mod tests {
     fn a_program_is_still_measured_on_its_own_functions() {
         // The counterpart: a program that includes the standard library is not on the hook
         // for covering the standard library.
-        let lib = tmp(&format!("sond_progdep.snd"), "fn dep() -> i64 { 1 }");
+        let lib = tmp("sond_progdep.snd", "fn dep() -> i64 { 1 }");
         let libname = lib.file_name().unwrap().to_str().unwrap();
         let entry = tmp(
-            &format!("sond_prog.snd"),
+            "sond_prog.snd",
             &format!("include \"{libname}\"\nfn mine() -> i64 {{ dep() }}\ntest \"t\" {{ }}"),
         );
         let (_, scope) = resolve_includes_scoped(&entry).unwrap();

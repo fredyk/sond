@@ -262,7 +262,6 @@ pub fn emit_windows_g(
 ) -> String {
     let mut cg = Codegen {
         check_contracts: true,
-        windows: true,
         ..Default::default()
     };
     cg.set_globals(globals);
@@ -943,8 +942,6 @@ struct Codegen {
     /// Whether the post-EBS heap is used (`alloc` after ExitBootServices, or the
     /// `exit_boot_services` call that seeds it). Emits the bump-allocator helpers.
     uses_heap: bool,
-    /// Whether this is the Windows target: a PE with the Microsoft x64 ABI at its boundaries.
-    windows: bool,
     /// Names declared `extern fn`: called through the platform's C ABI and resolved by the
     /// linker, never emitted.
     extern_fns: HashSet<String>,
