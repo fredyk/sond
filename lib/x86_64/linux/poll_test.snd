@@ -1,39 +1,62 @@
-// Test of poll.snd: a pipe with data must report POLLIN; an empty pipe must not.
-// exit 0 if the behavior is correct.
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/x86_64/linux/poll.snd.
+//
+// This file used to be a `main` that printed FAIL and returned 1, which the suite runner does
+// not collect: it only picks up files containing `test "` blocks. It had stopped compiling at
+// some point -- `.utf8` applied twice, once to the literal and again to the pointer that
+// produced -- and nobody found out, because nothing was running it. Rewritten as assertions so
+// that it both runs and fails out loud.
+//
+// Everything happens over a pipe inside this process: no network, no timing beyond a bounded
+// poll, nothing that depends on the machine.
 
-include "x86_64/linux/io.snd"
-include "any/strings.snd"
 include "x86_64/linux/poll.snd"
+include "x86_64/linux/testing.snd"
 
-fn puts(s: i64) { write_buf(1, s, strlen(s)) }
+let ONE_BYTE: string = "x"
 
-fn main() -> i64 {
+test "an empty pipe reports no event and the wait ends by itself" {
     let p[1]
-    let __f0_11: string = "FAIL pipe\n"
-    if syscall(SYS_pipe, p) < 0 { let __b0_11: string = __f0_11.utf8 puts(__b0_11.utf8) return 1 }
+    assert(syscall(SYS_pipe, p) >= 0)
     let rd = peek32(p)
     let wr = peek32(p + 4)
-
-    let pfd[1]   // one pollfd entry (8B)
-
-    // empty: poll with short timeout must NOT report POLLIN
+    let pfd[1]
     pollfd_set(pfd, 0, rd, POLLIN)
-    let __f0_20: string = "FAIL empty should timeout\n"
-    if poll_fds(pfd, 1, 50) != 0 { let __b0_19: string = __f0_20.utf8 puts(__b0_19.utf8) return 1 }
+    // 0 is the timeout, not an error: nothing to read, and the call came back anyway.
+    assert_eq(poll_fds(pfd, 1, 50), 0)
+    syscall(SYS_close, rd)
+    syscall(SYS_close, wr)
+}
 
-    // with data: poll must report POLLIN
-    let __f0_24: string = "x"
-    write_buf(wr, __f0_24.utf8, 1)
+test "a pipe with a byte in it reports POLLIN" {
+    let p[1]
+    assert(syscall(SYS_pipe, p) >= 0)
+    let rd = peek32(p)
+    let wr = peek32(p + 4)
+    assert_eq(syscall(SYS_write, wr, ONE_BYTE.utf8, 1), 1)
+    let pfd[1]
     pollfd_set(pfd, 0, rd, POLLIN)
-    let r = poll_fds(pfd, 1, 1000)
-    let __f0_28: string = "FAIL poll no event\n"
-    if r < 1 { let __b0_25: string = __f0_28.utf8 puts(__b0_25.utf8) return 1 }
-    let __f0_30: string = "FAIL revents no POLLIN\n"
-    if (pollfd_revents(pfd, 0) & POLLIN) == 0 { let __b0_26: string = __f0_30.utf8 puts(__b0_26.utf8) return 1 }
+    assert(poll_fds(pfd, 1, 1000) >= 1)
+    // The event has to be POLLIN specifically: a closed peer or an error would also wake the
+    // poll, and a reader that only counts the wake-ups reads from a pipe that has nothing.
+    assert(pollfd_revents(pfd, 0) & POLLIN != 0)
+    syscall(SYS_close, rd)
+    syscall(SYS_close, wr)
+}
 
-    close_fd(rd)
-    close_fd(wr)
-    let __f0_35: string = "OK poll\n"
-    puts(__f0_35.utf8)
-    0
+test "a closed writer wakes the poll without POLLIN having to be the reason" {
+    // POLLHUP is how the reader learns the other end is gone. Without it a relay waits for data
+    // that can never arrive, holding the connection open until something else times out.
+    let p[1]
+    assert(syscall(SYS_pipe, p) >= 0)
+    let rd = peek32(p)
+    let wr = peek32(p + 4)
+    syscall(SYS_close, wr)
+    let pfd[1]
+    pollfd_set(pfd, 0, rd, POLLIN)
+    assert(poll_fds(pfd, 1, 1000) >= 1)
+    assert(pollfd_revents(pfd, 0) & POLLHUP != 0)
+    syscall(SYS_close, rd)
 }

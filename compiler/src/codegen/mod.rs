@@ -164,12 +164,25 @@ fn entry_pos(funcs: &[Function], name: &str) -> usize {
 /// the rest keep their names and are user-callable.
 fn emit_all(cg: &mut Codegen, structs: &[StructDef], funcs: &[Function], entry: &str) {
     let ep = entry_pos(funcs, entry);
+    // The entry function is compiled under the internal label `sond_start`, not its
+    // own name.  For a library file with no `main`, the last function becomes the
+    // entry and other functions in the same file may call it (a forward reference).
+    // Without a trampoline the call lands in the builtin catch-all (`todo!()`).
+    // Fix: when the entry's name differs from the platform's C entry point, add it
+    // to `fn_names` so the codegen emits `call <name>`, and emit a `jmp sond_start`
+    // trampoline from that name so the call actually reaches the function body.
+    let entry_name = &funcs[ep].name;
+    let needs_trampoline =
+        entry_name != "main" && entry_name != "efi_main" && entry_name != "_start";
     cg.fn_names = funcs
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != ep)
         .map(|(_, f)| f.name.clone())
         .collect();
+    if needs_trampoline {
+        cg.fn_names.insert(entry_name.clone());
+    }
     cg.fn_ret_types = funcs
         .iter()
         .map(|f| (f.name.clone(), ret_kind(f)))
@@ -183,6 +196,11 @@ fn emit_all(cg: &mut Codegen, structs: &[StructDef], funcs: &[Function], entry: 
     for (i, f) in funcs.iter().enumerate() {
         if i == ep {
             cg.emit_function(f, "sond_start");
+            if needs_trampoline {
+                cg.line(&format!(".globl {entry_name}"));
+                cg.line(&format!("{entry_name}:"));
+                cg.line("    jmp sond_start");
+            }
         } else {
             cg.emit_function(f, &f.name.clone());
         }
@@ -203,7 +221,11 @@ pub fn emit_program_g(globals: &[Global], structs: &[StructDef], funcs: &[Functi
 
 /// Like [`emit_program_g`] but with the RFC-0016 `--debug` checkpoint instrumentation (a per-
 /// statement `__dbg_step(line)` trace). A separate entry so a normal build stays byte-identical.
-pub fn emit_program_debug_g(globals: &[Global], structs: &[StructDef], funcs: &[Function]) -> String {
+pub fn emit_program_debug_g(
+    globals: &[Global],
+    structs: &[StructDef],
+    funcs: &[Function],
+) -> String {
     emit_program_maybe_debug(globals, structs, funcs, true)
 }
 
@@ -266,8 +288,11 @@ pub fn emit_windows_g(
     };
     cg.set_globals(globals);
     cg.extern_fns = externs.iter().map(|e| e.name.clone()).collect();
-    cg.fn_ret_types
-        .extend(externs.iter().map(|e| (e.name.clone(), e.ret.as_ref().map_or(Ty::I64, kind_of_type))));
+    cg.fn_ret_types.extend(
+        externs
+            .iter()
+            .map(|e| (e.name.clone(), e.ret.as_ref().map_or(Ty::I64, kind_of_type))),
+    );
     emit_all(&mut cg, structs, funcs, "main");
     cg.line(".globl main");
     cg.line("main:");
@@ -419,7 +444,11 @@ pub fn emit_freestanding(funcs: &[Function]) -> String {
 }
 
 /// Like [`emit_freestanding`], but with module-level globals and struct definitions.
-pub fn emit_freestanding_g(globals: &[Global], structs: &[StructDef], funcs: &[Function]) -> String {
+pub fn emit_freestanding_g(
+    globals: &[Global],
+    structs: &[StructDef],
+    funcs: &[Function],
+) -> String {
     let mut cg = Codegen {
         check_contracts: true,
         ..Default::default()
@@ -581,7 +610,11 @@ pub(crate) fn frame_layout(func: &Function) -> FrameLayout {
         if let Some((_, o, _)) = params.iter().find(|(nm, _, _)| nm == n) {
             return *o;
         }
-        locals.iter().find(|(nm, _)| nm == n).map(|(_, o)| *o).unwrap_or(0)
+        locals
+            .iter()
+            .find(|(nm, _)| nm == n)
+            .map(|(_, o)| *o)
+            .unwrap_or(0)
     };
     let mut arr = Vec::new();
     collect_arrays(&func.body, &mut arr);
@@ -598,7 +631,14 @@ pub(crate) fn frame_layout(func: &Function) -> FrameLayout {
         (Some(off), func.ret_name.clone().map(|rn| (rn, off)))
     };
     let frame = (slot * 8 + 15) & !15;
-    FrameLayout { params, locals, arrays, ret_slot, ret_name, frame }
+    FrameLayout {
+        params,
+        locals,
+        arrays,
+        ret_slot,
+        ret_name,
+        frame,
+    }
 }
 
 /// Collects the names of all local bindings in a block (recursing into the
@@ -650,6 +690,9 @@ fn collect_locals(block: &Block, out: &mut Vec<String>) {
                 if let Some(c) = cond {
                     collect_locals_in_expr(c, out);
                 }
+                collect_locals(body, out);
+            }
+            Stmt::Lock { body, .. } => {
                 collect_locals(body, out);
             }
             Stmt::Break | Stmt::Continue => {}
@@ -714,6 +757,9 @@ fn collect_arrays(block: &Block, out: &mut Vec<(String, i64)>) {
                 }
                 collect_arrays(body, out);
             }
+            Stmt::Lock { body, .. } => {
+                collect_arrays(body, out);
+            }
             Stmt::Break | Stmt::Continue => {}
         }
     }
@@ -749,9 +795,7 @@ fn collect_arrays_in_expr(expr: &Expr, out: &mut Vec<(String, i64)>) {
             collect_arrays_in_expr(l, out);
             collect_arrays_in_expr(r, out);
         }
-        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
-            collect_arrays_in_expr(x, out)
-        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => collect_arrays_in_expr(x, out),
         Expr::List(items) => items.iter().for_each(|it| collect_arrays_in_expr(it, out)),
         _ => {}
     }
@@ -760,7 +804,11 @@ fn collect_arrays_in_expr(expr: &Expr, out: &mut Vec<(String, i64)>) {
 /// Collects, into `out`, the indices of the graph nodes that `expr` references (a data-dependency
 /// edge). Exhaustive over `Expr` so no reference is missed, which would let a node be scheduled
 /// before a node it depends on.
-pub(crate) fn collect_node_refs(expr: &Expr, node_idx: &HashMap<&str, usize>, out: &mut HashSet<usize>) {
+pub(crate) fn collect_node_refs(
+    expr: &Expr,
+    node_idx: &HashMap<&str, usize>,
+    out: &mut HashSet<usize>,
+) {
     match expr {
         Expr::Var(name) => {
             if let Some(&i) = node_idx.get(name.as_str()) {
@@ -904,12 +952,23 @@ fn collect_locals_in_expr(expr: &Expr, out: &mut Vec<String>) {
             collect_locals_in_expr(l, out);
             collect_locals_in_expr(r, out);
         }
-        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
-            collect_locals_in_expr(x, out)
-        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => collect_locals_in_expr(x, out),
         Expr::List(items) => items.iter().for_each(|it| collect_locals_in_expr(it, out)),
         _ => {}
     }
+}
+
+/// One structured scope on the `scopes` stack: either a `for` loop or a `lock` body.
+/// A non-local exit (`break`, `continue`, `return`) unwinds every `Lock` scope it crosses,
+/// running that lock's release code, then jumps to its own destination.
+#[derive(Clone)]
+enum Scope {
+    /// A `for` loop: `start` is the top-of-loop label (a `continue` target) and `end` is the
+    /// label just after the loop (a `break` target).
+    Loop { start: String, end: String },
+    /// A `lock (m) { .. }` body. `name` is the lock variable and `body_cont` is the label
+    /// just after the body's own release code (where a `break` with no enclosing loop lands).
+    Lock { name: String, body_cont: String },
 }
 
 #[derive(Default)]
@@ -922,8 +981,10 @@ struct Codegen {
     strings: Vec<(String, String)>,
     /// UEFI target: `print` lowers to ConOut and strings are UTF-16.
     uefi: bool,
-    /// Stack of `(continue_label, break_label)` for the enclosing loops.
-    loop_labels: Vec<(String, String)>,
+    /// Stack of enclosing structured scopes (`for` loops and `lock` bodies), innermost last.
+    /// A `break`/`continue`/`return` unwinds the `lock`s it crosses — running each one's
+    /// release code — before jumping to its own destination, so no exit can leave a lock held.
+    scopes: Vec<Scope>,
     /// Names of the user-defined functions in the program (to tell a call to a
     /// user function from a call to a builtin).
     fn_names: HashSet<String>,
@@ -996,6 +1057,9 @@ struct Codegen {
     /// of zeros, which is RESERVED rather than written out (see `emit_globals`), so a buffer of
     /// millions of elements costs the compiler and the binary nothing per element.
     global_array_data: Vec<(String, Vec<GlobalWord>, usize)>,
+    /// `let NAME: T[N]` at module level — the element type and declared element count, so
+    /// `emit_globals` can reserve the right number of BYTES (not words) in `.bss`.
+    global_view_lengths: HashMap<String, (Ty, i64)>,
     /// The value kind (`Int`/`Float`) of each in-scope local/parameter, so codegen
     /// knows to use the integer (`%rax`) or SSE (`%xmm0`) path for a `Var`. Reset per
     /// function alongside `locals`.
@@ -1004,6 +1068,20 @@ struct Codegen {
     /// address (an i64), so `var_types` says i64 for it; this is what `v[i]` needs, so the index
     /// scales by the element's width instead of assuming a 64-bit word. Reset per function.
     view_elem: HashMap<String, Ty>,
+    /// The rodata label for each local `string` variable whose value the compiler
+    /// can trace to a literal. When a tracked variable is passed as a `string` argument, emit
+    /// `leaq label(%rip), %rax` (UTF-8 bytes) instead of loading the code-point pointer.
+    /// Reset per function.
+    string_rodata_cur: HashMap<String, String>,
+    /// Functions whose return type is `string` (a view of code points). Populated in `emit_all`,
+    /// used in lowering to track call results as string variables.
+    string_returning_fns: HashSet<String>,
+    /// Local variables known to be of `string` type (vs. an arbitrary view type). Reset per function.
+    string_vars: HashSet<String>,
+    /// For each string variable tracked in `string_rodata_cur`, the source lines at which
+    /// the variable was assigned a string literal, together with the literal text.  Used to
+    /// build the error message that names both conflicting assignments.
+    string_assignments: HashMap<String, Vec<(u32, String)>>,
     /// The return kind of every user function, to type a call expression.
     fn_ret_types: HashMap<String, Ty>,
     /// Word count of each struct type (its by-value size), so a function returning a
@@ -1023,6 +1101,12 @@ struct Codegen {
     spawn_ctids: Vec<String>,
     /// Every ctid cell across the whole program, emitted as `.quad 0` in `.bss`.
     all_ctids: Vec<String>,
+    /// Slot TABLES for the `spawn` sites that sit inside a loop: `(label, slots)`. A looping site
+    /// cannot own a single join cell -- the next turn would overwrite the tid of a thread still
+    /// running -- so it owns a fixed ring of `(ctid, owner)` pairs instead, joined before reuse.
+    spawn_tables: Vec<(String, usize)>,
+    /// The same, for the function being emitted: joined at its return like the single cells.
+    fn_spawn_tables: Vec<(String, usize)>,
     /// One owner-pid cell per spawn site: the pid of the process that started that thread,
     /// stored just before the clone. `fork` copies the address space, so a forked child inherits
     /// every join cell of its parent while inheriting none of the threads; comparing this against
@@ -1072,6 +1156,14 @@ impl Codegen {
         self.locals.clear();
         self.var_types.clear();
         self.view_elem.clear();
+        self.string_rodata_cur.clear();
+        self.string_vars.clear();
+        self.string_assignments.clear();
+        // Register module-level view-typed globals so their element width is known.
+        for (name, (elem_kind, elem_count)) in &self.global_view_lengths {
+            self.view_elem.insert(name.clone(), *elem_kind);
+            self.view_len.insert(name.clone(), *elem_count);
+        }
         // The debug agent itself must NOT be instrumented, or `__dbg_step` (and every helper it
         // calls to serve the socket) would re-enter the checkpoint at each statement: unbounded
         // recursion. The agent is the `__dbg_` namespace, so disable the checkpoint for all of it.
@@ -1109,8 +1201,11 @@ impl Codegen {
         }
         // Fixed-size stack arrays `let a[N]`: the name's pointer slot is made to point at the
         // reserved N-word storage region (element 0 at the lowest address).
-        let array_bases: Vec<(i32, i32)> =
-            layout.arrays.iter().map(|(_, ptr, base)| (*ptr, *base)).collect();
+        let array_bases: Vec<(i32, i32)> = layout
+            .arrays
+            .iter()
+            .map(|(_, ptr, base)| (*ptr, *base))
+            .collect();
         // The return slot binds the named return (e.g. `vat_amount`) so `ensures` can read it.
         if let Some((rn, off)) = &layout.ret_name {
             self.locals.insert(rn.clone(), *off);
@@ -1119,6 +1214,7 @@ impl Codegen {
         let frame = layout.frame;
         self.ret_label = self.fresh_label("ret");
         self.spawn_ctids.clear();
+        self.fn_spawn_tables.clear();
 
         self.line(".text");
         self.line(&format!(".globl {label}"));
@@ -1230,10 +1326,14 @@ impl Codegen {
         // frame that started it. Emitted here at the single return label, so it covers early
         // `return`s too. The return value is in %rax and the futex syscall clobbers it, so it
         // is saved across the joins.
-        if !self.spawn_ctids.is_empty() {
+        if !self.spawn_ctids.is_empty() || !self.fn_spawn_tables.is_empty() {
             let ctids = std::mem::take(&mut self.spawn_ctids);
+            let tables = std::mem::take(&mut self.fn_spawn_tables);
             self.line("    pushq %rax"); // preserve the return value across the joins
             self.emit_join(&ctids);
+            for (tab, slots) in tables {
+                self.emit_join_table(&tab, slots);
+            }
             self.line("    popq %rax");
         }
         // Postconditions: checked at every exit, with the return value bound to
@@ -1321,7 +1421,11 @@ impl Codegen {
     /// unit, or a struct too large for registers, which is not yet supported).
     fn ret_struct_words(&self, ret: &Option<Type>) -> Option<i64> {
         match ret {
-            Some(Type::Named(n)) => self.struct_sizes.get(n).copied().filter(|&w| (1..=2).contains(&w)),
+            Some(Type::Named(n)) => self
+                .struct_sizes
+                .get(n)
+                .copied()
+                .filter(|&w| (1..=2).contains(&w)),
             _ => None,
         }
     }
@@ -1335,6 +1439,56 @@ impl Codegen {
                 panic!("global `{}` is declared more than once", g.name);
             }
             self.global_names.insert(g.name.clone());
+            // A string literal global (`let NAME = "..."` or `let NAME: string = "..."`):
+            // the global holds the ADDRESS of the interned bytes in `.rodata`, a valid
+            // compile-time constant. When the parser lowered `let s: string = "..."` to
+            // `Type::View(u32, n)` + `Expr::Str`, this must still be treated as a string,
+            // not passed through to the typed-view branch below.
+            //
+            // THE LOWERED VIEW MEANS TWO DIFFERENT THINGS:
+            //   - Inside a function: `Type::View(u32, n)` on a `let s: string = ".."` is the
+            //     code-point view the compiler emits in `.rodata` and the binding holds its
+            //     ADDRESS.  Indexing and `.len` work on it.
+            //   - At module level: the *same* lowered form used to mean a typed buffer `u32[n]`
+            //     with N·4 bytes in `.bss`.  That is WRONG — a module-level string literal must
+            //     remain a pointer in `.rodata` just like the unannotated form.
+            //
+            // FIX: handle `Expr::Str` before `Type::View` in set_globals() so the lowered
+            // module-level string takes the string-literal path, not the bss-buffer path.
+            if let Expr::Str(s) = &g.init {
+                let label = self.intern_string(s);
+                self.global_str_data.push((g.name.clone(), label));
+                continue;
+            }
+            // A typed view at module level (`let NAME: T[N]`). Must have a literal length,
+            // reserves that many *bytes* (not words) in `.bss`, and the Var resolves to the
+            // buffer address; indexing scales by the element width.
+            if let Some(Type::View(elem, len_str)) = &g.ty {
+                let elem_kind = kind_of_type(elem);
+                let len: i64 = len_str
+                    .clone()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "global `{}`: view length must be a literal (not a variable); \
+                         reserve it inside a function instead",
+                            g.name
+                        )
+                    })
+                    .parse()
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "global `{}`: view length must be a literal (not a variable); \
+                         reserve it inside a function instead",
+                            g.name
+                        )
+                    });
+                let byte_len = len * elem_kind.bits() as i64 / 8;
+                assert_ne!(byte_len, 0, "global `{}`: view length must be > 0", g.name);
+                self.global_arrays.insert(g.name.clone());
+                self.global_view_lengths
+                    .insert(g.name.clone(), (elem_kind, len));
+                continue;
+            }
             // An array global `let NAME[N] = [c0, c1, ...]` is a constant table in
             // `.data`; its `Var` resolves to the base ADDRESS so `NAME[i]` indexes.
             if let Some(n) = g.array_len {
@@ -1358,14 +1512,8 @@ impl Codegen {
                 // stored (`emit_globals`).
                 words.truncate(n as usize);
                 self.global_arrays.insert(g.name.clone());
-                self.global_array_data.push((g.name.clone(), words, n as usize));
-                continue;
-            }
-            // A string-literal global is a pointer to its NUL-terminated bytes in `.rodata`: a
-            // valid compile-time constant (the string's address), so `let MSG = "hi"` works.
-            if let Expr::Str(s) = &g.init {
-                let label = self.intern_string(s);
-                self.global_str_data.push((g.name.clone(), label));
+                self.global_array_data
+                    .push((g.name.clone(), words, n as usize));
                 continue;
             }
             let value = self.const_eval(&g.init).unwrap_or_else(|| {
@@ -1493,6 +1641,71 @@ impl Codegen {
         }
     }
 
+    /// How many threads one looping `spawn` site can have in flight. The ring is what gives a
+    /// loop a CEILING: the 65th spawn waits for the oldest to finish instead of adding to an
+    /// unbounded pile. A fork per connection has no such limit, which is how a test VM reached
+    /// 2920 processes at load 3.43 on two cores without anybody meaning to.
+    const SPAWN_SLOTS: usize = 64;
+
+    /// Emits the futex-join for the cell whose ADDRESS is in `base`, with its owner pid at
+    /// `8(base)`. The register-addressed twin of [`emit_join`], for the ring slots, whose cell is
+    /// chosen at run time and so has no name to `leaq`. Clobbers %rax/%rcx/%rdx/%rdi/%rsi/%r10/%r11
+    /// and leaves `base` untouched.
+    fn emit_join_at(&mut self, base: &str) {
+        let wait = self.fresh_label("join_wait");
+        let done = self.fresh_label("join_done");
+        // Whose thread is this? A forked child inherited the cell but not the thread, so waiting
+        // on it would block on a wake that cannot come.
+        self.line("    movq $39, %rax"); // SYS_getpid
+        self.line("    syscall");
+        self.line(&format!("    cmpq 8({base}), %rax"));
+        self.line(&format!("    jne {done}"));
+        self.line(&format!("{wait}:"));
+        self.line(&format!("    movq ({base}), %rdx")); // expected tid
+        self.line("    testq %rdx, %rdx");
+        self.line(&format!("    jz {done}")); // never used, or already finished
+        self.line(&format!("    movq {base}, %rdi")); // uaddr
+        self.line("    xorq %rsi, %rsi"); // FUTEX_WAIT
+        self.line("    xorq %r10, %r10"); // timeout = NULL
+        self.line("    movq $202, %rax"); // SYS_futex
+        self.line("    syscall");
+        // A failing futex returns at once, so jumping back unconditionally would spin. Retry only
+        // on the answers that mean "try again" (EAGAIN, EINTR, or a genuine wake); anything else
+        // falls through to a sleeping poll, which is slow but never a burning core.
+        self.line("    cmpq $-11, %rax");
+        self.line(&format!("    je {wait}"));
+        self.line("    cmpq $-4, %rax");
+        self.line(&format!("    je {wait}"));
+        self.line("    testq %rax, %rax");
+        self.line(&format!("    jns {wait}"));
+        self.line("    pushq $1000000"); // 1 ms
+        self.line("    pushq $0");
+        self.line("    movq %rsp, %rdi");
+        self.line("    xorq %rsi, %rsi");
+        self.line("    movq $35, %rax"); // SYS_nanosleep
+        self.line("    syscall");
+        self.line("    addq $16, %rsp");
+        self.line(&format!("    jmp {wait}"));
+        self.line(&format!("{done}:"));
+    }
+
+    /// Joins every slot of a looping site's ring, at the spawning function's return. A loop over
+    /// the table rather than `slots` copies of the join: at 64 slots the unrolled form would add
+    /// some 1600 instructions per site, for code that runs once.
+    fn emit_join_table(&mut self, table: &str, slots: usize) {
+        let top = self.fresh_label("jointab");
+        self.line("    pushq %rbx"); // callee-saved: the cursor has to survive the syscalls
+        self.line(&format!("    leaq {table}(%rip), %rbx"));
+        self.line(&format!("    pushq ${slots}")); // the counter lives on the stack, out of the way
+        self.line(&format!("{top}:"));
+        self.emit_join_at("%rbx");
+        self.line("    addq $16, %rbx"); // next (ctid, owner) pair
+        self.line("    decq (%rsp)");
+        self.line(&format!("    jnz {top}"));
+        self.line("    addq $8, %rsp");
+        self.line("    popq %rbx");
+    }
+
     /// Emits `par a() ~~ b() ~~ c()` (RFC-0008 §5.1a): spawn every peer on its own thread, then
     /// join them ALL before the next statement. Reuses the Layer B `spawn` substrate: each peer
     /// is spawned (which records its ctid cell), then this par's cells are split off the enclosing
@@ -1530,7 +1743,8 @@ impl Codegen {
                 .collect();
             for j in 0..nodes.len() {
                 for i in 0..j {
-                    if crate::check::footprints_conflict(&fps[i], &fps[j]) && !deps[j].contains(&i) {
+                    if crate::check::footprints_conflict(&fps[i], &fps[j]) && !deps[j].contains(&i)
+                    {
                         deps[j].push(i);
                     }
                 }
@@ -1649,6 +1863,153 @@ impl Codegen {
         self.line(&format!("    movq %rax, {off}(%rbp)"));
     }
 
+    /// Futex-based `lock (m) { body }` acquire: Drepper's "Futexes Are Tricky" protocol,
+    /// three states (0=free, 1=held, 2=held+waiters), uses FUTEX_WAKE. The lock
+    /// variable `m` is a single 64-bit word (an lvalue). The body runs under the lock;
+    /// any early exit (`return`, `break`) releases the lock before continuing.
+    ///
+    /// A critical section has three ways out — natural fall-through, `break`, `return` — and
+    /// all three must release the lock and then each go to its own destination. The body is
+    /// emitted while this lock is on the `scopes` stack, so `return`/`break`/`continue`
+    /// inside it unwind the locks they cross (running each one's release) before jumping to
+    /// their real target. The natural fall-through runs this lock's own release and lands on
+    /// `body_cont`, the statement right after the `lock`.
+fn emit_lock(&mut self, name: &str, body: &Block) {
+        let acquired = self.fresh_label("lock_acq");
+        let wait_loop = self.fresh_label("lock_wait_loop");
+        let sleep = self.fresh_label("lock_sleep");
+        let body_cont = self.fresh_label("lock_cont");
+
+        // --- ACQUIRE (fast path: CAS 0→1, then slow path with futex) ---
+        self.line(&format!("    leaq {name}(%rip), %rdi"));
+        self.line("    xorq %rax, %rax");          // rax = 0 (expected: free)
+        self.line("    movq $1, %rsi");           // rsi = 1 (new: held)
+        self.line("    lock cmpxchgq %rsi, (%rdi)");
+        self.line(&format!("    je {acquired}")); // fast path: grabbed it
+        // Slow path
+        self.line(&format!("{wait_loop}:"));
+        self.line("    movq $2, %rsi");  // rsi = 2 (new: held+waiter)
+        self.line("    movq $1, %rax");  // rax = 1 (expected: held)
+        self.line("    lock cmpxchgq %rsi, (%rdi)");
+        self.line(&format!("    je {sleep}")); // still held: sleep
+        // Released to 0: try to grab
+        self.line("    xorq %rax, %rax");   // rax = 0
+        self.line("    movq $1, %rsi");     // rsi = 1
+        self.line("    lock cmpxchgq %rsi, (%rdi)");
+        self.line(&format!("    je {acquired}")); // grabbed it
+        // Sleep until woken
+        self.line(&format!("{sleep}:"));
+        self.line(&format!("    leaq {name}(%rip), %rdi"));
+        self.line("    xorq %rsi, %rsi");     // futex_op = FUTEX_WAIT
+        self.line("    movq $2, %rdx");       // value = 2
+        self.line("    xorq %r10, %r10");     // flags = 0 (no private)
+        self.line("    movq $202, %rax");     // SYS_futex = 202
+        self.line("    syscall");
+        self.line("    cmpq $-11, %rax");     // EAGAIN (value changed): retry
+        self.line(&format!("    je {wait_loop}"));
+        self.line("    cmpq $-4, %rax");      // EINTR: retry
+        self.line(&format!("    jmp {wait_loop}")); // other error: retry
+
+        // --- BODY (early exits unwind this lock via the `scopes` stack) ---
+        self.line(&format!("{acquired}:"));
+        self.scopes.push(Scope::Lock {
+            name: name.to_string(),
+            body_cont: body_cont.clone(),
+        });
+        self.block(body);
+        self.scopes.pop();
+
+        // --- Natural exit (reached only by falling off the end of the body: release,
+        // then continue at `body_cont`. `break`/`return` inside the body already ran their
+        // own release and jump away, so they never reach this. ---
+        self.line("    pushq %rax");         // save body's value across release (clobbers %rax)
+        self.emit_lock_release(name);
+        self.line("    popq %rax");          // restore body's value
+        self.line(&format!("{body_cont}:"));
+    }
+
+    /// Emits the shared release of one `lock`: lower the word to 0, and if it was 2
+    /// (someone was waiting) do a `SYS_futex` with `FUTEX_WAKE` on it. On both paths execution
+    /// falls through to the next line, where the caller continues to its own destination. The
+    /// syscall clobbers `%rax`, so a caller that must preserve a value in `%rax` (a `return`)
+    /// saves it first.
+    fn emit_lock_release(&mut self, name: &str) {
+        let nowake = self.fresh_label("nolockwake");
+        // Release: CAS 1→0. If value was 1, stored 0. If value was 2, need to release + wake.
+        self.line(&format!("    leaq {name}(%rip), %rdi"));
+        self.line("    movq $1, %rax");   // CAS expected: 1
+        self.line("    movq $0, %rsi");   // CAS new: 0
+        self.line("    lock cmpxchgq %rsi, (%rdi)");
+        self.line("    cmpq $2, %rax");   // was value 2? (someone waiting)
+        self.line(&format!("    jne {nowake}"));
+        // Value was 2: CAS 1→0 failed because value is 2. Store 0 to release.
+        // (A plain store is used here instead of CAS 2→0 because: if value is still 2, store 0 releases;
+        //  if value changed (e.g., 2→1 by another thread), store 0 still releases — the other thread
+        //  will CAS 1→0 themselves on their turn, making this a harmless additional release.)
+        self.line("    movq $0, (%rdi)");
+        // Wake 1 futex waiter: SYS_futex(202) with op FUTEX_WAKE(1).
+        self.line("    movq $1, %rsi");    // futex_op: FUTEX_WAKE = 1
+        self.line("    movq $1, %rdx");    // val: wake 1 thread
+        self.line("    xorq %r10, %r10");  // flags = 0
+        self.line("    movq $202, %rax");  // SYS_futex
+        self.line("    syscall");
+        self.line(&format!("{nowake}:"));
+    }
+
+    /// Releases the locks in `inner_first` (given innermost first) in order, then jumps to
+    /// `dest`. When `preserve_rax`, saves `%rax` first and restores it after every release
+    /// (they clobber `%rax` via `syscall`) before jumping to `dest`, so a `return` value
+    /// survives. The save is the FIRST instruction emitted, straight after the caller has put
+    /// the value in `%rax`, and the restore is emitted LAST (reached only by the jump that
+    /// ends the last release), so control never falls into it prematurely.
+    fn emit_release_chain(&mut self, inner_first: &[String], dest: &str, preserve_rax: bool) {
+        if inner_first.is_empty() {
+            self.line(&format!("    jmp {dest}"));
+            return;
+        }
+        let n = inner_first.len();
+        if preserve_rax {
+            self.line("    pushq %rax");
+        }
+        // Emitted in place, so control falls into the innermost release (entries[0]) directly.
+        let entries: Vec<String> = (0..n).map(|_| self.fresh_label("lckrel")).collect();
+        let restored = self.fresh_label("lck_restore");
+        for i in 0..n {
+            let entry = entries[i].clone();
+            let cont = if i == n - 1 {
+                if preserve_rax {
+                    restored.clone()
+                } else {
+                    dest.to_string()
+                }
+            } else {
+                entries[i + 1].clone()
+            };
+            self.line(&format!("{entry}:"));
+            self.emit_lock_release(&inner_first[i]);
+            self.line(&format!("    jmp {cont}"));
+        }
+        if preserve_rax {
+            // Reached only by the last release's jump; restore the return value, then return.
+            self.line(&format!("{restored}:"));
+            self.line("    popq %rax");
+            self.line(&format!("    jmp {dest}"));
+        }
+    }
+
+    /// Collect the names of the locks on the `scopes` stack, innermost first — the order in
+    /// which they must be released (a lock acquired last must be released first).
+    fn locks_inner_first(&self) -> Vec<String> {
+        self.scopes
+            .iter()
+            .rev()
+            .filter_map(|s| match s {
+                Scope::Lock { name, .. } => Some(name.clone()),
+                Scope::Loop { .. } => None,
+            })
+            .collect()
+    }
+
     /// Spawns `call` on a new thread. If `result_cell` is `Some`, the child stores the call's
     /// return value (%rax) into that cell just before it exits, so the parent can read the peer's
     /// result after the join (the `par`-let binding). The store happens strictly before `SYS_exit`,
@@ -1667,24 +2028,66 @@ impl Codegen {
         // the six a normal call takes.
         let n = args.len();
         if n > ARG_REGS.len() {
-            panic!("spawn passes at most {} arguments (got {n})", ARG_REGS.len());
+            panic!(
+                "spawn passes at most {} arguments (got {n})",
+                ARG_REGS.len()
+            );
         }
         // 256 KiB per thread stack. The top 32 bytes hold the arena control block; the arguments
         // sit just below it, in a 16-aligned block, and the child's stack grows down from there.
         const THREAD_STACK: i64 = 262144;
         let argspace = (n as i64 * 8 + 15) & !15;
         self.uses_spawn = true;
-        let cell = format!("sond_ctid_{}", self.all_ctids.len());
-        self.all_owner_cells.push(Self::owner_cell(&cell));
-        self.all_ctids.push(cell.clone());
-        self.spawn_ctids.push(cell.clone());
+        // Inside a loop the site cannot own ONE cell: the next turn would overwrite the tid of a
+        // thread still running, and that thread would never be joined -- a silent leak, which is
+        // why this used to be a compile error. It owns a ring of slots instead, rotating through
+        // them and joining the one it is about to reuse.
+        let in_loop = self.scopes.iter().any(|s| matches!(s, Scope::Loop { .. }));
+        let mut cell = String::new();
+        let mut table = String::new();
+        if in_loop {
+            table = format!("sond_ctidtab_{}", self.spawn_tables.len());
+            self.spawn_tables.push((table.clone(), Self::SPAWN_SLOTS));
+            self.fn_spawn_tables
+                .push((table.clone(), Self::SPAWN_SLOTS));
+        } else {
+            cell = format!("sond_ctid_{}", self.all_ctids.len());
+            self.all_owner_cells.push(Self::owner_cell(&cell));
+            self.all_ctids.push(cell.clone());
+            self.spawn_ctids.push(cell.clone());
+        }
 
+        if in_loop {
+            // %rbx holds the chosen slot's address from here to the clone. It is callee-saved, so
+            // the syscalls in between leave it alone, and it is restored on the way out.
+            self.line("    pushq %rbx");
+        }
         // Evaluate the arguments and push them, so arg0 ends on top (at 0(%rsp), arg i at 8i).
         for arg in args.iter().rev() {
             self.expr(&arg.value); // -> %rax
             self.line("    pushq %rax");
         }
 
+        if in_loop {
+            // Rotate to the next slot and take its address. The index is per site and lives in
+            // `.data`; two threads running the SAME spawn site at once would race on it, which is
+            // the same single-writer assumption the static cell already made.
+            let idx = format!("{table}_i");
+            let wrap = self.fresh_label("slot_wrap");
+            self.line(&format!("    movq {idx}(%rip), %rax"));
+            self.line("    incq %rax");
+            self.line(&format!("    cmpq ${}, %rax", Self::SPAWN_SLOTS));
+            self.line(&format!("    jb {wrap}"));
+            self.line("    xorq %rax, %rax");
+            self.line(&format!("{wrap}:"));
+            self.line(&format!("    movq %rax, {idx}(%rip)"));
+            self.line("    shlq $4, %rax"); // 16 bytes per (ctid, owner) pair
+            self.line(&format!("    leaq {table}(%rip), %rbx"));
+            self.line("    addq %rax, %rbx");
+            // Wait for whoever had this slot before. On the first `SPAWN_SLOTS` turns the cell is
+            // zero and this returns at once; after that it is what puts a ceiling on the loop.
+            self.emit_join_at("%rbx");
+        }
         // mmap the child stack. The pushed arguments are untouched (a syscall does not use the
         // stack), so they are still there to copy across.
         self.line("    xorq %rdi, %rdi");
@@ -1718,7 +2121,11 @@ impl Codegen {
         // completed before the clone call returns in the parent" under CLONE_VM, so the parent could
         // read 0 and skip the wait entirely. A sentinel written before the clone is reliably 1 (set
         // by the parent) or 0 (cleared by the kernel), and depends on neither ordering.
-        self.line(&format!("    movq $1, {cell}(%rip)"));
+        if in_loop {
+            self.line("    movq $1, (%rbx)");
+        } else {
+            self.line(&format!("    movq $1, {cell}(%rip)"));
+        }
 
         // Record WHICH PROCESS owns this thread, for the join to check. `fork` copies the address
         // space but only the calling thread, so a forked child inherits this cell with the
@@ -1730,13 +2137,21 @@ impl Codegen {
         // here; %rsi (the child stack) is untouched.
         self.line("    movq $39, %rax"); // SYS_getpid
         self.line("    syscall");
-        self.line(&format!("    movq %rax, {}(%rip)", Self::owner_cell(&cell)));
+        if in_loop {
+            self.line("    movq %rax, 8(%rbx)");
+        } else {
+            self.line(&format!("    movq %rax, {}(%rip)", Self::owner_cell(&cell)));
+        }
 
         // clone(flags, child_stack, ptid=0, ctid=&cell, tls=0).
         // CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|CHILD_CLEARTID.
         self.line("    movq $0x250f00, %rdi");
         self.line("    xorq %rdx, %rdx"); // parent_tid = NULL
-        self.line(&format!("    leaq {cell}(%rip), %r10")); // child_tid cell
+        if in_loop {
+            self.line("    movq %rbx, %r10"); // child_tid cell: the slot chosen above
+        } else {
+            self.line(&format!("    leaq {cell}(%rip), %r10")); // child_tid cell
+        }
         self.line("    xorq %r8, %r8"); // tls = NULL
         self.line("    movq $56, %rax"); // SYS_clone
         self.line("    syscall");
@@ -1748,6 +2163,9 @@ impl Codegen {
         // nothing to record. Drop the pushed arguments and continue.
         if n > 0 {
             self.line(&format!("    addq ${}, %rsp", n * 8));
+        }
+        if in_loop {
+            self.line("    popq %rbx");
         }
         let after = self.fresh_label("thread_parent");
         self.line(&format!("    jmp {after}"));
@@ -1790,6 +2208,7 @@ impl Codegen {
         let data = std::mem::take(&mut self.global_data);
         let arrays = std::mem::take(&mut self.global_array_data);
         let ctids = std::mem::take(&mut self.all_ctids);
+        let tables = std::mem::take(&mut self.spawn_tables);
         self.line(".data");
         // DECLARE the section's alignment, do not hope for it. Without a directive the assembler
         // records AddrAlign 1 and the linker may start `.data` at any address, so whether an
@@ -1843,6 +2262,16 @@ impl Codegen {
         for cell in ctids {
             self.line(&format!("{cell}: .quad 0"));
         }
+        // The ring of a looping spawn site: `slots` pairs of (clear_child_tid, owner pid), plus
+        // the rotating index. All zero, which reads as "slot never used" everywhere it is
+        // checked, so the first turns of the loop join nothing and start immediately.
+        for (table, slots) in tables {
+            self.line(&format!(
+                "{table}: .quad {}",
+                vec!["0"; slots * 2].join(", ")
+            ));
+            self.line(&format!("{table}_i: .quad {}", slots - 1)); // first rotation lands on 0
+        }
         // The pid that started each of those threads. Zero until the spawn runs, which no real
         // pid ever is, so a join over a site that never executed skips instead of waiting.
         let owners = std::mem::take(&mut self.all_owner_cells);
@@ -1855,6 +2284,7 @@ impl Codegen {
             self.line(&format!("{cell}: .quad 0"));
         }
         self.emit_zeroed_arrays(zeroed);
+        self.emit_view_globals();
     }
 
     /// Reserves the ALL-ZERO module-level arrays in `.bss`, one `.zero <bytes>` each.
@@ -1874,6 +2304,38 @@ impl Codegen {
         self.line(".p2align 3");
         for (name, _, len) in zeroed {
             self.line(&format!("{name}: .zero {}", len * 8));
+        }
+    }
+
+    /// Reserves a typed view global (`let NAME: T[N]`) in `.bss` with the correct byte size.
+    /// A `u8[32]` reserves 32 BYTES; a `u32[16]` reserves 64 BYTES.
+    fn emit_view_globals(&mut self) {
+        if self.global_view_lengths.is_empty() {
+            return;
+        }
+        // Sorted, and WITHOUT draining the map: `enter_function` reads it to learn each
+        // global's element width AND its length, so emptying it here would leave every function
+        // compiled after this point indexing at the wrong stride, depending on the order of two
+        // passes. Same reason it is not a `HashMap` iteration: emitted code is a build artefact
+        // and must not depend on hash order.
+        //
+        // The map holds ELEMENT COUNTS, and `.bss` is reserved in BYTES: the multiplication
+        // belongs here, at the one place that speaks bytes. Storing bytes instead would be one
+        // conversion fewer and would make `NAME.len` -- which is in elements -- report 56 for an
+        // `i64[7]`, silently, since nothing else in the compiler would disagree.
+        let mut views: Vec<_> = self
+            .global_view_lengths
+            .iter()
+            .map(|(name, (ty, elem_count))| {
+                let byte_len = elem_count * ty.bits() as i64 / 8;
+                (name.clone(), byte_len)
+            })
+            .collect();
+        views.sort();
+        self.line(".bss");
+        self.line(".p2align 3");
+        for (name, byte_len) in views {
+            self.line(&format!("{name}: .zero {byte_len}"));
         }
     }
 
@@ -1968,6 +2430,18 @@ impl Codegen {
                             self.line(&format!("    movq %rax, {off}(%rbp)"));
                             self.var_types.insert(name.clone(), Ty::I64);
                             self.view_elem.insert(name.clone(), Ty::U32);
+                            // Also record the UTF-8 rodata label so passing this
+                            // variable as a `string` argument sends the real
+                            // source bytes, not the code-point array.
+                            let utflabel = self.intern_string(text);
+                            let asgn_line = block.stmt_lines.get(i).copied().unwrap_or(0);
+                            let desc = format!("{} = \"{}\"", name, text);
+                            self.string_assignments
+                                .entry(name.clone())
+                                .or_default()
+                                .push((asgn_line, desc));
+                            self.string_rodata_cur.insert(name.clone(), utflabel);
+                            self.string_vars.insert(name.clone());
                             if let Some(crate::ast::Type::View(_, Some(l))) = ty.as_ref()
                                 && let Ok(n) = l.parse::<i64>()
                             {
@@ -2050,6 +2524,57 @@ impl Codegen {
                                 self.view_len.insert(name.clone(), n);
                             }
                         }
+                        // `let q: string = l` where l's type is `string` (view of code points):
+                        // inherit the source's length and element info so `.len` works on the copy.
+                        // The parser does NOT lower `let q: string = l` to a view type when l is
+                        // a variable (it lowers only for string *literals*). So `ty` here is
+                        // `Some(Type::Named("string"))`, which does NOT match the `Type::View`
+                        // check above. Yet `q` holds the SAME representation as `l` (a pointer to
+                        // `.rodata` code points), so `.len` must be inherited from `l`.
+                        if let Expr::Var(src_name) = value {
+                            if let Some(&n) = self.view_len.get(src_name) {
+                                self.view_len.insert(name.clone(), n);
+                            }
+                            if let Some(&k) = self.view_elem.get(src_name) {
+                                self.view_elem.insert(name.clone(), k);
+                            }
+                            // Propagate the UTF-8 rodata label too, so `q` can be passed
+                            // as a `string` argument (even when the source was itself a
+                            // copy of a string literal).
+                            if let Some(label) = self.string_rodata_cur.get(src_name) {
+                                self.string_rodata_cur.insert(name.clone(), label.clone());
+                            }
+                            // Only mark as a string if the source IS a string variable.
+                            if self.string_vars.contains(src_name) {
+                                self.string_vars.insert(name.clone());
+                                // Copy assignment info so the error can trace the copy chain.
+                                if let Some(src_asgns) = self.string_assignments.get(src_name) {
+                                    let src_asgns = src_asgns.clone();
+                                    self.string_assignments
+                                        .entry(name.clone())
+                                        .or_default()
+                                        .extend(
+                                            src_asgns.iter().map(|&(l, ref s)| {
+                                                (l, format!("{} = {}", name, s))
+                                            }),
+                                        );
+                                }
+                            }
+                        }
+                        // `let l = f()`: if `f` returns `string`, treat `l` as a string
+                        // variable so the call site can know the variable's representation.
+                        if let Expr::Call(callee, _) = value {
+                            let callee_name = match callee.as_ref() {
+                                Expr::Var(n) => n.as_str(),
+                                _ => "",
+                            };
+                            if self.string_returning_fns.contains(callee_name) {
+                                // It is a string, but we don't know its rodata label
+                                // (the function parameter is untraceable). It will
+                                // still enter the `string_vars` check at call sites.
+                                self.string_vars.insert(name.clone());
+                            }
+                        }
                     }
                 }
                 Stmt::Assign {
@@ -2058,6 +2583,48 @@ impl Codegen {
                 } => {
                     let kind = self.ty_of(value);
                     self.expr(value);
+                    // When assigning a string literal to a string variable,
+                    // update the tracked rodata label so future uses of the
+                    // variable in a `string` argument send the correct bytes.
+                    let label = if let Expr::Str(text) = value
+                        && self.view_elem.contains_key(name)
+                    {
+                        // Record the assignment location for error messages.
+                        let asgn_line = block.stmt_lines.get(i).copied().unwrap_or(0);
+                        let desc = format!("{} = \"{}\"", name, text);
+                        self.string_assignments
+                            .entry(name.clone())
+                            .or_default()
+                            .push((asgn_line, desc));
+                        Some(self.intern_string(text))
+                    } else {
+                        None
+                    };
+                    if let Some(l) = label {
+                        self.string_rodata_cur.insert(name.clone(), l);
+                        self.string_vars.insert(name.clone());
+                    }
+                    // When assigning one tracked string to another, copy the rodata key
+                    // and the assignment chain.
+                    if let Expr::Var(src) = value {
+                        let src = src.clone();
+                        if let Some(label) = self.string_rodata_cur.get(&src) {
+                            let label = label.clone();
+                            self.string_rodata_cur.insert(name.clone(), label);
+                            self.string_vars.insert(name.clone());
+                            if let Some(src_asgns) = self.string_assignments.get(&src) {
+                                let src_asgns = src_asgns.clone();
+                                self.string_assignments
+                                    .entry(name.clone())
+                                    .or_default()
+                                    .extend(
+                                        src_asgns
+                                            .iter()
+                                            .map(|&(l, ref s)| (l, format!("{} = {}", name, s))),
+                                    );
+                            }
+                        }
+                    }
                     if let Some(&off) = self.locals.get(name) {
                         if kind.is_float() {
                             self.line(&format!("    movsd %xmm0, {off}(%rbp)"));
@@ -2124,12 +2691,30 @@ impl Codegen {
                         Some(e) => self.expr(e),
                         None => self.line("    movq $0, %rax"),
                     }
-                    self.line(&format!("    jmp {}", self.ret_label.clone()));
+                    // A `return` must release every lock it leaves held, then return the value
+                    // it has already left in `%rax`. The release code clobbers `%rax` (futex
+                    // `syscall`), so `emit_release_chain` saves and restores it.
+                    let locks = self.locks_inner_first();
+                    if locks.is_empty() {
+                        self.line(&format!("    jmp {}", self.ret_label.clone()));
+                    } else {
+                        self.emit_release_chain(&locks, &self.ret_label.clone(), true);
+                    }
                 }
                 Stmt::For { cond, body, .. } => {
+                    /* Track string-variable state before the loop body so we can detect
+                     * which variables were modified inside it.  The language rule: a
+                     * string variable that is assigned anywhere in a loop body becomes
+                     * *unknown* after the loop (because the body may run 0..N times and
+                     * the value at the end of one iteration might differ from what it
+                     * was before entering the loop). */
+                    let before_loop = self.save_string_state();
                     let start = self.fresh_label("for");
                     let end = self.fresh_label("endfor");
-                    self.loop_labels.push((start.clone(), end.clone()));
+                    self.scopes.push(Scope::Loop {
+                        start: start.clone(),
+                        end: end.clone(),
+                    });
                     self.line(&format!("{start}:"));
                     if let Some(c) = cond {
                         self.expr(c);
@@ -2137,32 +2722,147 @@ impl Codegen {
                         self.line(&format!("    je {end}"));
                     }
                     self.block(body);
+                    // Invalidate any string variable that was modified inside the
+                    // loop body — after N iterations its value may differ from
+                    // what it was before the loop started.
+                    let after_loop = self.save_string_state();
+                    for var in &before_loop.1 {
+                        if after_loop.0.get(var) != before_loop.0.get(var) {
+                            self.string_rodata_cur.remove(var);
+                        }
+                    }
                     self.line(&format!("    jmp {start}"));
                     self.line(&format!("{end}:"));
-                    self.loop_labels.pop();
+                    self.scopes.pop();
                 }
+                Stmt::Lock { name, body } => self.emit_lock(name, body),
                 Stmt::Break => {
-                    let end = self
-                        .loop_labels
-                        .last()
-                        .expect("break outside loop")
-                        .1
-                        .clone();
-                    self.line(&format!("    jmp {end}"));
+                    // A `break` releases every `lock` between here and its destination, then
+                    // jumps to the nearest enclosing loop's end. With no enclosing loop it is
+                    // a compile error (as it always was before `lock` existed).
+                    let mut release: Vec<String> = Vec::new();
+                    let mut dest: Option<String> = None;
+                    for scope in self.scopes.iter().rev() {
+                        match scope {
+                            Scope::Lock { name, .. } => release.push(name.clone()),
+                            Scope::Loop { end, .. } => {
+                                dest = Some(end.clone());
+                                break;
+                            }
+                        }
+                    }
+                    match dest {
+                        Some(d) => self.emit_release_chain(&release, &d, false),
+                        None => {
+                            // No enclosing loop: reject, as `break` never had any meaning
+                            // outside a loop before the `lock` feature existed.
+                            panic!("`break` outside a loop")
+                        }
+                    }
                 }
                 Stmt::Continue => {
-                    let start = self
-                        .loop_labels
-                        .last()
-                        .expect("continue outside loop")
-                        .0
-                        .clone();
-                    self.line(&format!("    jmp {start}"));
+                    // A `continue` releases every `lock` inside the loop body it crosses (so
+                    // none is left held as the next iteration begins), then jumps to the loop
+                    // top.
+                    let mut release: Vec<String> = Vec::new();
+                    let mut dest: Option<String> = None;
+                    for scope in self.scopes.iter().rev() {
+                        match scope {
+                            Scope::Lock { name, .. } => release.push(name.clone()),
+                            Scope::Loop { start, .. } => {
+                                dest = Some(start.clone());
+                                break;
+                            }
+                        }
+                    }
+                    let start = dest.expect("continue outside loop");
+                    self.emit_release_chain(&release, &start, false);
                 }
             }
         }
         if let Some(tail) = &block.tail {
             self.expr(tail);
+        }
+    }
+
+    /// String-literal branch tracking helpers (see `if_else`) so we can merge
+    /// per-branch values and either propagate a known text or flag an unknown one.
+    pub(crate) fn save_string_state(&self) -> (HashMap<String, String>, HashSet<String>) {
+        (self.string_rodata_cur.clone(), self.string_vars.clone())
+    }
+    /// Build a compile-time error message for a string variable whose value is
+    /// unknown (present in `string_vars` but missing from `string_rodata_cur`).
+    pub(crate) fn string_unknown_error(&self, var: &str) -> String {
+        if let Some(assigns) = self.string_assignments.get(var) {
+            // Variables with tracked assignments: name the conflicting ones.
+            let mut msg = format!(
+                "passing `{var}`: its value as a `string` is unknown \
+                 after a branch or loop — the compiler cannot prove which text \
+                 the variable holds. The assignments that make it impossible to \
+                 decide:\n"
+            );
+            // The assignments are named by what they say, not by a line number: after an
+            // `include` the source the codegen walks is the spliced one, so the count here is
+            // 150 lines past anything the programmer can point at in their own file. A number
+            // that names a line the reader cannot find is worse than no number at all.
+            for (_line, desc) in assigns {
+                msg.push_str(&format!("  {desc}\n"));
+            }
+            msg.push_str(
+                "Remove one of the conflicting assignments so there is a \
+                          single, provable value.\n",
+            );
+            msg
+        } else {
+            format!(
+                "passing `{var}`: its value as a `string` is unknown \
+                 because {var} was not initialized from a literal or \
+                 another traceable string variable. Assign a literal to \
+                 {var} before passing it, or restructure the code \
+                 so the compiler can see which text flows."
+            )
+        }
+    }
+    /// Merge two post-branch states into `string_rodata_cur` / `string_vars`.
+    /// For every variable that is a tracked string after at least one branch,
+    /// keep the rodata label only when both branches agree; otherwise mark it
+    /// as unknown.  Variables present only in one branch are also marked
+    /// unknown (one branch has a value, the other does not).
+    ///
+    /// `has_else: false` means no else block was present, so `post_else` /
+    /// `post_else_vars` are actually a copy of the pre-if state.  In that
+    /// case we still merge — variables that changed in *then* will have the
+    /// label in `post_then` but not in `post_else`, producing the same
+    /// "unknown" result.  The implementation is identical so we only need
+    /// to compute the union from the post-branch states regardless.
+    pub(crate) fn merge_string_branches(
+        &mut self,
+        _pre_if: &HashMap<String, String>,
+        _pre_vars: &HashSet<String>,
+        post_then: &HashMap<String, String>,
+        post_then_vars: &HashSet<String>,
+        post_else: &HashMap<String, String>,
+        post_else_vars: &HashSet<String>,
+    ) {
+        // For each variable in string_vars after the if, decide its post-if label.
+        let final_vars: HashSet<String> = {
+            let mut v = post_then_vars.clone();
+            v.extend(post_else_vars.iter().cloned());
+            v
+        };
+        for var in &final_vars {
+            let then_label = post_then.get(var);
+            let else_label = post_else.get(var);
+
+            if then_label == else_label {
+                // Both branches agree -- keep the label.
+                if let Some(l) = then_label {
+                    self.string_rodata_cur.insert(var.clone(), l.clone());
+                }
+            } else {
+                // Disagree or one side has no value → unknown.
+                self.string_rodata_cur.remove(var);
+            }
         }
     }
 }

@@ -1,9 +1,47 @@
 use super::*;
-use crate::ast::{Expr, Function, Param, Stmt, StructDef, Type, Visibility};
+use crate::ast::{Block, Expr, Function, Param, Stmt, StructDef, Type, Visibility};
 use crate::lexer::tokenize;
 
 fn parse_fn(src: &str) -> Function {
     Parser::new(tokenize(src)).parse_function()
+}
+
+#[test]
+fn a_rejected_token_carries_its_line_and_column() {
+    // The parser refuses the `;` where the `if` wanted a `{`; the refusal must say EXACTLY
+    // where, in the text that was parsed: line 2, the column of the `;` (column 13), and the
+    // tokens written the way a person writes them.
+    let src = "fn main() -> i64 {\n  if a == 1;\n}\n";
+    let (toks, lines, cols) = crate::lexer::tokenize_located(src);
+    let mut p = Parser::with_positions(toks, lines, cols);
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.parse_program()))
+        .expect_err("a `;` where a `{` belongs must be refused");
+    std::panic::set_hook(prev);
+    let p = err
+        .downcast_ref::<ParsePanic>()
+        .expect("a parse refusal must carry a structured position");
+    assert_eq!(p.line, 2, "line of the `;`: {p:?}");
+    assert_eq!(p.col as usize, src[src.find('\n').unwrap() + 1..].find(';').unwrap() + 1);
+    assert_eq!(p.message, "expected `{`, got `;`");
+}
+
+#[test]
+fn end_of_input_refuses_at_the_last_token_not_one_line_past_it() {
+    // An unterminated block: the honest position is where the text stops -- the last token's
+    // line -- never a line index the file does not have.
+    let (toks, lines, cols) = crate::lexer::tokenize_located("fn main() -> i64 {\nif a == 1");
+    let mut p = Parser::with_positions(toks, lines, cols);
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.parse_program()))
+        .expect_err("end of input is a parse error");
+    std::panic::set_hook(prev);
+    let p = err
+        .downcast_ref::<ParsePanic>()
+        .expect("a parse refusal must carry a structured position");
+    assert_eq!(p.line, 2, "the file has two lines: {p:?}");
 }
 
 fn named(t: &str) -> Type {
@@ -46,7 +84,10 @@ fn parses_multiple_tests_with_distinct_names() {
     ));
     let funcs = p.parse_program();
     assert_eq!(funcs.len(), 2);
-    assert_ne!(funcs[0].name, funcs[1].name, "each test gets a distinct symbol");
+    assert_ne!(
+        funcs[0].name, funcs[1].name,
+        "each test gets a distinct symbol"
+    );
     assert!(funcs.iter().all(|f| f.is_test));
 }
 
@@ -465,6 +506,30 @@ fn parses_field_access_and_call() {
 }
 
 #[test]
+fn rejects_a_call_whose_callee_is_not_a_name() {
+    // `let mut b = 2 (a + b) + (a + b)` on ONE line: with no semicolons the parser has
+    // to decide where `2` ends, and it used to decide that `(a + b)` was a CALL of the
+    // literal `2`. The resulting program was not the one written, no line survived,
+    // and the tell only surfaced later when x64 codegen met `Int(2)` as a callee.
+    // Sond has no invocable values: only a name (or a method on one) may be called.
+    let mut p = Parser::new(tokenize(
+        "fn main() {\n let mut a = 1\n let mut b = 2 (a + b) + (a + b)\n}",
+    ));
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.parse_program()))
+        .expect_err("a call of a literal must be refused");
+    std::panic::set_hook(prev);
+    let rejection = err
+        .downcast_ref::<ParsePanic>()
+        .expect("a parse refusal carries a position");
+    assert!(
+        rejection.message.contains("a call can only target a function name"),
+        "{rejection:?}"
+    );
+}
+
+#[test]
 fn parses_a_call_with_positional_and_keyword_args() {
     // `round(x, decimals=2)`: RFC-0002 examples use keyword args.
     assert_eq!(
@@ -490,8 +555,16 @@ fn parses_a_spawn_statement() {
     // `spawn f(a)` is a statement whose inner expression is the call to run on a
     // new thread.
     let f = parse_fn("fn run(a: i64) -> i64 { spawn work(a) 0 }");
-    let is_spawn_call = f.body.stmts.iter().any(|s| matches!(s, Stmt::Spawn(Expr::Call(_, _))));
-    assert!(is_spawn_call, "the body should hold a Spawn of a call, got {:?}", f.body);
+    let is_spawn_call = f
+        .body
+        .stmts
+        .iter()
+        .any(|s| matches!(s, Stmt::Spawn(Expr::Call(_, _))));
+    assert!(
+        is_spawn_call,
+        "the body should hold a Spawn of a call, got {:?}",
+        f.body
+    );
 }
 
 #[test]
@@ -552,12 +625,17 @@ fn parses_a_par_reduce() {
 #[test]
 fn parse_block_stamps_each_statement_with_its_source_line() {
     // Line 1: `fn f() {`; line 2: `let a = 1`; line 3: `let b = 2`; line 4: `a + b` (the tail).
-    let (toks, lines) = crate::lexer::tokenize_located("fn f() -> i64 {\nlet a = 1\nlet b = 2\na + b\n}");
+    let (toks, lines, _) =
+        crate::lexer::tokenize_located("fn f() -> i64 {\nlet a = 1\nlet b = 2\na + b\n}");
     let mut p = Parser::with_lines(toks, lines);
     let funcs = p.parse_program();
     let body = &funcs[0].body;
     assert_eq!(body.stmts.len(), 2, "two statements; `a + b` is the tail");
-    assert_eq!(body.stmt_lines, vec![2, 3], "each statement stamped with its line");
+    assert_eq!(
+        body.stmt_lines,
+        vec![2, 3, 4],
+        "each statement plus the tail stamped with its source line"
+    );
 }
 
 #[test]
@@ -586,7 +664,10 @@ fn node_is_a_free_identifier_outside_a_graph() {
     // `node` is contextual: it must still work as an ordinary parameter/variable name (json.snd
     // uses `fn json_type(node: i64)`), so making it a keyword only inside `graph` matters.
     let f = parse_fn("fn json_type(node: i64) -> i64 { node }");
-    assert_eq!(f.params[0].name, "node", "`node` is a normal parameter name");
+    assert_eq!(
+        f.params[0].name, "node",
+        "`node` is a normal parameter name"
+    );
 }
 
 // --- RFC-0014: ports (interfaces implemented per target) ---
@@ -603,13 +684,20 @@ fn parses_a_port_with_bodyless_signatures() {
          }",
     ));
     let funcs = p.parse_program();
-    assert!(funcs.is_empty(), "a port declares no functions, got {funcs:?}");
+    assert!(
+        funcs.is_empty(),
+        "a port declares no functions, got {funcs:?}"
+    );
     let ports = p.take_ports();
     assert_eq!(ports.len(), 1, "one port parsed");
     assert_eq!(ports[0].name, "Serial");
     let names: Vec<&str> = ports[0].methods.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(names, vec!["serial_init", "serial_getc", "serial_putc"]);
-    assert_eq!(ports[0].methods[1].ret, Some(named("i64")), "keeps the return type");
+    assert_eq!(
+        ports[0].methods[1].ret,
+        Some(named("i64")),
+        "keeps the return type"
+    );
     assert_eq!(ports[0].methods[2].params[0].name, "b", "keeps the params");
 }
 
@@ -625,7 +713,11 @@ fn a_port_signature_keeps_its_contracts() {
     p.parse_program();
     let ports = p.take_ports();
     assert_eq!(ports[0].methods[0].ret_name.as_deref(), Some("b"));
-    assert_eq!(ports[0].methods[0].ensures.len(), 1, "the ensures clause is kept");
+    assert_eq!(
+        ports[0].methods[0].ensures.len(),
+        1,
+        "the ensures clause is kept"
+    );
 }
 
 #[test]
@@ -659,11 +751,17 @@ fn parses_a_provider_with_target_and_bodied_functions() {
          }",
     ));
     let funcs = p.parse_program();
-    assert!(funcs.is_empty(), "provider methods are not top-level functions, got {funcs:?}");
+    assert!(
+        funcs.is_empty(),
+        "provider methods are not top-level functions, got {funcs:?}"
+    );
     let provs = p.take_providers();
     assert_eq!(provs.len(), 1, "one provider parsed");
     assert_eq!(provs[0].port, "Serial", "names the port it implements");
-    assert_eq!(provs[0].target, "pic16", "names the target it implements for");
+    assert_eq!(
+        provs[0].target, "pic16",
+        "names the target it implements for"
+    );
     let names: Vec<&str> = provs[0].methods.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(names, vec!["serial_init", "serial_getc"]);
 }
@@ -700,7 +798,6 @@ fn parses_a_use_directive() {
 }
 
 #[test]
-#[should_panic(expected = "unrecognised top-level declaration")]
 fn rejects_an_unrecognised_top_level_declaration() {
     // A top-level declaration the parser does not know must be a syntax ERROR, never a
     // silent stop.
@@ -720,8 +817,21 @@ fn rejects_an_unrecognised_top_level_declaration() {
     //
     // A compiler whose whole claim is that it rejects what it cannot prove cannot also
     // accept what it cannot read.
-    let mut p = Parser::new(tokenize("const X = 1\ntest \"t\" { let y = 1 }"));
-    let _ = p.parse_program();
+    let (toks, lines, cols) = crate::lexer::tokenize_located("const X = 1\ntest \"t\" { let y = 1 }");
+    let mut p = Parser::with_positions(toks, lines, cols);
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.parse_program()))
+        .expect_err("an unknown top-level word must stop the parse, not end it quietly");
+    std::panic::set_hook(prev);
+    let rejection = err
+        .downcast_ref::<ParsePanic>()
+        .expect("a parse refusal carries a position");
+    assert!(
+        rejection.message.contains("unrecognised top-level declaration"),
+        "{rejection:?}"
+    );
+    assert_eq!((rejection.line, rejection.col), (1, 1), "it points at `const`");
 }
 
 #[test]
@@ -783,5 +893,326 @@ fn a_struct_literal_still_parses_after_a_range_loop() {
          let p = P { a: 1, b: 2 }\np.a + s }",
     ))
     .parse_program();
-    assert_eq!(funcs.len(), 1, "a struct literal after a range loop must still parse");
+    assert_eq!(
+        funcs.len(),
+        1,
+        "a struct literal after a range loop must still parse"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BUG FIX: stmt_lines must always match stmts after the parser runs.
+// These tests establish that no statement ever enters stmts without a
+// synchronized line number.  The Block methods (push_stmt, insert_stmt)
+// are the only way the parser mutates these vectors.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stmt_lines_len_equals_stmts_len_after_parse_function_body() {
+    let src = "fn f() -> i64 {\n\
+               let a[3]\n\
+               a[0] = 1\n\
+               for x in a {\n\
+               s = s + x\n\
+               }\n\
+               for i in 0..3 {\n\
+               if 1 == 1 { continue }\n\
+               s = s + noexiste\n\
+               }\n\
+               0\n\
+               }";
+    let (toks, lines, _) = crate::lexer::tokenize_located(src);
+    let mut p = Parser::with_lines(toks, lines);
+    let funcs = p.parse_program();
+    for (i, f) in funcs.iter().enumerate() {
+        let tail_count = if f.body.tail.is_some() { 1 } else { 0 };
+        let expected_lines = f.body.stmts.len() + tail_count;
+        assert_eq!(
+            f.body.stmt_lines.len(),
+            expected_lines,
+            "function #{i}: stmt_lines.len ({}) must equal stmts.len ({}) + tail ({}); got stmt_lines={:?}",
+            f.body.stmt_lines.len(),
+            f.body.stmts.len(),
+            tail_count,
+            f.body.stmt_lines
+        );
+        check_block_invariants(&f.body, i);
+    }
+}
+
+fn check_block_invariants(b: &Block, ctx: usize) {
+    let expected_lines = b.stmts.len() + if b.tail.is_some() { 1 } else { 0 };
+    assert_eq!(
+        b.stmt_lines.len(),
+        expected_lines,
+        "block #{ctx}: stmt_lines.len ({}) must equal stmts.len ({}) + tail ({}); got {:?}",
+        b.stmt_lines.len(),
+        b.stmts.len(),
+        if b.tail.is_some() { 1 } else { 0 },
+        b.stmt_lines
+    );
+    if b.stmt_lines.len() == b.stmts.len() {
+        for (i, stmt) in b.stmts.iter().enumerate() {
+            let _line = b.stmt_lines[i];
+            match stmt {
+                Stmt::For { body, .. } => {
+                    check_block_invariants(body, i);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Nothing outside `ast.rs` may push or insert into a `Block`'s `stmts` directly.
+///
+/// `stmts` and `stmt_lines` are parallel BY INDEX. A direct `stmts.insert(0, ..)` in the `for`
+/// desugaring shifted every line by one without touching `stmt_lines`, and the error for a bad
+/// name inside a loop body came out pointing at the `for` line instead of at the offending one.
+/// `push_stmt` / `insert_stmt` are the only entry points that keep the two in step.
+///
+/// The guard walks the source TREE rather than a list of files: a list is a thing to maintain,
+/// and the file that reintroduces this will be one nobody remembered to add to it.
+#[test]
+fn nothing_outside_ast_touches_a_block_s_statements_directly() {
+    // Built at run time so this very file does not contain the string it looks for: written out
+    // in full, the guard found ITSELF and failed on a clean tree -- the same way `pgrep -f` finds
+    // its own command line.
+    let empujar = format!(".stmts{}", ".push(");
+    let meter = format!(".stmts{}", ".insert(");
+    fn recorrer(dir: &std::path::Path, culpables: &mut Vec<String>, empujar: &str, meter: &str) {
+        for e in std::fs::read_dir(dir).expect("the source tree must be readable") {
+            let p = e.expect("each entry must be readable").path();
+            if p.is_dir() {
+                recorrer(&p, culpables, empujar, meter);
+                continue;
+            }
+            if p.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            if p.file_name().and_then(|s| s.to_str()) == Some("ast.rs") {
+                continue; // where push_stmt / insert_stmt live
+            }
+            let texto = std::fs::read_to_string(&p).expect("each source file must be readable");
+            for (n, l) in texto.lines().enumerate() {
+                let code = l.split("//").next().unwrap_or("");
+                if code.contains(empujar) || code.contains(meter) {
+                    culpables.push(format!("{}:{}", p.display(), n + 1));
+                }
+            }
+        }
+    }
+    let raiz = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut culpables = Vec::new();
+    recorrer(&raiz, &mut culpables, &empujar, &meter);
+    assert!(
+        culpables.is_empty(),
+        "these push or insert into a Block's `stmts` without its line, which desynchronises \
+         `stmt_lines` and makes error messages point at the wrong line -- use `push_stmt` / \
+         `insert_stmt`: {culpables:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// for i in a..b: bounds that MUST be lifted (function call + body mutation)
+// ---------------------------------------------------------------------------
+
+/// The helper extracts the inner For loop from the desugared function body.
+fn for_body_and_cond(f: &Function) -> Option<(&crate::ast::Block, &crate::ast::Expr)> {
+    let for_stmt = f
+        .body
+        .stmts
+        .iter()
+        .find(|s| matches!(s, crate::ast::Stmt::For { .. }))?;
+    match for_stmt {
+        crate::ast::Stmt::For { body, cond, .. } => cond.as_ref().map(|c| (body, c)),
+        _ => None,
+    }
+}
+
+fn for_cond_right_var(f: &Function) -> Option<String> {
+    let (_, cond) = for_body_and_cond(f)?;
+    if let crate::ast::Expr::Binary(_, _, right) = cond {
+        if let crate::ast::Expr::Var(v) = right.as_ref() {
+            return Some(v.clone());
+        }
+    }
+    None
+}
+
+/// Does a let-binding for the loop counter appear in the function body?
+fn has_counter_let(f: &Function, var: &str) -> bool {
+    f.body.stmts.iter().any(|s| {
+        matches!(
+            s,
+            crate::ast::Stmt::Let { name, .. } if name == var
+        )
+    })
+}
+
+/// Returns the name of the lifted bound variable (`__endN`) if the bound
+/// was materialised into a local, or `None` if the bound is used directly.
+fn captured_end_name(f: &Function) -> Option<String> {
+    for s in &f.body.stmts {
+        if let crate::ast::Stmt::Let { name, .. } = s {
+            if name.starts_with("__end") {
+                return Some(name.clone());
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn bound_with_function_call_is_lifted() {
+    // `for i in 0..tope()` → a function call in the bound must be evaluated once.
+    // The parser lifts it to `let mut __endN = tope()` and uses `__endN` in the
+    // condition, so the call happens exactly once instead of once per iteration.
+    let funcs = Parser::new(tokenize(
+        "fn tope() -> i64 { 5 }\n\
+         fn main() -> i64 { let mut s = 0\nfor i in 0..tope() { s = s + i }\ns }",
+    ))
+    .parse_program();
+    let f = funcs.iter().find(|f| f.name == "main").expect("must find main");
+    // Must produce: let mut i = 0; (counter let)
+    assert!(has_counter_let(f, "i"), "counter must be declared");
+    // Must produce: let mut __endN = tope();  (lifted bound)
+    let end_name = captured_end_name(f);
+    assert!(
+        end_name.is_some(),
+        "function-call bound must be lifted to a local variable"
+    );
+    // The for loop's condition must reference the lifted name, not the call.
+    assert_eq!(
+        for_cond_right_var(f),
+        end_name,
+        "for condition must reference the lifted bound"
+    );
+}
+
+#[test]
+fn bound_with_body_assignment_is_lifted() {
+    // `for i in 0..n { n = n + 1 ... }` → the body assigns to a name that appears
+    // in the bound. Without lifting, the bound would change each iteration, causing
+    // an infinite loop. The parser lifts to `let mut __endN = n` before the loop.
+    let funcs = Parser::new(tokenize(
+        "fn main() -> i64 { let mut n = 5\nlet mut s = 0\nfor i in 0..n { n = n + 1; s = s + i }\ns }",
+    ))
+    .parse_program();
+    let f = &funcs[0];
+    assert!(has_counter_let(f, "i"), "counter must be declared");
+    let end_name = captured_end_name(f);
+    assert!(
+        end_name.is_some(),
+        "bound that references a body-assigned variable must be lifted"
+    );
+    // The condition must reference the lifted name, not the original var.
+    assert_eq!(
+        for_cond_right_var(f),
+        end_name,
+        "for condition must reference the lifted bound"
+    );
+}
+
+#[test]
+fn stable_variable_bound_is_not_lifted() {
+    // `for i in 0..n { s = s + i }` → a bare variable `n` in the bound, with
+    // no call in the bound and no body assignment to `n`. The bound should NOT
+    // be lifted, so the prover can still reason about `n` (e.g. `i < n` for
+    // bounds-checking).
+    let funcs = Parser::new(tokenize(
+        "fn main(n: i64) -> i64 { let mut s = 0\nfor i in 0..n { s = s + i }\ns }",
+    ))
+    .parse_program();
+    let f = &funcs[0];
+    assert!(has_counter_let(f, "i"), "counter must be declared");
+    // No __endN let-binding — the bound stays as-is.
+    let end_name = captured_end_name(f);
+    assert!(
+        end_name.is_none(),
+        "stable variable bound must NOT be lifted"
+    );
+    // The condition is `i < n` directly.
+    assert_eq!(
+        for_cond_right_var(f),
+        Some("n".to_string()),
+        "stable bound must stay as the original variable"
+    );
+}
+
+#[test]
+fn a_bound_that_is_not_a_plain_name_is_never_stable() {
+    // Anything with a call, or any computed expression, has to be lifted: the parser cannot know
+    // that evaluating it twice gives the same answer, and the whole bug was evaluating it N+1
+    // times. Only a literal or a plain name/field can stay in the condition, where the prover
+    // still sees it by name.
+    let vacio = Block::default();
+    assert!(!end_is_stable(&parse_e("f(g())"), &vacio), "a nested call must be lifted");
+    assert!(!end_is_stable(&parse_e("f(a) + 1"), &vacio), "a call inside a sum must be lifted");
+    assert!(!end_is_stable(&parse_e("a + b"), &vacio), "a computed bound must be lifted");
+    assert!(end_is_stable(&parse_e("4"), &vacio), "a literal never changes");
+    assert!(end_is_stable(&parse_e("a.len"), &vacio), "a field nobody assigns to stays in place");
+}
+
+#[test]
+fn a_bound_variable_the_body_assigns_to_is_seen_however_deep_the_assignment_is() {
+    // The first fix only looked at the body's top-level statements, so moving the very same
+    // assignment inside an `if` brought the infinite loop straight back: measured 51 turns where
+    // 4 were due.
+    let plano = parse_fn("fn f(n: i64) -> i64 { n = 5\nn }");
+    assert!(block_assigns_path(&plano.body, "n"), "a top-level assignment must be seen");
+
+    let anidado = parse_fn("fn f(n: i64) -> i64 { if n > 0 { n = 5 }\nn }");
+    assert!(block_assigns_path(&anidado.body, "n"), "an assignment inside an `if` must be seen");
+
+    let en_bucle = parse_fn("fn f(n: i64) -> i64 { for j in 0..2 { n = n + 1 }\nn }");
+    assert!(block_assigns_path(&en_bucle.body, "n"), "an assignment inside a loop must be seen");
+
+    let solo_lee = parse_fn("fn f(n: i64) -> i64 { let x = n\nx }");
+    assert!(!block_assigns_path(&solo_lee.body, "n"), "reading a bound variable is not assigning");
+
+    // A prefix of the bound's path counts: replacing the whole slice moves its `len` with it.
+    let reemplaza = parse_fn("fn f(s: Slice, u: Slice) -> i64 { s = u\n0 }");
+    assert!(block_assigns_path(&reemplaza.body, "s.len"), "assigning `s` disturbs `s.len`");
+    // Writing one field leaves the others alone: a bound on `s.cap` survives `s.len = 1`.
+    let un_campo = parse_fn("fn f(s: Slice) -> i64 { s.len = 1\n0 }");
+    assert!(block_assigns_path(&un_campo.body, "s.len"), "the field written is disturbed");
+    assert!(!block_assigns_path(&un_campo.body, "s.cap"), "a sibling field is not");
+}
+
+#[test]
+fn writing_into_an_element_does_not_lift_the_length_bound() {
+    // `for i in 0..s.len { s[i] = 0 }` is the single most common loop in the language, and the
+    // prover clears the index by matching `i < s.len` BY NAME. Lifting that bound to `__end0`
+    // would take the name away and start rejecting programs that compile today.
+    //
+    // Writing into an element is not writing to the name: `s[i] = 0` changes neither `s` nor
+    // `s.len`. Only an assignment to the bound's own path -- or to a prefix of it, since `s = t`
+    // moves `s.len` with it -- may lift.
+    let escribe_elemento = Parser::new(tokenize(
+        "fn main(s: Slice) -> i64 { let mut t = 0\nfor i in 0..s.len { s[i] = 0 }\nt }",
+    ))
+    .parse_program();
+    assert!(
+        captured_end_name(&escribe_elemento[0]).is_none(),
+        "writing into an element must leave the `s.len` bound where the prover can see it"
+    );
+
+    let escribe_longitud = Parser::new(tokenize(
+        "fn main(s: Slice) -> i64 { let mut t = 0\nfor i in 0..s.len { s.len = s.len + 1 }\nt }",
+    ))
+    .parse_program();
+    assert!(
+        captured_end_name(&escribe_longitud[0]).is_some(),
+        "a body that raises the bound itself must have it evaluated once"
+    );
+
+    let reasigna_base = Parser::new(tokenize(
+        "fn main(s: Slice, u: Slice) -> i64 { let mut t = 0\nfor i in 0..s.len { s = u }\nt }",
+    ))
+    .parse_program();
+    assert!(
+        captured_end_name(&reasigna_base[0]).is_some(),
+        "assigning the whole slice moves its `len` with it, so the bound must be lifted"
+    );
 }

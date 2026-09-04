@@ -135,8 +135,28 @@ impl Codegen {
                 self.canon(target);
             }
             // `s.utf8`: the literal's own bytes, at their address in `.rodata`.
-            Expr::Field(inner, field) if field == "utf8" && matches!(inner.as_ref(), Expr::Str(_)) => {
+            Expr::Field(inner, field)
+                if field == "utf8" && matches!(inner.as_ref(), Expr::Str(_)) =>
+            {
                 self.expr(inner)
+            }
+            // `.utf8` on a variable: for string locals with a rodata label, load that label;
+            // for string parameters, the variable's stack slot already holds the bytes pointer
+            // (after d58a0ad string params carry the interned UTF-8 address), so fall through.
+            Expr::Field(base, field)
+                if field == "utf8" && matches!(base.as_ref(), Expr::Var(_)) =>
+            {
+                match base.as_ref() {
+                    Expr::Var(var_name) if self.string_rodata_cur.contains_key(var_name) => {
+                        let label = self.string_rodata_cur[var_name].clone();
+                        self.line(&format!("    leaq {label}(%rip), %rax"));
+                    }
+                    _ => {
+                        // Untracked string param or other source: load from the stack slot.
+                        // After d58a0ad this is already the bytes pointer.
+                        self.expr(base);
+                    }
+                }
             }
             // `s.len` on a view whose length is written down (a `string`, or `u32[16]`) is that
             // constant: the compiler counted it, so nothing has to be walked to find out.
@@ -280,13 +300,25 @@ impl Codegen {
 
     /// Interns an `f64` literal by its bit pattern, returning its `.rodata` label.
     pub(crate) fn intern_float(&mut self, bits: u64) -> String {
+        if let Some((label, _)) = self.float_consts.iter().find(|(_, b)| *b == bits) {
+            return label.clone();
+        }
         let label = format!(".Lflt{}", self.float_consts.len());
         self.float_consts.push((label.clone(), bits));
         label
     }
 
-    /// Interns a string literal, returning its `.rodata` label.
+    /// Interns a string literal, returning its `.rodata` label. Equal contents share one label,
+    /// which is what "intern" means and what callers assume: `S.utf8` used twice has to be the
+    /// same address, or an equality against it is false while looking true.
+    ///
+    /// Merging is safe precisely because these live in `.rodata`: a program that writes through
+    /// the pointer already faults today, so aliasing two literals cannot turn a working mutation
+    /// into a silently shared one. On UEFI the same table becomes UTF-16 data, equally constant.
     pub(crate) fn intern_string(&mut self, s: &str) -> String {
+        if let Some((label, _)) = self.strings.iter().find(|(_, t)| t == s) {
+            return label.clone();
+        }
         let label = format!(".Lstr{}", self.strings.len());
         self.strings.push((label.clone(), s.to_string()));
         label
@@ -439,13 +471,44 @@ impl Codegen {
         self.expr(cond);
         self.line("    cmpq $0, %rax");
         self.line(&format!("    je {else_l}"));
+
+        // Save string-literal state before either branch runs.
+        let pre_if = self.save_string_state();
+
         self.block(then_b);
+        // State after then branch is now in self.*
+        let post_then = self.save_string_state();
+
         self.line(&format!("    jmp {end_l}"));
         self.line(&format!("{else_l}:"));
         match else_b {
-            Some(eb) => self.block(eb),
-            None => self.line("    movq $0, %rax"),
+            Some(eb) => {
+                self.block(eb);
+                // State after else branch is in self.*
+                let post_else = self.save_string_state();
+                self.merge_string_branches(
+                    &pre_if.0,
+                    &pre_if.1,
+                    &post_then.0,
+                    &post_then.1,
+                    &post_else.0,
+                    &post_else.1,
+                );
+            }
+            None => {
+                // No else branch: the "else" state is pre-if
+                // (the variable value was just preserved).
+                self.merge_string_branches(
+                    &pre_if.0,
+                    &pre_if.1,
+                    &post_then.0,
+                    &post_then.1,
+                    &pre_if.0,
+                    &pre_if.1,
+                );
+            }
         }
+
         self.line(&format!("{end_l}:"));
     }
 }

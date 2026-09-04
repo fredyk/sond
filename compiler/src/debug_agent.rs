@@ -398,7 +398,7 @@ mod tests {
         // A trivial host program plus the agent, exactly as the --debug driver assembles them.
         let program = format!("fn main() -> i64 {{ let x = 1\nx }}\n{SOURCE}");
 
-        let (toks, lines) = tokenize_located(&program);
+        let (toks, lines, _) = tokenize_located(&program);
         let mut p = Parser::with_lines(toks, lines);
         let funcs = p.parse_program();
         let mut globals = p.take_globals();
@@ -443,6 +443,9 @@ mod tests {
 
         // And it must lower without panicking, emitting the checkpoint the codegen calls into.
         let asm = emit_program_debug_g(&globals, &structs, &funcs);
-        assert!(asm.contains("__dbg_step"), "the agent is lowered into the program");
+        assert!(
+            asm.contains("__dbg_step"),
+            "the agent is lowered into the program"
+        );
     }
 }

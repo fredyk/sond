@@ -8,10 +8,6 @@
 include "x86_64/linux/http-server.snd"
 include "x86_64/linux/testing.snd"
 
-let O_WRONLY = 1
-let O_CREAT = 64
-let O_TRUNC = 512
-
 test "http_safe_path allows names and subdirs, rejects traversal and bad chars" {
     let __s0_15: string = "index.html"
     assert_eq(http_safe_path(bytes_from_cstr(__s0_15.utf8)), 1)
@@ -43,6 +39,26 @@ test "http_send_redirect writes a 301 with the Location header" {
     let __s6_42: string = "HTTP/1.1 301 Moved Permanently\r\nLocation: https://sondlang.org/"
     let want = bytes_from_cstr(__s6_42.utf8)
     assert_eq(bytes_eq(bytes_slice(resp, 0, bytes_len(want)), want), 1)
+}
+
+// The status line goes in as it is written, with no `.utf8` at the call site, and the bytes on
+// the wire are the same ones as before: the signature changed, the response did not.
+test "http_send_status takes the status line as text" {
+    let fds[1]
+    syscall(SYS_pipe, fds)
+    let rfd = peek32(fds + 0)
+    let wfd = peek32(fds + 4)
+
+    http_send_status(wfd, "404 Not Found")
+    close_fd(wfd)
+
+    let buf[256]
+    let n = read_buf(rfd, buf, 256)
+    close_fd(rfd)
+
+    let want = bytes_from_str("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+    assert_eq(n, bytes_len(want))
+    assert_eq(bytes_eq(bytes_from_raw(buf, n), want), 1)
 }
 
 // Integration: over a real loopback socket, http_serve_file streams a file as 200 (covering
@@ -117,4 +133,49 @@ test "http_serve_file streams a 200 and 404s a missing file" {
     let st[1]
     syscall(SYS_wait4, pid, st, 0, 0)
     assert_eq((st[0] >> 8) & 255, 0)
+}
+
+// A directory opens fine and lseek even reports a size for it, but read() then returns -EISDIR:
+// the old code answered 200 with a Content-Length and zero bytes of body, and the peer read the
+// NEXT response as the missing body (a proxy turns that into an intermittent 502).
+test "http_serve_file 404s a directory instead of promising a body it cannot send" {
+    let fds[1]
+    syscall(SYS_pipe, fds)
+    let rfd = peek32(fds + 0)
+    let wfd = peek32(fds + 4)
+
+    http_serve_file(wfd, bytes_from_str("."), "text/plain".utf8)
+    close_fd(wfd)
+
+    let buf[256]
+    let n = read_buf(rfd, buf, 256)
+    close_fd(rfd)
+
+    let want = bytes_from_str("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+    assert_eq(n, bytes_len(want))
+    assert_eq(bytes_eq(bytes_from_raw(buf, n), want), 1)
+}
+
+// HEAD: byte for byte the headers a GET would send (Content-Length included, so it still states
+// the real size), and then nothing at all.
+test "http_head_file sends the GET headers and no body" {
+    let fd = open_file("__httptest.txt".utf8, O_WRONLY | O_CREAT | O_TRUNC, 420)
+    write_buf(fd, "hello sond\n".utf8, 11)
+    close_fd(fd)
+
+    let fds[1]
+    syscall(SYS_pipe, fds)
+    let rfd = peek32(fds + 0)
+    let wfd = peek32(fds + 4)
+
+    http_head_file(wfd, bytes_from_str("__httptest.txt"), "text/plain".utf8)
+    close_fd(wfd)
+
+    let buf[256]
+    let n = read_buf(rfd, buf, 256)
+    close_fd(rfd)
+
+    let want = bytes_from_str("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 11\r\nConnection: keep-alive\r\n\r\n")
+    assert_eq(n, bytes_len(want))
+    assert_eq(bytes_eq(bytes_from_raw(buf, n), want), 1)
 }

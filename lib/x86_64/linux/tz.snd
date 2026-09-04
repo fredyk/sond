@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/tz.snd: how far local time is from UTC, right now or at a given instant.
+//
+// Public API:
+//   tz_offset() -> i64              seconds east of UTC for the current instant
+//   tz_offset_at(epoch) -> i64      the same, for `epoch`
+//   tz_offset_from(path, epoch)     the same, reading a specific TZif file
+//
+// Negative results are errors (TZ_ENOFILE, TZ_EFORMAT, TZ_ETOOBIG), and they are chosen far
+// outside the range a real offset can occupy: an offset of 0 is a perfectly good ANSWER -- it is
+// UTC -- so returning it on failure would silently put a program in London every time
+// /etc/localtime went missing.
+//
+// Why not a number from a config file: the offset of a place is not a constant. Most of the
+// world changes it twice a year, so a value written down is right for a few months and then
+// wrong for a few months, and being wrong TWICE A YEAR is harder to notice than being wrong
+// always -- nobody connects an odd hour in March to a setting typed last November. The only
+// correct source is the zone database, which is what /etc/localtime is.
+//
+// The format is TZif (RFC 8536). What matters here: a v1 block with 32-bit transition times,
+// followed -- in version 2 and later -- by a SECOND header and block with 64-bit ones. The 64-bit
+// block is the one to read; the 32-bit one runs out in 2038, and a parser that stops at it gets
+// an answer that is right today and wrong later, which is the worst kind.
+
+include "x86_64/linux/io.snd"
+include "x86_64/linux/time.snd"
+
+let TZ_ENOFILE = 0 - 2000001   // the file is not there, or cannot be read
+let TZ_EFORMAT = 0 - 2000002   // not a TZif, or truncated, or version 1 only
+let TZ_ETOOBIG = 0 - 2000003   // the zone file does not fit in the buffer below
+
+// 8 KiB. Every real zone file on a current tzdata is under 4 KiB (the larger things under
+// /usr/share/zoneinfo are text tables, not TZif binaries), so this is double the worst case --
+// and a file that still does not fit is reported rather than parsed halfway.
+let TZ_BUF_BYTES = 8192
+let mut tz_buf[1024]
+
+let TZFILE_PATH: string = "/etc/localtime"
+
+// A big-endian unsigned 32-bit field.
+fn tz_be32u(p: i64) -> i64 {
+    let hi = (peek8(p) << 24) | (peek8(p + 1) << 16)
+    hi | (peek8(p + 2) << 8) | peek8(p + 3)
+}
+
+// A big-endian SIGNED 32-bit field, sign-extended. Every offset west of Greenwich is negative,
+// and read as unsigned it comes back as roughly 4.29 billion seconds: 1193 hours out, which no
+// plausibility check on a clock would catch because nothing about the number looks like a time.
+fn tz_be32(p: i64) -> i64 {
+    let v = tz_be32u(p)
+    if v >= 0x80000000 { return v - 0x100000000 }
+    v
+}
+
+// A big-endian signed 64-bit field (a transition time).
+fn tz_be64(p: i64) -> i64 {
+    (tz_be32u(p) << 32) | tz_be32u(p + 4)
+}
+
+// The size of a v1 data block, given the header at `h`. Everything in it is counted by the
+// header, which is what makes the 64-bit block behind it findable at all.
+fn tz_v1_size(h: i64) -> i64 {
+    let isutcnt = tz_be32u(h + 20)
+    let isstdcnt = tz_be32u(h + 24)
+    let leapcnt = tz_be32u(h + 28)
+    let timecnt = tz_be32u(h + 32)
+    let typecnt = tz_be32u(h + 36)
+    let charcnt = tz_be32u(h + 40)
+    timecnt * 5 + typecnt * 6 + charcnt + leapcnt * 8 + isstdcnt + isutcnt
+}
+
+// Seconds east of UTC at `epoch`, according to the TZif file at `path`; negative on error.
+//
+// The walk is linear from the END of the transition list, because the answer is nearly always
+// one of the last few: a program asking about now, or about a recent log line, finds it in two
+// or three steps, while a binary search would pay the same cost for every question.
+fn tz_offset_from(path: i64, epoch: i64) -> i64 {
+    let n = read_file(path, tz_buf, TZ_BUF_BYTES)
+    if n == 0 - 27 { return TZ_ETOOBIG }   // EFBIG: the file is larger than the buffer
+    if n < 0 { return TZ_ENOFILE }
+    if n < 44 { return TZ_EFORMAT }
+    // "TZif"
+    if peek8(tz_buf) != 84 { return TZ_EFORMAT }
+    if peek8(tz_buf + 1) != 90 { return TZ_EFORMAT }
+    if peek8(tz_buf + 2) != 105 { return TZ_EFORMAT }
+    if peek8(tz_buf + 3) != 102 { return TZ_EFORMAT }
+    // Version '2' or later. A version 1 file has only 32-bit transition times and stops meaning
+    // anything in 2038; refusing it is better than answering correctly until then.
+    if peek8(tz_buf + 4) < 50 { return TZ_EFORMAT }
+
+    let h2 = 44 + tz_v1_size(tz_buf)
+    if h2 + 44 > n { return TZ_EFORMAT }
+    let head = tz_buf + h2
+    let timecnt = tz_be32u(head + 32)
+    let typecnt = tz_be32u(head + 36)
+    if typecnt == 0 { return TZ_EFORMAT }
+
+    let times = head + 44                  // timecnt transition times, 8 bytes each
+    let idxs = times + timecnt * 8         // one type index per transition
+    let types = idxs + timecnt             // typecnt ttinfo records, 6 bytes each
+    if types + typecnt * 6 > tz_buf + n { return TZ_EFORMAT }
+
+    // The last transition at or before `epoch` decides. A transition AT `epoch` already counts:
+    // the new offset applies from that second, not from the one after it.
+    let mut i = timecnt
+    for i > 0 {
+        i = i - 1
+        if tz_be64(times + i * 8) <= epoch {
+            let t = peek8(idxs + i)
+            if t >= typecnt { return TZ_EFORMAT }
+            return tz_be32(types + t * 6)
+        }
+    }
+    // Before the first transition, or a file with none at all: standard time, i.e. the first
+    // type that is not DST. That is what the zone database means by what a place did before its
+    // record begins, and falling back to type 0 instead would report summer time for a date in
+    // the middle of winter whenever type 0 happens to be the DST one.
+    for t in 0..typecnt {
+        if peek8(types + t * 6 + 4) == 0 {
+            return tz_be32(types + t * 6)
+        }
+    }
+    tz_be32(types)
+}
+
+// Seconds east of UTC at `epoch`, from the system's configured zone.
+fn tz_offset_at(epoch: i64) -> i64 {
+    tz_offset_from(TZFILE_PATH.utf8, epoch)
+}
+
+// Seconds east of UTC right now. What a program adds to `now_epoch()` before formatting it, to
+// show a time the person reading it recognises.
+fn tz_offset() -> i64 {
+    tz_offset_at(now_epoch())
+}

@@ -114,11 +114,11 @@ pub fn eval_block(block: &Block, env: &mut Env) -> Value {
             Stmt::Return(e) => {
                 return e.as_ref().map_or(Value::Unit, |e| eval_expr(e, env));
             }
-            // Loop evaluation in the interpreter needs proper break/continue
+// Loop evaluation in the interpreter needs proper break/continue
             // control flow (a Signal refactor); the codegen backend supports
             // loops fully. Contracts do not loop yet, so this is deferred.
-            Stmt::For { .. } | Stmt::Break | Stmt::Continue => {
-                todo!("interpreter loop support (use the codegen backend for loops)")
+            Stmt::For { .. } | Stmt::Lock { .. } | Stmt::Break | Stmt::Continue => {
+                todo!("interpreter loop/lock support (use the codegen backend)")
             }
         }
     }

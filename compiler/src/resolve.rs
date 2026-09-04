@@ -9,18 +9,189 @@
 //! toward the RFC-0006 package format, not a full module system: one flat namespace,
 //! no visibility, but it makes real multi-file programs (an SSH stack) buildable.
 
-use crate::lexer::tokenize_located;
+use crate::lexer::{LexPanic, tokenize_located};
 use crate::token::Token;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// Where one line of the spliced text came from: the file a person wrote, the line within that
+/// file, and (only when the name-rewriting made the line differ) a per-character map back to the
+/// columns of the original line.
+#[derive(Debug)]
+struct SpliceLine {
+    file: PathBuf,
+    line: u32,
+    /// Index = 0-based column in the spliced line; value = 1-based column in the source line.
+    /// `None` means the line was copied verbatim, so the columns are the same.
+    cols: Option<Vec<u32>>,
+}
+
+/// A position in the files a person wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Loc {
+    pub file: PathBuf,
+    pub line: u32,
+    pub col: u32,
+}
+
+/// Position-en-el-empalme -> (file, line, column) of the sources. The compiler parses ONE buffer
+/// built by splicing every `include`d file, so a position inside it means nothing to the author
+/// of the file where the problem actually is: `at line 7572` in a program whose every file is
+/// shorter than that is not a location, it is a search task. The splicing knows where every line
+/// came from; this carries that knowledge to the other end.
+#[derive(Debug)]
+pub struct SpanMap {
+    entry: PathBuf,
+    lines: Vec<SpliceLine>,
+}
+
+impl SpanMap {
+    /// The source position of `(line, column)` in the spliced text, or `None` when the line is
+    /// outside everything that got spliced (0 = "unknown", or text appended after resolution).
+    pub fn locate(&self, line: u32, col: u32) -> Option<Loc> {
+        let origin = self.lines.get(line.checked_sub(1)? as usize)?;
+        let col = match &origin.cols {
+            None => col,
+            Some(m) => {
+                if col == 0 {
+                    0
+                } else if (col as usize) <= m.len() {
+                    m[col as usize - 1]
+                } else {
+                    // One past the rewritten text (an end-of-line position): keep counting from
+                    // where the original line ended.
+                    m.last().copied().unwrap_or(col) + (col as usize - m.len()) as u32
+                }
+            }
+        };
+        Some(Loc {
+            file: origin.file.clone(),
+            line: origin.line,
+            col,
+        })
+    }
+
+    /// The source position of a spliced LINE (columns unknown).
+    pub fn locate_line(&self, line: u32) -> Option<Loc> {
+        self.locate(line, 0)
+    }
+
+    /// Rewrites `"at line N"` inside an already-formatted message to the line of the file the N
+    /// was spliced out of, naming that file when it is not the one being compiled. `true` means a
+    /// foreign file had to be named, so the caller must not re-blame its own entry file.
+    pub fn fix_message_lines(&self, msg: &str) -> (String, bool) {
+        const PAT: &str = "at line ";
+        let mut out = String::new();
+        let mut rest = msg;
+        let mut named_elsewhere = false;
+        while let Some(k) = rest.find(PAT) {
+            out.push_str(&rest[..k]);
+            let after = &rest[k + PAT.len()..];
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let located = if digits.is_empty() {
+                None
+            } else {
+                digits.parse::<u32>().ok().and_then(|n| self.locate_line(n))
+            };
+            match located {
+                Some(loc) => {
+                    if loc.file == self.entry {
+                        out.push_str(&format!("at line {}", loc.line));
+                    } else {
+                        named_elsewhere = true;
+                        out.push_str(&format!(
+                            "at line {} of {}",
+                            loc.line,
+                            loc.file.display()
+                        ));
+                    }
+                    rest = &after[digits.len()..];
+                }
+                None => {
+                    out.push_str(PAT);
+                    rest = after;
+                }
+            }
+        }
+        out.push_str(rest);
+        (out, named_elsewhere)
+    }
+}
+
+/// Resolves a module name (from `import <name>`) to a file path on disk.
+/// The default implementation searches `lib/` the same way `include` does.
+pub trait ModuleResolver {
+    fn resolve(&self, module_name: &str) -> Result<PathBuf, String>;
+}
+
+/// Default resolver: searches for `<name>.snd` under the project's `lib/` and the
+/// system `~/.local/lib/sond/`, exactly like `include` does today. The `base_dir`
+/// is the parent directory of the importing file, so the search starts there.
+pub struct DefaultResolver {
+    base_dir: PathBuf,
+}
+
+impl DefaultResolver {
+    pub fn new(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+}
+
+impl ModuleResolver for DefaultResolver {
+    fn resolve(&self, module_name: &str) -> Result<PathBuf, String> {
+        for cand in include_candidates(module_name) {
+            if let Some(found) = find_in_roots(&self.base_dir, &cand) {
+                return Ok(found);
+            }
+            if let Some(home) = std::env::var_os("HOME") {
+                let home_path = Path::new(&home);
+                if let Some(found) = find_in_roots(home_path, &cand) {
+                    return Ok(found);
+                }
+            }
+        }
+        Err(format!(
+            "`import {module_name}`: module `{module_name}` not found; declare it or add an `include` of the file that defines it"
+        ))
+    }
+}
+
+/// Tokenizes a whole file for name extraction, CATCHING the refusal a character the lexer cannot
+/// read raises. The position in that refusal is a position in THIS file -- which nothing knows
+/// once the refusal escapes the per-file pass and lands in a driver holding only the spliced
+/// text -- so it is translated to (file, line, message) here, at the one moment the file name and
+/// the per-file line are both at hand.
+fn lex_tokens(src: &str) -> (Vec<Token>, Option<(u32, String)>) {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let r = std::panic::catch_unwind(|| tokenize_located(src));
+    std::panic::set_hook(prev);
+    match r {
+        Ok((toks, _, _)) => (toks, None),
+        Err(e) => {
+            if let Some(p) = e.downcast_ref::<LexPanic>() {
+                (
+                    Vec::new(),
+                    Some((p.line, format!("unexpected character {:?}", p.ch))),
+                )
+            } else {
+                let text = e
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "cannot read this file".to_string());
+                (Vec::new(), Some((0, text)))
+            }
+        }
+    }
+}
+
 /// The PRIVATE (non-`pub`) FREE functions a file defines, i.e. its file-local helpers. A free
 /// function's `fn` keyword sits at brace-depth 0; a method's is inside its `impl { .. }` (depth 1)
-/// and is already mangled `Type_m`, so it is left alone. Uses the lexer, so strings and comments
-/// never false-match. Modifiers (`wrapping`/`interrupt`) between the visibility and `fn` are
-/// skipped when checking for `pub`.
-fn private_free_fn_names(src: &str) -> HashSet<String> {
-    let (toks, _) = tokenize_located(src);
+/// and is already mangled `Type_m`, so it is left alone. Takes the token stream, so strings and
+/// comments never false-match. Modifiers (`wrapping`/`interrupt`) between the visibility and `fn`
+/// are skipped when checking for `pub`.
+fn private_free_fn_names(toks: &[Token]) -> HashSet<String> {
     let mut names = HashSet::new();
     let mut depth: i32 = 0;
     for (i, t) in toks.iter().enumerate() {
@@ -48,8 +219,7 @@ fn private_free_fn_names(src: &str) -> HashSet<String> {
 /// body (depth > 0) is a local and is ignored. An optional `mut` (lexed as an identifier) between
 /// `let` and the name is skipped. These are file-scoped on collision exactly like private helper
 /// functions, so two bignum modules can each define `let BN_MASK16 = 0xFFFF`.
-fn module_global_names(src: &str) -> HashSet<String> {
-    let (toks, _) = tokenize_located(src);
+fn module_global_names(toks: &[Token]) -> HashSet<String> {
     let mut names = HashSet::new();
     let mut depth: i32 = 0;
     for (i, t) in toks.iter().enumerate() {
@@ -74,28 +244,114 @@ fn module_global_names(src: &str) -> HashSet<String> {
     names
 }
 
-/// Rewrites whole-identifier occurrences of each name in `map` to `name__f<id>` in one line,
-/// where `<id>` is the DEFINING file's id (map value), OUTSIDE string/char literals and line
-/// comments (so a helper's name inside a string is never touched). The map, keyed by the file
-/// being emitted, resolves each colliding private to the definition visible in THAT file's
-/// include closure, so a caller and the definition it includes get the same mangled name even
-/// across files. Preserves the line count, so source-line info stays accurate.
-fn mangle_line(line: &str, map: &std::collections::HashMap<String, u32>) -> String {
+/// The PUBLIC (`pub fn` / `pub let`) names a file exports: its module surface. These are what a
+/// `module::name` may reach, and what has to stay reachable unqualified while the tree migrates.
+fn public_names(toks: &[Token]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut depth: i32 = 0;
+    for (i, t) in toks.iter().enumerate() {
+        match t {
+            Token::LBrace => depth += 1,
+            Token::RBrace => depth -= 1,
+            Token::Fn if depth == 0 => {
+                let mut j = i;
+                while j > 0 && matches!(toks[j - 1], Token::Wrapping | Token::Interrupt) {
+                    j -= 1;
+                }
+                if j > 0
+                    && matches!(toks[j - 1], Token::Pub)
+                    && let Some(Token::Ident(n)) = toks.get(i + 1)
+                {
+                    names.insert(n.clone());
+                }
+            }
+            Token::Let if depth == 0 => {
+                if i > 0 && matches!(toks[i - 1], Token::Pub) {
+                    let mut j = i + 1;
+                    if let Some(Token::Ident(m)) = toks.get(j)
+                        && m == "mut"
+                    {
+                        j += 1;
+                    }
+                    if let Some(Token::Ident(n)) = toks.get(j) {
+                        names.insert(n.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// The module name a file goes by: its own name without the extension, with `-` written `_` so it
+/// is a legal identifier. `x86_64/linux/http-server.snd` is the module `http_server`. Deriving it
+/// from the file rather than declaring it inside keeps one source of truth -- a declared name can
+/// disagree with the file it is in, and then two things claim to be the same module.
+fn module_name(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .replace('-', "_")
+}
+
+/// What a single file's line rewriting needs to know: which colliding names bind to which file
+/// (`map`), which modules it can see, what each of those exports, and which names are ambiguous
+/// unqualified. Grouped rather than passed as six arguments, because every one of them is needed
+/// for a decision that must be made in one place: what does this identifier refer to?
+/// Everything the emit pass needs to turn names into symbols, gathered from the first pass and
+/// keyed by file. Each entry answers the same question for a different file: given a line of
+/// THIS file, what does each name in it refer to?
+struct Namespaces<'a> {
+    resolve_map: &'a std::collections::HashMap<PathBuf, std::collections::HashMap<String, u32>>,
+    module_maps: &'a std::collections::HashMap<PathBuf, std::collections::HashMap<String, PathBuf>>,
+    ambiguous_maps:
+        &'a std::collections::HashMap<PathBuf, std::collections::HashMap<String, Vec<String>>>,
+    exports: &'a std::collections::HashMap<PathBuf, HashSet<String>>,
+    ids: &'a std::collections::HashMap<PathBuf, u32>,
+    colliding: &'a HashSet<String>,
+}
+
+struct LineCtx<'a> {
+    map: &'a std::collections::HashMap<String, u32>,
+    modules: &'a std::collections::HashMap<String, PathBuf>,
+    exports: &'a std::collections::HashMap<PathBuf, HashSet<String>>,
+    ids: &'a std::collections::HashMap<PathBuf, u32>,
+    ambiguous: &'a std::collections::HashMap<String, Vec<String>>,
+    colliding: &'a HashSet<String>,
+    aliases: &'a std::collections::HashMap<String, String>,
+}
+
+/// Rewrites one line: qualified `module::name` references into the symbol they denote, and
+/// whole-identifier occurrences of a colliding name into `name__f<id>` of the file that defines
+/// it. Strings, char literals and line comments are copied verbatim, so a name inside a message
+/// is never touched. Preserves the line count, so source-line info stays accurate.
+///
+/// `module::name` is resolved HERE, before the lexer, so nothing downstream ever sees a `::`:
+/// the parser, the type checker and the code generator keep working on the flat namespace they
+/// already understand, and the module system is a rewriting of names rather than a second
+/// meaning for them.
+///
+/// Also returns the column map: when the line was rewritten, every character of the result knows
+/// the column of the source character it came from (a replacement names the column its original
+/// started at, so a position landing anywhere inside a mangled name points at the name the
+/// author typed). `None` when the rewriting was, in fact, a copy.
+fn rewrite_line_mapped(line: &str, ctx: &LineCtx) -> Result<(String, Option<Vec<u32>>), String> {
     let chars: Vec<char> = line.chars().collect();
-    let mut out = String::new();
+    let mut out = Rewriter::default();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
         match c {
             '"' | '\'' => {
-                // Copy the literal verbatim (respecting `\` escapes) without mangling inside it.
+                // Copy the literal verbatim (respecting `\` escapes) without rewriting inside it.
                 let quote = c;
-                out.push(c);
+                out.push_verbatim(c, i);
                 i += 1;
                 while i < chars.len() {
-                    out.push(chars[i]);
+                    out.push_verbatim(chars[i], i);
                     if chars[i] == '\\' && i + 1 < chars.len() {
-                        out.push(chars[i + 1]);
+                        out.push_verbatim(chars[i + 1], i + 1);
                         i += 2;
                         continue;
                     }
@@ -107,7 +363,9 @@ fn mangle_line(line: &str, map: &std::collections::HashMap<String, u32>) -> Stri
                 }
             }
             '/' if i + 1 < chars.len() && chars[i + 1] == '/' => {
-                out.extend(&chars[i..]); // rest of the line is a comment
+                for k in i..chars.len() {
+                    out.push_verbatim(chars[k], k); // rest of the line is a comment
+                }
                 break;
             }
             _ if c.is_alphabetic() || c == '_' => {
@@ -116,25 +374,128 @@ fn mangle_line(line: &str, map: &std::collections::HashMap<String, u32>) -> Stri
                     i += 1;
                 }
                 let ident: String = chars[start..i].iter().collect();
-                if let Some(id) = map.get(&ident) {
-                    out.push_str(&format!("{ident}__f{id}"));
+                // `module::name`?
+                if i + 2 < chars.len()
+                    && chars[i] == ':'
+                    && chars[i + 1] == ':'
+                    && (chars[i + 2].is_alphabetic() || chars[i + 2] == '_')
+                {
+                    let ns = i + 2;
+                    let mut j = ns;
+                    while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                        j += 1;
+                    }
+                    let name: String = chars[ns..j].iter().collect();
+                    out.push_replacement(
+                        &resolve_qualified(&ident, &name, ctx, ctx.aliases)?,
+                        start,
+                    );
+                    i = j;
+                    continue;
+                }
+                if let Some(mods) = ctx.ambiguous.get(&ident) {
+                    return Err(format!(
+                        "`{ident}` is exported by more than one module ({}); say which one, \
+                         e.g. `{}::{ident}`",
+                        mods.join(", "),
+                        mods[0]
+                    ));
+                }
+                if let Some(id) = ctx.map.get(&ident) {
+                    out.push_replacement(&format!("{ident}__f{id}"), start);
                 } else {
-                    out.push_str(&ident);
+                    out.push_str_verbatim(&ident, start);
                 }
             }
             _ => {
-                out.push(c);
+                out.push_verbatim(c, i);
                 i += 1;
             }
         }
     }
-    out
+    let Rewriter { out, map } = out;
+    let colmap = if out == line { None } else { Some(map) };
+    Ok((out, colmap))
+}
+
+/// The characters a rewritten line produces, each remembering the column of the source character
+/// it came from. A replacement (a mangled or qualified name) maps every one of its characters to
+/// the column where the name it replaces was written: a diagnostic landing anywhere inside it
+/// points the author at the name THEY wrote, not at whatever prefix `_f2` the rewriter appended.
+#[derive(Default)]
+struct Rewriter {
+    out: String,
+    /// Parallel to the CHARACTERS of `out` (not bytes): 1-based column in the source line.
+    map: Vec<u32>,
+}
+
+impl Rewriter {
+    fn push_verbatim(&mut self, c: char, src_index: usize) {
+        self.out.push(c);
+        self.map.push(src_index as u32 + 1);
+    }
+    fn push_str_verbatim(&mut self, s: &str, src_index: usize) {
+        for (k, c) in s.chars().enumerate() {
+            self.push_verbatim(c, src_index + k);
+        }
+    }
+    fn push_replacement(&mut self, s: &str, src_index: usize) {
+        for c in s.chars() {
+            self.out.push(c);
+            self.map.push(src_index as u32 + 1);
+        }
+    }
+}
+
+/// The symbol `module::name` denotes, or why it denotes nothing.
+///
+/// A module has to be INCLUDED to be named -- qualifying is a way to say which of the things you
+/// already pulled in you meant, not a way to reach something you did not. And only its `pub`
+/// surface is reachable: if `::` could see a private helper, the visibility the language already
+/// has would stop meaning anything the moment somebody typed a colon.
+fn resolve_qualified(
+    module: &str,
+    name: &str,
+    ctx: &LineCtx,
+    _aliases: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    // The module name is looked up directly in the module map. For aliased imports,
+    // the alias replaces the original name in the map (e.g., `str` instead of `strings`).
+    let Some(file) = ctx.modules.get(module) else {
+        return Err(format!(
+            "module `{module}` is not included here: `{module}::{name}` needs an \
+             `include` of the file that defines it"
+        ));
+    };
+    let exported = ctx.exports.get(file).is_some_and(|e| e.contains(name));
+    if !exported {
+        return Err(format!(
+            "`{name}` is not public in module `{module}`: only `pub` names can be reached \
+             from outside the file that defines them"
+        ));
+    }
+    match ctx.ids.get(file) {
+        Some(id) if ctx.colliding.contains(name) => Ok(format!("{name}__f{id}")),
+        _ => Ok(name.to_string()),
+    }
 }
 
 /// Reads `entry` and inlines every `include "..."` it (transitively) names, returning
 /// the combined source ready for the lexer.
 pub fn resolve_includes(entry: &Path) -> std::io::Result<String> {
-    Ok(resolve_includes_scoped(entry)?.0)
+    let base = entry
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    resolve_includes_with_resolver(entry, &DefaultResolver::new(base))
+}
+
+/// Like [`resolve_includes`], but uses a custom [`ModuleResolver`] for `import` resolution.
+pub fn resolve_includes_with_resolver(
+    entry: &Path,
+    resolver: &dyn ModuleResolver,
+) -> std::io::Result<String> {
+    resolve_includes_scoped_with_resolver(entry, resolver).map(|(s, _)| s)
 }
 
 /// Like [`resolve_includes`], but also returns the set of function names that COVERAGE should
@@ -144,6 +505,46 @@ pub fn resolve_includes(entry: &Path) -> std::io::Result<String> {
 /// transitively-included dependencies are assumed tested by their own suites, so they do not
 /// drag down the entry's coverage. (The testing library is filtered out downstream.)
 pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet<String>)> {
+    let base = entry
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    resolve_includes_scoped_with_resolver(entry, &DefaultResolver::new(base))
+}
+
+/// Like [`resolve_includes_scoped`], but uses a custom [`ModuleResolver`] for `import` resolution.
+pub fn resolve_includes_scoped_with_resolver(
+    entry: &Path,
+    resolver: &dyn ModuleResolver,
+) -> std::io::Result<(String, HashSet<String>)> {
+    let r = resolve_includes_located_with_resolver(entry, resolver)?;
+    Ok((r.src, r.cov_scope))
+}
+
+/// The resolved program: the spliced text, the coverage scope, and the map from positions in that
+/// text back to the files a person wrote.
+pub struct ResolvedProgram {
+    pub src: String,
+    pub cov_scope: HashSet<String>,
+    pub spans: SpanMap,
+}
+
+/// Like [`resolve_includes_scoped`], but also hands back the [`SpanMap`] every diagnostic needs:
+/// the spliced text on its own carries line numbers nobody's editor has.
+pub fn resolve_includes_scoped_located(entry: &Path) -> std::io::Result<ResolvedProgram> {
+    let base = entry
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    resolve_includes_located_with_resolver(entry, &DefaultResolver::new(base))
+}
+
+/// Like [`resolve_includes_scoped_located`], but uses a custom [`ModuleResolver`] for `import`
+/// resolution.
+pub fn resolve_includes_located_with_resolver(
+    entry: &Path,
+    resolver: &dyn ModuleResolver,
+) -> std::io::Result<ResolvedProgram> {
     // Make the entry ABSOLUTE first. The search for a project's own `lib/` walks up from the
     // entry's PARENT, and the parent of a relative path like `prog.snd` is the empty path, so the
     // walk never starts and the only root left is the one under $HOME. The result is a compiler
@@ -160,12 +561,56 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
     // file) resolves within THAT file's include closure.
     let mut g = IncludeGraph::default();
     let mut gseen = HashSet::new();
-    build_graph(entry, 0, &mut gseen, &mut g);
+    build_graph(entry, 0, &mut gseen, &mut g, resolver);
 
-    // A private name is colliding if two or more DISTINCT files define it privately.
+    // A file that cannot even be lexed is reported naming ITS OWN path and line, now, while they
+    // are known; after splicing they are gone.
+    if let Some((f, l, m)) = g.lex_errors.first() {
+        let place = if *l > 0 {
+            format!("{}: line {l}", f.display())
+        } else {
+            format!("{}", f.display())
+        };
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{place}: {m}"),
+        ));
+    }
+
+    // Validate aliases: an alias must not clash with any module name already visible.
+    let visible_modules: HashSet<&String> = g.modules.values().collect();
+    for (alias, _original) in &g.aliases {
+        if visible_modules.contains(alias) {
+            // Find which file introduced this alias to report the line.
+            for (file, lines) in &g.source_lines {
+                for (i, line) in lines.iter().enumerate() {
+                    if parse_import(line.trim()).is_some() && parse_import_alias(line.trim()).as_deref() == Some(alias.as_str()) {
+                        g.import_errors.push((
+                            file.clone(),
+                            i + 1,
+                            format!(
+                                "alias `{alias}` clashes with the module name `{alias}`; \
+                                 rename the import or the module"
+                            ),
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // A name is colliding if two or more DISTINCT files define it -- privately as before, and
+    // now publicly too: two modules are allowed to export the same name, and telling them apart
+    // is exactly what the mangling already does for privates.
     let mut name_files: std::collections::HashMap<&String, HashSet<&PathBuf>> =
         std::collections::HashMap::new();
     for (path, names) in &g.defines {
+        for n in names {
+            name_files.entry(n).or_default().insert(path);
+        }
+    }
+    for (path, names) in &g.exports {
         for n in names {
             name_files.entry(n).or_default().insert(path);
         }
@@ -179,32 +624,110 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
     // Per file, resolve each colliding name to the single definition visible in its include
     // closure (the file itself plus everything it includes, transitively). If the closure sees
     // more than one definer, the name is genuinely ambiguous from that file and is left alone.
-    let mut resolve_map: std::collections::HashMap<PathBuf, std::collections::HashMap<String, u32>> =
-        std::collections::HashMap::new();
-    if !colliding.is_empty() {
-        for f in g.edges.keys() {
-            let closure = include_closure(f, &g.edges);
-            let mut map = std::collections::HashMap::new();
-            for name in &colliding {
-                let ids: HashSet<u32> = closure
-                    .iter()
-                    .filter(|c| g.defines.get(*c).is_some_and(|d| d.contains(name)))
-                    .filter_map(|c| g.ids.get(c).copied())
-                    .collect();
-                if ids.len() == 1 {
-                    map.insert(name.clone(), *ids.iter().next().unwrap());
+    let mut resolve_map: std::collections::HashMap<
+        PathBuf,
+        std::collections::HashMap<String, u32>,
+    > = std::collections::HashMap::new();
+    // Per file, the modules it can NAME (its include closure, by module name) and the names that
+    // are genuinely ambiguous from there: exported by two of the modules it can see, so an
+    // unqualified use has to be turned back rather than guessed at.
+    let mut module_maps: std::collections::HashMap<
+        PathBuf,
+        std::collections::HashMap<String, PathBuf>,
+    > = std::collections::HashMap::new();
+    let mut ambiguous_maps: std::collections::HashMap<
+        PathBuf,
+        std::collections::HashMap<String, Vec<String>>,
+    > = std::collections::HashMap::new();
+    for f in g.edges.keys() {
+        let closure = include_closure(f, &g.edges);
+        let mut map = std::collections::HashMap::new();
+        let mut mods = std::collections::HashMap::new();
+        let mut amb: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for name in &colliding {
+            let definers: Vec<&PathBuf> = closure
+                .iter()
+                .filter(|c| {
+                    g.defines.get(*c).is_some_and(|d| d.contains(name))
+                        || g.exports.get(*c).is_some_and(|e| e.contains(name))
+                })
+                .collect();
+            // A file that defines the name itself sees its OWN definition, not the one in a file
+            // it includes: file-local names are the author's to reuse (serial.snd and io.snd both
+            // define O_RDWR and that is legal). That definition appears under the file's own id
+            // (the depth-0 entry has no id and stays bare), so bind the name to it here -- NOT to
+            // the collapsed single id of the other definers. Before this, when the entry (no id)
+            // collided with an include, `ids` below shrank to one value and BOTH definitions were
+            // renamed `name__f<id>`: a duplicate global at codegen time.
+            if definers.contains(&&f) {
+                if let Some(id) = g.ids.get(f) {
+                    map.insert(name.clone(), *id);
                 }
+                continue;
             }
-            if !map.is_empty() {
-                resolve_map.insert(f.clone(), map);
+            let ids: HashSet<u32> = definers
+                .iter()
+                .filter_map(|c| g.ids.get(*c).copied())
+                .collect();
+            if ids.len() == 1 {
+                map.insert(name.clone(), *ids.iter().next().unwrap());
+                continue;
             }
+            // Ambiguity is only reported for a PUBLIC clash. Two files with a private helper or
+            // a private constant of the same name are not ambiguous to anybody: neither is
+            // visible outside its file, and that case is already file-scoped. Reporting it would
+            // turn a private name -- something the author is entitled to choose freely -- into a
+            // compile error caused by a file they may never have read.
+            let mut exporters: Vec<String> = definers
+                .iter()
+                .filter(|c| g.exports.get(**c).is_some_and(|e| e.contains(name)))
+                .filter_map(|c| g.modules.get(*c).cloned())
+                .collect();
+            if exporters.len() > 1 {
+                exporters.sort();
+                amb.insert(name.clone(), exporters);
+            }
+        }
+        for c in &closure {
+            if let Some(m) = g.modules.get(c) {
+                // If this module name is hidden by an alias in this file, add the
+                // alias instead of the original name.
+                if let Some(hidden) = g.hidden_modules.get(f) {
+                    if hidden.contains(m) {
+                        for (alias, orig) in &g.aliases {
+                            if orig == m {
+                                mods.insert(alias.clone(), c.clone());
+                            }
+                        }
+                        continue;
+                    }
+                }
+                mods.insert(m.clone(), c.clone());
+            }
+        }
+        if !map.is_empty() {
+            resolve_map.insert(f.clone(), map);
+        }
+        module_maps.insert(f.clone(), mods);
+        if !amb.is_empty() {
+            ambiguous_maps.insert(f.clone(), amb);
         }
     }
 
     let mut seen = HashSet::new();
     let mut out = String::new();
+    let mut spans: Vec<SpliceLine> = Vec::new();
     let mut depth0 = HashSet::new();
     let mut depth1 = HashSet::new();
+    let ns = Namespaces {
+        resolve_map: &resolve_map,
+        module_maps: &module_maps,
+        ambiguous_maps: &ambiguous_maps,
+        exports: &g.exports,
+        ids: &g.ids,
+        colliding: &colliding,
+    };
     resolve_into(
         entry,
         &mut seen,
@@ -212,7 +735,10 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
         0,
         &mut depth0,
         &mut depth1,
-        &resolve_map,
+        &ns,
+        &g.import_errors,
+        &g.aliases,
+        &mut spans,
     )?;
     // Which functions is this entry on the hook for covering?
     //
@@ -235,7 +761,14 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
     } else {
         depth0
     };
-    Ok((out, scope))
+    Ok(ResolvedProgram {
+        src: out,
+        cov_scope: scope,
+        spans: SpanMap {
+            entry: entry.to_path_buf(),
+            lines: spans,
+        },
+    })
 }
 
 /// The include graph gathered in the first pass, keyed by canonical file path: each file's
@@ -246,15 +779,37 @@ pub fn resolve_includes_scoped(entry: &Path) -> std::io::Result<(String, HashSet
 struct IncludeGraph {
     ids: std::collections::HashMap<PathBuf, u32>,
     defines: std::collections::HashMap<PathBuf, HashSet<String>>,
+    /// Each file's `pub` surface: what `module::name` may reach.
+    exports: std::collections::HashMap<PathBuf, HashSet<String>>,
+    /// Each file's module name, taken from the file name itself.
+    modules: std::collections::HashMap<PathBuf, String>,
     edges: std::collections::HashMap<PathBuf, Vec<PathBuf>>,
     ctr: u32,
+    /// Errors from failed `import` resolution: (file, line_number, error_message).
+    import_errors: Vec<(PathBuf, usize, String)>,
+    /// Module aliases from `import X as Y`: maps alias -> original module name.
+    aliases: std::collections::HashMap<String, String>,
+    /// Per-file: original module names hidden by aliases. When `import X as Y` is in
+    /// file F, `X` is hidden from F's namespace so only `Y` works.
+    hidden_modules: std::collections::HashMap<PathBuf, HashSet<String>>,
+    /// Source lines per file, for line-number reporting in import errors.
+    source_lines: std::collections::HashMap<PathBuf, Vec<String>>,
+    /// Files that hold a character the lexer refuses: (canonical file, line in THAT file, message).
+    /// Reported before any splicing, because the splice is what loses the file the line belongs to.
+    lex_errors: Vec<(PathBuf, u32, String)>,
 }
 
 /// First pass: walk the include tree once and populate [`IncludeGraph`]. Each visited file records
 /// its private helper names and the canonical paths it directly includes, so the emit pass can
 /// resolve a colliding private to the definition visible in each file's include closure. Read
 /// errors are ignored here; the emit pass reports them.
-fn build_graph(path: &Path, depth: usize, seen: &mut HashSet<PathBuf>, g: &mut IncludeGraph) {
+fn build_graph(
+    path: &Path,
+    depth: usize,
+    seen: &mut HashSet<PathBuf>,
+    g: &mut IncludeGraph,
+    resolver: &dyn ModuleResolver,
+) {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !seen.insert(canon.clone()) {
         return;
@@ -262,24 +817,79 @@ fn build_graph(path: &Path, depth: usize, seen: &mut HashSet<PathBuf>, g: &mut I
     let Ok(src) = std::fs::read_to_string(path) else {
         return;
     };
-    let mut names = private_free_fn_names(&src);
+    // A character the lexer refuses is not a reason to stop WALKING the graph (the emit pass
+    // reads every file again by hand), but it is a reason to remember it with the place it lives:
+    // this is the only moment the file name and this file's own line number are known together.
+    let (toks, lex_err) = lex_tokens(&src);
+    if let Some((line, msg)) = lex_err {
+        g.lex_errors.push((canon.clone(), line, msg));
+    }
+    let mut names = private_free_fn_names(&toks);
     // Module-level private globals are file-scoped on collision too (e.g. two bignum modules
     // both defining `let BN_MASK16 = 0xFFFF`), so fold them into the same defined-name set.
-    names.extend(module_global_names(&src));
-    // Only files that define private helpers/globals (below the entry) need a mangling id.
-    if depth >= 1 && !names.is_empty() {
+    names.extend(module_global_names(&toks));
+    let exports = public_names(&toks);
+    // A file needs a mangling id if anything it defines might have to be told apart from
+    // somebody else's name of the same spelling -- which now includes its PUBLIC surface, since
+    // two modules are allowed to export the same name and be separated by qualification.
+    if depth >= 1 && !(names.is_empty() && exports.is_empty()) {
         g.ctr += 1;
         g.ids.insert(canon.clone(), g.ctr);
     }
+    g.modules.insert(canon.clone(), module_name(path));
+    g.exports.insert(canon.clone(), exports);
     g.defines.insert(canon.clone(), names);
+    // Store source lines for line-number reporting on import errors.
+    g.source_lines
+        .insert(canon.clone(), src.lines().map(String::from).collect());
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut es = Vec::new();
-    for line in src.lines() {
+    let mut brace_depth: i32 = 0;
+    for (line_idx, line) in src.lines().enumerate() {
+        // Track brace depth to detect imports inside functions.
+        for c in line.chars() {
+            match c {
+                '{' => brace_depth += 1,
+                '}' => brace_depth -= 1,
+                _ => {}
+            }
+        }
         if let Some(rel) = parse_include(line.trim()) {
             let target = resolve_target(dir, rel);
             let tcanon = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
             es.push(tcanon);
-            build_graph(&target, depth + 1, seen, g);
+            build_graph(&target, depth + 1, seen, g, resolver);
+        } else if let Some(mod_name) = parse_import(line.trim()) {
+            // `import` inside braces (inside a function) is invalid.
+            if brace_depth > 0 {
+                g.import_errors.push((
+                    canon.clone(),
+                    line_idx + 1,
+                    "`import` is only valid at the top level, not inside a function".to_string(),
+                ));
+                continue;
+            }
+            // Resolve the module name to a file path using the injectable resolver.
+            match resolver.resolve(mod_name) {
+                Ok(target) => {
+                    let tcanon =
+                        std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+                    es.push(tcanon);
+                    // Register alias if present (validation of clashes happens after graph building).
+                    if let Some(alias) = parse_import_alias(line.trim()) {
+                        g.aliases.insert(alias.to_string(), mod_name.to_string());
+                        g.hidden_modules
+                            .entry(canon.clone())
+                            .or_default()
+                            .insert(mod_name.to_string());
+                    }
+                    build_graph(&target, depth + 1, seen, g, resolver);
+                }
+                Err(msg) => {
+                    g.import_errors
+                        .push((canon.clone(), line_idx + 1, msg));
+                }
+            }
         }
     }
     g.edges.insert(canon, es);
@@ -312,7 +922,10 @@ fn resolve_into(
     depth: usize,
     depth0: &mut HashSet<String>,
     depth1: &mut HashSet<String>,
-    resolve_map: &std::collections::HashMap<PathBuf, std::collections::HashMap<String, u32>>,
+    ns: &Namespaces,
+    import_errors: &[(PathBuf, usize, String)],
+    aliases: &std::collections::HashMap<String, String>,
+    spans: &mut Vec<SpliceLine>,
 ) -> std::io::Result<()> {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !seen.insert(canon) {
@@ -322,10 +935,7 @@ fn resolve_into(
     // every read error, so a missing NESTED include (`any/json.snd` not on any root) is blamed on
     // the top file, which is deeply confusing to debug.
     let src = std::fs::read_to_string(path).map_err(|e| {
-        std::io::Error::new(
-            e.kind(),
-            format!("cannot read `{}`: {e}", path.display()),
-        )
+        std::io::Error::new(e.kind(), format!("cannot read `{}`: {e}", path.display()))
     })?;
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -334,8 +944,29 @@ fn resolve_into(
     // cross-file CALLER to the same mangled name as the definition it includes, not just the file
     // that defines the name. A unique private name is not in the map and is left alone. The entry
     // file (depth 0) has no id, so `main` and the program's own functions are never renamed.
-    let mangle = resolve_map.get(&canon);
-    for line in src.lines() {
+    let empty_map = std::collections::HashMap::new();
+    let empty_mods = std::collections::HashMap::new();
+    let empty_amb = std::collections::HashMap::new();
+    let ctx = LineCtx {
+        map: ns.resolve_map.get(&canon).unwrap_or(&empty_map),
+        modules: ns.module_maps.get(&canon).unwrap_or(&empty_mods),
+        exports: ns.exports,
+        ids: ns.ids,
+        ambiguous: ns.ambiguous_maps.get(&canon).unwrap_or(&empty_amb),
+        colliding: ns.colliding,
+        aliases,
+    };
+    // Report import errors for THIS file before processing lines, so they surface
+    // before any `module::name` rewrite error on a subsequent line.
+    for (err_file, line_num, msg) in import_errors {
+        if err_file == &canon {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{}: line {line_num}: {msg}", path.display()),
+            ));
+        }
+    }
+    for (idx, line) in src.lines().enumerate() {
         match parse_include(line.trim()) {
             Some(rel) => resolve_into(
                 &resolve_target(dir, rel),
@@ -344,17 +975,43 @@ fn resolve_into(
                 depth + 1,
                 depth0,
                 depth1,
-                resolve_map,
+                ns,
+                import_errors,
+                aliases,
+                spans,
             )?,
+            None if let Some(mod_name) = parse_import(line.trim()) => {
+                // Resolve the import: find the module's canonical path and inline it.
+                // For aliased imports, the alias replaces the original name in module_maps,
+                // so we must look up by the alias if present.
+                let lookup_name = parse_import_alias(line.trim()).unwrap_or(mod_name);
+                if let Some(file) = ns.module_maps.get(&canon).and_then(|m| m.get(lookup_name)) {
+                    resolve_into(
+                        file,
+                        seen,
+                        out,
+                        depth + 1,
+                        depth0,
+                        depth1,
+                        ns,
+                        import_errors,
+                        aliases,
+                        spans,
+                    )?;
+                }
+                // If the import had an error, it was already reported above.
+            }
             None => {
-                let owned;
-                let line: &str = match mangle {
-                    Some(map) => {
-                        owned = mangle_line(line, map);
-                        &owned
-                    }
-                    None => line,
-                };
+                // A name that cannot be resolved is reported HERE, naming the file it was
+                // written in. Left to the code generator it would surface as an undefined
+                // mangled symbol, which names nothing anybody typed.
+                let (owned, colmap) = rewrite_line_mapped(line, &ctx).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("{}: {e}", path.display()),
+                    )
+                })?;
+                let line: &str = &owned;
                 if let Some(name) = extract_fn_name(line) {
                     match depth {
                         0 => {
@@ -368,6 +1025,12 @@ fn resolve_into(
                 }
                 out.push_str(line);
                 out.push('\n');
+                // One spliced line, one origin: this file, this line, and where the columns went.
+                spans.push(SpliceLine {
+                    file: path.to_path_buf(),
+                    line: idx as u32 + 1,
+                    cols: colmap,
+                });
             }
         }
     }
@@ -410,7 +1073,7 @@ fn resolve_target(dir: &Path, rel: &str) -> PathBuf {
 /// `any/serial.snd` resolves immediately and unchanged), then `.snd`-appended, then
 /// the same two under `any/`. The `any/` prefix makes `"serial"` an alias of
 /// `"any/serial"` when the exact path is not found.
-fn include_candidates(rel: &str) -> Vec<String> {
+pub(crate) fn include_candidates(rel: &str) -> Vec<String> {
     let has_ext = rel.ends_with(".snd");
     let mut cands = vec![rel.to_string()];
     if !has_ext {
@@ -461,6 +1124,36 @@ fn parse_include(line: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
+/// If `line` is a top-level `import <name>` directive, returns the module name.
+/// Also matches `import <name> as <alias>` (returns the original name, not the alias).
+fn parse_import(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("import")?.trim_start();
+    let end = rest
+        .chars()
+        .position(|c| c.is_whitespace())
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    Some(&rest[..end])
+}
+
+/// If `line` is a top-level `import <name> as <alias>` directive, returns the alias.
+fn parse_import_alias(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("import")?.trim_start();
+    let after_name = rest.chars().position(|c| c.is_whitespace())?;
+    let rest = rest[after_name..].trim_start();
+    let rest = rest.strip_prefix("as")?.trim_start();
+    let end = rest
+        .chars()
+        .position(|c| c.is_whitespace() || c == '/')
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    Some(&rest[..end])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,8 +1179,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sond_rel_{}_{}", std::process::id(), uid()));
         std::fs::create_dir_all(dir.join("lib/mylib")).unwrap();
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        std::fs::write(dir.join("lib/mylib/helper.snd"), "fn helper_answer() -> i64 { 42 }\n").unwrap();
-        std::fs::write(dir.join("src/prog.snd"), "include \"mylib/helper.snd\"\nfn main() -> i64 { helper_answer() }\n").unwrap();
+        std::fs::write(
+            dir.join("lib/mylib/helper.snd"),
+            "fn helper_answer() -> i64 { 42 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("src/prog.snd"),
+            "include \"mylib/helper.snd\"\nfn main() -> i64 { helper_answer() }\n",
+        )
+        .unwrap();
 
         let from_absolute = resolve_includes_scoped(&dir.join("src/prog.snd"))
             .expect("an absolute entry resolves the project lib");
@@ -534,23 +1235,41 @@ mod tests {
     fn a_bare_name_resolves_under_any_with_the_snd_extension_added() {
         // `include "serial"` must reach `any/serial.snd`: the extension is optional and the
         // `any/` prefix is tried when the exact path is not found (JMV's alias request).
-        let entry = lib_fixture("any/serial.snd", "fn serial_getc() -> i64 { 7 }", "include \"serial\"");
+        let entry = lib_fixture(
+            "any/serial.snd",
+            "fn serial_getc() -> i64 { 7 }",
+            "include \"serial\"",
+        );
         let combined = resolve_includes(&entry).unwrap();
-        assert!(combined.contains("fn serial_getc"), "`include \"serial\"` pulled in any/serial.snd");
+        assert!(
+            combined.contains("fn serial_getc"),
+            "`include \"serial\"` pulled in any/serial.snd"
+        );
     }
 
     #[test]
     fn the_snd_extension_is_optional_on_an_explicit_any_path() {
-        let entry = lib_fixture("any/frame.snd", "fn frame_encode() -> i64 { 1 }", "include \"any/frame\"");
+        let entry = lib_fixture(
+            "any/frame.snd",
+            "fn frame_encode() -> i64 { 1 }",
+            "include \"any/frame\"",
+        );
         let combined = resolve_includes(&entry).unwrap();
-        assert!(combined.contains("fn frame_encode"), "`any/frame` resolved to any/frame.snd");
+        assert!(
+            combined.contains("fn frame_encode"),
+            "`any/frame` resolved to any/frame.snd"
+        );
     }
 
     #[test]
     fn an_explicit_full_path_still_resolves_exactly() {
         // The alias must not change behaviour for the canonical, extension-carrying paths the
         // whole stdlib already uses.
-        let entry = lib_fixture("x86_64/linux/io.snd", "fn close_fd(fd: i64) -> i64 { 0 }", "include \"x86_64/linux/io.snd\"");
+        let entry = lib_fixture(
+            "x86_64/linux/io.snd",
+            "fn close_fd(fd: i64) -> i64 { 0 }",
+            "include \"x86_64/linux/io.snd\"",
+        );
         let combined = resolve_includes(&entry).unwrap();
         assert!(combined.contains("fn close_fd"), "explicit path unchanged");
     }
@@ -564,9 +1283,17 @@ mod tests {
         std::fs::create_dir_all(lib_file.parent().unwrap()).unwrap();
         std::fs::write(&lib_file, "fn serial_putc(b: i64) { }").unwrap();
         let entry = root.join("main.snd");
-        std::fs::write(&entry, "include \"serial\"\ninclude \"any/serial.snd\"\nfn main() -> i64 { 0 }").unwrap();
+        std::fs::write(
+            &entry,
+            "include \"serial\"\ninclude \"any/serial.snd\"\nfn main() -> i64 { 0 }",
+        )
+        .unwrap();
         let combined = resolve_includes(&entry).unwrap();
-        assert_eq!(combined.matches("fn serial_putc").count(), 1, "included once despite two spellings");
+        assert_eq!(
+            combined.matches("fn serial_putc").count(),
+            1,
+            "included once despite two spellings"
+        );
     }
 
     #[test]
@@ -591,18 +1318,27 @@ mod tests {
 
     #[test]
     fn a_colliding_private_helper_is_file_scoped_a_unique_one_is_left_alone() {
-        let root = std::env::temp_dir().join(format!("sond_fscope_{}_{}", std::process::id(), uid()));
+        let root =
+            std::env::temp_dir().join(format!("sond_fscope_{}_{}", std::process::id(), uid()));
         std::fs::create_dir_all(&root).unwrap();
         // Two included libs each define a PRIVATE `secret` (a collision); libb also has a unique
         // private `only_b`. The entry includes both.
-        std::fs::write(root.join("a.snd"), "fn secret() -> i64 { 1 }\npub fn a() -> i64 { secret() }").unwrap();
+        std::fs::write(
+            root.join("a.snd"),
+            "fn secret() -> i64 { 1 }\npub fn a() -> i64 { secret() }",
+        )
+        .unwrap();
         std::fs::write(
             root.join("b.snd"),
             "fn secret() -> i64 { 2 }\nfn only_b() -> i64 { 9 }\npub fn b() -> i64 { secret() + only_b() }",
         )
         .unwrap();
         let entry = root.join("main.snd");
-        std::fs::write(&entry, "include \"a.snd\"\ninclude \"b.snd\"\nfn main() -> i64 { a() + b() }").unwrap();
+        std::fs::write(
+            &entry,
+            "include \"a.snd\"\ninclude \"b.snd\"\nfn main() -> i64 { a() + b() }",
+        )
+        .unwrap();
         let combined = resolve_includes(&entry).unwrap();
         // The colliding `secret` is renamed per file: no bare `fn secret(` survives.
         assert_eq!(
@@ -616,7 +1352,10 @@ mod tests {
             "two definitions + two call sites of `secret` are mangled:\n{combined}"
         );
         // The unique private `only_b` is NOT touched (nothing that calls it across files breaks).
-        assert!(combined.contains("fn only_b()"), "a unique private helper is left alone");
+        assert!(
+            combined.contains("fn only_b()"),
+            "a unique private helper is left alone"
+        );
     }
 
     #[test]
@@ -627,14 +1366,23 @@ mod tests {
         // left its call BARE, while both definitions were mangled per file. Result: the bare
         // call resolved to nothing. A caller must bind to the definition visible in ITS include
         // closure.
-        let root = std::env::temp_dir().join(format!("sond_xfile_{}_{}", std::process::id(), uid()));
+        let root =
+            std::env::temp_dir().join(format!("sond_xfile_{}_{}", std::process::id(), uid()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.snd"), "fn shared() -> i64 { 1 }").unwrap();
         std::fs::write(root.join("b.snd"), "fn shared() -> i64 { 2 }").unwrap();
         // c includes ONLY b, and calls `shared` without defining it: it must bind to b's `shared`.
-        std::fs::write(root.join("c.snd"), "include \"b.snd\"\npub fn c_call() -> i64 { shared() }").unwrap();
+        std::fs::write(
+            root.join("c.snd"),
+            "include \"b.snd\"\npub fn c_call() -> i64 { shared() }",
+        )
+        .unwrap();
         let entry = root.join("main.snd");
-        std::fs::write(&entry, "include \"a.snd\"\ninclude \"c.snd\"\nfn main() -> i64 { c_call() }").unwrap();
+        std::fs::write(
+            &entry,
+            "include \"a.snd\"\ninclude \"c.snd\"\nfn main() -> i64 { c_call() }",
+        )
+        .unwrap();
         let combined = resolve_includes(&entry).unwrap();
 
         // Both definitions are file-scoped: no bare `fn shared(` survives.
@@ -662,7 +1410,9 @@ mod tests {
         let line = combined
             .lines()
             .find(|l| l.contains("shared__f") && l.contains(marker))
-            .unwrap_or_else(|| panic!("no mangled `shared__f` line with `{marker}` in:\n{combined}"));
+            .unwrap_or_else(|| {
+                panic!("no mangled `shared__f` line with `{marker}` in:\n{combined}")
+            });
         let start = line.find("shared__f").unwrap();
         line[start..]
             .chars()
@@ -677,10 +1427,22 @@ mod tests {
         // program that pulls in both would otherwise fail with "declared more than once".
         let root = std::env::temp_dir().join(format!("sond_glob_{}_{}", std::process::id(), uid()));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("a.snd"), "let MASK = 255\npub fn a() -> i64 { 7 & MASK }").unwrap();
-        std::fs::write(root.join("b.snd"), "let MASK = 255\npub fn b() -> i64 { 9 & MASK }").unwrap();
+        std::fs::write(
+            root.join("a.snd"),
+            "let MASK = 255\npub fn a() -> i64 { 7 & MASK }",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("b.snd"),
+            "let MASK = 255\npub fn b() -> i64 { 9 & MASK }",
+        )
+        .unwrap();
         let entry = root.join("main.snd");
-        std::fs::write(&entry, "include \"a.snd\"\ninclude \"b.snd\"\nfn main() -> i64 { a() + b() }").unwrap();
+        std::fs::write(
+            &entry,
+            "include \"a.snd\"\ninclude \"b.snd\"\nfn main() -> i64 { a() + b() }",
+        )
+        .unwrap();
         let combined = resolve_includes(&entry).unwrap();
         assert_eq!(
             combined.matches("let MASK =").count(),
@@ -699,15 +1461,26 @@ mod tests {
     fn a_uniquely_named_global_shared_across_files_is_left_alone() {
         // A global defined in ONE file and used in another (a shared constant) must NOT be
         // mangled: it does not collide, so cross-file use keeps working.
-        let root = std::env::temp_dir().join(format!("sond_globshare_{}_{}", std::process::id(), uid()));
+        let root =
+            std::env::temp_dir().join(format!("sond_globshare_{}_{}", std::process::id(), uid()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("k.snd"), "let SHARED = 42").unwrap();
-        std::fs::write(root.join("u.snd"), "include \"k.snd\"\npub fn u() -> i64 { SHARED }").unwrap();
+        std::fs::write(
+            root.join("u.snd"),
+            "include \"k.snd\"\npub fn u() -> i64 { SHARED }",
+        )
+        .unwrap();
         let entry = root.join("main.snd");
         std::fs::write(&entry, "include \"u.snd\"\nfn main() -> i64 { u() }").unwrap();
         let combined = resolve_includes(&entry).unwrap();
-        assert!(combined.contains("let SHARED = 42"), "a unique shared global is untouched:\n{combined}");
-        assert!(!combined.contains("SHARED__f"), "a non-colliding global is never mangled:\n{combined}");
+        assert!(
+            combined.contains("let SHARED = 42"),
+            "a unique shared global is untouched:\n{combined}"
+        );
+        assert!(
+            !combined.contains("SHARED__f"),
+            "a non-colliding global is never mangled:\n{combined}"
+        );
     }
 
     #[test]
@@ -771,5 +1544,595 @@ mod tests {
         assert_eq!(parse_include("included = 5"), None);
         assert_eq!(parse_include("let include_flag = 1"), None);
         assert_eq!(parse_include("include \"lib.snd\""), Some("lib.snd"));
+    }
+
+    #[test]
+    fn a_qualified_name_reaches_a_module_by_its_file_name() {
+        // The first step of RFC namespaces: every included file is a MODULE named after itself,
+        // and `module::name` says which one you mean. Resolved here, at include time, into the
+        // symbol that module actually defines -- so the lexer, the parser and the code generator
+        // never see a `::` and nothing downstream changes.
+        let root = std::env::temp_dir().join(format!("sond_ns1_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("dns.snd"), "pub fn resolve() -> i64 { 7 }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"dns.snd\"\nfn main() -> i64 { dns::resolve() }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry).unwrap();
+        assert!(
+            !combined.contains("::"),
+            "no `::` survives resolution:\n{combined}"
+        );
+        assert!(
+            combined.contains("resolve()"),
+            "it binds to the module's function:\n{combined}"
+        );
+    }
+
+    #[test]
+    fn two_modules_may_export_the_same_name_when_each_use_says_which() {
+        // The point of the whole exercise. Today two libraries that both export `read` cannot be
+        // used by one program at all: it is a hard "defined more than once". Qualified, they can.
+        let root = std::env::temp_dir().join(format!("sond_ns2_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("disk.snd"), "pub fn read() -> i64 { 1 }").unwrap();
+        std::fs::write(root.join("net.snd"), "pub fn read() -> i64 { 2 }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"disk.snd\"\ninclude \"net.snd\"\nfn main() -> i64 { disk::read() + net::read() }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry).unwrap();
+        assert_eq!(
+            combined.matches("fn read(").count(),
+            0,
+            "both definitions are renamed apart:\n{combined}"
+        );
+        assert!(
+            !combined.contains("::"),
+            "and both uses are resolved:\n{combined}"
+        );
+    }
+
+    #[test]
+    fn an_unqualified_name_two_modules_export_says_which_two() {
+        // The diagnostic is the feature. Left alone, the ambiguous name would compile to
+        // something undefined and the error would land in the code generator, naming a mangled
+        // symbol nobody wrote.
+        let root = std::env::temp_dir().join(format!("sond_ns3_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("disk.snd"), "pub fn read() -> i64 { 1 }").unwrap();
+        std::fs::write(root.join("net.snd"), "pub fn read() -> i64 { 2 }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"disk.snd\"\ninclude \"net.snd\"\nfn main() -> i64 { read() }",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(
+            err.contains("read"),
+            "it names the ambiguous name, got: {err}"
+        );
+        assert!(
+            err.contains("disk") && err.contains("net"),
+            "and both modules that export it, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_qualified_name_cannot_reach_a_module_that_is_not_included() {
+        let root = std::env::temp_dir().join(format!("sond_ns4_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("dns.snd"), "pub fn resolve() -> i64 { 7 }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(&entry, "fn main() -> i64 { dns::resolve() }").unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(err.contains("dns"), "it names the module, got: {err}");
+    }
+
+    #[test]
+    fn a_qualified_name_cannot_reach_a_private_helper() {
+        // `pub` is what a module offers; qualifying must not be a way around it, or the
+        // visibility that already exists would stop meaning anything the moment `::` landed.
+        let root = std::env::temp_dir().join(format!("sond_ns5_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("dns.snd"),
+            "fn helper() -> i64 { 7 }\npub fn resolve() -> i64 { helper() }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"dns.snd\"\nfn main() -> i64 { dns::helper() }",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(
+            err.contains("helper") && err.contains("dns"),
+            "it says which name in which module, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_entry_that_redefines_an_included_global_keeps_its_own() {
+        // The repro behind io.snd/serial.snd: the entry (depth 0) has NO mangling id, so when it
+        // defines a module-level global that an included file also defines, the only id that
+        // survives is the include's -- and the old code renamed BOTH definitions to
+        // `name__f<id>`, i.e. a `global `O_RDWR__f1` is declared more than once` duplicate. The
+        // entry's own definition must stay bare; only the include's is file-scoped.
+        let root = std::env::temp_dir().join(format!("sond_entglob_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.snd"), "let O_RDWR = 2\npub fn a() -> i64 { O_RDWR }").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"a.snd\"\nlet O_RDWR = 99\nfn main() -> i64 { O_RDWR }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry)
+            .expect("the collision must resolve, not become a duplicate definition");
+        assert_eq!(
+            combined.matches("let O_RDWR =").count(),
+            1,
+            "exactly one BARE definition survives (the entry's own):\n{combined}"
+        );
+        assert!(
+            combined.contains("let O_RDWR = 99"),
+            "the entry keeps its own global unmangled:\n{combined}"
+        );
+        assert!(
+            combined.contains("let O_RDWR__f1 = 2"),
+            "the include's definition is file-scoped:\n{combined}"
+        );
+        assert!(
+            combined.contains("fn main() -> i64 { O_RDWR }"),
+            "the entry's use binds to its own bare global:\n{combined}"
+        );
+        assert!(
+            combined.contains("O_RDWR__f1 }"),
+            "the include's use binds to its mangled global:\n{combined}"
+        );
+    }
+
+    #[test]
+    fn two_nested_includes_each_keep_their_own_colliding_global() {
+        // The exact shape of the tree KO: `serial.snd` includes `io.snd`, and BOTH define a
+        // private module-level global of the same name (both depth >= 1, both with ids). Each
+        // must be file-scoped to its own definition and its own uses -- no duplicate, no
+        // rebinding where one file starts reading the other's value.
+        let root = std::env::temp_dir().join(format!("sond_nestglob_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("io.snd"), "let O_ROLE = 1\npub fn io_role() -> i64 { O_ROLE }").unwrap();
+        std::fs::write(
+            root.join("serial.snd"),
+            "include \"io.snd\"\nlet O_ROLE = 2\npub fn serial_role() -> i64 { O_ROLE }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"serial.snd\"\nfn main() -> i64 { serial_role() + io_role() }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry)
+            .expect("the nested collision must resolve, not become a duplicate definition");
+        assert_eq!(
+            combined.matches("let O_ROLE =").count(),
+            0,
+            "both definitions are file-scoped (none left bare):\n{combined}"
+        );
+        // io.snd's definition and use bind to io's id; serial.snd's to serial's id; each function
+        // reads its own file's constant (1 and 2), not both reading one or the other.
+        let io_def_line = combined
+            .lines()
+            .find(|l| l.contains("let O_ROLE__") && l.contains("= 1"))
+            .unwrap_or_else(|| panic!("io's file-scoped definition must survive:\n{combined}"));
+        let io_id = &io_def_line[io_def_line.find("O_ROLE__").unwrap() + 8..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric())
+            .collect::<String>();
+        let serial_def_line = combined
+            .lines()
+            .find(|l| l.contains("let O_ROLE__") && l.contains("= 2"))
+            .unwrap_or_else(|| panic!("serial's file-scoped definition must survive:\n{combined}"));
+        let serial_id = &serial_def_line[serial_def_line.find("O_ROLE__").unwrap() + 8..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric())
+            .collect::<String>();
+        assert_ne!(io_id, serial_id, "the two files must NOT share a mangled id:\n{combined}");
+        assert!(
+            combined.contains(&format!("serial_role() -> i64 {{ O_ROLE__{serial_id} }}")),
+            "serial reads its own {serial_id}-mangled constant:\n{combined}"
+        );
+        assert!(
+            combined.contains(&format!("io_role() -> i64 {{ O_ROLE__{io_id} }}")),
+            "io reads its own {io_id}-mangled constant:\n{combined}"
+        );
+    }
+
+    #[test]
+    fn a_qualified_name_for_a_module_without_exports_fails_resolution() {
+        // A module that exports nothing cannot be queried for any name via `::`.
+        let root = std::env::temp_dir().join(format!("sond_ns6_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("empty.snd"), "// no functions, no exports").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"empty.snd\"\nfn main() -> i64 { empty::thing() }",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(err.contains("thing") && err.contains("empty"), "error names both, got: {err}");
+    }
+
+    // ── import directive tests ────────────────────────────────────────────
+
+    // CP1: `import strings` empalma el módulo y `strings::itoa(7)` resuelve.
+    #[test]
+    fn an_import_empalmes_the_module_and_qualified_name_resolves() {
+        let root = std::env::temp_dir().join(format!("sond_imp1_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/strings.snd"),
+            "pub fn itoa(n: i64) -> i64 { n }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "import strings\nfn main() -> i64 { strings::itoa(7) }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry).expect("import must resolve");
+        assert!(
+            !combined.contains("::"),
+            "no `::` survives resolution:\n{combined}"
+        );
+        assert!(
+            combined.contains("itoa(7)"),
+            "it binds to the module's function:\n{combined}"
+        );
+    }
+
+    // CP2: `import strings as str` alias renombra el módulo en ese fichero.
+    #[test]
+    fn an_import_as_alias_renames_the_module_and_original_name_is_gone() {
+        let root = std::env::temp_dir().join(format!("sond_imp2_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/strings.snd"),
+            "pub fn itoa(n: i64) -> i64 { n }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "import strings as str\nfn main() -> i64 { str::itoa(7) }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry).expect("import as must resolve");
+        assert!(
+            !combined.contains("::"),
+            "no `::` survives resolution:\n{combined}"
+        );
+        assert!(
+            combined.contains("itoa(7)"),
+            "alias resolves to the function:\n{combined}"
+        );
+        // The original name `strings` must NOT resolve any more.
+        let entry2 = root.join("main2.snd");
+        std::fs::write(
+            &entry2,
+            "import strings as str\nfn main() -> i64 { strings::itoa(7) }",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry2).unwrap_err().to_string();
+        assert!(
+            err.contains("strings"),
+            "original name is gone, error names it: {err}"
+        );
+    }
+
+    // CP3: A private function of the imported module is NOT reachable via `::`.
+    #[test]
+    fn a_private_fn_of_an_imported_module_is_not_reachable() {
+        let root = std::env::temp_dir().join(format!("sond_imp3_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/math.snd"),
+            "fn secret() -> i64 { 42 }\npub fn answer() -> i64 { secret() }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "import math\nfn main() -> i64 { math::secret() }",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(
+            err.contains("secret") && err.contains("math"),
+            "error names the private name and the module, got: {err}"
+        );
+    }
+
+    // CP4: `import` of an unknown name is a hard error naming the import, its line, and
+    // saying it must be declared.
+    #[test]
+    fn an_import_of_an_unknown_name_is_a_hard_error_with_line() {
+        let root = std::env::temp_dir().join(format!("sond_imp4_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "fn dummy() -> i64 { 0 }\nimport nonexistent\nfn main() -> i64 { 0 }",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(
+            err.contains("import"),
+            "error names the `import` keyword, got: {err}"
+        );
+        assert!(
+            err.contains("nonexistent"),
+            "error names the unknown module, got: {err}"
+        );
+        assert!(
+            err.contains("line 2"),
+            "error includes the line number (line 2), got: {err}"
+        );
+    }
+
+    // CP5: Importing the same module twice does not duplicate definitions.
+    #[test]
+    fn importing_the_same_module_twice_does_not_duplicate() {
+        let root = std::env::temp_dir().join(format!("sond_imp5_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/strings.snd"),
+            "pub fn itoa(n: i64) -> i64 { n }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "import strings\nimport strings\nfn main() -> i64 { strings::itoa(7) }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry).expect("double import must not fail");
+        assert_eq!(
+            combined.matches("fn itoa(").count(),
+            1,
+            "included once despite two import lines:\n{combined}"
+        );
+    }
+
+    // CP6: An `import` and an `include` of the same file do not define twice.
+    #[test]
+    fn import_and_include_of_the_same_file_dedup() {
+        let root = std::env::temp_dir().join(format!("sond_imp6_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/strings.snd"),
+            "pub fn itoa(n: i64) -> i64 { n }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "import strings\ninclude \"lib/strings.snd\"\nfn main() -> i64 { strings::itoa(7) }",
+        )
+        .unwrap();
+        let combined = resolve_includes(&entry).expect("import+include must not fail");
+        assert_eq!(
+            combined.matches("fn itoa(").count(),
+            1,
+            "included once despite import + include:\n{combined}"
+        );
+    }
+
+    // CP7: `import` only valid at top level; inside a function is an error with line.
+    #[test]
+    fn an_import_inside_a_function_is_an_error_with_line() {
+        let root = std::env::temp_dir().join(format!("sond_imp7_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/strings.snd"),
+            "pub fn itoa(n: i64) -> i64 { n }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "fn main() -> i64 {\n  import strings\n  strings::itoa(7)\n}",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(
+            err.contains("import"),
+            "error names the `import` keyword, got: {err}"
+        );
+        assert!(
+            err.contains("2"),
+            "error includes the line number (line 2), got: {err}"
+        );
+    }
+
+    // CP8: An alias that clashes with an already-visible module name is an error.
+    #[test]
+    fn an_alias_that_clashes_with_a_visible_module_name_is_an_error() {
+        let root = std::env::temp_dir().join(format!("sond_imp8_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(
+            root.join("lib/strings.snd"),
+            "pub fn itoa(n: i64) -> i64 { n }",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("lib/io.snd"),
+            "pub fn read() -> i64 { 1 }",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        // Import `strings` as `io` — but `io` is already a visible module.
+        std::fs::write(
+            &entry,
+            "import strings as io\ninclude \"lib/io.snd\"\nfn main() -> i64 { io::read() }",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(
+            err.contains("io"),
+            "error names the clashing name, got: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The spliced-position -> written-position map.
+    // ---------------------------------------------------------------------
+
+    /// `include a`, `include b`, `include c` and a main, each file multiple lines; returns
+    /// entry path + combined text + a handle to the map.
+    fn three_include_fixture() -> (PathBuf, ResolvedProgram) {
+        let root =
+            std::env::temp_dir().join(format!("sond_spans_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.snd"), "fn a_ok() -> i64 { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("b.snd"),
+            "fn b_ok() -> i64 { 2 }\nfn b_two() -> i64 { 3 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("c.snd"),
+            "fn c_ok() -> i64 { 1 }\nfn c_bad() -> i64 { if x == 1; }\n",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"a.snd\"\ninclude \"b.snd\"\ninclude \"c.snd\"\nfn main() -> i64 { 0 }\n",
+        )
+        .unwrap();
+        let rp = resolve_includes_scoped_located(&entry).unwrap();
+        (entry, rp)
+    }
+
+    #[test]
+    fn the_splice_map_points_each_line_at_the_file_it_was_written_in() {
+        let (entry, rp) = three_include_fixture();
+        // Combined: 1 = a's line 1, 2-3 = b's lines, 4-5 = c's lines, 6 = main's own line 4.
+        assert_eq!(rp.src.lines().count(), 6);
+        let loc = rp.spans.locate(5, 30).expect("line 5 is c's second line");
+        assert_eq!(loc.file, entry.parent().unwrap().join("c.snd"));
+        assert_eq!(loc.line, 2, "c's OWN line, not the spliced offset 5");
+        let loc = rp.spans.locate(6, 1).expect("line 6 is main's own code");
+        assert_eq!(loc.file, entry);
+        assert_eq!(loc.line, 4, "the spliced main line is main's line 4");
+        // Identity line, not rewritten: columns pass through untouched.
+        assert_eq!(loc.col, 1);
+        assert_eq!(rp.spans.locate(7, 1), None);
+    }
+
+    #[test]
+    fn an_error_named_by_spliced_line_is_fixed_to_the_written_file_and_line() {
+        let (_entry, rp) = three_include_fixture();
+        let msg = "variable `return1` is not declared in function `c_bad` at line 5";
+        let (fixed, named) = rp.spans.fix_message_lines(msg);
+        assert!(named, "the blamed file is not the entry, so it must be named: {fixed}");
+        assert!(fixed.contains("at line 2 of "), "c's own line: {fixed}");
+        assert!(fixed.contains("c.snd"), "the file is named: {fixed}");
+        assert!(!fixed.contains("line 5"), "the spliced offset is gone: {fixed}");
+
+        // A line that came from the entry itself keeps the entry as the only name it needs.
+        let msg = "cannot prove `i` is in bounds at line 6; bound it";
+        let (fixed, named) = rp.spans.fix_message_lines(msg);
+        assert!(!named, "same file as the entry: {fixed}");
+        assert_eq!(fixed, "cannot prove `i` is in bounds at line 4; bound it");
+
+        // An unmappable line (0, or past the splice) is left exactly as it is.
+        let (fixed, named) = rp.spans.fix_message_lines("no location here at all");
+        assert_eq!(fixed, "no location here at all");
+        assert!(!named);
+        let (fixed, _) = rp.spans.fix_message_lines("problem at line 99");
+        assert_eq!(fixed, "problem at line 99", "nothing maps line 99, nothing changes");
+    }
+
+    #[test]
+    fn a_rewritten_line_maps_its_columns_back_to_the_name_that_was_written() {
+        // The one case WHERE the columns can lie: name resolution rewrites `shared` into
+        // `shared__f<id>`, and every column after it shifts. The map has to undo that, so a
+        // position landing anywhere inside the mangled name points at the name the author wrote.
+        let root =
+            std::env::temp_dir().join(format!("sond_spancol_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.snd"), "fn shared() -> i64 { 1 }\n").unwrap();
+        std::fs::write(root.join("b.snd"), "fn shared() -> i64 { 2 }\n").unwrap();
+        std::fs::write(
+            root.join("c.snd"),
+            "include \"b.snd\"\npub fn c_call() -> i64 { 7 + shared() }\n",
+        )
+        .unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"a.snd\"\ninclude \"c.snd\"\nfn main() -> i64 { c_call() }\n",
+        )
+        .unwrap();
+        let rp = resolve_includes_scoped_located(&entry).unwrap();
+        // Spliced: 1 = a's line, 2 = b's line, 3 = c's REWRITTEN line 2, 4 = main's line 3.
+        let rewritten = rp.src.lines().nth(2).unwrap();
+        assert!(rewritten.contains("shared__f"), "{rewritten}");
+        let orig = "pub fn c_call() -> i64 { 7 + shared() }";
+        let written_col = orig.find("shared").unwrap() + 1; // 1-based column in c.snd
+
+        // A position on the mangled SUFFIX (`__f...`) -- which exists only after the rewriting --
+        // still answers with the column of `shared`.
+        let suffix = rewritten.find("__f").unwrap() + 2;
+        let loc = rp.spans.locate(3, suffix as u32 + 1).unwrap();
+        assert_eq!(loc.file, root.join("c.snd"));
+        assert_eq!(loc.line, 2);
+        assert_eq!(
+            loc.col as usize, written_col,
+            "a position inside the rewritten name must point at the written name"
+        );
+
+        // And a position PAST the rewriting (the end of the `}`) keeps mapping sanely: it exists
+        // in both texts at the same character, shifted by the longer name.
+        let tail = rewritten.chars().count();
+        let loc = rp.spans.locate(3, tail as u32).unwrap();
+        assert_eq!(loc.file, root.join("c.snd"));
+        assert_eq!(loc.col as usize, orig.find('}').unwrap() + 1);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_lexed_is_named_with_its_own_line() {
+        // The graph pass tokenizes every file to learn the names it defines; the refusal used to
+        // escape with a line number in a nameless file, which the driver then blamed on the entry.
+        let root =
+            std::env::temp_dir().join(format!("sond_spanlex_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bad = root.join("bad.snd");
+        std::fs::write(&bad, "fn ok() -> i64 { 1 }\nfn bad() -> i64 { 1 ? 2 }\n").unwrap();
+        let entry = root.join("main.snd");
+        std::fs::write(
+            &entry,
+            "include \"bad.snd\"\nfn main() -> i64 { ok() }\n",
+        )
+        .unwrap();
+        let err = resolve_includes(&entry).unwrap_err().to_string();
+        assert!(err.contains("bad.snd"), "it must name the file, got: {err}");
+        assert!(err.contains("line 2"), "and the line IN THAT FILE, got: {err}");
+        assert!(
+            !err.contains("main.snd"),
+            "not the entry file it was included from, got: {err}"
+        );
     }
 }

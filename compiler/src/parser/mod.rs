@@ -8,13 +8,44 @@ use crate::ast::{
 };
 use crate::token::Token;
 use std::collections::HashMap;
+use std::fmt;
+
+/// Why the parser stopped, and WHERE. The line and column are positions in the text the parser
+/// was given: a driver that spliced several files into that text is the one who knows which file
+/// each position belongs to, so it translates them before printing (and prints the bare position
+/// if it cannot). The message names tokens the way a person writes them (`` `{` ``), never by
+/// their lexer-internal name.
+#[derive(Debug)]
+pub struct ParsePanic {
+    /// 1-based line in the parsed text, or 0 when the parser has no line info at all.
+    pub line: u32,
+    /// 1-based character column in the parsed text, or 0 when unknown.
+    pub col: u32,
+    /// What was wrong, as a sentence.
+    pub message: String,
+}
+
+impl fmt::Display for ParsePanic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.line == 0 {
+            return write!(f, "{}", self.message);
+        }
+        if self.col == 0 {
+            return write!(f, "{} at line {}", self.message, self.line);
+        }
+        write!(f, "{} at line {}:{}", self.message, self.line, self.col)
+    }
+}
 
 /// A recursive-descent parser over a flat token stream.
 pub struct Parser {
     tokens: Vec<Token>,
     /// The source line of each token (parallel to `tokens`), or empty when the parser was built
-    /// from tokens alone. Used to stamp each statement with its line for the `--debug` checkpoint.
+    /// from tokens alone. Used to stamp each statement with its line for the `--debug` checkpoint,
+    /// and to say where a parse error sits in the text being parsed.
     lines: Vec<u32>,
+    /// The source column of each token (parallel to `tokens`), or empty when unknown.
+    cols: Vec<u32>,
     pos: usize,
     /// Module-level `let` bindings collected while parsing the program.
     globals: Vec<Global>,
@@ -54,15 +85,24 @@ fn split_conjuncts(e: Expr, out: &mut Vec<Expr>) {
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Parser::with_lines(tokens, Vec::new())
+        Parser::with_positions(tokens, Vec::new(), Vec::new())
     }
 
     /// Builds a parser that also knows each token's source line (from `tokenize_located`), so the
     /// blocks it parses carry per-statement line info for the `--debug` checkpoint.
     pub fn with_lines(tokens: Vec<Token>, lines: Vec<u32>) -> Self {
+        let cols = vec![0; lines.len()];
+        Parser::with_positions(tokens, lines, cols)
+    }
+
+    /// Builds a parser that knows each token's source line AND column, so a rejected token can be
+    /// pointed at exactly. Columns are 1-based character positions in the parsed text; they may
+    /// all be 0, which reads as "the column is not known" and simply leaves it out of the message.
+    pub fn with_positions(tokens: Vec<Token>, lines: Vec<u32>, cols: Vec<u32>) -> Self {
         Parser {
             tokens,
             lines,
+            cols,
             pos: 0,
             globals: Vec::new(),
             structs: Vec::new(),
@@ -80,6 +120,28 @@ impl Parser {
     /// The source line of the current token, or 0 if line info is absent.
     fn cur_line(&self) -> u32 {
         self.lines.get(self.pos).copied().unwrap_or(0)
+    }
+
+    /// The reported position of the token at index `n` (clamped into the stream so a refusal at
+    /// end of input points at the LAST line of the text rather than a line past it).
+    fn pos_at(&self, n: usize) -> (u32, u32) {
+        let n = n.min(self.tokens.len().saturating_sub(1));
+        (
+            self.lines.get(n).copied().unwrap_or(0),
+            self.cols.get(n).copied().unwrap_or(0),
+        )
+    }
+
+    /// Refuses the program: panics with the parse error message and the position of the token at
+    /// index `n`. Every rejection the parser issues goes through here, so no "expected X, got Y"
+    /// can reach a person without saying where.
+    pub(crate) fn fail_at(&self, n: usize, message: String) -> ! {
+        let (line, col) = self.pos_at(n);
+        std::panic::panic_any(ParsePanic {
+            line,
+            col,
+            message,
+        });
     }
 
     /// Parses a whole program: top-level `fn` declarations, `let` globals and
@@ -182,7 +244,7 @@ impl Parser {
                         name,
                         value,
                         array_len,
-                        ..
+                        ty,
                     } = self.parse_let()
                     else {
                         unreachable!("parse_let returns a Let")
@@ -192,6 +254,7 @@ impl Parser {
                         mutable,
                         name,
                         array_len,
+                        ty,
                         init: value,
                     });
                 }
@@ -210,12 +273,14 @@ impl Parser {
         // the fence: that one was closed for characters that cannot be Sond, this one for
         // words made of ordinary letters that the lexer accepts and the parser cannot use.
         if let Some(tok) = self.peek() {
-            panic!(
-                "unrecognised top-level declaration at line {}: {:?}. \
-                 Expected one of: fn, let, struct, enum, iface, use, impl, test \
-                 (a named constant is `let NAME = ...`, Sond has no `const`).",
-                self.cur_line(),
-                tok
+            self.fail_at(
+                self.pos,
+                format!(
+                    "unrecognised top-level declaration {tok}. \
+                     Expected one of: `fn`, `let`, `struct`, `enum`, `iface`, `use`, `impl`, `test` \
+                     (a named constant is `let NAME = ...`, Sond has no `const`).",
+                    tok = tok.describe()
+                ),
             );
         }
         funcs
@@ -378,6 +443,7 @@ impl Parser {
             is_wrapping,
             is_test: false,
             test_name: None,
+            is_harness: false,
             body,
         }
     }
@@ -511,9 +577,13 @@ impl Parser {
     /// readable name for the runner. `idx` makes the generated symbol unique across a file.
     fn parse_test(&mut self, idx: usize) -> Function {
         self.expect(Token::Test);
+        let name_pos = self.pos;
         let name = match self.advance() {
             Token::Str(s) => s,
-            other => panic!("expected a test name string after `test`, got {other:?}"),
+            other => self.fail_at(
+                name_pos,
+                format!("expected a test name string after `test`, got {other}"),
+            ),
         };
         let body = self.parse_block();
         Function {
@@ -580,12 +650,15 @@ impl Parser {
                         };
                         let mut body = self.parse_block();
                         sink_tail(&mut body); // the step runs AFTER the body, not before
-                        body.stmts.push(step);
+                        let for_line = stmt_line;
+                        step_before_continues(&mut body, &step); // ...and before every `continue`
+                        body.push_stmt(step, for_line);
                         stmts.push(init);
                         stmts.push(Stmt::For {
                             cond: Some(cond),
                             body,
                             invariant: Vec::new(),
+                            is_range_for: false,
                         });
                         self.skip_semicolons();
                         continue;
@@ -620,6 +693,7 @@ impl Parser {
                             let end = self.parse_expr();
                             self.no_struct_lit = saved;
                             let mut body = self.parse_block();
+                            let for_line = stmt_line;
                             stmts.push(Stmt::Let {
                                 mutable: true,
                                 name: var.clone(),
@@ -628,7 +702,31 @@ impl Parser {
                                 array_len: None,
                             });
                             sink_tail(&mut body); // increment must run AFTER the body, not before
-                            body.stmts.push(assign_inc(&var));
+                            // ...and before every `continue`, which jumps past the end of the
+                            // body: without this the iteration that continues never advances `i`
+                            // and the loop spins for ever.
+                            let inc = assign_inc(&var);
+                            step_before_continues(&mut body, &inc);
+                            body.push_stmt(inc, for_line);
+                            // The bound goes into the loop CONDITION, which is re-read every
+                            // turn. That is wrong for a counting form: `for i in 0..tope()`
+                            // called `tope()` four times to run three turns, and a body that
+                            // raised its own bound never finished -- compiling in silence, and
+                            // walking off the end of a buffer while it spun. Unless the bound
+                            // is stable, it is evaluated ONCE into a local.
+                            let end = if end_is_stable(&end, &body) {
+                                end
+                            } else {
+                                let name = format!("__end{}", self.pos);
+                                stmts.push(Stmt::Let {
+                                    mutable: false,
+                                    name: name.clone(),
+                                    ty: None,
+                                    value: end,
+                                    array_len: None,
+                                });
+                                Expr::Var(name)
+                            };
                             stmts.push(Stmt::For {
                                 cond: Some(Expr::Binary(
                                     BinOp::Lt,
@@ -637,6 +735,7 @@ impl Parser {
                                 )),
                                 invariant: Vec::new(),
                                 body,
+                                is_range_for: true,
                             });
                         } else {
                             // Foreach `for x in coll { body }`: iterate a slice/array's elements.
@@ -644,7 +743,8 @@ impl Parser {
                             // named by token position so nested loops never collide.
                             let idx = format!("__fe{}", self.pos);
                             let mut body = self.parse_block();
-                            body.stmts.insert(
+                            let for_line = stmt_line;
+                            body.insert_stmt(
                                 0,
                                 Stmt::Let {
                                     mutable: false,
@@ -656,9 +756,15 @@ impl Parser {
                                     ),
                                     array_len: None,
                                 },
+                                for_line,
                             );
                             sink_tail(&mut body);
-                            body.stmts.push(assign_inc(&idx));
+                            // ...and before every `continue`, which jumps past the end of the
+                            // body: without this the iteration that continues never advances
+                            // __feN and the loop spins for ever.
+                            let idx_inc = assign_inc(&idx);
+                            step_before_continues(&mut body, &idx_inc);
+                            body.push_stmt(idx_inc, for_line);
                             stmts.push(Stmt::Let {
                                 mutable: true,
                                 name: idx.clone(),
@@ -674,13 +780,15 @@ impl Parser {
                                 )),
                                 invariant: Vec::new(),
                                 body,
+                                is_range_for: false,
                             });
                         }
                         self.skip_semicolons();
                     } else {
                         // No condition when the body (`{`) or an `invariant` clause follows `for`
                         // directly, an infinite loop, optionally carrying an invariant.
-                        let cond = if matches!(self.peek(), Some(Token::LBrace | Token::Invariant)) {
+                        let cond = if matches!(self.peek(), Some(Token::LBrace | Token::Invariant))
+                        {
                             None
                         } else {
                             let saved = self.no_struct_lit;
@@ -701,6 +809,7 @@ impl Parser {
                             cond,
                             invariant,
                             body,
+                            is_range_for: false,
                         });
                         self.skip_semicolons();
                     }
@@ -713,6 +822,23 @@ impl Parser {
                 Some(Token::Continue) => {
                     self.advance();
                     stmts.push(Stmt::Continue);
+                    self.skip_semicolons();
+                }
+                // `lock (name) { ... }`: acquire a futex mutex at `name`, run the body as a
+                // lexical critical section, release the mutex on any exit path. `lock` is a
+                // contextual keyword: it only has this meaning when followed by `(` then an
+                // identifier then `)` then `{` at statement position (the full pattern
+                // `lock (IDENT) { ... }`), so `lock(x)` always parses as a call.
+                // Note: we use `if name == "lock"` in a guard because tokens stores
+                // `Ident(String)` and Rust doesn't allow matching a `String` against
+                // a `&str` in patterns.
+                Some(Token::Ident(name)) if name == "lock" && looks_like_lock_stmt(&self.tokens, self.pos) => {
+                    self.advance(); // `lock`
+                    self.expect(Token::LParen);
+                    let name = self.expect_ident();
+                    self.expect(Token::RParen);
+                    let body = self.parse_block();
+                    stmts.push(Stmt::Lock { name, body });
                     self.skip_semicolons();
                 }
                 Some(Token::Spawn) => {
@@ -748,6 +874,7 @@ impl Parser {
                         self.skip_semicolons();
                         if self.peek() == Some(&Token::RBrace) {
                             // Last bare expression = the block's tail value.
+                            stmt_lines.push(stmt_line);
                             tail = Some(Box::new(e));
                         } else {
                             stmts.push(Stmt::Expr(e));
@@ -795,9 +922,10 @@ impl Parser {
         }
         // `let name[N]`: a fixed-size stack array of N words (N a literal).
         let array_len = if self.eat(Token::LBracket) {
+            let n_pos = self.pos;
             let n = match self.advance() {
                 Token::Int(n) => n,
-                other => panic!("array size must be an integer literal, got {other:?}"),
+                other => self.fail_at(n_pos, format!("array size must be an integer literal, got {other}")),
             };
             self.expect(Token::RBracket);
             Some(n)
@@ -816,6 +944,7 @@ impl Parser {
             self.expect(Token::Eq);
             self.expect(Token::Par);
             self.expect(Token::LParen);
+            let op_pos = self.pos;
             let op = match self.advance() {
                 Token::Plus => BinOp::Add,
                 Token::Star => BinOp::Mul,
@@ -825,7 +954,7 @@ impl Parser {
                 // Parsed so the checker can reject it with a clear message; not in the monoid set.
                 Token::Minus => BinOp::Sub,
                 Token::Slash => BinOp::Div,
-                other => panic!("`par(op)` reducer must be an operator, got {other:?}"),
+                other => self.fail_at(op_pos, format!("`par(op)` reducer must be an operator, got {other}")),
             };
             self.expect(Token::RParen);
             let mut peers = vec![self.parse_expr()];
@@ -868,9 +997,13 @@ impl Parser {
                         yield_expr: y,
                     };
                 } else {
-                    panic!(
-                        "graph block: expected `node NAME = ..` or `yield ..`, got {:?}",
-                        self.peek()
+                    let got = match self.peek() {
+                        Some(t) => t.describe(),
+                        None => "end of input".to_string(),
+                    };
+                    self.fail_at(
+                        self.pos,
+                        format!("graph block: expected `node NAME = ..` or `yield ..`, got {got}"),
                     );
                 }
             }
@@ -1076,14 +1209,18 @@ impl Parser {
                 }
                 // The length is either the NAME of the parameter/local carrying it, or a literal
                 // for a view over a store whose size is written down at the declaration.
-                Some(Token::Ident(len)) if self.tokens.get(self.pos + 2) == Some(&Token::RBracket) => {
+                Some(Token::Ident(len))
+                    if self.tokens.get(self.pos + 2) == Some(&Token::RBracket) =>
+                {
                     let len = len.clone();
                     self.expect(Token::LBracket);
                     self.advance();
                     self.expect(Token::RBracket);
                     return Type::View(Box::new(base), Some(len));
                 }
-                Some(Token::Int(len)) if self.tokens.get(self.pos + 2) == Some(&Token::RBracket) => {
+                Some(Token::Int(len))
+                    if self.tokens.get(self.pos + 2) == Some(&Token::RBracket) =>
+                {
                     let len = len.to_string();
                     self.expect(Token::LBracket);
                     self.advance();
@@ -1112,9 +1249,251 @@ fn assign_inc(name: &str) -> Stmt {
 /// Sinks a block's tail expression into its statement list (as a discarded expression), so a
 /// loop-counter increment appended afterwards runs AFTER the body's last expression, not before
 /// it (`for i in 0..3 { print(i) }` must print 0,1,2, the increment cannot precede the tail).
+/// Inserts `step` before every `continue` that belongs to THIS loop.
+///
+/// The counting and three-part `for` forms both desugar to a `for <cond>` whose body ENDS with
+/// the step (`i = i + 1`). That is right for a body that runs to its end, and wrong for one that
+/// jumps: `continue` goes straight to the condition, past the step, so the iteration that took it
+/// never advanced the counter and the loop spun for ever -- compiling clean, printing nothing,
+/// at 100% of a core.
+///
+/// The desugar owns the rule "the step runs on every path that leaves the body", so it has to
+/// fix up the paths that leave early too. Nested loops are skipped: a `continue` inside one
+/// belongs to that loop and stepping the outer counter as well would silently skip an iteration,
+/// which is a wrong answer rather than a hang, and harder to notice.
+fn step_before_continues(block: &mut Block, step: &Stmt) {
+    // Collect continues at the *current* block level before any insertion (inserting shifts all
+    // subsequent positions).  For each direct `continue` insert the increment right before it,
+    // using the continue's source line so error reporting stays correct.
+    let conts: Vec<(usize, u32)> = block
+        .stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| match s {
+            Stmt::Continue => Some((i, block.stmt_lines[i])),
+            _ => None,
+        })
+        .collect();
+    // Insert from back to front so earlier positions don't shift.
+    for (i, line) in conts.iter().rev() {
+        block.insert_stmt(*i, step.clone(), *line);
+    }
+    // Process statements that may contain continues of THE CURRENT loop.
+    // Nested `for` statements are SKIPPED — they own their own continues, which are processed
+    // when the outer loop's body is itself passed to step_before_continues.
+    let mut i = 0;
+    while i < block.stmts.len() {
+        match &mut block.stmts[i] {
+            // Direct continues (handled above) and nested fors (own block is handled by caller).
+            Stmt::Continue | Stmt::For { .. } => {}
+            other => step_in_stmt(other, step),
+        }
+        i += 1;
+    }
+    if let Some(t) = block.tail.as_mut() {
+        step_in_expr(t, step);
+    }
+}
+
+/// Walks a statement's expressions looking for the blocks of an `if`/`match`, where a `continue`
+/// of the enclosing loop can also sit.
+fn step_in_stmt(s: &mut Stmt, step: &Stmt) {
+    match s {
+        Stmt::Let { value, .. } => step_in_expr(value, step),
+        Stmt::Assign { target, value } => {
+            step_in_expr(target, step);
+            step_in_expr(value, step);
+        }
+        Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => step_in_expr(e, step),
+        Stmt::Par(peers) | Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
+            for p in peers {
+                step_in_expr(p, step);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The same, through an expression: `if` and `match` carry blocks, and any expression can hold
+/// one deeper down (`f(if c { .. } else { .. })`).
+fn step_in_expr(e: &mut Expr, step: &Stmt) {
+    match e {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            step_in_expr(cond, step);
+            step_before_continues(then_branch, step);
+            if let Some(b) = else_branch.as_mut() {
+                step_before_continues(b, step);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            step_in_expr(scrutinee, step);
+            for a in arms {
+                step_before_continues(&mut a.body, step);
+            }
+        }
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            step_in_expr(l, step);
+            step_in_expr(r, step);
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => step_in_expr(x, step),
+        Expr::Call(c, args) => {
+            step_in_expr(c, step);
+            for a in args {
+                step_in_expr(&mut a.value, step);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn sink_tail(body: &mut Block) {
+    let line = body.stmt_lines.last().copied().unwrap_or(0);
     if let Some(t) = body.tail.take() {
-        body.stmts.push(Stmt::Expr(*t));
+        body.push_stmt(Stmt::Expr(*t), line);
+    }
+}
+
+/// Peeks ahead to see if the tokens starting from `pos` match `lock (IDENT) {`.
+/// This distinguishes the contextual `lock` keyword from a function call like `lock(x)`.
+fn looks_like_lock_stmt(tokens: &[Token], pos: usize) -> bool {
+    // lock ( IDENT ) {
+    matches!(tokens.get(pos), Some(Token::Ident(s)) if s == "lock")
+        && matches!(tokens.get(pos + 1), Some(Token::LParen))
+        && matches!(tokens.get(pos + 2), Some(Token::Ident(_)))
+        && matches!(tokens.get(pos + 3), Some(Token::RParen))
+        && matches!(tokens.get(pos + 4), Some(Token::LBrace))
+}
+
+// ---------------------------------------------------------------------------
+// When a `for i in a..b` bound may stay in the condition
+// ---------------------------------------------------------------------------
+
+/// The dotted path a bound names, when it names one: `n`, `s.len`, `cfg.limits.max`. `None` for
+/// anything computed -- a call, arithmetic, an index -- whose value the parser cannot assume is
+/// the same on the next turn.
+///
+/// An index is deliberately NOT a path: `a[i]` reads through a name, and writing to it does not
+/// change the name itself.
+fn named_path(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Var(n) => Some(n.clone()),
+        Expr::Field(base, f) => Some(format!("{}.{}", named_path(base)?, f)),
+        _ => None,
+    }
+}
+
+/// Whether `end` may stay in the loop condition, where it is re-read on every turn, instead of
+/// being evaluated once into a local.
+///
+/// Only two shapes qualify: an integer literal, and a path the body never assigns to.
+///
+/// The asymmetry is deliberate. Lifting costs the prover the NAME it reasons about: it clears an
+/// index by matching `i < s.len` textually, so lifting a stable bound to `__end0` would start
+/// rejecting programs that compile today, across the whole tree. Failing the other way is silent
+/// -- the loop re-reads a bound that moved, and never ends.
+fn end_is_stable(end: &Expr, body: &Block) -> bool {
+    match end {
+        Expr::Int(_) => true,
+        _ => match named_path(end) {
+            Some(path) => !block_assigns_path(body, &path),
+            None => false,
+        },
+    }
+}
+
+/// Whether `block` assigns to `path`, AT ANY DEPTH: inside an `if`, a nested loop, a match arm, a
+/// `lock`. Looking only at the block's own top-level statements is not enough -- moving the very
+/// same assignment one line into an `if` brought the endless loop straight back, measured.
+fn block_assigns_path(block: &Block, path: &str) -> bool {
+    block.stmts.iter().any(|s| stmt_assigns_path(s, path))
+        || block
+            .tail
+            .as_ref()
+            .is_some_and(|t| expr_assigns_path(t, path))
+}
+
+/// Whether assigning to `target` disturbs the bound at `path`. A prefix counts: `s = t` carries
+/// `s.len` with it. Writing through an index does not: `s[i] = 0` leaves both `s` and `s.len`.
+fn assignment_disturbs(target: &Expr, path: &str) -> bool {
+    match named_path(target) {
+        Some(escrito) => path == escrito || path.starts_with(&format!("{escrito}.")),
+        None => false,
+    }
+}
+
+/// Every variant is named on purpose: no `_` arm. A statement added to the language must not be
+/// able to hide an assignment from this walk by simply not being listed -- adding one has to stop
+/// the Rust compiler, which is the only reminder that never gets forgotten.
+fn stmt_assigns_path(s: &Stmt, path: &str) -> bool {
+    match s {
+        Stmt::Assign { target, value } => {
+            assignment_disturbs(target, path)
+                || expr_assigns_path(target, path)
+                || expr_assigns_path(value, path)
+        }
+        Stmt::Let { value, .. } => expr_assigns_path(value, path),
+        Stmt::Return(e) => e.as_ref().is_some_and(|e| expr_assigns_path(e, path)),
+        Stmt::Expr(e) | Stmt::Spawn(e) => expr_assigns_path(e, path),
+        Stmt::For {
+            cond,
+            invariant: _,
+            body,
+            is_range_for: _,
+        } => {
+            cond.as_ref().is_some_and(|c| expr_assigns_path(c, path))
+                || block_assigns_path(body, path)
+        }
+        Stmt::Break | Stmt::Continue => false,
+        Stmt::Par(peers) | Stmt::ParLet { peers, .. } | Stmt::ParReduce { peers, .. } => {
+            peers.iter().any(|p| expr_assigns_path(p, path))
+        }
+        Stmt::GraphLet {
+            nodes, yield_expr, ..
+        } => {
+            nodes.iter().any(|(_, e)| expr_assigns_path(e, path))
+                || expr_assigns_path(yield_expr, path)
+        }
+        Stmt::Lock { name: _, body } => block_assigns_path(body, path),
+    }
+}
+
+/// An `if` and a `match` are EXPRESSIONS here, so a body's branches are reached through this one.
+fn expr_assigns_path(e: &Expr, path: &str) -> bool {
+    match e {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            expr_assigns_path(cond, path)
+                || block_assigns_path(then_branch, path)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|b| block_assigns_path(b, path))
+        }
+        Expr::Match { scrutinee, arms } => {
+            expr_assigns_path(scrutinee, path)
+                || arms.iter().any(|a| block_assigns_path(&a.body, path))
+        }
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            expr_assigns_path(l, path) || expr_assigns_path(r, path)
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => expr_assigns_path(x, path),
+        Expr::Call(c, args) => {
+            expr_assigns_path(c, path) || args.iter().any(|a| expr_assigns_path(&a.value, path))
+        }
+        Expr::List(items) => items.iter().any(|it| expr_assigns_path(it, path)),
+        Expr::StructLit(_, fields) => fields.iter().any(|(_, v)| expr_assigns_path(v, path)),
+        Expr::SliceRange(base, lo, hi) => {
+            expr_assigns_path(base, path)
+                || lo.as_ref().is_some_and(|l| expr_assigns_path(l, path))
+                || hi.as_ref().is_some_and(|h| expr_assigns_path(h, path))
+        }
+        Expr::Int(_) | Expr::Decimal(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Var(_) => false,
     }
 }
 

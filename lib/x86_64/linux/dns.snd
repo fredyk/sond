@@ -1,0 +1,325 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/dns.snd: turning a host name into an IPv4 address (RFC 1035 over UDP).
+//
+// Public API:
+//   dns_resolve(host) -> i64                     the address of `host`, or a negative error
+//   resolv_nameserver(path) -> i64               the first `nameserver` in a resolv.conf
+//   dns_query_fd(fd, server, port, host, id, buf, cap) -> i64
+//   dns_build_query(buf, host, id) -> i64        bytes written, or a negative error
+//   dns_parse_a(buf, n, id) -> i64               the A record's address, or a negative error
+//
+// Addresses are u32 in host order (127.0.0.1 is 0x7f000001), the same convention
+// sockaddr_in_build takes, so the result goes straight into a connect.
+//
+// Why this exists: without it a program has to be given a literal IP, and a literal IP is a
+// promise that a third party will not change theirs. Anything behind a CDN rotates addresses,
+// so a binary with one baked in works until it does not, for reasons the user cannot see.
+//
+// What this deliberately does NOT do: no TCP fallback, no EDNS, no DNSSEC, no /etc/hosts, no
+// search domains, no IPv6. It asks one recursive resolver one question and reads one answer.
+// A caller that needs more than that needs a real resolver library, and should be told so by
+// this comment rather than by a subtle failure.
+
+include "x86_64/linux/net.snd"
+include "x86_64/linux/udp.snd"
+include "x86_64/linux/io.snd"
+
+// Negative results, chosen below the errno range so they cannot be confused with one.
+let DNS_EFORMAT   = 0 - 1001   // the packet is malformed, or too short for what it claims
+let DNS_EID       = 0 - 1002   // the reply answers a different question
+let DNS_ENOANSWER = 0 - 1003   // a valid reply that carries no A record
+let DNS_ENAME     = 0 - 1004   // the host name cannot be encoded as a query
+let DNS_ENOSERVER = 0 - 1005   // no usable nameserver line in resolv.conf
+let DNS_ETIMEOUT  = 0 - 1006   // nobody answered before the deadline
+
+// Seconds to wait for a reply. A global rather than a parameter so the common call stays short;
+// a test that wants to observe the timeout can shorten it.
+let mut dns_timeout_secs = 5
+
+let RESOLV_CONF_PATH: string = "/etc/resolv.conf"
+let NAMESERVER_KEY: string = "nameserver"
+
+// Two buffers, sized in BYTES and named so, because mixing the two units is exactly how this
+// module shipped broken: `let mut dns_scratch[192]` reserves 192 WORDS (1536 bytes) and the
+// read was given 192 as a byte cap, so it used an eighth of its own buffer. On any machine
+// running systemd-resolved -- the default on Ubuntu, Debian and Fedora -- /etc/resolv.conf is
+// a stub file with 19 lines of comments before the nameserver, and the read failed outright.
+//
+// A `let x[N]` is N WORDS. Whenever one of these is handed to something that counts bytes, the
+// number that goes with it is the _BYTES constant, never the declaration's N.
+let DNS_PKT_BYTES = 512        // the classic maximum size of a DNS message over UDP
+let RESOLV_BYTES = 4096        // room for a stub header plus several search and nameserver lines
+
+let mut dns_pkt[64]            // 512 bytes
+let mut resolv_buf[512]        // 4096 bytes
+
+// Writes a big-endian 16-bit value.
+fn dns_be16(buf: i64, off: i64, val: i64) {
+    poke8(buf + off, (val >>> 8) & 0xff)
+    poke8(buf + off + 1, val & 0xff)
+}
+
+// Reads a big-endian 16-bit value.
+fn dns_get_be16(buf: i64, off: i64) -> i64 {
+    (peek8(buf + off) << 8) | peek8(buf + off + 1)
+}
+
+// Builds an A query for `host` in `buf`, returning its length, or a negative error.
+//
+// The name is written as length-prefixed labels: "example.com" becomes 7 "example" 3 "com" 0.
+// A label longer than 63 bytes is refused rather than truncated, because 63 is not an arbitrary
+// limit: the two top bits of a length byte mark a COMPRESSION POINTER, so a longer label does
+// not produce a malformed query, it produces a query that means something else.
+fn dns_build_query(buf: i64, host: i64, id: i64) -> i64 {
+    dns_be16(buf, 0, id)
+    dns_be16(buf, 2, 0x0100) // RD: ask the server to recurse
+    dns_be16(buf, 4, 1)      // QDCOUNT
+    dns_be16(buf, 6, 0)      // ANCOUNT
+    dns_be16(buf, 8, 0)      // NSCOUNT
+    dns_be16(buf, 10, 0)     // ARCOUNT
+
+    let mut off = 12
+    let mut i = 0
+    let mut label_start = 0
+    for {
+        let c = peek8(host + i)
+        if c == 46 || c == 0 {
+            let len = i - label_start
+            if len == 0 { return DNS_ENAME }  // "", "a..b" and a trailing dot all land here
+            if len > 63 { return DNS_ENAME }
+            poke8(buf + off, len)
+            off = off + 1
+            for k in 0..len {
+                poke8(buf + off + k, peek8(host + label_start + k))
+            }
+            off = off + len
+            label_start = i + 1
+        }
+        if c == 0 { break }
+        i = i + 1
+    }
+    poke8(buf + off, 0) // root label
+    off = off + 1
+    dns_be16(buf, off, 1)     // QTYPE = A
+    dns_be16(buf, off + 2, 1) // QCLASS = IN
+    off + 4
+}
+
+// Skips the name at `off`, returning the offset just past it, or a negative error.
+//
+// A name is either a sequence of length-prefixed labels ending in a zero byte, or a two-byte
+// pointer into the packet (top two bits of the length byte set), or labels ending in one. The
+// pointer is not followed here: nothing in this module needs to READ the name, only to get past
+// it, and following pointers is where a parser turns a hostile packet into an endless loop.
+fn dns_skip_name(buf: i64, n: i64, off: i64) -> i64 {
+    let mut p = off
+    for {
+        if p >= n { return DNS_EFORMAT }
+        let len = peek8(buf + p)
+        if (len & 0xc0) == 0xc0 {
+            if p + 2 > n { return DNS_EFORMAT }
+            return p + 2
+        }
+        if len > 63 { return DNS_EFORMAT }
+        p = p + 1
+        if len == 0 { return p }
+        p = p + len
+    }
+    DNS_EFORMAT
+}
+
+// Reads the first A record out of a reply to the query with identifier `id`, and returns its
+// address, or a negative error.
+//
+// The counts are believed only as far as the packet's own length allows: every step checks its
+// bytes are there before reading them. ANCOUNT is what bounds the walk -- NOT "records until
+// the buffer ends" -- because a reply with no answers still carries an SOA in the AUTHORITY
+// section, and its rdata read as an address is a plausible-looking IP that points nowhere.
+fn dns_parse_a(buf: i64, n: i64, id: i64) -> i64 {
+    if n < 12 { return DNS_EFORMAT }
+    if dns_get_be16(buf, 0) != id { return DNS_EID }
+    let ancount = dns_get_be16(buf, 6)
+    let qdcount = dns_get_be16(buf, 4)
+
+    let mut off = 12
+    for q in 0..qdcount {
+        off = dns_skip_name(buf, n, off)
+        if off < 0 { return off }
+        off = off + 4 // QTYPE + QCLASS
+        if off > n { return DNS_EFORMAT }
+    }
+
+    for a in 0..ancount {
+        off = dns_skip_name(buf, n, off)
+        if off < 0 { return off }
+        if off + 10 > n { return DNS_EFORMAT }
+        let rtype = dns_get_be16(buf, off)
+        let rclass = dns_get_be16(buf, off + 2)
+        let rdlen = dns_get_be16(buf, off + 8)
+        off = off + 10
+        if off + rdlen > n { return DNS_EFORMAT }
+        if rtype == 1 {
+            if rclass == 1 {
+                if rdlen == 4 {
+                    let hi = (peek8(buf + off) << 24) | (peek8(buf + off + 1) << 16)
+                    return hi | (peek8(buf + off + 2) << 8) | peek8(buf + off + 3)
+                }
+            }
+        }
+        off = off + rdlen
+    }
+    DNS_ENOANSWER
+}
+
+// Parses a dotted-quad at `p`, stopping at the first byte that is neither a digit nor a dot.
+// Returns the address, or a negative error if it is not four numbers in 0..255.
+fn dns_parse_ipv4(p: i64) -> i64 {
+    let mut ip = 0
+    let mut i = 0
+    for part in 0..4 {
+        let mut v = 0
+        let mut digits = 0
+        for {
+            let c = peek8(p + i)
+            if c < 48 { break }
+            if c > 57 { break }
+            v = v * 10 + (c - 48)
+            digits = digits + 1
+            i = i + 1
+        }
+        if digits == 0 { return DNS_ENOSERVER }
+        if v > 255 { return DNS_ENOSERVER }
+        ip = (ip << 8) | v
+        if part < 3 {
+            if peek8(p + i) != 46 { return DNS_ENOSERVER }
+            i = i + 1
+        }
+    }
+    ip
+}
+
+// Internal: reads resolv.conf using i64 path (caller has the raw bytes).
+fn _resolv_nameserver_i64(path: i64) -> i64 {
+    let fd = syscall(SYS_open, path, O_RDONLY, 0)
+    if fd < 0 { return fd }
+    let mut n = 0
+    let mut buf_off = 0
+    for {
+        let r = read_buf(fd, resolv_buf + buf_off, RESOLV_BYTES - buf_off - 1)
+        if r <= 0 { break }
+        n = n + r
+        buf_off = buf_off + r
+    }
+    close_fd(fd)
+    if n == 0 { return DNS_ENOSERVER }
+    let mut i = 0
+    for i < n {
+        let mut k = 0
+        for k < 10 {
+            if i + k >= n { break }
+            if peek8(resolv_buf + i + k) != peek8(NAMESERVER_KEY.utf8 + k) { break }
+            k = k + 1
+        }
+        if k == 10 {
+            let mut j = i + 10
+            for j < n {
+                if peek8(resolv_buf + j) != 32 {
+                    if peek8(resolv_buf + j) != 9 { break }
+                }
+                j = j + 1
+            }
+            if j > i + 10 {
+                let ip = dns_parse_ipv4(resolv_buf + j)
+                if ip >= 0 { return ip }
+            }
+        }
+        for i < n {
+            if peek8(resolv_buf + i) == 10 { break }
+            i = i + 1
+        }
+        i = i + 1
+    }
+    DNS_ENOSERVER
+}
+
+// Reads a resolv.conf file and returns the first nameserver IP.
+fn resolv_nameserver(path: i64) -> i64 {
+    let n = read_file(path, resolv_buf, RESOLV_BYTES)
+    if n < 0 { return n }
+    let mut i = 0
+    for i < n {
+        // At the start of a line: compare against "nameserver" and require a space after it.
+        let mut k = 0
+        for k < 10 {
+            if i + k >= n { break }
+            if peek8(resolv_buf + i + k) != peek8(NAMESERVER_KEY.utf8 + k) { break }
+            k = k + 1
+        }
+        if k == 10 {
+            let mut j = i + 10
+            for j < n {
+                if peek8(resolv_buf + j) != 32 {
+                    if peek8(resolv_buf + j) != 9 { break }
+                }
+                j = j + 1
+            }
+            if j > i + 10 {
+                let ip = dns_parse_ipv4(resolv_buf + j)
+                if ip >= 0 { return ip }
+            }
+        }
+        // Skip to the start of the next line.
+        for i < n {
+            if peek8(resolv_buf + i) == 10 { break }
+            i = i + 1
+        }
+        i = i + 1
+    }
+    DNS_ENOSERVER
+}
+
+// Asks `server:port` for the address of `host` over the already-created socket `fd`, using
+// `buf` (of `cap` bytes) for both the query and the reply. Returns the address, or a negative
+// error. The socket is the caller's so that a test can bind it, and so that a caller who wants
+// to ask several questions does not pay for a socket per question.
+fn dns_query_fd(fd: i64, server: i64, port: i64, host: i64, id: i64, buf: i64, cap: i64) -> i64 {
+    let qlen = dns_build_query(buf, host, id)
+    if qlen < 0 { return qlen }
+    if qlen > cap { return DNS_ENAME }
+    let sa[2]
+    sockaddr_in_build(sa, server, port)
+    // A deadline, always: a UDP question that nobody answers otherwise blocks the program for
+    // as long as it runs, with no error and nothing in a log.
+    set_rcvtimeo(fd, dns_timeout_secs)
+    let sent = sendto_sock(fd, buf, qlen, 0, sa, 16)
+    if sent < 0 { return sent }
+    let got = recvfrom_sock(fd, buf, cap, 0, 0, 0)
+    if got < 0 { return DNS_ETIMEOUT }
+    dns_parse_a(buf, got, id)
+}
+
+// The address of `host`, asking the system's configured resolver. Negative on error.
+//
+// The query id is the low 16 bits of the clock. It is not a defence against a spoofed reply --
+// nothing over plain UDP is -- it only keeps a late answer to a previous question from being
+// read as the answer to this one.
+fn dns_resolve(host: i64) -> i64 {
+    dns_resolve_from(RESOLV_CONF_PATH.utf8, host)
+}
+
+// The same, reading the resolver from `path`. Split out from dns_resolve so the whole body can
+// be exercised against a fixture: a test that had to reach the real /etc/resolv.conf would be
+// asking the machine it runs on a question, and would pass or fail for reasons that have
+// nothing to do with this code.
+fn dns_resolve_from(path: i64, host: i64) -> i64 {
+    let server = resolv_nameserver(path)
+    if server < 0 { return server }
+    let fd = udp_socket()
+    if fd < 0 { return fd }
+    let id = syscall(SYS_time, 0, 0, 0) & 0xffff
+    let ip = dns_query_fd(fd, server, 53, host, id, dns_pkt, DNS_PKT_BYTES)
+    close_fd(fd)
+    ip
+}

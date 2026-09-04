@@ -1,77 +1,97 @@
-// Test of chacha20poly1305.snd against RFC 8439 §2.8.2 AEAD vector.
-// Returns 0 if all pass, !=0 if any fail.
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/crypto/aead/chacha20poly1305.snd, against the RFC 8439 §2.8.2 AEAD vector.
+//
+// This file used to be a `main` that printed FAIL and returned a code, which the suite runner
+// does not collect: it only picks up files containing `test "` blocks. It had also stopped
+// compiling -- `.utf8` applied twice, once to the literal and again to the pointer that produced
+// -- so the AEAD that every TLS record goes through had no test being run at all.
+//
+// The vectors are the RFC's own, not this implementation's output. A vector taken from the code
+// it checks proves that the code agrees with itself, which is not a property anybody needs.
 
-include "x86_64/linux/io.snd"
-include "any/strings.snd"
 include "any/crypto/aead/chacha20poly1305.snd"
+include "x86_64/linux/testing.snd"
 
-fn puts(s: i64) { write_buf(1, s, strlen(s)) }
+let PT_TEXT: string = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+let CT_HEX: string = "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116"
+let TAG_HEX: string = "1ae10b594f09e26a7e902ecbd0600691"
+
+let mut key[4]      // 32 bytes
+let mut nonce[2]    // 12 bytes
+let mut aad[2]      // 12 bytes
+let mut ct[15]      // 114 bytes
+let mut back[15]
+let mut tag[2]      // 16 bytes
+
 fn hexval(c: i64) -> i64 {
     if c >= 48 && c <= 57 { return c - 48 }
     if c >= 97 && c <= 102 { return c - 87 }
     c - 55
 }
+
+// 1 if the `n` bytes at `buf` are the ones `hexstr` spells out.
 fn eq_hex(buf: i64, n: i64, hexstr: i64) -> i64 {
-    let mut i = 0
-    for i < n {
+    for i in 0..n {
         let hi = hexval(peek8(hexstr + i * 2))
         let lo = hexval(peek8(hexstr + i * 2 + 1))
         if peek8(buf + i) != (hi * 16 + lo) { return 0 }
-        i = i + 1
     }
     1
 }
 
-fn main() -> i64 {
-    // key = 80 81 .. 9f
-    let key[32]
-    let mut i = 0
-    for i < 32 { poke8(key + i, 0x80 + i) i = i + 1 }
-    // nonce = 07 00 00 00 40 41 42 43 44 45 46 47
-    let nonce[12]
-    i = 0
-    for i < 12 { poke8(nonce + i, 0) i = i + 1 }
+// key = 80 81 .. 9f, nonce = 07 00 00 00 40 41 .. 47, aad = 50 51 52 53 c0 c1 .. c7.
+fn setup() {
+    for i in 0..32 { poke8(key + i, 0x80 + i) }
+    for i in 0..12 { poke8(nonce + i, 0) }
     poke8(nonce + 0, 0x07)
-    i = 0
-    for i < 8 { poke8(nonce + 4 + i, 0x40 + i) i = i + 1 }
-    // aad = 50 51 52 53 c0 c1 c2 c3 c4 c5 c6 c7
-    let aad[12]
-    poke8(aad + 0, 0x50) poke8(aad + 1, 0x51) poke8(aad + 2, 0x52) poke8(aad + 3, 0x53)
-    i = 0
-    for i < 8 { poke8(aad + 4 + i, 0xc0 + i) i = i + 1 }
+    for i in 0..8 { poke8(nonce + 4 + i, 0x40 + i) }
+    poke8(aad + 0, 0x50)
+    poke8(aad + 1, 0x51)
+    poke8(aad + 2, 0x52)
+    poke8(aad + 3, 0x53)
+    for i in 0..8 { poke8(aad + 4 + i, 0xc0 + i) }
+}
 
-    let pt_text: string = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
-    let pt = pt_text.utf8
-    let n = strlen(pt)
+test "the RFC 8439 vector seals to the ciphertext and tag the RFC prints" {
+    setup()
+    aead_seal(key, nonce, aad, 12, PT_TEXT.utf8, 114, ct, tag)
+    assert_eq(eq_hex(ct, 114, CT_HEX.utf8), 1)
+    assert_eq(eq_hex(tag, 16, TAG_HEX.utf8), 1)
+}
 
-    let ct[114]
-    let tag[16]
-    aead_seal(key, nonce, aad, 12, pt, n, ct, tag)
-
-    let ectx_text: string = "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116"
-    let ectx = ectx_text.utf8
-    let __f0_52: string = "FAIL ciphertext\n"
-    if eq_hex(ct, 114, ectx) == 0 { let __b0_52: string = __f0_52.utf8 puts(__b0_52.utf8) return 1 }
-    let __f0_54: string = "1ae10b594f09e26a7e902ecbd0600691"
-    let __f1_54: string = "FAIL tag\n"
-    if eq_hex(tag, 16, __f0_54.utf8) == 0 { let __b0_53: string = __f1_54.utf8 puts(__b0_53.utf8) return 1 }
-
-    // open with valid tag → 0 and recovers pt
-    let back[114]
-    let __f0_60: string = "FAIL open valid\n"
-    if aead_open(key, nonce, aad, 12, ct, n, tag, back) != 0 { let __b0_57: string = __f0_60.utf8 puts(__b0_57.utf8) return 1 }
-    i = 0
-    for i < n {
-        let __f0_64: string = "FAIL open plaintext\n"
-        if peek8(back + i) != peek8(pt + i) { let __b0_60: string = __f0_64.utf8 puts(__b0_60.utf8) return 1 }
-        i = i + 1
+test "what was sealed opens back to the same plaintext" {
+    setup()
+    aead_seal(key, nonce, aad, 12, PT_TEXT.utf8, 114, ct, tag)
+    assert_eq(aead_open(key, nonce, aad, 12, ct, 114, tag, back), 0)
+    for i in 0..114 {
+        assert_eq(peek8(back + i), peek8(PT_TEXT.utf8 + i))
     }
-    // open with corrupted tag → !=0
-    poke8(tag + 0, peek8(tag + 0) ^ 1)
-    let __f0_70: string = "FAIL open forged accepted\n"
-    if aead_open(key, nonce, aad, 12, ct, n, tag, back) == 0 { let __b0_65: string = __f0_70.utf8 puts(__b0_65.utf8) return 1 }
+}
 
-    let __f0_73: string = "OK chacha20poly1305 (RFC 8439 2.8.2)\n"
-    puts(__f0_73.utf8)
-    0
+test "a tag with one bit flipped is refused" {
+    // The whole point of the AEAD: a forged or damaged message must not open. One bit is the
+    // smallest change an attacker can make, and the smallest one an implementation can miss.
+    setup()
+    aead_seal(key, nonce, aad, 12, PT_TEXT.utf8, 114, ct, tag)
+    poke8(tag + 0, peek8(tag + 0) ^ 1)
+    assert(aead_open(key, nonce, aad, 12, ct, 114, tag, back) != 0)
+}
+
+test "a ciphertext with one bit flipped is refused" {
+    setup()
+    aead_seal(key, nonce, aad, 12, PT_TEXT.utf8, 114, ct, tag)
+    poke8(ct + 50, peek8(ct + 50) ^ 1)
+    assert(aead_open(key, nonce, aad, 12, ct, 114, tag, back) != 0)
+}
+
+test "associated data that changed is refused, though it is not encrypted" {
+    // The AAD travels in the clear and is NOT part of the ciphertext, so the only thing binding
+    // it to the message is the tag. If a changed AAD still opened, a header could be rewritten
+    // in flight -- the length, the type, the sequence -- while the body stayed valid.
+    setup()
+    aead_seal(key, nonce, aad, 12, PT_TEXT.utf8, 114, ct, tag)
+    poke8(aad + 0, peek8(aad + 0) ^ 1)
+    assert(aead_open(key, nonce, aad, 12, ct, 114, tag, back) != 0)
 }

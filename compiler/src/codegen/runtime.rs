@@ -69,9 +69,9 @@ impl Codegen {
             "    movq $10, %rcx",  // divisor
             "    xorq %r8, %r8",   // r8 = negative flag (0 = non-negative)
             "    testq %rax, %rax",
-            "    jns .Lpis_mag",  // >= 0 -> print magnitude directly
-            "    movq $1, %r8",   // negative: remember the sign
-            "    negq %rax",      // magnitude (MIN -> MIN; its unsigned reading is |MIN|)
+            "    jns .Lpis_mag", // >= 0 -> print magnitude directly
+            "    movq $1, %r8",  // negative: remember the sign
+            "    negq %rax",     // magnitude (MIN -> MIN; its unsigned reading is |MIN|)
             ".Lpis_mag:",
             "    testq %rax, %rax",
             "    jnz .Lpis_loop",
@@ -82,7 +82,7 @@ impl Codegen {
             "    testq %rax, %rax",
             "    jz .Lpis_sign",
             "    xorq %rdx, %rdx",
-            "    divq %rcx",     // rax /= 10 (unsigned on the magnitude), rdx = remainder
+            "    divq %rcx", // rax /= 10 (unsigned on the magnitude), rdx = remainder
             "    addb $48, %dl", // digit -> ASCII
             "    decq %rsi",
             "    movb %dl, (%rsi)",
@@ -252,12 +252,12 @@ impl Codegen {
             // the register, so the request survives for the arithmetic below.
             "    testq %rdi, %rdi",
             "    jle .Lva_empty",
-            "    addq $7, %rdi",  // round the request up to the 8-byte grain
+            "    addq $7, %rdi", // round the request up to the 8-byte grain
             "    andq $-8, %rdi",
-            "    movq (%r15), %rax",   // next free byte
+            "    movq (%r15), %rax", // next free byte
             "    movq %rax, %rcx",
-            "    addq %rdi, %rcx",     // where this request would end
-            "    cmpq 8(%r15), %rcx",  // does it fit in the current block?
+            "    addq %rdi, %rcx",    // where this request would end
+            "    cmpq 8(%r15), %rcx", // does it fit in the current block?
             "    jbe .Lva_fit",
             // Grow: map a fresh block, at least 16 MiB, at least the request.
             "    movq %rdi, %rsi",
@@ -276,14 +276,14 @@ impl Codegen {
             "    syscall",
             "    popq %rsi",
             "    popq %rdi",
-            "    movq %rax, (%r15)",  // the block starts here
+            "    movq %rax, (%r15)", // the block starts here
             "    addq %rax, %rsi",
             "    movq %rsi, 8(%r15)", // and ends here
             "    movq (%r15), %rax",
             "    movq %rax, %rcx",
             "    addq %rdi, %rcx",
             ".Lva_fit:",
-            "    movq %rcx, (%r15)",   // hand out the old cursor, park the new one
+            "    movq %rcx, (%r15)", // hand out the old cursor, park the new one
             "    addq %rdi, 16(%r15)", // and count it, so `heap_used` sees this too
             "    ret",
             ".Lva_empty:",
@@ -467,6 +467,12 @@ impl Codegen {
             self.line(".section .rodata");
             self.line(".p2align 3");
             for (label, bytes) in &strings {
+                // Every control byte gets an octal escape, not just the two that read as
+                // punctuation. A literal written `"ERROR\0"` used to land here as a raw NUL
+                // inside the quotes, which ends the string as far as the assembler is
+                // concerned: it reported `invalid character (0xa) in mnemonic` on a line the
+                // programmer never wrote, and the build failed with nothing to grep for. The
+                // trailing NUL that `.asciz` adds is separate from any the text itself holds.
                 let escaped: String = bytes
                     .chars()
                     .map(|c| match c {
@@ -474,6 +480,9 @@ impl Codegen {
                         '\\' => "\\\\".to_string(),
                         '\n' => "\\n".to_string(),
                         '\t' => "\\t".to_string(),
+                        c if (c as u32) < 0x20 || c as u32 == 0x7F => {
+                            format!("\\{:03o}", c as u32)
+                        }
                         other => other.to_string(),
                     })
                     .collect();

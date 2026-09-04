@@ -75,8 +75,7 @@ fn post_rx(buf_addr: i64) {
     poke32(rx_desc + idx * 16 + 8, 1526)
     poke16(rx_desc + idx * 16 + 12, 2)
     poke16(rx_desc + avail_off + 4 + idx * 2, idx)
-    let __f0_77: string = "mfence"
-    asm(__f0_77.utf8)
+    asm("mfence")
     poke16(rx_desc + avail_off + 2, peek16(rx_desc + avail_off + 2) + 1)
     vio_w16(io_base, 0x10, 0)
 }
@@ -85,14 +84,12 @@ fn tx_send(buf: i64, len: i64) {
     let idx = peek16(tx_desc + avail_off + 2) & (QSZ - 1)
     let mut i = 0
     for i < len { poke8(tx_buf + i, peek8(buf + i)); i = i + 1 }
-    let __f0_87: string = "mfence"
-    asm(__f0_87.utf8)
+    asm("mfence")
     poke64(tx_desc + idx * 16, tx_buf)
     poke32(tx_desc + idx * 16 + 8, len)
     poke16(tx_desc + idx * 16 + 12, 0)
     poke16(tx_desc + avail_off + 4 + idx * 2, idx)
-    let __f0_93: string = "mfence"
-    asm(__f0_93.utf8)
+    asm("mfence")
     poke16(tx_desc + avail_off + 2, peek16(tx_desc + avail_off + 2) + 1)
     vio_w16(io_base, 0x10, 1)
 }

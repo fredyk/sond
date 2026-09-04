@@ -45,8 +45,7 @@ pub fn resolve_ports(
             ));
         };
 
-        let for_port: Vec<&ProviderDef> =
-            providers.iter().filter(|pr| pr.port == u.port).collect();
+        let for_port: Vec<&ProviderDef> = providers.iter().filter(|pr| pr.port == u.port).collect();
         let matching: Vec<&ProviderDef> = for_port
             .iter()
             .copied()
@@ -55,8 +54,7 @@ pub fn resolve_ports(
 
         let prov = match matching.as_slice() {
             [] => {
-                let mut targets: Vec<&str> =
-                    for_port.iter().map(|pr| pr.target.as_str()).collect();
+                let mut targets: Vec<&str> = for_port.iter().map(|pr| pr.target.as_str()).collect();
                 targets.sort_unstable();
                 targets.dedup();
                 let found = if targets.is_empty() {
@@ -223,7 +221,11 @@ mod tests {
         );
         let spliced = r.expect("a use with its target provider must resolve");
         let names: Vec<&str> = spliced.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(names, vec!["putc"], "the selected provider's methods are spliced in");
+        assert_eq!(
+            names,
+            vec!["putc"],
+            "the selected provider's methods are spliced in"
+        );
     }
 
     #[test]
@@ -264,9 +266,15 @@ mod tests {
             "pic16",
         )
         .unwrap_err();
-        assert!(e.contains("pic16"), "names the target lacking a provider: {e}");
+        assert!(
+            e.contains("pic16"),
+            "names the target lacking a provider: {e}"
+        );
         assert!(e.contains("Serial"), "names the port: {e}");
-        assert!(e.contains("host"), "lists the targets that do have a provider: {e}");
+        assert!(
+            e.contains("host"),
+            "lists the targets that do have a provider: {e}"
+        );
     }
 
     #[test]
@@ -279,7 +287,10 @@ mod tests {
             "pic16",
         )
         .unwrap_err();
-        assert!(e.contains("exactly one"), "ambiguity is rejected, never silent: {e}");
+        assert!(
+            e.contains("exactly one"),
+            "ambiguity is rejected, never silent: {e}"
+        );
     }
 
     #[test]
@@ -320,8 +331,16 @@ mod tests {
         )
         .expect("resolves");
         assert_eq!(spliced.len(), 1);
-        assert_eq!(spliced[0].ensures.len(), 1, "the port's ensures is folded in");
-        assert_eq!(spliced[0].ret_name.as_deref(), Some("r"), "adopts the port's named return");
+        assert_eq!(
+            spliced[0].ensures.len(),
+            1,
+            "the port's ensures is folded in"
+        );
+        assert_eq!(
+            spliced[0].ret_name.as_deref(),
+            Some("r"),
+            "adopts the port's named return"
+        );
     }
 
     #[test]
@@ -336,7 +355,11 @@ mod tests {
             "host",
         )
         .expect("resolves");
-        assert_eq!(spliced[0].requires.len(), 1, "the port's requires is folded onto the method");
+        assert_eq!(
+            spliced[0].requires.len(),
+            1,
+            "the port's requires is folded onto the method"
+        );
         assert_eq!(spliced[0].ensures.len(), 1, "and its ensures");
     }
 
@@ -349,7 +372,10 @@ mod tests {
             "pic16",
         )
         .unwrap_err();
-        assert!(e.contains("parameter"), "explains the parameter-name mismatch: {e}");
+        assert!(
+            e.contains("parameter"),
+            "explains the parameter-name mismatch: {e}"
+        );
         assert!(e.contains('b'), "names the port's parameter: {e}");
     }
 
@@ -378,13 +404,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("get"), "names the method: {e}");
-        assert!(e.contains("return"), "explains the return-type mismatch: {e}");
+        assert!(
+            e.contains("return"),
+            "explains the return-type mismatch: {e}"
+        );
     }
 
     #[test]
     fn using_an_undeclared_port_is_an_error() {
         let e = resolve("use Serial", "pic16").unwrap_err();
-        assert!(e.contains("no interface named"), "a use of an undeclared port fails: {e}");
+        assert!(
+            e.contains("no interface named"),
+            "a use of an undeclared port fails: {e}"
+        );
     }
 
     #[test]
@@ -398,7 +430,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("Serail"), "names the misspelled port: {e}");
-        assert!(e.contains("no interface named"), "says the port is undeclared: {e}");
+        assert!(
+            e.contains("no interface named"),
+            "says the port is undeclared: {e}"
+        );
     }
 
     #[test]
@@ -417,7 +452,11 @@ mod tests {
         .expect("both ports resolve for host");
         let mut names: Vec<&str> = spliced.iter().map(|f| f.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec!["now", "putc"], "both providers' methods spliced");
+        assert_eq!(
+            names,
+            vec!["now", "putc"],
+            "both providers' methods spliced"
+        );
     }
 
     #[test]
@@ -434,7 +473,10 @@ mod tests {
             "host",
         )
         .unwrap_err();
-        assert!(e.contains("Clock"), "names the port with no host provider: {e}");
+        assert!(
+            e.contains("Clock"),
+            "names the port with no host provider: {e}"
+        );
         assert!(e.contains("host"), "names the target lacking it: {e}");
     }
 

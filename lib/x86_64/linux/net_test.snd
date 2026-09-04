@@ -1,0 +1,139 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/x86_64/linux/net.snd.
+//
+// This replaces net_stream_test.snd, which was a `main` that printed FAIL and returned 1. The
+// suite runner only picks up files containing `test "` blocks, so it had not been run in a long
+// time -- it was not passing, it was not being asked. Its loopback case is here, as assertions.
+//
+// Everything runs on 127.0.0.1 inside this process (and one fork), so no test here depends on
+// the machine having a network, a route or a name server.
+
+include "x86_64/linux/net.snd"
+include "x86_64/linux/testing.snd"
+
+// read/write/close go through `syscall` directly rather than through io.snd: including that
+// module would put ITS functions inside this file's coverage gate, and a test file that has to
+// exercise a module it is not testing ends up padded with tests nobody wanted to write.
+
+let PAYLOAD: string = "hola-tcp-loopback-1234"
+
+let mut buf[16]
+let mut sa[2]
+let mut salen[1]
+let mut optval[1]
+
+fn bytes_eq(a: i64, b: i64, n: i64) -> i64 {
+    for i in 0..n {
+        if peek8(a + i) != peek8(b + i) { return 0 }
+    }
+    1
+}
+
+test "a sockaddr_in carries back the address and port it was built with" {
+    sockaddr_in_build(sa, 0x0a000205, 443)   // 10.0.2.5:443
+    assert_eq(sockaddr_in_ip(sa), 0x0a000205)
+    assert_eq(sockaddr_in_port(sa), 443)
+    // Both are written big-endian on the wire: the first byte of the port is its HIGH half.
+    assert_eq(peek8(sa + 2), 1)              // 443 = 0x01bb
+    assert_eq(peek8(sa + 3), 0xbb)
+    assert_eq(peek8(sa + 4), 10)
+}
+
+test "bytes sent over TCP loopback arrive unchanged" {
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    assert(sfd >= 0)
+    assert(set_reuseaddr(sfd) >= 0)
+    sockaddr_in_build(sa, 0x7f000001, 0)     // port 0: the kernel picks a free one
+    assert(bind_sock(sfd, sa, 16) >= 0)
+    assert(listen_sock(sfd, 4) >= 0)
+    poke32(salen, 16)
+    assert(syscall(SYS_getsockname, sfd, sa, salen) >= 0)
+    let port = sockaddr_in_port(sa)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let cfd = sock(AF_INET, SOCK_STREAM, 0)
+        let ca[2]
+        sockaddr_in_build(ca, 0x7f000001, port)
+        if connect_sock(cfd, ca, 16) < 0 { syscall(SYS_exit, 2) }
+        syscall(SYS_write, cfd, PAYLOAD.utf8, 22)
+        syscall(SYS_close, cfd)
+        syscall(SYS_exit, 0)
+    }
+
+    let afd = accept_sock(sfd, 0, 0)
+    assert(afd >= 0)
+    assert_eq(syscall(SYS_read, afd, buf, 64), 22)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    assert_eq(bytes_eq(buf, PAYLOAD.utf8, 22), 1)
+    syscall(SYS_close, afd)
+    syscall(SYS_close, sfd)
+}
+
+test "a receive deadline and a non-blocking flag are accepted by the kernel" {
+    let fd = sock(AF_INET, SOCK_DGRAM, 0)
+    assert(fd >= 0)
+    assert_eq(set_rcvtimeo(fd, 1), 0)
+    assert_eq(set_nonblock(fd), 0)
+    syscall(SYS_close, fd)
+}
+
+test "the routing mark is the option the kernel guards, not some neighbour of it" {
+    // SO_MARK tells the routing layer WHICH table to send a connection through, and it is
+    // PRIVILEGED: unprivileged, the kernel answers EPERM. That refusal is the fingerprint that
+    // pins the number, because the options either side of 36 (SO_TIMESTAMPNS 35,
+    // SO_TIMESTAMPING 37) are not privileged and would quietly succeed instead.
+    //
+    // Which answer is correct depends on who is running the suite, so the test ASKS rather than
+    // assuming: an earlier version accepted "0 or EPERM" and passed with SO_MARK set to 37,
+    // measured -- it pinned nothing in the direction that mattered.
+    //
+    // Why it matters that the number be exact: a socket that believes it is marked but is not
+    // takes the DEFAULT route, so the traffic leaves by the very interface the mark existed to
+    // avoid, and nothing about the send looks wrong.
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    assert(fd >= 0)
+    let r = set_mark(fd, 7)
+    if syscall(SYS_geteuid) == 0 {
+        assert_eq(r, 0)
+        poke32(salen, 4)
+        assert(syscall(SYS_getsockopt, fd, SOL_SOCKET, SO_MARK, optval, salen) >= 0)
+        assert_eq(peek32(optval), 7)
+    } else {
+        assert_eq(r, 0 - 1)   // -EPERM, and nothing else: not success, not another errno
+    }
+    syscall(SYS_close, fd)
+}
+
+test "setting an option on a closed descriptor reports the kernel's error" {
+    // Proves the helper actually issues the syscall with the descriptor it was handed, rather
+    // than returning something of its own devising.
+    assert_eq(set_mark(0 - 1, 7), 0 - 9)   // -EBADF
+}
+
+test "a datagram sent to a bound socket comes back with its sender" {
+    let srv = sock(AF_INET, SOCK_DGRAM, 0)
+    assert(srv >= 0)
+    sockaddr_in_build(sa, 0x7f000001, 0)
+    assert(bind_sock(srv, sa, 16) >= 0)
+    poke32(salen, 16)
+    assert(syscall(SYS_getsockname, srv, sa, salen) >= 0)
+    let port = sockaddr_in_port(sa)
+
+    let cli = sock(AF_INET, SOCK_DGRAM, 0)
+    assert(cli >= 0)
+    sockaddr_in_build(sa, 0x7f000001, port)
+    assert_eq(sendto_sock(cli, PAYLOAD.utf8, 22, 0, sa, 16), 22)
+
+    // The sender's address is written back into `sa`, which is what a server needs to reply.
+    let from[2]
+    poke32(salen, 16)
+    assert_eq(recvfrom_sock(srv, buf, 64, 0, from, salen), 22)
+    assert_eq(bytes_eq(buf, PAYLOAD.utf8, 22), 1)
+    assert_eq(sockaddr_in_ip(from), 0x7f000001)
+    syscall(SYS_close, cli)
+    syscall(SYS_close, srv)
+}

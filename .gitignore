@@ -8,3 +8,4 @@ oc-*.log
 tools/vscode-sond/node_modules/
 tools/sprint/
 /dist/
+.oc-snapshots/

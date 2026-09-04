@@ -122,6 +122,9 @@ pub struct Global {
     /// `Some(N)` for a module-level array `let NAME[N] = [..]` (a constant table
     /// in `.data`); `None` for a scalar global.
     pub array_len: Option<i64>,
+    /// The declared type, when there is one. `Some(Type::View(..))` is a module-level
+    /// buffer (`let NAME: u8[32]`), which reserves its own storage in `.bss`.
+    pub ty: Option<Type>,
     pub init: Expr,
 }
 
@@ -155,6 +158,11 @@ pub struct Function {
     /// The human-readable name of a `test` block (the string after `test`), for the
     /// runner's report. `None` for ordinary functions.
     pub test_name: Option<String>,
+    /// True for a function the COMPILER synthesized (the `sond test` harness `main`),
+    /// never for one the author wrote. The harness is the only code allowed to reference
+    /// the four reserved `__cov_*` coverage symbols, which `check_undeclared_variables`
+    /// predeclares for it alone; author code may neither read nor bind that prefix.
+    pub is_harness: bool,
     /// The function body.
     pub body: Block,
 }
@@ -216,6 +224,31 @@ pub struct Block {
     pub stmt_lines: Vec<u32>,
 }
 
+impl Block {
+    /// Appends a statement together with the source line it came from.
+    ///
+    /// `stmts` and `stmt_lines` are parallel BY INDEX, and a plain `stmts.push` leaves the second
+    /// short: `check.rs` then reads the line with `.get(i).unwrap_or(line)` and quietly falls back
+    /// to the enclosing statement's line. That is how a synthetic statement inserted by the `for`
+    /// desugaring pushed every later line off by one and the error pointed at the `for` instead of
+    /// at the offending line. Go through here and the two cannot come apart.
+    ///
+    /// A block that still carries a `tail` has one line already parked for it, so `stmt_lines` may
+    /// legitimately run one ahead; the fill below is what puts them back in step.
+    pub fn push_stmt(&mut self, stmt: Stmt, line: u32) {
+        self.stmts.push(stmt);
+        while self.stmt_lines.len() < self.stmts.len() {
+            self.stmt_lines.push(line);
+        }
+    }
+
+    /// Inserts a statement at `i`, moving its line along with it.
+    pub fn insert_stmt(&mut self, i: usize, stmt: Stmt, line: u32) {
+        self.stmts.insert(i, stmt);
+        self.stmt_lines.insert(i, line);
+    }
+}
+
 /// A statement inside a block.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -241,6 +274,9 @@ pub enum Stmt {
         cond: Option<Expr>,
         invariant: Vec<Expr>,
         body: Block,
+        /// `for i in a..b` was parsed as `i = a; for i < b { ... }`.
+        /// True for the desugared loop; false for ordinary conditionals and foreach.
+        is_range_for: bool,
     },
     /// `break`
     Break,
@@ -290,6 +326,13 @@ pub enum Stmt {
         name: String,
         nodes: Vec<(String, Expr)>,
         yield_expr: Expr,
+    },
+    /// `lock (m) { .. }`: acquires a futex-based mutex at `m`, runs the body (as a lexical
+    /// critical section), and releases the mutex unconditionally on any exit path (normal,
+    /// return, break). `m` is an lvalue reference to a single 64-bit word used as the futex.
+    Lock {
+        name: String,
+        body: Block,
     },
 }
 
@@ -370,4 +413,41 @@ pub struct EnumDef {
     pub vis: Visibility,
     pub name: String,
     pub variants: Vec<EnumVariant>,
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+
+    fn stmt() -> Stmt {
+        Stmt::Continue
+    }
+
+    /// `push_stmt` takes a line because the caller knows it; it must be the line that lands in
+    /// `stmt_lines`, not a placeholder. Written with a `0` there, the method compiled with an
+    /// unused-parameter warning and got away with it: every caller happened to run on a block
+    /// whose `stmt_lines` was already one ahead (blocks with a tail), so the fill never ran. On a
+    /// block WITHOUT a tail it ran, and wrote a zero.
+    #[test]
+    fn push_stmt_records_the_line_it_was_given() {
+        let mut b = Block::default();
+        b.push_stmt(stmt(), 41);
+        b.push_stmt(stmt(), 42);
+        assert_eq!(
+            b.stmt_lines,
+            vec![41, 42],
+            "the line passed in must be the line stored"
+        );
+    }
+
+    /// The two vectors are parallel BY INDEX; every entry point must leave them the same length.
+    #[test]
+    fn both_entry_points_keep_the_two_vectors_in_step() {
+        let mut b = Block::default();
+        b.push_stmt(stmt(), 10);
+        b.insert_stmt(0, stmt(), 9);
+        b.push_stmt(stmt(), 11);
+        assert_eq!(b.stmts.len(), b.stmt_lines.len());
+        assert_eq!(b.stmt_lines, vec![9, 10, 11], "insert must place its line too");
+    }
 }

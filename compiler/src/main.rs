@@ -22,7 +22,9 @@ use std::process::{Command, ExitCode};
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: sondc <input.snd> [-o <output>] [--freestanding | --uefi | --windows | --shared | --object]");
+        eprintln!(
+            "usage: sondc <input.snd> [-o <output>] [--freestanding | --uefi | --windows | --shared | --object]"
+        );
         return ExitCode::from(2);
     }
 
@@ -46,7 +48,9 @@ fn main() -> ExitCode {
         break;
     }
     let Some(input) = input else {
-        eprintln!("usage: sondc <input.snd> [-o <output>] [--test | --freestanding | --uefi | --windows | --shared | --object]");
+        eprintln!(
+            "usage: sondc <input.snd> [-o <output>] [--test | --freestanding | --uefi | --windows | --shared | --object]"
+        );
         return ExitCode::from(2);
     };
     let output = parse_output_flag(&args).unwrap_or_else(|| default_output(input));
@@ -76,24 +80,28 @@ fn main() -> ExitCode {
     // the user's. The hook used to be set further down, after this phase.
     std::panic::set_hook(Box::new(|_| {}));
     let input_for_resolve = input.clone();
-    let (mut src, cov_scope) =
-        match std::panic::catch_unwind(move || {
-            sondc::resolve::resolve_includes_scoped(std::path::Path::new(&input_for_resolve))
-        })
-        .unwrap_or_else(|e| {
-            Err(std::io::Error::other(format!(
-                "lex error while reading {input}: {}",
-                panic_message(&e)
-            )))
-        }) {
-            Ok(s) => s,
-            Err(e) => {
-                // `e` already names the file that failed (the entry, or the nested include that
-                // could not be resolved), so it is not re-blamed on `input` here.
-                eprintln!("sondc: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let resolved = match std::panic::catch_unwind(move || {
+        sondc::resolve::resolve_includes_scoped_located(std::path::Path::new(
+            &input_for_resolve,
+        ))
+    })
+    .unwrap_or_else(|e| {
+        Err(std::io::Error::other(format!(
+            "cannot resolve the includes of {input}: {}",
+            panic_message(&e)
+        )))
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            // `e` already names the file that failed (the entry, or the nested include that
+            // could not be resolved), so it is not re-blamed on `input` here.
+            eprintln!("sondc: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut src = resolved.src;
+    let cov_scope = resolved.cov_scope;
+    let spans = resolved.spans;
     // RFC-0016: in a --debug build, append the debug agent, WRITTEN IN SOND (see `debug_agent`). The
     // per-statement checkpoint (emitted by codegen) calls `__dbg_step(line)`; the agent is the Sond
     // that serves the socket step protocol. Appended after include resolution, so it depends only on
@@ -150,11 +158,11 @@ fn main() -> ExitCode {
     let src_for_parse = src.clone();
     let (mut funcs, mut globals, mut structs, externs, enums, ports, providers, uses) =
         match std::panic::catch_unwind(move || {
-            let (toks, lines) = tokenize_located(&src_for_parse);
+            let (toks, lines, cols) = tokenize_located(&src_for_parse);
             // Keep the token stream: it is the only count of `test` blocks the parser cannot
             // influence, and comparing the two is what catches a parse that quietly dropped some.
             let declared_tests = toks.clone();
-            let mut p = Parser::with_lines(toks, lines);
+            let mut p = Parser::with_positions(toks, lines, cols);
             let funcs = p.parse_program();
             let globals = p.take_globals();
             let structs = p.take_structs();
@@ -165,11 +173,28 @@ fn main() -> ExitCode {
             let uses = p.take_uses();
             sondc::testing::check_all_tests_registered(&declared_tests, &funcs)
                 .unwrap_or_else(|e| panic!("{e}"));
-            (funcs, globals, structs, externs, enums, ports, providers, uses)
+            (
+                funcs, globals, structs, externs, enums, ports, providers, uses,
+            )
         }) {
             Ok(fg) => fg,
             Err(e) => {
-                eprintln!("sondc: parse error in {input}: {}", panic_message(&e));
+                // The parser and lexer refuse with a POSITION: a line of the spliced text means
+                // nothing to the author of the file it came from, so translate it back before
+                // printing (and name the file it turns out to be, which may not be `input`).
+                if let Some(pp) = e.downcast_ref::<sondc::parser::ParsePanic>() {
+                    report_positioned(&spans, input, pp.line, pp.col, &pp.message);
+                } else if let Some(lp) = e.downcast_ref::<sondc::lexer::LexPanic>() {
+                    report_positioned(
+                        &spans,
+                        input,
+                        lp.line,
+                        lp.col,
+                        &format!("unexpected character {:?}", lp.ch),
+                    );
+                } else {
+                    eprintln!("sondc: parse error in {input}: {}", panic_message(&e));
+                }
                 return ExitCode::FAILURE;
             }
         };
@@ -226,100 +251,32 @@ fn main() -> ExitCode {
         funcs.retain(|f| !f.is_test);
     }
 
-    // Value/pointer struct rules: a value struct received as a parameter is
-    // read-only (only its creator may mutate it). Reject field mutation of a
-    // value-struct param before lowering, declare it `*Point` to mutate.
-    if let Err(msg) = sondc::check::check_no_duplicate_functions(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_spawn_not_in_loop(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_par_let_arity(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_par_confluence(&funcs, &globals) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_graph_acyclic(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_no_process_exit_in_spawn(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_no_close_fd_after_spawn(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_syscall_retry_has_an_exit(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_no_raw_access_to_declared_buffers(&funcs) {
-        eprintln!("sondc: {msg}");
-        std::process::exit(1);
-    }
-    if let Err(msg) = sondc::check::check_receiver_kinds(&funcs) {
-        eprintln!("sondc: {msg}");
+    // The shared compilation pipeline: checks and desugars, used by both the
+    // driver and the codegen test helpers so the two paths can never diverge.
+    let lower_target = if pic16 {
+        "pic16"
+    } else if debug {
+        "host-debug"
+    } else {
+        "host"
+    };
+    // The file is named on every pipeline error, not just on the bounds one that used to carry
+    // it: the checks now share one exit, and a compiler that says which file it is talking about
+    // is the behaviour worth keeping when the two spellings meet.
+    if let Err(msg) =
+        sondc::lower_program(&mut funcs, &mut globals, &mut structs, &enums, lower_target)
+    {
+        // The line numbers these checks carry are lines of the SPLICED text. Translate them back
+        // into the file the line was written in, and name that file when it is not the entry --
+        // `at line 7572` in a program whose longest file is 1201 lines is not a location.
+        let (msg, named) = spans.fix_message_lines(&msg);
+        if named {
+            eprintln!("sondc: {msg}");
+        } else {
+            eprintln!("sondc: {input}: {msg}");
+        }
         return ExitCode::FAILURE;
     }
-    if let Err(msg) = sondc::check::check_declaration_kinds(&funcs) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-    if let Err(msg) = sondc::check::check_struct_mutability(&funcs, &structs) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-    // Exhaustiveness: every `match` must cover all of its enum's variants (checked on
-    // the original `match`, before it is lowered to if/else).
-    if let Err(msg) = sondc::check::check_enum_matches(&funcs, &enums) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-    // The built-in `Slice { ptr, len }` fat pointer is available to every program.
-    sondc::desugar::inject_builtin_structs(&mut structs);
-    // `a.len` on a fixed-size array lowers to its constant size. Done before the constant
-    // checks so `a[a.len]` is seen as `a[N]` (a provable out-of-bounds) and `for i < a.len`
-    // as `for i < N`.
-    sondc::desugar::lower_array_len(&mut funcs, &globals);
-    // A slice range `s[lo:hi]` lowers to a sub-`Slice` view. After `a.len` (so an array's
-    // `.len` is a constant), before the constant checks and struct lowering.
-    sondc::desugar::lower_slice_ranges(&mut funcs);
-    // (C) on-ramp for #3 (RFC-0012): a `+`/`-`/`*` of constants that overflows i64 is a
-    // compile error, the non-breaking first step of checked-by-default arithmetic.
-    if let Err(msg) = sondc::check::check_constant_overflow(&funcs) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-    // (C) on-ramp for #2 (RFC-0012): a constant index outside a known array's bounds is a
-    // compile error, the non-breaking first step of checked array access.
-    // Text has a type: a string literal binds to `string`, never to a bare address.
-    if let Err(msg) = sondc::check::check_string_literal_types(&funcs) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-    if let Err(msg) = sondc::check::check_constant_bounds(&funcs, &globals) {
-        eprintln!("sondc: {msg}");
-        return ExitCode::FAILURE;
-    }
-
-    // `--emit-header`: print the module's public interface (contract, no bodies)
-    // and stop. This is the `.snd` header for ~/.local/include/sond and dist/include.
-    // A payloaded enum lowers to a synthetic `{__tag, __payload}` struct, append those
-    // to the struct set so `desugar_structs` lowers the enum's field access and layout.
-    let synth = sondc::desugar::desugar_enums(&mut funcs, &enums);
-    structs.extend(synth);
-    // Materialize struct literals used in expression position (call args, branch tails)
-    // into temps, so a constructor works anywhere, before the struct pass lowers them.
-    sondc::desugar::hoist_struct_literals(&mut funcs);
-    sondc::desugar::desugar_structs(&mut funcs, &structs);
 
     if emit_header {
         print!(
@@ -351,6 +308,11 @@ fn main() -> ExitCode {
     // Lower struct-field access in the contracts NOW, after the prover saw the source-level
     // form (`s.len`, readable), so the runtime guard codegen receives the lowered slot read.
     sondc::desugar::desugar_contracts(&mut funcs, &structs);
+
+    // Give every shadowing `let` a binding (and frame slot) of its own, so an inner
+    // `let n` no longer writes through the outer `n`'s slot and leave its value after
+    // the block closes. Runs last: a pure, semantically-neutral rename of body locals.
+    sondc::desugar::disambiguate_shadows(&mut funcs);
 
     let asm = match std::panic::catch_unwind(|| {
         if pic16 {
@@ -389,25 +351,26 @@ fn main() -> ExitCode {
             eprintln!("sondc: cannot write {asm_path}: {e}");
             return ExitCode::FAILURE;
         }
-        return match Command::new("gpasm")
+        // gpasm chooses output format from the last dot in the FULL output path
+        // (directories included), so a dot in the directory name (e.g. worktree
+        // `foo.bar`) silently prevents .hex creation even with exit 0.
+        // Always pass a path whose *file* ends in `.hex` so gpasm has no other
+        // choice, and verify afterward that the file is actually on disk.
+        let hex_path = ensure_pic16_output(&output);
+        let pic16_status = Command::new("gpasm")
             .args(["-p", "p16f684"])
             .arg(&asm_path)
-            .args(["-o", output.as_str()])
-            .status()
-        {
-            Ok(s) if s.success() => {
-                println!("sondc: wrote PIC16F684 Intel HEX `{output}` (flash it to the chip)");
-                ExitCode::SUCCESS
-            }
-            Ok(_) => {
-                eprintln!("sondc: gpasm failed to assemble {asm_path}");
-                ExitCode::FAILURE
-            }
+            .args(["-o", &hex_path])
+            .status();
+        let pic16_msg = match pic16_result(pic16_status, Path::new(&hex_path)) {
+            Ok(msg) => msg,
             Err(e) => {
-                eprintln!("sondc: cannot run gpasm (install gputils): {e}");
-                ExitCode::FAILURE
+                eprintln!("sondc: {e}");
+                return ExitCode::FAILURE;
             }
         };
+        println!("{pic16_msg}");
+        return ExitCode::SUCCESS;
     }
 
     let asm_path = format!("{output}.s");
@@ -525,6 +488,41 @@ fn panic_message(e: &Box<dyn std::any::Any + Send>) -> String {
         .unwrap_or_else(|| "unsupported construct".to_string())
 }
 
+/// Prints one refusal of the source with its position translated into the files the author wrote
+/// (the compiler parsed a splice of them all). When nothing maps the position -- a lone file, or
+/// text appended after resolution -- the parsed-text number is printed against the named input,
+/// which is still better than saying nothing about where.
+fn report_positioned(
+    spans: &sondc::resolve::SpanMap,
+    input: &str,
+    line: u32,
+    col: u32,
+    message: &str,
+) {
+    match spans.locate(line, col) {
+        Some(loc) if loc.col > 0 => eprintln!(
+            "sondc: parse error in {}:{}:{}: {message}",
+            loc.file.display(),
+            loc.line,
+            loc.col
+        ),
+        Some(loc) => eprintln!(
+            "sondc: parse error in {}:{}: {message}",
+            loc.file.display(),
+            loc.line
+        ),
+        None => {
+            if line > 0 && col > 0 {
+                eprintln!("sondc: parse error in {input}:{line}:{col}: {message}");
+            } else if line > 0 {
+                eprintln!("sondc: parse error in {input}:{line}: {message}");
+            } else {
+                eprintln!("sondc: parse error in {input}: {message}");
+            }
+        }
+    }
+}
+
 fn parse_output_flag(args: &[String]) -> Option<String> {
     args.iter()
         .position(|a| a == "-o")
@@ -538,4 +536,210 @@ fn default_output(input: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("a")
         .to_string()
+}
+
+/// Pic16/gpasm always produces Intel HEX.  gpasm decides the output extension by looking at the
+/// last dot in the *full* output path (directory components included), so a dot in the directory
+/// name (e.g. worktree `foo.bar`) can silently prevent `.hex` creation.  We always pass a path
+/// whose **file** ends in `.hex` so gpasm has no other option.  If the user already asked for
+/// `.hex` we do not double it.
+fn ensure_pic16_output(user_output: &str) -> String {
+    if user_output.to_lowercase().ends_with(".hex") {
+        user_output.to_string()
+    } else {
+        format!("{user_output}.hex")
+    }
+}
+
+/// Turns the assembler's outcome into what the user is told, given the HEX path that was
+/// asked for. Split out of `main` so it can be tested without ever running gpasm.
+///
+/// The case that matters is the third one: gpasm exits 0 whether or not it wrote anything,
+/// so success is only success once the file is on disk.
+///
+/// - could not even be launched -> tell the user to install gputils
+/// - ran and failed            -> report the failure, without looking at the disk
+/// - ran, succeeded, no file   -> an error naming the file that is missing
+/// - ran, succeeded, file there -> the message announcing it
+fn pic16_result(
+    status: std::io::Result<std::process::ExitStatus>,
+    hex_path: &std::path::Path,
+) -> Result<String, String> {
+    let hex_display = hex_path.display().to_string();
+    let s = status.map_err(|e| format!("sondc: cannot run gpasm (install gputils): {e}"))?;
+
+    if !s.success() {
+        return Err(format!(
+            "sondc: gpasm failed to assemble (exit code: {})",
+            s.code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+
+    if !hex_path.exists() {
+        return Err(format!(
+            "sondc: gpasm returned success but `{hex_display}` does not exist"
+        ));
+    }
+
+    Ok(format!(
+        "sondc: wrote PIC16F684 Intel HEX `{hex_display}` (flash it to the chip)"
+    ))
+}
+
+#[cfg(test)]
+mod pic16_assemble_tests {
+    use super::*;
+    use std::io;
+    use std::process::ExitStatus;
+
+    // A real exit status that succeeded.
+    fn success_exit_status() -> ExitStatus {
+        Command::new("true").status().expect("true ran")
+    }
+
+    // A real exit status that failed.
+    fn failure_exit_status() -> ExitStatus {
+        Command::new("false").status().expect("false ran")
+    }
+
+    #[test]
+    fn gpasm_success_but_hex_missing_returns_error_naming_path() {
+        let hex_path = std::env::temp_dir().join(format!(
+            "sondc_test_no_file_8f3a_2c4d-{}.hex",
+            std::process::id()
+        ));
+        if hex_path.exists() {
+            let _ = std::fs::remove_file(&hex_path);
+        }
+        // Make sure it truly is not there.
+        let _ = std::fs::remove_file(&hex_path);
+        let result = pic16_result(Ok(success_exit_status()), &hex_path);
+        assert!(
+            result.is_err(),
+            "the assembler succeeded but the file is missing: must be an error; got {result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("does not exist"),
+            "the error must say the file does not exist; got: {err}"
+        );
+        assert!(
+            err.contains("sondc:"),
+            "the error must carry the `sondc:` prefix; got: {err}"
+        );
+    }
+
+    #[test]
+    fn gpasm_success_and_hex_exists_returns_ok_naming_path() {
+        let hex = std::env::temp_dir().join(format!(
+            "sondc_test_exists_a1b2_7e9f-{}.hex",
+            std::process::id()
+        ));
+        // Create the file; removed at the end of the test.
+        std::fs::write(&hex, ":020000040000FA02").unwrap();
+        let result = pic16_result(Ok(success_exit_status()), &hex);
+        assert!(
+            result.is_ok(),
+            "the file is there: must be Ok; got {result:?}"
+        );
+        let msg = result.unwrap();
+        assert!(
+            msg.contains("wrote") && msg.contains(&hex.display().to_string()),
+            "the success message must name the file it wrote; got: {msg}"
+        );
+        assert!(
+            msg.contains("sondc:"),
+            "the message must carry the `sondc:` prefix; got: {msg}"
+        );
+        let _ = std::fs::remove_file(&hex);
+    }
+
+    #[test]
+    fn gpasm_failure_returns_error_without_checking_disk() {
+        let hex_path = std::env::temp_dir().join(format!(
+            "sondc_test_fail_c3d4_a5b6-{}.hex",
+            std::process::id()
+        ));
+        // The file is deliberately absent: a failed run must not look at the disk at all.
+        let result = pic16_result(Ok(failure_exit_status()), &hex_path);
+        assert!(
+            result.is_err(),
+            "a failed assembler run must be an error; got {result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("failed") || err.contains("exit"),
+            "the error must say gpasm failed; got: {err}"
+        );
+    }
+
+    #[test]
+    fn gpasm_cannot_run_returns_install_gputils_error() {
+        let hex_path = std::env::temp_dir().join(format!(
+            "sondc_test_norun_e5f6_c7d8-{}.hex",
+            std::process::id()
+        ));
+        let io_err = io::Error::new(io::ErrorKind::NotFound, "gpasm: No such file or directory");
+        let result = pic16_result(Err(io_err), &hex_path);
+        assert!(
+            result.is_err(),
+            "no se puede lanzar gpasm → error; result={result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_lowercase().contains("gputils") || err.to_lowercase().contains("gpasm"),
+            "the error must point at gputils/gpasm; got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pic16_output_tests {
+    use super::*;
+
+    #[test]
+    fn no_dot_in_name_becomes_hex() {
+        let out = ensure_pic16_output("myprog");
+        assert_eq!(out, "myprog.hex");
+    }
+
+    #[test]
+    fn dot_in_directory_does_not_clobber_extension() {
+        // Worktree name "the-ai-language.oc-gpasm-hex" has a dot but the file has none.
+        let out = ensure_pic16_output("/work/pic/build/x");
+        assert_eq!(out, "/work/pic/build/x.hex");
+    }
+
+    #[test]
+    fn user_already_provided_hex_no_double() {
+        let out = ensure_pic16_output("output.hex");
+        assert_eq!(out, "output.hex");
+    }
+
+    #[test]
+    fn user_already_provided_uppercase_hex_no_double() {
+        let out = ensure_pic16_output("output.HEX");
+        assert_eq!(out, "output.HEX");
+    }
+
+    #[test]
+    fn dot_in_directory_with_different_extension_requested() {
+        // User asked for .cod but pic16 always writes .hex.
+        let out = ensure_pic16_output("/path/to/dir.with.dots/output.cod");
+        assert_eq!(out, "/path/to/dir.with.dots/output.cod.hex");
+    }
+
+    #[test]
+    fn only_filename_no_extension() {
+        let out = ensure_pic16_output("blink");
+        assert_eq!(out, "blink.hex");
+    }
+
+    #[test]
+    fn relative_path_with_dir_dot() {
+        let out = ensure_pic16_output("adir.oc/x");
+        assert_eq!(out, "adir.oc/x.hex");
+    }
 }

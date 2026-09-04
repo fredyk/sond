@@ -61,8 +61,7 @@ pub fn verify(funcs: &[Function]) -> Result<(), VerifyError> {
 pub fn verify_with_globals(funcs: &[Function], globals: &[Global]) -> Result<(), VerifyError> {
     // The contract of every function, so a caller can verify modularly against a callee's
     // `requires`/`ensures` (its summary) without re-analysing the callee's body.
-    let contracts: HashMap<String, &Function> =
-        funcs.iter().map(|f| (f.name.clone(), f)).collect();
+    let contracts: HashMap<String, &Function> = funcs.iter().map(|f| (f.name.clone(), f)).collect();
     // Fold every immutable scalar global to its constant value. A `let mut` global can change,
     // so it is NOT a constant and must be left opaque; an array global is not a scalar value.
     let global_consts: HashMap<String, i64> = globals
@@ -209,9 +208,7 @@ fn collect_block_vars(block: &Block, out: &mut HashSet<String>) {
                 expr_vars(value, out);
             }
             Stmt::Return(Some(v)) | Stmt::Expr(v) => expr_vars(v, out),
-            Stmt::For {
-                cond, body, ..
-            } => {
+            Stmt::For { cond, body, .. } => {
                 if let Some(c) = cond {
                     expr_vars(c, out);
                 }
@@ -510,7 +507,7 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
     for stmt in &block.stmts {
         // A path that has already `break`ed out of the loop is done: it skips every remaining
         // statement. Only the still-live paths are advanced; the broken ones are re-joined after.
-        let (mut states_out, live): (Vec<State>, Vec<State>) =
+        let (mut states_out, mut live): (Vec<State>, Vec<State>) =
             states.into_iter().partition(|s| s.broke);
         let advanced = match stmt {
             Stmt::Let { name, value, .. } => fork_bind(live, name, value, ctx)?,
@@ -581,14 +578,22 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
                 cond,
                 invariant,
                 body,
+                ..
             } if !invariant.is_empty() => eval_loop(live, cond.as_ref(), invariant, body, ctx)?,
-            Stmt::For { body, .. } => {
+            Stmt::For { cond, body, .. } => {
                 // The prover cannot carry state through a loop it has no invariant for, and
                 // stops. But stopping must not WAIVE what the callees inside demand: a call
                 // whose arguments are constants can be judged here and now, and refusing it is
                 // the difference between a contract and a suggestion. `f(-5)` was rejected at
                 // the top level of a body and waved through one line deeper, inside a loop —
                 // which is where the work actually happens.
+                //
+                // The same goes for an argument built from the COUNTER, which is the shape a
+                // bounds contract actually takes: the first iteration is not a mystery even
+                // without an invariant, so it is run and its refutations reported.
+                if let Some(bad) = refuted_on_the_first_iteration(&live, cond.as_ref(), body, ctx) {
+                    return ctx.refuse(bad);
+                }
                 if let Some(bad) = constant_call_violating_a_precondition(body, ctx.contracts) {
                     return ctx.refuse(bad);
                 }
@@ -606,6 +611,20 @@ fn eval_stmts(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> 
                 broken
             }
             Stmt::Continue => return ctx.bail("a `continue`"),
+            Stmt::Lock { body, .. } => {
+                // Advance each living state through the lock body.
+                let mut new_states = Vec::new();
+                for st in &live {
+                    if let Some(advanced) = eval_stmts(body, st.clone(), ctx) {
+                        for s in advanced {
+                            new_states.push(s);
+                        }
+                    }
+                }
+                live.clear();
+                live.extend(new_states);
+                live
+            }
         };
         states_out.extend(advanced);
         states = states_out;
@@ -664,12 +683,7 @@ fn eval_body(block: &Block, state: State, ctx: &mut Ctx) -> Option<Vec<State>> {
 }
 
 /// Binds `name` to `value` across every current state, forking when `value` is a branch.
-fn fork_bind(
-    states: Vec<State>,
-    name: &str,
-    value: &Expr,
-    ctx: &mut Ctx,
-) -> Option<Vec<State>> {
+fn fork_bind(states: Vec<State>, name: &str, value: &Expr, ctx: &mut Ctx) -> Option<Vec<State>> {
     let mut next = Vec::new();
     for st in states {
         for (mut st2, v) in eval_expr_paths(value, st, ctx)? {
@@ -853,9 +867,10 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
             for (s1, lv) in eval_expr_paths(l, state, ctx)? {
                 for (mut s2, rv) in eval_expr_paths(r, s1, ctx)? {
                     let value = match simplify(rv) {
-                        Sym::Const(k) if (0..63).contains(&k) => {
-                            simplify(Sym::Mul(Box::new(Sym::Const(1i64 << k)), Box::new(lv.clone())))
-                        }
+                        Sym::Const(k) if (0..63).contains(&k) => simplify(Sym::Mul(
+                            Box::new(Sym::Const(1i64 << k)),
+                            Box::new(lv.clone()),
+                        )),
                         // A dynamic shift is opaque in general (it can overflow: `1 << 63` is
                         // negative, `1 << 64` wraps to 0), but a POSITIVE CONSTANT base shifted by a
                         // provably non-negative, bounded amount stays positive: `c << r` = c * 2^r
@@ -1028,7 +1043,9 @@ fn eval_expr_paths(e: &Expr, state: State, ctx: &mut Ctx) -> Option<Vec<(State, 
         }
         // a comparison used as a value, a cast, a list/struct literal, `|`/`^`, etc.: out of the
         // fragment (no linear model).
-        _ => ctx.bail("an unsupported expression (a comparison used as a value, or an unsupported operator)"),
+        _ => ctx.bail(
+            "an unsupported expression (a comparison used as a value, or an unsupported operator)",
+        ),
     }
 }
 
@@ -1053,7 +1070,9 @@ fn eval_loop(
         for inv in invariant {
             let p = sym_prop(inv, &st.env)?;
             if !matches!(prove(&p, &st.cons, &int_types), Outcome::Proven) {
-                return ctx.bail("a loop invariant that does not hold on entry; check the `invariant { .. }`");
+                return ctx.bail(
+                    "a loop invariant that does not hold on entry; check the `invariant { .. }`",
+                );
             }
         }
         // (2) PRESERVATION: havoc the modified variables to arbitrary values, assume the
@@ -1062,7 +1081,10 @@ fn eval_loop(
         for v in &modified {
             henv.insert(v.clone(), ctx.fresh_var());
         }
-        let inv_here: Vec<SymProp> = invariant.iter().filter_map(|e| sym_prop(e, &henv)).collect();
+        let inv_here: Vec<SymProp> = invariant
+            .iter()
+            .filter_map(|e| sym_prop(e, &henv))
+            .collect();
         if inv_here.len() != invariant.len() {
             return ctx.bail("a loop invariant proposition outside the verifiable fragment");
         }
@@ -1081,7 +1103,8 @@ fn eval_loop(
             // under the assumptions live where it arose, on EVERY path, including one that broke.
             for ob in &bs.obligations {
                 if !obligation_holds(ob, &ob.assumptions, &int_types) {
-                    return ctx.bail("a safety obligation inside the loop body that could not be proved");
+                    return ctx
+                        .bail("a safety obligation inside the loop body that could not be proved");
                 }
             }
             // The invariant must be re-established at the end of the iteration, but only on a
@@ -1228,7 +1251,25 @@ fn eval_call(
     let Expr::Var(name) = callee else {
         return None;
     };
-    let g = ctx.contracts.get(name).copied()?;
+    let Some(g) = ctx.contracts.get(name) else {
+        // Unknown / builtin function: the verifier cannot reason about its
+        // preconditions or postconditions. Treat it as an opaque operation
+        // (same as an assignment whose RHS evaluates to fresh values, but
+        // without rebinding a variable).  Each argument is still evaluated
+        // for its own obligations; the call's result is a fresh variable.
+        let mut cur = vec![state.clone()];
+        for arg in args {
+            let mut nxt: Vec<State> = Vec::new();
+            for st in cur {
+                for (st2, _) in eval_expr_paths(&arg.value, st, ctx)? {
+                    nxt.push(st2);
+                }
+            }
+            cur = nxt;
+        }
+        if cur.is_empty() { cur.push(state); }
+        return Some(cur.into_iter().map(|s| (s, ctx.fresh_var())).collect());
+    };
     // Evaluate the arguments (they may themselves branch or call), threading the state.
     let mut arg_states: Vec<(State, Vec<Sym>)> = vec![(state, Vec::new())];
     for arg in args {
@@ -1377,9 +1418,10 @@ fn eval_expr(e: &Expr, env: &HashMap<String, Sym>) -> Option<Sym> {
         // with no value takes its whole obligation down with it: `f(0 - 5)` was rejected against
         // `requires { x > 0 }` while `f(-5)` compiled clean. The contract did not weaken, it
         // disappeared, which is the worst way for one to fail.
-        Expr::Unary(UnOp::Neg, inner) => {
-            Some(simplify(Sym::Sub(Box::new(Sym::Const(0)), Box::new(eval_expr(inner, env)?))))
-        }
+        Expr::Unary(UnOp::Neg, inner) => Some(simplify(Sym::Sub(
+            Box::new(Sym::Const(0)),
+            Box::new(eval_expr(inner, env)?),
+        ))),
         Expr::Binary(op, l, r) => {
             let a = eval_expr(l, env)?;
             let b = eval_expr(r, env)?;
@@ -1558,6 +1600,54 @@ fn lin_of_sym(s: &Sym) -> Option<Lin> {
 /// that the constraints cannot all hold. Eliminates one variable per round by combining
 /// each positive/negative pair; a bare negative constant is the contradiction. Bails to
 /// `false` (conservatively "not shown unsat") if the system grows past a size cap.
+/// Every variable name appearing in a symbolic term.
+fn sym_vars(s: &Sym, out: &mut BTreeSet<String>) {
+    match s {
+        Sym::Const(_) => {}
+        Sym::Var(v) => {
+            out.insert(v.clone());
+        }
+        Sym::Add(a, b) | Sym::Sub(a, b) | Sym::Mul(a, b) => {
+            sym_vars(a, out);
+            sym_vars(b, out);
+        }
+    }
+}
+
+/// The assumptions reachable from the goal's variables by sharing a name, transitively.
+///
+/// `k == i + j` and `i < 10` are connected to a goal about `k`; `MAX_RETRIES == 3` is not, and
+/// no chain of facts can make it so. Dropping a fact is always sound -- fewer facts can only
+/// make proving harder, never wrongly succeed -- and dropping the disconnected ones is what
+/// keeps an unrelated part of the program from spending this proof's elimination budget.
+fn relevant_assumptions(goal: &SymProp, assumptions: &[SymProp]) -> Vec<SymProp> {
+    let mut vars = BTreeSet::new();
+    sym_vars(&goal.lhs, &mut vars);
+    sym_vars(&goal.rhs, &mut vars);
+    let mut kept: Vec<SymProp> = Vec::new();
+    let mut rest: Vec<&SymProp> = assumptions.iter().collect();
+    loop {
+        let mut touching: Vec<&SymProp> = Vec::new();
+        let mut others: Vec<&SymProp> = Vec::new();
+        for ap in rest {
+            let mut v = BTreeSet::new();
+            sym_vars(&ap.lhs, &mut v);
+            sym_vars(&ap.rhs, &mut v);
+            if v.iter().any(|n| vars.contains(n)) {
+                vars.extend(v);
+                touching.push(ap);
+            } else {
+                others.push(ap);
+            }
+        }
+        if touching.is_empty() {
+            return kept;
+        }
+        kept.extend(touching.into_iter().cloned());
+        rest = others;
+    }
+}
+
 fn unsat(mut cons: Vec<Lin>) -> bool {
     const CAP: usize = 600;
     loop {
@@ -1660,6 +1750,16 @@ fn prove(
     {
         return Outcome::Proven;
     }
+    // Only the facts CONNECTED to the goal are kept, from here on. A fact about a name the goal
+    // never mentions, directly or through a chain of other facts, cannot contribute to deciding
+    // it -- but it is not free: elimination is exponential in the number of constraints and
+    // gives up past a cap, and giving up is indistinguishable from "not proven". That turned a
+    // module-level constant declared elsewhere in the program into a bounds error inside an
+    // unrelated function, which is the kind of failure nobody can attribute to its cause.
+    //
+    // It happens BEFORE the overflow check below, because that check runs the same engine and
+    // pays the same price: filtering after it would leave the cliff exactly where it was.
+    let assumptions = &relevant_assumptions(p, assumptions);
     // The linear engine reasons over ℤ, but signed machine arithmetic WRAPS. Only trust it when
     // every `+`/`-`/`*` in the goal is proven not to overflow under the assumptions; otherwise a
     // ℤ-true relation may be false at runtime (`x + 1 > x` holds over ℤ but fails at i64::MAX).
@@ -1688,6 +1788,12 @@ fn prove(
     let (Some(l), Some(r)) = (lin_of_sym(&p.lhs), lin_of_sym(&p.rhs)) else {
         return Outcome::Unknown; // goal outside linear arithmetic
     };
+    // Only the facts CONNECTED to the goal are kept. A fact about a name the goal never
+    // mentions, directly or through a chain of other facts, cannot contribute to deciding it --
+    // but it is not free: elimination is exponential in the number of constraints and gives up
+    // past a cap, and giving up is indistinguishable from "not proven". That turned a
+    // module-level constant declared somewhere else in the program into a bounds error inside
+    // an unrelated function, which is the kind of failure nobody can attribute to its cause.
     // `!=` is the odd one out (its truth is a disjunction): the goal holds iff the two
     // sides are forced apart, i.e. equality is unsatisfiable under the assumptions.
     if p.op == BinOp::Ne {
@@ -1787,7 +1893,11 @@ fn int_range(ty: &str) -> Option<(i128, i128)> {
 /// `r < n` is safe (`n <= MAX` forces `r <= MAX - 1`), while `x + 1` under only `x > 0` is not,
 /// and an `i32` sum leaving `[i32::MIN, i32::MAX]` but fitting in i64 is correctly rejected. A
 /// non-linear result (`a * b`, two variables) is never certified, returns `false`.
-fn overflow_safe(result: &Sym, cons: &[SymProp], int_types: &HashMap<String, (i128, i128)>) -> bool {
+fn overflow_safe(
+    result: &Sym,
+    cons: &[SymProp],
+    int_types: &HashMap<String, (i128, i128)>,
+) -> bool {
     let Some(e) = lin_of_sym(result) else {
         return false; // non-linear: cannot bound it, so assume it may overflow
     };
@@ -1892,7 +2002,12 @@ fn collect_expr_vars(e: &Expr, out: &mut HashSet<String>) {
 }
 
 /// The lower/upper safety props, the assumption set, and the variable type ranges.
-type IndexProps = (SymProp, SymProp, Vec<SymProp>, HashMap<String, (i128, i128)>);
+type IndexProps = (
+    SymProp,
+    SymProp,
+    Vec<SymProp>,
+    HashMap<String, (i128, i128)>,
+);
 
 /// The two safety propositions `0 <= idx` and `idx < bound`, the assumptions in scope, and the
 /// parameter type ranges, the shared setup of the bounds decisions below. `None` if the index
@@ -1918,7 +2033,10 @@ fn index_props(
         .map(|n| (n.clone(), Sym::Var(n.clone())))
         .collect();
     let (i, hi) = (eval_expr(idx, &env)?, eval_expr(bound, &env)?);
-    let asm: Vec<SymProp> = assumptions.iter().flat_map(|e| sym_props(e, &env)).collect();
+    let asm: Vec<SymProp> = assumptions
+        .iter()
+        .flat_map(|e| sym_props(e, &env))
+        .collect();
     let int_types = int_types_of(params);
     let lower = SymProp {
         op: BinOp::Ge,
@@ -1935,12 +2053,187 @@ fn index_props(
 
 /// Do the assumptions FORCE the index out of `[0, bound)`: a provable overrun? (The lenient
 /// check: reject only what is disproven.)
-pub fn index_provably_oob(idx: &Expr, bound: &Expr, assumptions: &[Expr], params: &[Param]) -> bool {
+pub fn index_provably_oob(
+    idx: &Expr,
+    bound: &Expr,
+    assumptions: &[Expr],
+    params: &[Param],
+) -> bool {
     let Some((lower, upper, asm, it)) = index_props(idx, bound, assumptions, params) else {
         return false;
     };
     matches!(prove(&lower, &asm, &it), Outcome::Disproven)
         || matches!(prove(&upper, &asm, &it), Outcome::Disproven)
+}
+
+/// Is `expr1 > expr2` provable over integers (wrapping semantics), under the given
+/// assumptions and parameter types?
+///
+/// Used by the range bounds checker in `check.rs` to detect provably empty loops.
+/// Unlike the standard prover version, this works over ℤ rather than i64, so
+/// it correctly identifies `n+1 > n` even at `i64::MAX` where wrapping semantics
+/// would otherwise hold.
+pub fn proves_gt_for_bounds(
+    expr1: &Expr,
+    expr2: &Expr,
+    assumptions: &[Expr],
+    params: &[Param],
+) -> bool {
+    let int_types: HashMap<String, (i128, i128)> = int_types_of(params);
+    let mut names: HashSet<String> = HashSet::new();
+    collect_expr_vars(expr1, &mut names);
+    collect_expr_vars(expr2, &mut names);
+    for a in assumptions {
+        collect_expr_vars(a, &mut names);
+    }
+    let env: HashMap<String, Sym> = names
+        .iter()
+        .map(|n| (n.clone(), Sym::Var(n.clone())))
+        .collect();
+    let Some(l) = eval_expr(expr1, &env) else {
+        return false;
+    };
+    let Some(r) = eval_expr(expr2, &env) else {
+        return false;
+    };
+    let (Some(lf), Some(lr)) = (lin_of_sym(&l), lin_of_sym(&r)) else {
+        return false; // non-linear: cannot decide, conservative pass-through
+    };
+    let diff = lf.sub(&lr); // start - end
+    let Some(mut tight) = diff else { return false };
+    tight.k -= 1; // integer-tighten: start > end ⟺ start - end - 1 >= 0
+    // Relevant assumptions only (same as prove).
+    let sym_asm: Vec<SymProp> = assumptions
+        .iter()
+        .flat_map(|e| sym_props(e, &env))
+        .collect();
+    let relevant = relevant_assumptions(
+        &SymProp {
+            op: BinOp::Ge,
+            lhs: l.clone(),
+            rhs: r.clone(),
+        },
+        &sym_asm,
+    );
+    let asm_lins: Vec<Lin> = relevant
+        .iter()
+        .filter_map(|ap| {
+            let (Some(l), Some(r)) = (lin_of_sym(&ap.lhs), lin_of_sym(&ap.rhs)) else {
+                return None;
+            };
+            holds_cons(&ap.op, &l, &r)
+                .map(|cs| cs.into_iter().next())
+                .flatten()
+        })
+        .collect();
+    // Add variable range constraints from int_types (same as prove).
+    let range_of = |v: &str| {
+        int_types
+            .get(v)
+            .copied()
+            .unwrap_or((i64::MIN as i128, i64::MAX as i128))
+    };
+    let mut vars: std::collections::HashSet<String> = lf.coeffs.keys().cloned().collect();
+    vars.extend(lr.coeffs.keys().cloned());
+    for v in vars {
+        let (lo, hi) = range_of(&v);
+        let vv = Lin::var(&v);
+        let (Some(loc), Some(hic)) = (vv.sub(&Lin::const_i128(lo)), Lin::const_i128(hi).sub(&vv))
+        else {
+            return false; // overflow forming a bound, conservative
+        };
+        let mut ext = asm_lins.clone();
+        ext.push(loc);
+        ext.push(hic);
+        if implies_geq0(&ext, &tight) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Same idea as `proves_gt_for_bounds` but proves `expr1 <= expr2`.
+///
+/// Used by the range bounds checker in `check.rs` to require that `start <= end`
+/// for parameterized range loops (`for i in a..b` where at least one bound is variable).
+pub fn proves_le_for_bounds(
+    expr1: &Expr,
+    expr2: &Expr,
+    assumptions: &[Expr],
+    params: &[Param],
+) -> bool {
+    let int_types: HashMap<String, (i128, i128)> = int_types_of(params);
+    let mut names: HashSet<String> = HashSet::new();
+    collect_expr_vars(expr1, &mut names);
+    collect_expr_vars(expr2, &mut names);
+    for a in assumptions {
+        collect_expr_vars(a, &mut names);
+    }
+    let env: HashMap<String, Sym> = names
+        .iter()
+        .map(|n| (n.clone(), Sym::Var(n.clone())))
+        .collect();
+    let Some(l) = eval_expr(expr1, &env) else {
+        return false;
+    };
+    let Some(r) = eval_expr(expr2, &env) else {
+        return false;
+    };
+    let (Some(lf), Some(lr)) = (lin_of_sym(&l), lin_of_sym(&r)) else {
+        return false; // non-linear: cannot decide, pass-through (conservative)
+    };
+    // Prove: lr - lf >= 0  (i.e., end - start >= 0)
+    let diff = lr.sub(&lf); // end - start
+    let Some(tight) = diff else { return false }; // >= 0, no tightening needed
+    // Relevant assumptions only.
+    let sym_asm: Vec<SymProp> = assumptions
+        .iter()
+        .flat_map(|e| sym_props(e, &env))
+        .collect();
+    let relevant = relevant_assumptions(
+        &SymProp {
+            op: BinOp::Ge,
+            lhs: r.clone(),
+            rhs: l.clone(),
+        },
+        &sym_asm,
+    );
+    let asm_lins: Vec<Lin> = relevant
+        .iter()
+        .filter_map(|ap| {
+            let (Some(l), Some(r)) = (lin_of_sym(&ap.lhs), lin_of_sym(&ap.rhs)) else {
+                return None;
+            };
+            holds_cons(&ap.op, &l, &r)
+                .map(|cs| cs.into_iter().next())
+                .flatten()
+        })
+        .collect();
+    // Add variable range constraints.
+    let range_of = |v: &str| {
+        int_types
+            .get(v)
+            .copied()
+            .unwrap_or((i64::MIN as i128, i64::MAX as i128))
+    };
+    let mut vars: std::collections::HashSet<String> = lf.coeffs.keys().cloned().collect();
+    vars.extend(lr.coeffs.keys().cloned());
+    let asm_lins: Vec<Lin> = {
+        let mut ext = asm_lins;
+        for v in vars {
+            let (lo, hi) = range_of(&v);
+            let vv = Lin::var(&v);
+            let (Some(loc), Some(hic)) =
+                (vv.sub(&Lin::const_i128(lo)), Lin::const_i128(hi).sub(&vv))
+            else {
+                continue;
+            };
+            ext.push(loc);
+            ext.push(hic);
+        }
+        ext
+    };
+    implies_geq0(&asm_lins, &tight)
 }
 
 /// The integer-typed parameters and their value ranges (`i32` -> [-2^31, 2^31-1]), so the prover
@@ -1978,7 +2271,10 @@ fn proven_nonneg(e: &Expr, assumptions: &[Expr], params: &[Param]) -> bool {
     let Some(sym) = eval_expr(e, &env) else {
         return false;
     };
-    let asm: Vec<SymProp> = assumptions.iter().flat_map(|a| sym_props(a, &env)).collect();
+    let asm: Vec<SymProp> = assumptions
+        .iter()
+        .flat_map(|a| sym_props(a, &env))
+        .collect();
     let prop = SymProp {
         op: BinOp::Ge,
         lhs: sym,
@@ -2120,7 +2416,11 @@ fn node_signed_width(s: &Sym, int_types: &HashMap<String, (i128, i128)>) -> Opti
 /// Evaluates a symbolic value under a concrete assignment, using WRAPPING arithmetic at each
 /// operation's real type width (the machine's semantics), so a witness is faithful to how the
 /// compiled code runs (an `i32 + 1` at `i32::MAX` wraps to `i32::MIN`, not 2^31).
-fn eval_sym(s: &Sym, env: &BTreeMap<String, i64>, int_types: &HashMap<String, (i128, i128)>) -> Option<i64> {
+fn eval_sym(
+    s: &Sym,
+    env: &BTreeMap<String, i64>,
+    int_types: &HashMap<String, (i128, i128)>,
+) -> Option<i64> {
     let narrow = |raw: i64| match node_signed_width(s, int_types) {
         Some(w) => canon_signed(raw, w),
         None => raw,
@@ -2128,15 +2428,28 @@ fn eval_sym(s: &Sym, env: &BTreeMap<String, i64>, int_types: &HashMap<String, (i
     Some(match s {
         Sym::Const(n) => *n,
         Sym::Var(v) => *env.get(v)?,
-        Sym::Add(a, b) => narrow(eval_sym(a, env, int_types)?.wrapping_add(eval_sym(b, env, int_types)?)),
-        Sym::Sub(a, b) => narrow(eval_sym(a, env, int_types)?.wrapping_sub(eval_sym(b, env, int_types)?)),
-        Sym::Mul(a, b) => narrow(eval_sym(a, env, int_types)?.wrapping_mul(eval_sym(b, env, int_types)?)),
+        Sym::Add(a, b) => {
+            narrow(eval_sym(a, env, int_types)?.wrapping_add(eval_sym(b, env, int_types)?))
+        }
+        Sym::Sub(a, b) => {
+            narrow(eval_sym(a, env, int_types)?.wrapping_sub(eval_sym(b, env, int_types)?))
+        }
+        Sym::Mul(a, b) => {
+            narrow(eval_sym(a, env, int_types)?.wrapping_mul(eval_sym(b, env, int_types)?))
+        }
     })
 }
 
 /// Evaluates a comparison under a concrete assignment (`None` if a variable is unbound).
-fn eval_prop(p: &SymProp, env: &BTreeMap<String, i64>, int_types: &HashMap<String, (i128, i128)>) -> Option<bool> {
-    let (l, r) = (eval_sym(&p.lhs, env, int_types)?, eval_sym(&p.rhs, env, int_types)?);
+fn eval_prop(
+    p: &SymProp,
+    env: &BTreeMap<String, i64>,
+    int_types: &HashMap<String, (i128, i128)>,
+) -> Option<bool> {
+    let (l, r) = (
+        eval_sym(&p.lhs, env, int_types)?,
+        eval_sym(&p.rhs, env, int_types)?,
+    );
     Some(match p.op {
         BinOp::Eq => l == r,
         BinOp::Ne => l != r,
@@ -2292,6 +2605,94 @@ fn counterexample_clause_alt(
     }
 }
 
+/// An obligation inside a loop body that is REFUTED on the loop's first iteration, as a
+/// ready-made error, when that iteration is certain to run.
+///
+/// A `for` without an `invariant { .. }` leaves the verifiable fragment, and that is the right
+/// answer for the loop as a whole: nothing is known about what the counter becomes. But the
+/// FIRST iteration is not part of that mystery. `for i in 0..2` desugars to `i = 0` followed by
+/// a loop over `i < 2`, so on entry the counter has an exact value and the condition is
+/// provable -- that iteration definitely happens, with those values, and can simply be run.
+///
+/// Three things keep this from rejecting correct programs, which is the failure that matters:
+/// a prover that cries wolf gets its contracts deleted.
+///
+///  - The loop must be PROVEN to run: `for i in 0..n` with `n` unknown refutes nothing, because
+///    a call that never happens violates nothing.
+///  - Only a REFUTED obligation counts, never an unproven one. `f(x)` with `x` opaque stays
+///    unknown and is given the benefit of the doubt, exactly as outside a loop.
+///
+/// A refutation under a branch condition (`if x > 0 { f(-5) }`) IS reported, because that is
+/// what the verifier does with the same code outside a loop: it demands the precondition on
+/// every path, reachable or not. Making the loop the one place where a guard buys silence would
+/// mean the same two lines are an error until you wrap them in a `for`.
+///
+/// What it does NOT do is reason about later iterations: `f(3 - i)` is fine at `i = 0` and false
+/// from `i = 4`, and seeing that needs the invariant. Judging one certain iteration is not the
+/// whole loop; it is the part that needs no assumptions at all.
+fn refuted_on_the_first_iteration(
+    states: &[State],
+    cond: Option<&Expr>,
+    body: &Block,
+    ctx: &mut Ctx,
+) -> Option<String> {
+    let cond = cond?;
+    let int_types = ctx.int_types.clone();
+    // This evaluation is SPECULATIVE: whatever the body hits must not replace the diagnostic
+    // for the loop itself, so the bail reason and any refusal are put back before returning.
+    let saved_bail = ctx.bail.clone();
+    let saved_refusal = ctx.refusal.clone();
+    let mut found = None;
+    for st in states {
+        if found.is_some() {
+            break;
+        }
+        // Does this iteration certainly happen?
+        let Some(entry) = sym_prop(cond, &st.env) else {
+            continue;
+        };
+        if !matches!(prove(&entry, &st.cons, &int_types), Outcome::Proven) {
+            continue;
+        }
+        let mut first = st.clone();
+        first.cons.extend(cond_props(cond, &st.env).0);
+        first.obligations.clear(); // only what THIS iteration raises
+        let Some(ends) = eval_body(body, first, ctx) else {
+            continue; // the body leaves the fragment; nothing to judge, and nothing claimed
+        };
+        for end in &ends {
+            for ob in &end.obligations {
+                if !obligation_refuted(ob, &int_types) {
+                    continue;
+                }
+                found = Some(format!(
+                    "{} does not hold on the first iteration of this loop",
+                    ob.what
+                ));
+                break;
+            }
+        }
+    }
+    ctx.bail = saved_bail;
+    ctx.refusal = saved_refusal;
+    found
+}
+
+/// Is this obligation DISPROVEN -- shown false, not merely left unproven? A disjunctive one
+/// (`prop` or `alt`) is refuted only when both halves are, since proving either would discharge
+/// it.
+fn obligation_refuted(ob: &Obligation, int_types: &HashMap<String, (i128, i128)>) -> bool {
+    if !matches!(
+        prove(&ob.prop, &ob.assumptions, int_types),
+        Outcome::Disproven
+    ) {
+        return false;
+    }
+    match &ob.alt {
+        None => true,
+        Some(alt) => matches!(prove(alt, &ob.assumptions, int_types), Outcome::Disproven),
+    }
+}
 
 /// A call inside an unverifiable loop whose CONSTANT arguments already violate the callee's
 /// precondition, as a ready-made error. Constants need no loop reasoning: their value is the
@@ -2379,7 +2780,11 @@ fn constant_call_violating_a_precondition(
                     walk_expr(&a.value, funcs, out);
                 }
             }
-            Expr::If { cond, then_branch, else_branch } => {
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 walk_expr(cond, funcs, out);
                 walk_block(then_branch, funcs, out);
                 if let Some(eb) = else_branch {
@@ -2508,9 +2913,7 @@ mod tests {
         // inside a plain `main` was exactly how a bounds contract would be used, and moving a
         // real guard into a `requires` no longer weakens it in that shape.
         //
-        // Still open, deliberately: an argument that DEPENDS on the loop (`f(i)`) is unknown
-        // rather than refuted, and is still given the benefit of the doubt. Closing that needs
-        // the invariant.
+        // The argument that DEPENDS on the loop is covered too, one test down.
         let funcs = parse(
             "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
              fn main() -> i64 { for k in 0..2 { f(-5) }\n0 }",
@@ -2521,6 +2924,86 @@ mod tests {
             "a constant argument that violates the precondition is refused inside a loop too, \
              got: {err}"
         );
+    }
+
+    #[test]
+    fn an_argument_that_depends_on_the_loop_is_checked_on_the_first_iteration() {
+        // The half that was left open: `f(i - 5)` is not a constant, so the argument-is-constant
+        // judgement never saw it, and a `for` without an invariant left the fragment before
+        // anything else could. The contract was a suggestion again, in the one shape where a
+        // bounds contract is actually used -- indexing by a loop counter.
+        //
+        // What makes it decidable without an invariant: the FIRST iteration is not a mystery.
+        // `for i in 0..2` desugars to `i = 0` and a loop over `i < 2`, so on entry `i` is 0
+        // exactly, and `0 < 2` is provable, which means that iteration DEFINITELY runs. Running
+        // it symbolically gives `-5 >= 0`, and that is refuted, not merely unproven.
+        let funcs = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn main() -> i64 { for i in 0..2 { f(i - 5) }\n0 }",
+        );
+        let err = verify(&funcs).unwrap_err().message;
+        assert!(
+            err.contains("precondition") && err.contains("f") && err.contains("first iteration"),
+            "an argument built from the loop counter is judged on the iteration that certainly \
+             runs, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_loop_that_might_not_run_refutes_nothing() {
+        // `for i in 0..n` with `n` unknown may execute zero times, and a call that never happens
+        // cannot violate anything. Refuting here would reject a correct program -- the failure
+        // mode that matters most, because a prover that cries wolf gets its contracts deleted.
+        let funcs = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn g(n: i64) -> i64 { for i in 0..n { f(i - 5) }\n0 }",
+        );
+        verify(&funcs).expect("a loop whose trip count is unknown proves nothing about its body");
+    }
+
+    #[test]
+    fn an_argument_that_is_merely_unknown_keeps_the_benefit_of_the_doubt() {
+        // `f(x)` with `x` a parameter: the precondition is neither proven nor refuted, and the
+        // loop offers no way to learn more. Unknown must stay unknown -- only a REFUTED
+        // obligation is an error where the body cannot be analysed.
+        let funcs = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn h(x: i64) -> i64 { for i in 0..2 { f(x) }\n0 }",
+        );
+        verify(&funcs)
+            .expect("an unprovable precondition inside an uninvarianted loop is not a refutation");
+    }
+
+    #[test]
+    fn a_guard_does_not_buy_silence_inside_a_loop_that_it_would_not_buy_outside() {
+        // `if x > 0 { f(-5) }` is already an error on its own: the verifier demands the
+        // precondition on every path, and reports it "on the path where x > 0". Wrapping those
+        // same two lines in a `for` must not make them acceptable -- a rule that stops applying
+        // where the work happens is not a rule.
+        let outside = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn h(x: i64) -> i64 { if x > 0 { f(0 - 5) }\n0 }",
+        );
+        verify(&outside).expect_err("a guarded call with a refuted precondition is an error");
+        let inside = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn h(x: i64) -> i64 { for i in 0..2 { if x > 0 { f(0 - 5) } }\n0 }",
+        );
+        verify(&inside).expect_err("and it stays one inside a loop");
+    }
+
+    #[test]
+    fn only_the_first_iteration_is_judged_without_an_invariant() {
+        // A characterization test, pinning what this does NOT do. `f(3 - i)` is fine on the
+        // first iteration (3 >= 0) and false from the fourth on, and nothing here notices: the
+        // later iterations need to know what `i` becomes, which is what an `invariant { .. }`
+        // is for. If this ever starts failing, the prover learned to reason about the whole
+        // loop, and this test should become the assertion that `f(3 - i)` is rejected.
+        let funcs = parse(
+            "fn f(i: i64) -> i64 requires { i >= 0 } { i }\n\
+             fn h() -> i64 { for i in 0..9 { f(3 - i) }\n0 }",
+        );
+        verify(&funcs).expect("iterations past the first are still out of reach");
     }
 
     #[test]
@@ -2721,9 +3204,7 @@ mod tests {
         assert!(verify(&ok).is_ok());
         // The safety obligation on the INDEX expression is still gathered through the read: a
         // division in the index must be proven safe.
-        let div = parse(
-            "fn g(a: Slice, k: i64) -> (r: i64) ensures { r == r } { a[10 / k] }",
-        );
+        let div = parse("fn g(a: Slice, k: i64) -> (r: i64) ensures { r == r } { a[10 / k] }");
         assert!(verify(&div).is_err());
     }
 
@@ -2894,9 +3375,8 @@ mod tests {
         let funcs = parse("fn f(x: i64 where x > 0) -> (r: i64) ensures { r > 0 } { x }");
         assert!(verify(&funcs).is_ok());
         // A `&&` refinement contributes both bounds, so `x + 1` is proven not to overflow.
-        let funcs2 = parse(
-            "fn f(x: i64 where x > 0 && x < 100) -> (r: i64) ensures { r > x } { x + 1 }",
-        );
+        let funcs2 =
+            parse("fn f(x: i64 where x > 0 && x < 100) -> (r: i64) ensures { r > x } { x + 1 }");
         assert!(verify(&funcs2).is_ok());
     }
 
@@ -2938,8 +3418,7 @@ mod tests {
     #[test]
     fn proves_a_weaker_bound() {
         // x >= 10 entails x >= 3 (10 >= 3): a strictly weaker lower bound.
-        let funcs =
-            parse("fn f(x: i64) -> (r: i64) requires { x >= 10 } ensures { r >= 3 } { x }");
+        let funcs = parse("fn f(x: i64) -> (r: i64) requires { x >= 10 } ensures { r >= 3 } { x }");
         assert!(verify(&funcs).is_ok());
     }
 
@@ -2979,6 +3458,57 @@ mod tests {
     }
 
     #[test]
+    fn facts_about_unrelated_names_do_not_cost_a_proof() {
+        // Adding a module-level constant somewhere else in the program made a DIFFERENT
+        // function stop compiling: `x25_fe_mul` in the x25519 library, with the diagnostic
+        // pointing at its index and asking for a bound it already had. Nothing about that
+        // function had changed.
+        //
+        // Every global constant enters the proof as two assumptions (`g >= c` and `g <= c`),
+        // and the elimination that decides the goal is exponential in the constraint count, so
+        // past a cap it gives up -- and giving up reads exactly like "you did not prove your
+        // index". Measured on the real case: 602 constraints against a cap of 600.
+        //
+        // Facts about names the goal never mentions cannot help prove it, so they must not be
+        // able to break it either. The shape below is x25_fe_mul's: k = i + j with both in
+        // 0..10 and k >= 10, indexing at k - 10.
+        let v = |n: &str| Box::new(Expr::Var(n.to_string()));
+        let cmp = |op: BinOp, l: Box<Expr>, r: Box<Expr>| Expr::Binary(op, l, r);
+        let mut asm = vec![
+            cmp(
+                BinOp::Eq,
+                v("k"),
+                Box::new(Expr::Binary(BinOp::Add, v("i"), v("j"))),
+            ),
+            cmp(BinOp::Ge, v("i"), Box::new(Expr::Int(0))),
+            cmp(BinOp::Lt, v("i"), Box::new(Expr::Int(10))),
+            cmp(BinOp::Ge, v("j"), Box::new(Expr::Int(0))),
+            cmp(BinOp::Lt, v("j"), Box::new(Expr::Int(10))),
+            cmp(BinOp::Ge, v("k"), Box::new(Expr::Int(10))),
+        ];
+        // The noise: constants that share not one variable with the goal.
+        for n in 0..200 {
+            let name = format!("UNRELATED_{n}");
+            asm.push(cmp(
+                BinOp::Ge,
+                Box::new(Expr::Var(name.clone())),
+                Box::new(Expr::Int(n)),
+            ));
+            asm.push(cmp(
+                BinOp::Le,
+                Box::new(Expr::Var(name)),
+                Box::new(Expr::Int(n)),
+            ));
+        }
+        let idx = Expr::Binary(BinOp::Sub, v("k"), Box::new(Expr::Int(10)));
+        assert!(
+            index_proven_in_bounds(&idx, &Expr::Int(10), &asm, &[]),
+            "an index proven from i, j and k must stay proven however many unrelated \
+             constants the program declares"
+        );
+    }
+
+    #[test]
     fn proves_a_sum_of_two_lower_bounds() {
         // a >= 3 and b >= 4 entail a + b >= 7 (a genuine linear combination). Upper bounds keep
         // the sum from overflowing so the prover may use its exact value.
@@ -2991,8 +3521,7 @@ mod tests {
     #[test]
     fn still_rejects_an_unprovable_bound() {
         // x >= 0 does NOT entail x >= 5, the prover must remain sound and reject it.
-        let funcs =
-            parse("fn f(x: i64) -> (r: i64) requires { x >= 0 } ensures { r >= 5 } { x }");
+        let funcs = parse("fn f(x: i64) -> (r: i64) requires { x >= 0 } ensures { r >= 5 } { x }");
         assert!(verify(&funcs).is_err());
     }
 
@@ -3016,9 +3545,8 @@ mod tests {
     #[test]
     fn rejects_when_one_branch_violates_the_postcondition() {
         // The else-branch returns -1, breaking `r >= 0`: one bad path rejects the whole.
-        let funcs = parse(
-            "fn f(x: i64) -> (r: i64) ensures { r >= 0 } { if x >= 0 { x } else { 0 - 1 } }",
-        );
+        let funcs =
+            parse("fn f(x: i64) -> (r: i64) ensures { r >= 0 } { if x >= 0 { x } else { 0 - 1 } }");
         assert!(verify(&funcs).is_err());
     }
 
@@ -3027,9 +3555,8 @@ mod tests {
         // The else-branch (reached when `x < 0`) returns -1, breaking `r >= 0`. A good
         // diagnostic must name the PATH under which the proof fails, so the red→green
         // loop knows WHICH case to fix, not merely that the postcondition failed.
-        let funcs = parse(
-            "fn f(x: i64) -> (r: i64) ensures { r >= 0 } { if x >= 0 { x } else { 0 - 1 } }",
-        );
+        let funcs =
+            parse("fn f(x: i64) -> (r: i64) ensures { r >= 0 } { if x >= 0 { x } else { 0 - 1 } }");
         let err = verify(&funcs).expect_err("must reject the broken else-branch");
         assert!(
             err.message.contains("x < 0"),
@@ -3109,8 +3636,7 @@ mod tests {
         // `divisor != 0` is not enough for SIGNED division: `i64::MIN / -1` overflows the
         // quotient and traps (#DE / SIGFPE). A `requires { y != 0 }` proves nonzero but not
         // the overflow case, so the function must be REJECTED, not compiled.
-        let funcs =
-            parse("fn q(x: i64, y: i64) -> (r: i64) requires { y != 0 } { x / y }");
+        let funcs = parse("fn q(x: i64, y: i64) -> (r: i64) requires { y != 0 } { x / y }");
         let err = verify(&funcs).expect_err("MIN / -1 overflows even with y != 0");
         assert!(
             err.message.contains("overflow"),
@@ -3122,25 +3648,21 @@ mod tests {
     #[test]
     fn signed_mod_min_minus_one_also_rejected() {
         // `i64::MIN % -1` traps the same way as the division.
-        let funcs =
-            parse("fn r(x: i64, y: i64) -> (r: i64) requires { y != 0 } { x % y }");
+        let funcs = parse("fn r(x: i64, y: i64) -> (r: i64) requires { y != 0 } { x % y }");
         assert!(verify(&funcs).is_err(), "MIN % -1 overflows too");
     }
 
     #[test]
     fn accepts_signed_div_when_divisor_positive() {
         // `y > 0` proves BOTH obligations: y != 0 (nonzero) and y != -1 (no MIN/-1 overflow).
-        let funcs =
-            parse("fn q(x: i64, y: i64) -> (r: i64) requires { y > 0 } { x / y }");
+        let funcs = parse("fn q(x: i64, y: i64) -> (r: i64) requires { y > 0 } { x / y }");
         assert!(verify(&funcs).is_ok(), "y > 0 excludes both 0 and -1");
     }
 
     #[test]
     fn accepts_signed_div_when_dividend_above_min() {
         // Excluding the dividend from i64::MIN also discharges the overflow obligation.
-        let funcs = parse(
-            "fn q(x: i64, y: i64) -> (r: i64) requires { y != 0; x > 0 } { x / y }",
-        );
+        let funcs = parse("fn q(x: i64, y: i64) -> (r: i64) requires { y != 0; x > 0 } { x / y }");
         assert!(verify(&funcs).is_ok(), "x > 0 means x != i64::MIN");
     }
 
@@ -3148,17 +3670,18 @@ mod tests {
     fn unsigned_div_needs_only_nonzero() {
         // Unsigned division (`divq`) never has the MIN/-1 overflow, so `y != 0` suffices,
         // the overflow obligation must NOT be raised for u64.
-        let funcs =
-            parse("fn q(x: u64, y: u64) -> (r: u64) requires { y != 0 } { x / y }");
-        assert!(verify(&funcs).is_ok(), "unsigned division only needs a nonzero divisor");
+        let funcs = parse("fn q(x: u64, y: u64) -> (r: u64) requires { y != 0 } { x / y }");
+        assert!(
+            verify(&funcs).is_ok(),
+            "unsigned division only needs a nonzero divisor"
+        );
     }
 
     #[test]
     fn bail_diagnostic_names_an_unsupported_expression() {
         // A comparison used as a value (`let b = x > 0`) is outside the fragment. The
         // diagnostic must point at the expression, not at loops it does not contain.
-        let funcs =
-            parse("fn f(x: i64) -> (r: i64) ensures { r >= 0 } { let b = x > 0\n0 }");
+        let funcs = parse("fn f(x: i64) -> (r: i64) ensures { r >= 0 } { let b = x > 0\n0 }");
         let err = verify(&funcs).expect_err("a comparison-as-value is unsupported");
         assert!(
             err.message.contains("expression"),
@@ -3274,16 +3797,14 @@ mod tests {
     fn accepts_a_division_guarded_by_a_branch() {
         // A signed division whose then-branch establishes `b > 0` proves both obligations
         // (nonzero and, since b >= 1 > -1, no MIN/-1 overflow) from the branch guard.
-        let funcs =
-            parse("fn sd(a: i64, b: i64) -> i64 { if b > 0 { a / b } else { 0 } }");
+        let funcs = parse("fn sd(a: i64, b: i64) -> i64 { if b > 0 { a / b } else { 0 } }");
         assert!(verify(&funcs).is_ok());
     }
 
     #[test]
     fn unsigned_division_guarded_by_a_branch_needs_no_min_guard() {
         // For unsigned division the negated `b == 0` guard alone suffices, no overflow case.
-        let funcs =
-            parse("fn sd(a: u64, b: u64) -> u64 { if b == 0 { 0 } else { a / b } }");
+        let funcs = parse("fn sd(a: u64, b: u64) -> u64 { if b == 0 { 0 } else { a / b } }");
         assert!(verify(&funcs).is_ok());
     }
 

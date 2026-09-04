@@ -52,11 +52,39 @@ impl Codegen {
             }
             // Stack args pushed high-to-low so arg7 sits at the lowest address.
             for arg in args[reg..].iter().rev() {
+                if let Expr::Var(vname) = &arg.value {
+                    if let Some(label) = self.string_rodata_cur.get(vname) {
+                        self.line(&format!("    leaq {label}(%rip), %rax"));
+                        self.line("    pushq %rax");
+                        continue;
+                    } else if self.string_vars.contains(vname) {
+                        panic!("{}", self.string_unknown_error(vname));
+                    }
+                }
                 self.expr(&arg.value);
                 self.line("    pushq %rax");
             }
             // Register args: evaluate, stage on the stack, then pop into registers.
             for arg in &args[..reg] {
+                // A tracked local `string` variable → use its UTF-8 rodata
+                // label directly, so the callee receives the same bytes it
+                // would get from a literal.  An untracked string variable is
+                // a compile error: the compiler cannot know what text it
+                // holds at runtime.
+                if let Expr::Var(vname) = &arg.value {
+                    if let Some(label) = self.string_rodata_cur.get(vname) {
+                        // Tracked string variable: emit rodata load.
+                        self.line(&format!("    leaq {label}(%rip), %rax"));
+                        self.line("    pushq %rax");
+                        continue;
+                    } else if self.string_vars.contains(vname) {
+                        // The variable is tracked as a `string` but has no rodata
+                        // label in the trace — it came from a function parameter or
+                        // some path the compiler cannot prove.  This must be a
+                        // compile error.
+                        panic!("{}", self.string_unknown_error(vname));
+                    }
+                }
                 self.expr(&arg.value);
                 self.line("    pushq %rax");
             }
@@ -351,6 +379,40 @@ impl Codegen {
                 self.line("    popq %rcx"); // ptr -> %rcx
                 self.line("    movq %rax, (%rcx)");
             }
+            // `atomic_cas64(ptr, expected, new) -> i64`: compare-and-swap on a 64-bit word.
+            // Returns the OLD value at *ptr. If *ptr == expected, writes new and returns old.
+            // Uses `lock cmpxchgq` for cross-process atomicity.
+            "atomic_cas64" => {
+                assert_eq!(args.len(), 3, "atomic_cas64 expects (ptr, expected, new)");
+                self.expr(&args[0].value);
+                self.line("    pushq %rax");       // push ptr
+                self.expr(&args[1].value);
+                self.line("    pushq %rax");       // push expected
+                self.expr(&args[2].value);
+                self.line("    pushq %rax");       // push new
+                // stack (top→bottom): new, expected, ptr
+                self.line("    movq (%rsp), %r12");     // r12 = new
+                self.line("    movq 8(%rsp), %rax");    // rax = expected
+                self.line("    movq 16(%rsp), %r11");   // r11 = ptr
+                self.line("    lock cmpxchgq %r12, (%r11)");
+                self.line("    addq $24, %rsp");        // restore 3 pushes
+            }
+            // `atomic_add64(ptr, delta) -> i64`: fetch-and-add on a 64-bit word.
+            // Returns the OLD value at ptr, then sets *ptr = old + delta.
+            // Uses `lock xaddq` for cross-process atomicity.
+            "atomic_add64" => {
+                assert_eq!(args.len(), 2, "atomic_add64 expects (ptr, delta)");
+                self.expr(&args[0].value); // ptr -> %rax
+                self.line("    pushq %rax"); // save ptr on stack
+                self.expr(&args[1].value); // delta -> %rax
+                self.line("    pushq %rax"); // save delta on stack
+                self.line("    movq 8(%rsp), %rax"); // ptr -> %rax
+                self.line("    movq (%rsp), %rcx");  // delta -> %rcx
+                self.line("    lock xaddq %rcx, (%rax)"); // *ptr += delta; old = %rcx
+                self.line("    movq %rcx, %rax");      // return old value
+                self.line("    addq $16, %rsp");       // restore stack
+            }
+            // poke8(v): write one byte at *ptr.
             "poke8" => {
                 assert_eq!(args.len(), 2, "poke8 expects (ptr, val)");
                 self.expr(&args[0].value); // ptr -> %rax

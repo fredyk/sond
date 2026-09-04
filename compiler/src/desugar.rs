@@ -212,7 +212,11 @@ fn lower_enum_expr(e: &mut Expr, info: &HashMap<String, VariantInfo>) {
 
 /// If/else-if chain for a PAYLOAD-FREE match: the scrutinee is an integer tag, so each
 /// arm tests `scrutinee == tag`. Scrutinee and bodies are already lowered.
-fn lower_match_int(scrutinee: &Expr, arms: &[MatchArm], info: &HashMap<String, VariantInfo>) -> Expr {
+fn lower_match_int(
+    scrutinee: &Expr,
+    arms: &[MatchArm],
+    info: &HashMap<String, VariantInfo>,
+) -> Expr {
     let n = arms.len();
     let mut acc = arms[n - 1].body.clone(); // final else = the last arm
     for i in (0..n - 1).rev() {
@@ -230,7 +234,7 @@ fn lower_match_int(scrutinee: &Expr, arms: &[MatchArm], info: &HashMap<String, V
         acc = Block {
             stmts: Vec::new(),
             tail: Some(Box::new(if_expr)),
-        stmt_lines: Vec::new(),
+            stmt_lines: Vec::new(),
         };
     }
     match acc.tail {
@@ -264,7 +268,7 @@ fn lower_match_payload(
         acc = Block {
             stmts: Vec::new(),
             tail: Some(Box::new(if_expr)),
-        stmt_lines: Vec::new(),
+            stmt_lines: Vec::new(),
         };
     }
     match acc.tail {
@@ -278,7 +282,12 @@ fn lower_match_payload(
 fn arm_block(scrutinee: &Expr, arm: &MatchArm) -> Block {
     let mut b = arm.body.clone();
     if let Some(bind) = &arm.binding {
-        b.stmts.insert(
+        // Through `insert_stmt`, so the arm's own lines do not shift under the binding. This one
+        // is not reporting wrong lines today only because name resolution runs before this pass;
+        // left as a plain `stmts.insert` it is the same trap as the `for` desugaring, armed and
+        // waiting for the day the order of the phases changes.
+        let line = b.stmt_lines.first().copied().unwrap_or(0);
+        b.insert_stmt(
             0,
             Stmt::Let {
                 mutable: false,
@@ -287,6 +296,7 @@ fn arm_block(scrutinee: &Expr, arm: &MatchArm) -> Block {
                 value: Expr::Field(Box::new(scrutinee.clone()), PAYLOAD.to_string()),
                 array_len: None,
             },
+            line,
         );
     }
     b
@@ -632,7 +642,9 @@ fn desugar_stmt(
             desugar_expr(target, fields, sizes, locals, methods);
             desugar_expr(value, fields, sizes, locals, methods);
         }
-        Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => desugar_expr(e, fields, sizes, locals, methods),
+        Stmt::Return(Some(e)) | Stmt::Expr(e) | Stmt::Spawn(e) => {
+            desugar_expr(e, fields, sizes, locals, methods)
+        }
         Stmt::Par(peers) => {
             for p in peers {
                 desugar_expr(p, fields, sizes, locals, methods);
@@ -655,6 +667,9 @@ fn desugar_stmt(
             if let Some(c) = cond {
                 desugar_expr(c, fields, sizes, locals, methods);
             }
+            desugar_block(body, fields, sizes, locals, methods);
+        }
+        Stmt::Lock { body, .. } => {
             desugar_block(body, fields, sizes, locals, methods);
         }
         Stmt::Return(None) | Stmt::Break | Stmt::Continue => {}
@@ -708,10 +723,7 @@ fn desugar_expr(
                     let idx = std::mem::replace(&mut **i, Expr::Int(0));
                     **i = Expr::Binary(
                         BinOp::Add,
-                        Box::new(Expr::Field(
-                            Box::new(Expr::Var(sname)),
-                            "len".to_string(),
-                        )),
+                        Box::new(Expr::Field(Box::new(Expr::Var(sname)), "len".to_string())),
                         Box::new(idx),
                     );
                 }
@@ -838,189 +850,126 @@ const SLICE_TYPE: &str = "Slice";
 /// length-carrying slice type would make `.len` a runtime field; for these fixed arrays it is
 /// the known constant. A struct with a field literally named `len` is unaffected: only names
 /// known to be arrays are rewritten.
+/// Replaces every `name.len` in the body (where `name` is a known fixed-size
+/// array in the current scope) with a constant `i64` literal equal to the
+/// array's length. Scopes: variables declared inside an `if`/`else` body don't
+/// leak out, so `m.len` at outer scope resolves to the outer `m`, not the inner one.
 pub fn lower_array_len(funcs: &mut [Function], globals: &[Global]) {
-    let mut global_sizes: HashMap<String, i64> = HashMap::new();
+    let mut global_map: HashMap<String, i64> = HashMap::new();
     for g in globals {
         if let Some(n) = g.array_len {
-            global_sizes.insert(g.name.clone(), n);
+            global_map.insert(g.name.clone(), n);
         }
     }
     for f in funcs {
-        let mut sizes = global_sizes.clone();
-        collect_array_sizes_block(&f.body, &mut sizes);
-        len_block(&mut f.body, &sizes);
+        let mut sizes: Vec<HashMap<String, i64>> = vec![global_map.clone()];
+        walk_sizes_block(&mut f.body, &mut sizes);
     }
 }
 
-/// Collects every `let name[N]` array size reachable in a body (function-scoped, matching the
-/// codegen frame model where each array (including one declared inside a branch or loop) gets
-/// its own reserved slot).
-fn collect_array_sizes_block(b: &Block, out: &mut HashMap<String, i64>) {
-    for s in &b.stmts {
-        match s {
-            Stmt::Let {
-                name,
-                array_len: Some(n),
-                value,
-                ..
-            } => {
-                out.insert(name.clone(), *n);
-                collect_array_sizes_expr(value, out);
-            }
-            // A view whose length is written down (`u32[16]`, and every `let s: string = ".."`
-            // after the parser counts the literal) knows its own `.len` at compile time, exactly
-            // like a fixed array does.
-            Stmt::Let {
-                name,
-                ty: Some(Type::View(_, Some(len))),
-                value,
-                ..
-            } if len.parse::<i64>().is_ok() => {
-                out.insert(name.clone(), len.parse().unwrap());
-                collect_array_sizes_expr(value, out);
-            }
-            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
-                collect_array_sizes_expr(value, out)
-            }
-            Stmt::Assign { target, value } => {
-                collect_array_sizes_expr(target, out);
-                collect_array_sizes_expr(value, out);
-            }
-            Stmt::For {
-                cond, invariant, body, ..
-            } => {
-                if let Some(c) = cond {
-                    collect_array_sizes_expr(c, out);
-                }
-                for inv in invariant {
-                    collect_array_sizes_expr(inv, out);
-                }
-                collect_array_sizes_block(body, out);
-            }
-            _ => {}
-        }
+fn walk_sizes_block(b: &mut Block, sizes: &mut Vec<HashMap<String, i64>>) {
+    for s in &mut b.stmts {
+        // Insert any array declaration into the current scope before processing
+        // the value expression.
+        insert_array_into_scope(s, sizes);
+        // Process the value/init of any statement.
+        walk_sizes_in_expr_for_stmt(s, sizes);
     }
-    if let Some(t) = &b.tail {
-        collect_array_sizes_expr(t, out);
+    if let Some(t) = &mut b.tail {
+        walk_sizes_in_expr(t, sizes);
     }
 }
 
-fn collect_array_sizes_expr(e: &Expr, out: &mut HashMap<String, i64>) {
-    match e {
-        Expr::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            collect_array_sizes_expr(cond, out);
-            collect_array_sizes_block(then_branch, out);
-            if let Some(eb) = else_branch {
-                collect_array_sizes_block(eb, out);
+fn insert_array_into_scope(s: &mut Stmt, sizes: &mut Vec<HashMap<String, i64>>) {
+    if let Stmt::Let { name, array_len: Some(arr_n), .. } = s {
+        sizes.last_mut().unwrap().insert(name.clone(), *arr_n);
+    } else if let Stmt::Let { name, ty: Some(Type::View(_, Some(len_str))), .. } = s
+        && len_str.parse::<i64>().is_ok()
+    {
+        sizes.last_mut().unwrap().insert(name.clone(), len_str.parse().unwrap());
+    }
+}
+
+fn walk_sizes_in_expr_for_stmt(s: &mut Stmt, sizes: &mut Vec<HashMap<String, i64>>) {
+    match s {
+        Stmt::Let { value, .. } => walk_sizes_in_expr(value, sizes),
+        Stmt::Return(Some(v)) | Stmt::Expr(v) => walk_sizes_in_expr(v, sizes),
+        Stmt::Assign { target, value } => {
+            walk_sizes_in_expr(target, sizes);
+            walk_sizes_in_expr(value, sizes);
+        }
+        Stmt::For { cond, invariant, body, .. } => {
+            if let Some(c) = cond {
+                walk_sizes_in_expr(c, sizes);
             }
-        }
-        Expr::Match { scrutinee, arms } => {
-            collect_array_sizes_expr(scrutinee, out);
-            for a in arms {
-                collect_array_sizes_block(&a.body, out);
+            for inv in invariant.iter_mut() {
+                walk_sizes_in_expr(inv, sizes);
             }
-        }
-        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
-            collect_array_sizes_expr(l, out);
-            collect_array_sizes_expr(r, out);
-        }
-        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
-            collect_array_sizes_expr(x, out)
-        }
-        Expr::Call(c, args) => {
-            collect_array_sizes_expr(c, out);
-            for a in args {
-                collect_array_sizes_expr(&a.value, out);
-            }
-        }
-        Expr::List(items) => items.iter().for_each(|it| collect_array_sizes_expr(it, out)),
-        Expr::StructLit(_, fields) => {
-            fields.iter().for_each(|(_, v)| collect_array_sizes_expr(v, out))
+            walk_sizes_block(body, sizes);
         }
         _ => {}
     }
 }
 
-fn len_block(b: &mut Block, sizes: &HashMap<String, i64>) {
-    for s in &mut b.stmts {
-        match s {
-            Stmt::Let { value, .. } | Stmt::Return(Some(value)) | Stmt::Expr(value) => {
-                len_expr(value, sizes)
-            }
-            Stmt::Assign { target, value } => {
-                len_expr(target, sizes);
-                len_expr(value, sizes);
-            }
-            Stmt::For {
-                cond, invariant, body, ..
-            } => {
-                if let Some(c) = cond {
-                    len_expr(c, sizes);
-                }
-                for inv in invariant.iter_mut() {
-                    len_expr(inv, sizes);
-                }
-                len_block(body, sizes);
-            }
-            _ => {}
-        }
-    }
-    if let Some(t) = &mut b.tail {
-        len_expr(t, sizes);
-    }
-}
-
-fn len_expr(e: &mut Expr, sizes: &HashMap<String, i64>) {
-    // `a.len` where `a` is a known fixed-size array → the constant size.
+fn walk_sizes_in_expr(e: &mut Expr, sizes: &mut Vec<HashMap<String, i64>>) {
+    // Replace `name.len` if `name` is a known array in the current scope.
     if let Expr::Field(base, field) = e
         && field == "len"
         && let Expr::Var(name) = base.as_ref()
-        && let Some(&n) = sizes.get(name)
+        && sizes.iter().rev().flat_map(|m| m.get(name)).copied().next().is_some()
     {
-        *e = Expr::Int(n);
-        return;
+        let Expr::Var(name) = base.as_ref() else {
+            return;
+        };
+        if let Some(n) = sizes.iter().rev().flat_map(|m| m.get(name)).copied().next() {
+            *e = Expr::Int(n);
+            return;
+        }
     }
     match e {
-        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
-            len_expr(l, sizes);
-            len_expr(r, sizes);
-        }
-        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => len_expr(x, sizes),
-        Expr::Call(c, args) => {
-            len_expr(c, sizes);
-            for a in args.iter_mut() {
-                len_expr(&mut a.value, sizes);
-            }
-        }
-        Expr::List(items) => items.iter_mut().for_each(|it| len_expr(it, sizes)),
-        Expr::StructLit(_, fields) => {
-            fields.iter_mut().for_each(|(_, v)| len_expr(v, sizes))
-        }
         Expr::If {
             cond,
             then_branch,
             else_branch,
         } => {
-            len_expr(cond, sizes);
-            len_block(then_branch, sizes);
+            walk_sizes_in_expr(cond, sizes);
+            sizes.push(HashMap::new());
+            walk_sizes_block(then_branch, sizes);
+            sizes.pop();
             if let Some(eb) = else_branch {
-                len_block(eb, sizes);
+                sizes.push(HashMap::new());
+                walk_sizes_block(eb, sizes);
+                sizes.pop();
             }
         }
         Expr::Match { scrutinee, arms } => {
-            len_expr(scrutinee, sizes);
+            walk_sizes_in_expr(scrutinee, sizes);
             for a in arms.iter_mut() {
-                len_block(&mut a.body, sizes);
+                sizes.push(HashMap::new());
+                walk_sizes_block(&mut a.body, sizes);
+                sizes.pop();
             }
+        }
+        Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+            walk_sizes_in_expr(l, sizes);
+            walk_sizes_in_expr(r, sizes);
+        }
+        Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
+            walk_sizes_in_expr(x, sizes)
+        }
+        Expr::Call(c, args) => {
+            walk_sizes_in_expr(c, sizes);
+            for a in args.iter_mut() {
+                walk_sizes_in_expr(&mut a.value, sizes);
+            }
+        }
+        Expr::List(items) => items.iter_mut().for_each(|it| walk_sizes_in_expr(it, sizes)),
+        Expr::StructLit(_, fields) => {
+            fields.iter_mut().for_each(|(_, v)| walk_sizes_in_expr(v, sizes))
         }
         _ => {}
     }
 }
-
 /// Lowers a slice range `base[lo:hi]` (Python-style) to a sub-`Slice` VIEW (no copy), over the
 /// same backing store: `Slice { ptr: base.ptr + lo*8, len: hi - lo }`. Omitted bounds default to
 /// `lo = 0` and `hi = base.len`. Runs before struct lowering + hoisting, so the produced
@@ -1093,7 +1042,10 @@ fn sr_block(b: &mut Block) {
                 sr_expr(value);
             }
             Stmt::For {
-                cond, invariant, body, ..
+                cond,
+                invariant,
+                body,
+                ..
             } => {
                 if let Some(c) = cond {
                     sr_expr(c);
@@ -1157,6 +1109,233 @@ fn sr_expr(e: &mut Expr) {
         }
         _ => {}
     }
+}
+
+/// A single pre-codegen pass that gives every shadowing local declaration a binding
+/// of its own, so the backend's name-keyed frame cannot confuse two variables that
+/// happen to share a name.
+///
+/// The x64 codegen reserves one frame slot per local NAME across the whole function
+/// (`frame_layout::collect_locals` keys by name and dedupes), so two `let n` in
+/// different scopes collapse into one stack slot and the inner one writes over the
+/// outer one's value, which then survives the block — and even overwrites a
+/// parameter of the same name. The scope checker (`check::check_undeclared_variables`)
+/// already knows these are two different variables; the frame is what does not.
+/// Giving each declaration a unique name here, and rewriting every reference that
+/// resolves to it, makes the name-keyed frame (and every name-keyed metadata map in
+/// codegen) agree with what the checker already understood, with no change to the
+/// frame machinery itself.
+///
+/// The rewrite mirrors the checker's scope structure exactly: an `if`/`else` branch,
+/// a `for` body, and a `match` arm each open a scope that closes when the block ends,
+/// so a name declared there stops existing at the closing brace. Only shadowed
+/// declarations are renamed; references use the innermost binding in scope at their
+/// point in the walk. Runs on `func.body` only (parameters keep their names and are
+/// the outermost scope); contract propositions are not touched.
+pub fn disambiguate_shadows(funcs: &mut [Function]) {
+    for f in funcs {
+        let mut scopes: Vec<HashMap<String, String>> = Vec::new();
+        let mut top: HashMap<String, String> = HashMap::new();
+        // Parameters are in scope for the whole body and never renamed.
+        for p in &f.params {
+            top.insert(p.name.clone(), p.name.clone());
+        }
+        scopes.push(top);
+        let mut r = ShadowRenamer { counter: 0 };
+        rename_block(&mut f.body, &mut scopes, &mut r);
+    }
+}
+
+/// Node-counters for synthesizing fresh binding names. A `#` cannot appear in a Sond
+/// identifier (the lexer accepts only alphanumerics and `_`), so a generated name can
+/// never collide with a source-spelled one.
+struct ShadowRenamer {
+    counter: u32,
+}
+
+impl ShadowRenamer {
+    fn fresh(&mut self, name: &str) -> String {
+        self.counter += 1;
+        format!("{name}#{}", self.counter)
+    }
+}
+
+/// The scope stack: each frame maps the source name to the binding name it currently
+/// denotes (the binding name is the source name unless the declaration shadows an
+/// enclosing one). Innermost scope is last, mirroring the checker.
+type ShadowScopes = Vec<HashMap<String, String>>;
+
+/// Resolves a source name to its current binding, innermost scope first. `None` when
+/// the name is not a local at all (a global, a module-level constant, a function name).
+fn shadow_resolve<'a>(scopes: &'a ShadowScopes, name: &str) -> Option<&'a str> {
+    for s in scopes.iter().rev() {
+        if let Some(b) = s.get(name) {
+            return Some(b.as_str());
+        }
+    }
+    None
+}
+
+fn rename_block(b: &mut Block, scopes: &mut ShadowScopes, r: &mut ShadowRenamer) {
+    for s in &mut b.stmts {
+        rename_stmt(s, scopes, r);
+    }
+    if let Some(t) = &mut b.tail {
+        rename_expr(t, scopes, r);
+    }
+}
+
+fn rename_stmt(s: &mut Stmt, scopes: &mut ShadowScopes, r: &mut ShadowRenamer) {
+    match s {
+        Stmt::Let { name, value, .. } => {
+            // The initializer resolves against the OLD binding (`let n = n + 1` reads the
+            // outer `n`), so the value is renamed before the new declaration binds.
+            rename_expr(value, scopes, r);
+            shadow_bind(scopes, r, name);
+        }
+        Stmt::Assign { target, value } => {
+            rename_expr(target, scopes, r);
+            rename_expr(value, scopes, r);
+        }
+        Stmt::Return(Some(e)) => rename_expr(e, scopes, r),
+        Stmt::Return(None) => {}
+        Stmt::Expr(e) | Stmt::Spawn(e) => rename_expr(e, scopes, r),
+        Stmt::Par(peers) => {
+            for p in peers {
+                rename_expr(p, scopes, r);
+            }
+        }
+        Stmt::ParLet { names, peers, .. } => {
+            // The peers resolve against the OLD scope; the names bind afterwards.
+            for p in peers {
+                rename_expr(p, scopes, r);
+            }
+            for n in names.iter_mut() {
+                shadow_bind(scopes, r, n);
+            }
+        }
+        Stmt::ParReduce { name, peers, .. } => {
+            for p in peers {
+                rename_expr(p, scopes, r);
+            }
+            shadow_bind(scopes, r, name);
+        }
+        Stmt::GraphLet {
+            name,
+            nodes,
+            yield_expr,
+            ..
+        } => {
+            // A node can depend on an earlier node's binding, so each binds as it is
+            // walked (mirroring the checker).
+            for (n, e) in nodes.iter_mut() {
+                rename_expr(e, scopes, r);
+                shadow_bind(scopes, r, n);
+            }
+            rename_expr(yield_expr, scopes, r);
+            shadow_bind(scopes, r, name);
+        }
+        Stmt::For { cond, body, .. } => {
+            if let Some(c) = cond {
+                rename_expr(c, scopes, r);
+            }
+            scopes.push(HashMap::new());
+            rename_block(body, scopes, r);
+            scopes.pop();
+        }
+        Stmt::Lock { body, .. } => {
+            scopes.push(HashMap::new());
+            rename_block(body, scopes, r);
+            scopes.pop();
+        }
+        Stmt::Break | Stmt::Continue => {}
+    }
+}
+
+fn rename_expr(e: &mut Expr, scopes: &mut ShadowScopes, r: &mut ShadowRenamer) {
+    match e {
+        Expr::Var(name) => {
+            if let Some(b) = shadow_resolve(scopes, name) {
+                *name = b.to_string();
+            }
+        }
+        Expr::Field(base, _) => rename_expr(base, scopes, r),
+        Expr::Call(callee, args) => {
+            rename_expr(callee, scopes, r);
+            for a in args.iter_mut() {
+                rename_expr(&mut a.value, scopes, r);
+            }
+        }
+        Expr::Index(base, index) => {
+            rename_expr(base, scopes, r);
+            rename_expr(index, scopes, r);
+        }
+        Expr::Unary(_, inner) => rename_expr(inner, scopes, r),
+        Expr::Binary(_, l, rr) => {
+            rename_expr(l, scopes, r);
+            rename_expr(rr, scopes, r);
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            rename_expr(cond, scopes, r);
+            scopes.push(HashMap::new());
+            rename_block(then_branch, scopes, r);
+            scopes.pop();
+            if let Some(eb) = else_branch {
+                scopes.push(HashMap::new());
+                rename_block(eb, scopes, r);
+                scopes.pop();
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            rename_expr(scrutinee, scopes, r);
+            for arm in arms.iter_mut() {
+                scopes.push(HashMap::new());
+                if let Some(binding) = &mut arm.binding {
+                    shadow_bind(scopes, r, binding);
+                }
+                rename_block(&mut arm.body, scopes, r);
+                scopes.pop();
+            }
+        }
+        Expr::Cast(inner, _) => rename_expr(inner, scopes, r),
+        Expr::List(items) => {
+            for it in items.iter_mut() {
+                rename_expr(it, scopes, r);
+            }
+        }
+        Expr::SliceRange(base, lo, hi) => {
+            rename_expr(base, scopes, r);
+            if let Some(l) = lo {
+                rename_expr(l, scopes, r);
+            }
+            if let Some(h) = hi {
+                rename_expr(h, scopes, r);
+            }
+        }
+        Expr::StructLit(_, fields) => {
+            for (_, v) in fields.iter_mut() {
+                rename_expr(v, scopes, r);
+            }
+        }
+        Expr::Int(_) | Expr::Decimal(_) | Expr::Str(_) | Expr::Bool(_) => {}
+    }
+}
+
+/// Registers a declaration's binding in the top scope, renaming the declaration when it
+/// shadows any enclosing binding (so the frame gives it a slot of its own). The source
+/// name in `name` is replaced by the binding name that references must use from here on.
+fn shadow_bind(scopes: &mut ShadowScopes, r: &mut ShadowRenamer, name: &mut String) {
+    let fresh = if scopes.iter().any(|s| s.contains_key(name.as_str())) {
+        r.fresh(name)
+    } else {
+        name.clone()
+    };
+    scopes.last_mut().unwrap().insert(name.clone(), fresh.clone());
+    *name = fresh;
 }
 
 #[cfg(test)]
@@ -1580,9 +1759,7 @@ mod tests {
     fn print_int_of_a_u64_still_prints_unsigned() {
         // A `u64` whose high bit is set is a large positive number, not a negative, the
         // signed path must NOT be taken for unsigned types.
-        let out = compile_and_capture(
-            "fn main() -> i64 { let h: u64 = 0 - 1  print_int(h)  0 }",
-        );
+        let out = compile_and_capture("fn main() -> i64 { let h: u64 = 0 - 1  print_int(h)  0 }");
         assert_eq!(out, "18446744073709551615");
     }
 
@@ -1655,5 +1832,54 @@ mod tests {
              }",
         );
         assert_eq!(out, "42");
+    }
+
+    // Shadowing of `.len` across nested scopes: the fix ensures that a `let m` inside
+    // an `if` block does not shadow the outer `m` for `.len` resolution at the outer level.
+    // These tests go through `lower_array_len` (the full desugar pipeline via compile_and_capture),
+    // so they exercise the scope-aware walk.
+
+    #[test]
+    fn array_len_shadowing_in_if_block_resolves_outer_scope() {
+        // The outer `m: string = "hola"` has length 4. The inner `m: string = "0123456789"` has
+        // length 10 but is in a nested scope, so `m.len` at outer scope must resolve to 4.
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             let m: string = \"hola\"\n\
+             if 1 == 1 { let m: string = \"0123456789\" }\n\
+             print_int(m.len)\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "4");
+    }
+
+    #[test]
+    fn array_len_shadowing_in_dead_branch_does_not_affect_outer() {
+        // Even when the branch is dead (always false), the outer scope must still resolve correctly.
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             let m: string = \"hola\"\n\
+             if 1 == 0 { let m: string = \"0123456789\" }\n\
+             print_int(m.len)\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "4");
+    }
+
+    #[test]
+    fn array_len_earlier_use_not_affected_by_later_shadowing() {
+        // `a.len` is evaluated BEFORE the inner `a` shadows it, so it must resolve to the outer `a` (5).
+        let out = compile_and_capture(
+            "fn main() -> i64 {\n\
+             let a: string = \"12345\"\n\
+             let r = a.len\n\
+             if 1 == 1 { let a: string = \"xy\" }\n\
+             print_int(r)\n\
+             0\n\
+             }",
+        );
+        assert_eq!(out, "5");
     }
 }

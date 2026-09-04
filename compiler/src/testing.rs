@@ -11,10 +11,10 @@
 //! The harness `main` is produced as Sond SOURCE and parsed with the ordinary parser, so it
 //! is always a well-formed AST, no hand-built nodes to keep in sync with the language.
 
-use crate::token::Token;
 use crate::ast::Function;
 use crate::lexer::tokenize;
 use crate::parser::Parser;
+use crate::token::Token;
 
 /// Escapes a test's display name for embedding in a Sond string literal.
 fn escape(name: &str) -> String {
@@ -36,12 +36,17 @@ fn fork_test_block(k: usize, sym: &str, label: &str) -> String {
 }
 
 /// Parses a synthesized `fn main() { .. }` source into a Function (always well-formed, since
-/// it goes through the ordinary parser).
+/// it goes through the ordinary parser). The result is marked `is_harness`: it is compiler
+/// output, not author code, and that mark is what lets the undeclared-variable check accept
+/// its references to the reserved `__cov_*` coverage symbols while refusing them everywhere
+/// else.
 fn parse_main(src: &str) -> Function {
-    Parser::new(tokenize(src))
+    let mut f = Parser::new(tokenize(src))
         .parse_program()
         .pop()
-        .expect("synthesized harness must parse to one function")
+        .expect("synthesized harness must parse to one function");
+    f.is_harness = true;
+    f
 }
 
 /// Builds the `main` that `sond test` runs. It forks each test into its own child, waits,
@@ -165,15 +170,22 @@ mod tests {
         // tests are driven.
         assert!(src.contains("__cov_total"), "reads the total point count");
         assert!(src.contains("SYS_mmap"), "mmaps a shared coverage buffer");
-        assert!(src.contains("__cov_ptr"), "points the instrumentation buffer at the mmap");
-        assert!(src.contains("__test_0") && src.contains("__test_1"), "runs both tests");
+        assert!(
+            src.contains("__cov_ptr"),
+            "points the instrumentation buffer at the mmap"
+        );
+        assert!(
+            src.contains("__test_0") && src.contains("__test_1"),
+            "runs both tests"
+        );
     }
 
     #[test]
     fn harness_uses_the_real_test_symbol_not_a_sequential_index() {
         // A non-test fn sits between the tests, so the second test's symbol is __test_2,
         // not __test_1, the harness must use the actual name.
-        let funcs = parse("test \"a\" { let x = 1 }\nfn helper() -> i64 { 0 }\ntest \"b\" { let y = 2 }");
+        let funcs =
+            parse("test \"a\" { let x = 1 }\nfn helper() -> i64 { 0 }\ntest \"b\" { let y = 2 }");
         let main = synth_harness(&funcs);
         let src = format!("{:?}", main.body);
         assert!(src.contains("__test_0"));
@@ -235,7 +247,10 @@ mod registered_tests {
         // called `test` must not inflate the count and make a correct file fail.
         let src = "fn test() -> i64 { 1 }\n\
                    test \"only one\" { let test = 2\nassert_eq(test, 2) }\n";
-        assert!(check(src).is_ok(), "one real block; the identifiers are not blocks");
+        assert!(
+            check(src).is_ok(),
+            "one real block; the identifiers are not blocks"
+        );
     }
 
     #[test]
@@ -246,10 +261,19 @@ mod registered_tests {
              test \"one\" { assert_eq(f(), 1) }\n\
              test \"two\" { assert_eq(f(), 1) }\n",
         );
-        let funcs = Parser::new(tokenize("fn f() -> i64 { 1 }\ntest \"one\" { assert_eq(f(), 1) }\n"))
-            .parse_program();
-        let err = check_all_tests_registered(&toks, &funcs).expect_err("a dropped block is refused");
-        assert!(err.contains('2') && err.contains('1'), "name both counts: {err}");
-        assert!(err.contains("never run"), "say what the consequence is: {err}");
+        let funcs = Parser::new(tokenize(
+            "fn f() -> i64 { 1 }\ntest \"one\" { assert_eq(f(), 1) }\n",
+        ))
+        .parse_program();
+        let err =
+            check_all_tests_registered(&toks, &funcs).expect_err("a dropped block is refused");
+        assert!(
+            err.contains('2') && err.contains('1'),
+            "name both counts: {err}"
+        );
+        assert!(
+            err.contains("never run"),
+            "say what the consequence is: {err}"
+        );
     }
 }

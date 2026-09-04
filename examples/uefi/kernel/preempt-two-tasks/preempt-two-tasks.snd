@@ -26,8 +26,7 @@ interrupt fn timer_isr() {
 // Task B: enable interrupts (it is first entered via swtch, not iretq, so IF is off),
 // then spin forever. Only the timer can take it off the CPU.
 fn task_b() {
-    let __f0_28: string = "sti"
-    asm(__f0_28.utf8)
+    asm("sti")
     for { cb = cb + 1 }
 }
 
@@ -56,8 +55,7 @@ fn pit_init() {
 
 fn efi_main() -> i64 {
     exit_boot_services()
-    let __f0_58: string = "cli"
-    asm(__f0_58.utf8)
+    asm("cli")
     ctxs = alloc(16)
     poke64(ctxs, 0)
     poke64(ctxs + 8, 0)
@@ -77,12 +75,10 @@ fn efi_main() -> i64 {
     lidt(idtr)
     pic_remap()
     pit_init()
-    let __f0_79: string = "sti"
-    asm(__f0_79.utf8)
+    asm("sti")
     // Task A: spin until enough ticks have accrued, then stop and report.
     for ticks < 60 { ca = ca + 1 }
-    let __f0_83: string = "cli"
-    asm(__f0_83.utf8)
+    asm("cli")
     if ca > 0 && cb > 0 { serial_print("PREEMPT-OK") } else { serial_print("PREEMPT-BAD") }
     halt()
     0

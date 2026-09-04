@@ -9,7 +9,7 @@
 //   include "x86_64/linux/http-server.snd"
 //   ... in the request handler:
 //     let name = ...route the path...
-//     if name == 0 { let __b0_11: string = "404 Not Found" http_send_status(afd, __b0_11.utf8) }
+//     if name == 0 { http_send_status(afd, "404 Not Found") }
 //     else { http_serve_file(afd, name, my_content_type(name)) }
 
 include "x86_64/linux/io.snd"
@@ -39,6 +39,15 @@ fn http_safe_path(name: i64) -> i64 {
         i = i + 1
     }
     1
+}
+
+// S_IFMT / S_IFREG: an open fd is a regular file, not a directory, device or socket.
+fn http_is_regular(fd: i64) -> i64 {
+    let st[18]                                         // struct stat is 144 bytes on x86-64
+    if syscall(SYS_fstat, fd, st) < 0 { return 0 }
+    let mode = st[3] & 0xFFFFFFFF                      // st_mode sits at byte offset 24
+    if (mode & 0xF000) == 0x8000 { return 1 }
+    0
 }
 
 // The size of an open file, via lseek to the end and back.
@@ -83,9 +92,9 @@ fn http_send_redirect(afd: i64, location: i64) {
 }
 
 // Send a bodyless HTTP response with the given status line (e.g. "404 Not Found").
-fn http_send_status(afd: i64, status: i64) {
+fn http_send_status(afd: i64, status: string) {
     let body = bytes_new()
-    let resp = http_response(status, body)
+    let resp = http_response(status.utf8, body)
     write_buf(afd, peek64(resp), bytes_len(resp))
 }
 
@@ -96,13 +105,26 @@ fn http_send_status(afd: i64, status: i64) {
 // tarball served against a freshly-generated checksum desyncs (and every install fails) the
 // moment a stale copy lingers at the edge, so releases opt out of caching entirely.
 fn http_serve_file_cc(afd: i64, path: i64, ctype: i64, cc: i64) -> i64 {
+    http_serve_file_ex(afd, path, ctype, cc, 1)
+}
+
+// The engine behind http_serve_file / http_serve_file_cc / http_head_file: `want_body` 0 emits
+// the very same status line and headers and stops there, which is what HEAD must answer.
+fn http_serve_file_ex(afd: i64, path: i64, ctype: i64, cc: i64, want_body: i64) -> i64 {
     let p = bytes_new()
     bytes_append(p, path)
     bytes_push(p, 0)                                   // NUL-terminate for open
     let fd = open_file(peek64(p), 0, 0)                // O_RDONLY
     if fd < 0 {
-        let __lit2: string = "404 Not Found"
-        http_send_status(afd, __lit2.utf8)
+        http_send_status(afd, "404 Not Found")
+        return 0
+    }
+    // A directory opens fine and lseek even gives it a size, but read() returns -EISDIR: the
+    // response would announce a Content-Length and then send zero bytes, and the peer would
+    // read the NEXT response as the missing body. Only a regular file is servable.
+    if http_is_regular(fd) == 0 {
+        close_fd(fd)
+        http_send_status(afd, "404 Not Found")
         return 0
     }
     let sz = http_file_size(fd)
@@ -121,6 +143,10 @@ fn http_serve_file_cc(afd: i64, path: i64, ctype: i64, cc: i64) -> i64 {
     let __lit6: string = "\r\nConnection: keep-alive\r\n\r\n"
     bytes_append_cstr(h, __lit6.utf8)
     write_buf(afd, peek64(h), bytes_len(h))
+    if want_body == 0 {
+        close_fd(fd)
+        return 0
+    }
     let buf[2048]
     for {
         let rn = read_buf(fd, buf, 16384)
@@ -129,6 +155,12 @@ fn http_serve_file_cc(afd: i64, path: i64, ctype: i64, cc: i64) -> i64 {
     }
     close_fd(fd)
     0
+}
+
+// Answer HEAD for `path`: the headers a GET would send, and no body. Same 404 when the path is
+// missing or is not a regular file, so HEAD and GET never disagree about what exists.
+fn http_head_file(afd: i64, path: i64, ctype: i64) -> i64 {
+    http_serve_file_ex(afd, path, ctype, 0, 0)
 }
 
 // Stream a file at `path` to `afd` as a 200 with `Content-Type: <ctype>`, no Cache-Control; 404 if

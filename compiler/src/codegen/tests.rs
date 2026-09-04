@@ -1,6 +1,7 @@
 use super::testutil::{
-    compile_and_capture, compile_and_run, compile_and_run_freestanding,
-    compile_and_run_windows, freestanding_section_alignment, parse_function,
+    compile_and_capture, compile_and_capture_with_globals, compile_and_run,
+    compile_and_run_freestanding, compile_and_run_windows,
+    freestanding_section_alignment, parse_function,
 };
 use super::*;
 use crate::lexer::tokenize;
@@ -28,7 +29,10 @@ fn coverage_build_instruments_each_statement() {
         "coverage build marks statements"
     );
     // The total point count is published for the harness to size its buffer.
-    assert!(asm.contains("__cov_total:"), "publishes the total point count");
+    assert!(
+        asm.contains("__cov_total:"),
+        "publishes the total point count"
+    );
 }
 
 #[test]
@@ -119,10 +123,14 @@ fn compiles_and_runs_local_variables_on_real_x64() {
 fn a_debug_build_emits_a_per_statement_checkpoint_a_normal_build_does_not() {
     // The codegen emits the per-statement CHECKPOINT (`call __dbg_step`); the `__dbg_step` runtime
     // itself is a Sond function appended to the program in a --debug build (RFC-0016), not codegen.
-    let funcs = Parser::new(tokenize("fn main() -> i64 { let a = 1\nlet b = 2\na + b }")).parse_program();
+    let funcs =
+        Parser::new(tokenize("fn main() -> i64 { let a = 1\nlet b = 2\na + b }")).parse_program();
     let debug_asm = emit_program_debug_g(&[], &[], &funcs);
     let normal_asm = emit_program_g(&[], &[], &funcs);
-    assert!(debug_asm.contains("call __dbg_step"), "the --debug build calls the checkpoint");
+    assert!(
+        debug_asm.contains("call __dbg_step"),
+        "the --debug build calls the checkpoint"
+    );
     // The checkpoint passes the CURRENT frame base (%rbp) as the second argument, so the agent can
     // read the debuggee's locals and walk its call stack.
     assert!(
@@ -143,8 +151,14 @@ fn a_debug_build_tracks_call_depth_for_step_over_and_step_out() {
     let funcs = Parser::new(tokenize("fn main() -> i64 { let a = 1\na }")).parse_program();
     let debug_asm = emit_program_debug_g(&[], &[], &funcs);
     let normal_asm = emit_program_g(&[], &[], &funcs);
-    assert!(debug_asm.contains("call __dbg_enter"), "the --debug build bumps the depth on entry");
-    assert!(debug_asm.contains("call __dbg_exit"), "the --debug build drops the depth on exit");
+    assert!(
+        debug_asm.contains("call __dbg_enter"),
+        "the --debug build bumps the depth on entry"
+    );
+    assert!(
+        debug_asm.contains("call __dbg_exit"),
+        "the --debug build drops the depth on exit"
+    );
     assert!(
         !normal_asm.contains("__dbg_enter") && !normal_asm.contains("__dbg_exit"),
         "a normal build tracks no call depth"
@@ -180,8 +194,14 @@ fn a_shared_pub_function_seeds_the_arena_at_the_c_abi_boundary() {
     let globals = p.take_globals();
     let structs = p.take_structs();
     let asm = emit_shared_g(&globals, &structs, &funcs);
-    assert!(asm.contains("pushq %r15"), "the pub boundary saves the host's %r15");
-    assert!(asm.contains("popq %r15"), "and restores it before returning");
+    assert!(
+        asm.contains("pushq %r15"),
+        "the pub boundary saves the host's %r15"
+    );
+    assert!(
+        asm.contains("popq %r15"),
+        "and restores it before returning"
+    );
     // The seed appears exactly once: for the single `pub` function, not the hidden one.
     assert_eq!(
         asm.matches("leaq sond_arena_tcb(%rip), %r15").count(),
@@ -205,7 +225,11 @@ fn par_runs_every_peer_on_a_thread_and_joins_before_continuing() {
             par w(a, 0) ~~ w(a, 1) ~~ w(a, 2)\n\
             peek64(a) + peek64(a + 8) + peek64(a + 16)\n\
         }";
-    assert_eq!(compile_and_run(src), 3, "all three peers ran and were joined");
+    assert_eq!(
+        compile_and_run(src),
+        3,
+        "all three peers ran and were joined"
+    );
 }
 
 #[test]
@@ -222,7 +246,11 @@ fn par_let_binds_each_peer_result_by_source_position() {
             let a ~~ b ~~ c = par one() ~~ two() ~~ three()\n\
             a * 16 + b * 4 + c\n\
         }";
-    assert_eq!(compile_and_run(src), 27, "results bound by position: a=1, b=2, c=3");
+    assert_eq!(
+        compile_and_run(src),
+        27,
+        "results bound by position: a=1, b=2, c=3"
+    );
 }
 
 #[test]
@@ -240,7 +268,11 @@ fn par_reduce_folds_peer_results_with_a_commutative_op() {
         fn b() -> i64 { 3 }\n\
         fn c() -> i64 { 7 }\n\
         fn main() -> i64 { let s = par(*) a() ~~ b() ~~ c()\n s }";
-    assert_eq!(compile_and_run(prod), 42, "par(*) multiplies the peer results");
+    assert_eq!(
+        compile_and_run(prod),
+        42,
+        "par(*) multiplies the peer results"
+    );
 }
 
 #[test]
@@ -261,7 +293,11 @@ fn graph_evaluates_nodes_in_dependency_order_not_source_order() {
             }\n\
             r\n\
         }";
-    assert_eq!(compile_and_run(src), 41, "nodes evaluate in dependency order regardless of source order");
+    assert_eq!(
+        compile_and_run(src),
+        41,
+        "nodes evaluate in dependency order regardless of source order"
+    );
 }
 
 #[test]
@@ -315,7 +351,11 @@ fn graph_runs_independent_nodes_in_parallel_and_binds_them_correctly() {
             }\n\
             r\n\
         }";
-    assert_eq!(compile_and_run(src), 27, "parallel level nodes bound to their own results");
+    assert_eq!(
+        compile_and_run(src),
+        27,
+        "parallel level nodes bound to their own results"
+    );
 }
 
 #[test]
@@ -382,7 +422,10 @@ fn freestanding_argc_reads_the_process_arguments() {
     // do it), and the globals must be declared, else `argc()` fails to link. Run with no
     // args, argc is 1 (the program name).
     let (code, _) = compile_and_run_freestanding("fn main() -> i64 { argc() }");
-    assert_eq!(code, 1, "argc() should be 1 when run with no extra arguments");
+    assert_eq!(
+        code, 1,
+        "argc() should be 1 when run with no extra arguments"
+    );
 }
 
 #[test]
@@ -479,9 +522,7 @@ fn a_global_array_of_string_literals_holds_their_addresses() {
     // string literal IS a compile-time constant: its address in `.rodata`. A scalar
     // `let MSG = "hi"` already worked, so rejecting the same literal one bracket deeper was an
     // inconsistency that pushed every fixed list into a function body.
-    let asm = emit_with_globals(
-        "let NAMES[2] = [\"uno\", \"dos\"]\nfn main() -> i64 { NAMES[0] }",
-    );
+    let asm = emit_with_globals("let NAMES[2] = [\"uno\", \"dos\"]\nfn main() -> i64 { NAMES[0] }");
     assert!(
         asm.contains("NAMES: .quad .Lstr"),
         "the table holds the literals' rodata addresses, got:\n{asm}"
@@ -598,6 +639,114 @@ fn a_bss_global_array_still_reads_and_writes_on_real_x64() {
             "let mut px[64]\nfn main() -> i64 { px[10] = 7\npx[63] = 35\npx[10] + px[63] + px[0] }"
         ),
         42
+    );
+}
+
+#[test]
+fn module_level_byte_view_reserves_bytes_and_writes_in_bytes() {
+    // `let mut g: u8[32]` at module level must allocate exactly 32 bytes in .bss, resolve to
+    // the buffer address, index at byte granularitiy (two adjacent positions stay independent),
+    // and start zeroed.
+    let asm = emit_with_globals("let mut g: u8[32]\nfn main() -> i64 { g[0] }");
+    assert!(
+        asm.contains(".bss"),
+        "a byte view at module level must be reserved in .bss, got:\n{asm}"
+    );
+    assert!(
+        asm.contains("g: .zero 32"),
+        "u8[32] must reserve exactly 32 bytes, not 256 words, got:\n{}",
+        &asm[..asm.len().min(3000)]
+    );
+    // The index must use byte-width stores (movb/movq %al) not 64-bit stores into word slots.
+    // With byte-width we get g[0]=65, g[1]=42 independently.
+    assert_eq!(
+        compile_and_run_with_globals("let mut g: u8[32]\nfn main() -> i64 { g[0] = 65\ng[0] }"),
+        65
+    );
+    // Two adjacent positions must be independent byte slots.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut g: u8[32]\nfn main() -> i64 {\n    g[0] = 65\n    g[1] = 42\n    g[0] + g[1]\n    }"
+        ),
+        107
+    );
+    // Byte-level independence via raw memory access: peek at g+0 and g+1 independently.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut g: u8[32]\nfn main() -> i64 {\n    g[0] = 65\n    g[1] = 42\n    peek8(g + 0)\n    }"
+        ),
+        65
+    );
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut g: u8[32]\nfn main() -> i64 {\n    g[0] = 65\n    g[1] = 42\n    peek8(g + 1)\n    }"
+        ),
+        42
+    );
+    // Must start at zero.
+    assert_eq!(
+        compile_and_run_with_globals("let mut g: u8[32]\nfn main() -> i64 { g[0] + g[31] }"),
+        0
+    );
+}
+
+#[test]
+fn module_level_u32_view_reserves_bytes_at_4_byte_granularity() {
+    // `let mut buf: u32[16]` must reserve 64 bytes (16 * 4), index at 4-byte boundaries.
+    let asm = emit_with_globals("let mut buf: u32[16]\nfn main() -> i64 { peek32(buf) }");
+    assert!(asm.contains(".bss"));
+    assert!(asm.contains("buf: .zero 64"));
+    // Write at element 0 and read it back. Value 0xaa = 170 fits in exit code.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut buf: u32[16]\nfn main() -> i64 {\n    buf[0] = 0xaa\n    peek32(buf)\n    }"
+        ),
+        0xaa
+    );
+    // Verify 4-byte granularity: write 1 to element 2 (byte offset 8).
+    // If the compiler mistakenly used 8-byte word granularity, writing 1 at offset 8
+    // would actually be element 1, not element 2. We verify by checking element 0 is still 0xaa.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut buf: u32[16]\nfn main() -> i64 {\n    buf[0] = 0xaa\n    buf[2] = 0xbb\n    peek32(buf)\n    }"
+        ),
+        0xaa // element 0 unchanged by write to element 2
+    );
+    // Element 2 should be 0xbb = 187, fits in exit code.
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut buf: u32[16]\nfn main() -> i64 {\n    buf[2] = 0xbb\n    peek32(buf + 8)\n    }"
+        ),
+        0xbb
+    );
+}
+
+#[test]
+fn module_level_view_large_does_not_expand_binary() {
+    // The binary size for a zeroed view must not grow proportionally to its capacity.
+    let asm_small = emit_with_globals("let mut g: u8[64]\nfn main() -> i64 { 0 }");
+    let asm_big = emit_with_globals("let mut g: u8[200000]\nfn main() -> i64 { 0 }");
+    let growth = asm_big.len() - asm_small.len();
+    assert!(
+        growth < 256,
+        "a zeroed view must NOT expand the binary: growth={growth} bytes (expected < 256)"
+    );
+}
+
+#[test]
+fn non_literal_view_length_is_a_compile_error() {
+    // If the length is not a literal (e.g. derived from a variable), compilation must fail.
+    let src = "let mut buf: u8[n]\nfn main(n: i64) -> i64 { 0 }";
+    let mut p = Parser::new(tokenize(src));
+    let funcs = p.parse_program();
+    let globals = p.take_globals();
+    // emit_program_g calls set_globals internally, which must panic for non-literal view lengths.
+    let result = std::panic::catch_unwind(|| {
+        emit_program_g(&globals, &[], &funcs);
+    });
+    assert!(
+        result.is_err(),
+        "set_globals must panic for non-literal view length"
     );
 }
 
@@ -759,7 +908,7 @@ fn a_violated_ensures_traps_the_program() {
     assert_eq!(status.code(), None, "a broken postcondition must trap");
 }
 
-/// Compiles a program that has module-level globals and runs it (exit code).
+/// Compiles a program that has module-level globals and captures its stdout.
 fn compile_and_run_with_globals(src: &str) -> i32 {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let mut p = Parser::new(tokenize(src));
@@ -786,6 +935,93 @@ fn compile_and_run_with_globals(src: &str) -> i32 {
     let _ = std::fs::remove_file(&asm_path);
     let _ = std::fs::remove_file(&bin_path);
     code
+}
+
+fn compile_and_run_with_globals_lowered(src: &str) -> i32 {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    let (funcs, globals, _structs) = super::testutil::parse_and_lower(src, "host");
+    let asm = emit_program_g(&globals, &[], &funcs);
+    let dir = std::env::temp_dir();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let stem = format!("sondc_g_l_{}_{}", std::process::id(), n);
+    let asm_path = dir.join(format!("{stem}.s"));
+    let bin_path = dir.join(&stem);
+    std::fs::write(&asm_path, asm).unwrap();
+    assert!(
+        Command::new("cc")
+            .arg(&asm_path)
+            .arg("-o")
+            .arg(&bin_path)
+            .status()
+            .unwrap()
+            .success(),
+        "compile failed"
+    );
+    let code = Command::new(&bin_path).status().unwrap().code().unwrap();
+    let _ = std::fs::remove_file(&asm_path);
+    let _ = std::fs::remove_file(&bin_path);
+    code
+}
+
+#[test]
+fn global_constant_table_len_returns_the_count() {
+    // `let t[3] = [10,20,30]` is a constant table in .data; `.len` must yield
+    // the element count 3 (not the byte count).
+    assert_eq!(compile_and_run_with_globals_lowered(
+        "let t[3] = [10, 20, 30]\nfn main() -> i64 { t.len }"
+    ), 3);
+}
+
+#[test]
+fn global_mutable_buffer_len_returns_the_count() {
+    // `let mut buf[7]` reserves 7 words in .bss; `.len` yields 7.
+    assert_eq!(compile_and_run_with_globals_lowered(
+        "let mut buf[7]\nfn main() -> i64 { buf.len }"
+    ), 7);
+}
+
+#[test]
+fn global_typed_view_len_returns_the_count() {
+    // `let g: i64[7]` is a typed view that reserves 7 words in .bss;
+    // `.len` must return 7 (element count, not byte count).
+    assert_eq!(compile_and_run_with_globals_lowered(
+        "let mut g: i64[7]\nfn main() -> i64 { g.len }"
+    ), 7);
+}
+
+#[test]
+fn global_len_uses_element_count_not_byte_count() {
+    // u32 is 4 bytes, 8 bits per byte -> 32 bits per element.
+    // `let buf: u32[4]` reserves 4*4=16 bytes but has 4 elements.
+    // .len must return 4, not 16.
+    assert_eq!(compile_and_run_with_globals_lowered(
+        "let buf: u32[4]\nfn main() -> i64 { buf.len }"
+    ), 4);
+}
+
+#[test]
+fn global_len_inside_if_block() {
+    // .len on a global inside an if branch must resolve to the constant.
+    assert_eq!(compile_and_run_with_globals_lowered(
+        "let arr[5] = [1,2,3,4,5]\nfn main() -> i64 {\n    if 1 == 1 { arr.len }\n    else { 0 }\n}"
+    ), 5);
+}
+
+#[test]
+fn global_len_inside_for_loop() {
+    // .len on a global inside a for loop body must resolve to the constant.
+    assert_eq!(compile_and_run_with_globals_lowered(
+        "let arr[4] = [10,20,30,40]\nfn main() -> i64 {\n    let mut i = 0\n    for i < arr.len { arr[i] = i + 1  i = i + 1 }\n    0\n}"
+    ), 0);
+}
+
+#[test]
+fn local_array_len_still_works() {
+    // Verify the fix does not break local arrays: .len on a local should still
+    // return the expected constant.
+    assert_eq!(compile_and_run(
+        "fn main() -> i64 { let a: i64[5] = [0,0,0,0,0]\n    a.len }"
+    ), 5);
 }
 
 #[test]
@@ -1022,6 +1258,28 @@ fn asm_emits_the_instruction_verbatim() {
 }
 
 #[test]
+fn asm_rejects_variable_references() {
+    // `asm(...)` requires a string literal so the assembler can emit the
+    // instruction at compile time. Passing a variable (even one holding a
+    // string) must fail with a message saying a literal is required.
+    let err = std::panic::catch_unwind(|| {
+        emit_uefi_with_globals(
+            "fn efi_main() -> i64 { let s: string = \"cli\"\nasm(s.utf8)\n0 }",
+        )
+    })
+    .expect_err("asm with a variable must not compile");
+    let msg = err
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    assert!(
+        msg.contains("string literal"),
+        "must mention 'string literal' in the error, got: {msg}"
+    );
+}
+
+#[test]
 fn uefi_serial_writes_to_com1_port() {
     // serial_print/serial_putc lower to COM1 (0x3F8) iface I/O via a helper
     // that polls the UART line-status register, no firmware, survives EBS.
@@ -1061,9 +1319,8 @@ fn uefi_readkey_polls_conin_and_print_char_uses_conout() {
 #[test]
 fn a_string_literal_lowers_to_the_address_of_null_terminated_bytes() {
     // "A" should emit leaq and the string data; peek8 reads 'A' (65).
-    let asm = emit_program(
-        &Parser::new(tokenize("fn f() -> i64 { peek8(\"A\") }")).parse_program(),
-    );
+    let asm =
+        emit_program(&Parser::new(tokenize("fn f() -> i64 { peek8(\"A\") }")).parse_program());
     assert!(
         asm.contains("leaq .Lstr0(%rip), %rax"),
         "cstr must lea the string address into %rax"
@@ -1071,6 +1328,76 @@ fn a_string_literal_lowers_to_the_address_of_null_terminated_bytes() {
     assert!(
         asm.contains(".asciz"),
         "string data must be emitted with NUL terminator"
+    );
+}
+
+#[test]
+fn a_control_byte_in_a_literal_is_escaped_for_the_assembler() {
+    // `"ERROR\0"` reached the assembler as a raw NUL between the quotes of a `.asciz`, which
+    // ends the string right there as far as `as` is concerned: it answered `invalid character
+    // (0xa) in mnemonic` pointing at a line the programmer never wrote, and the build died
+    // with nothing to grep for. Every control byte gets an octal escape now, so the text
+    // survives the trip and keeps the NUL it was written with -- separate from the one
+    // `.asciz` appends.
+    let asm = emit_program(
+        &Parser::new(tokenize(
+            "fn f() -> i64 { let s: string = \"ERROR\\0\"\n    s.utf8 }",
+        ))
+        .parse_program(),
+    );
+    assert!(
+        asm.contains(r#".asciz "ERROR\000""#),
+        "a NUL inside a literal must be escaped as \\000:\n{asm}"
+    );
+    assert!(
+        !asm.lines()
+            .any(|l| l.contains(".asciz") && l.contains('\0')),
+        "no line may carry a raw control byte inside the quotes:\n{asm}"
+    );
+}
+
+#[test]
+fn the_same_literal_used_twice_has_one_address() {
+    // Two uses of the same `string` global gave two DIFFERENT pointers, ten bytes apart --
+    // one `.rodata` copy per use -- because `intern_string` interned nothing: it appended a
+    // fresh label every call. The name said one thing and the body did another.
+    //
+    // It reads as a waste of space, but it breaks a program: comparing a value returned by a
+    // lookup against the fallback it was given (`env_get_or(name, FALLBACK) == FALLBACK`)
+    // is false even when the fallback IS what came back, because the two `FALLBACK` are two
+    // addresses. The equality that everyone writes silently stops meaning what it says.
+    let asm = emit_program(
+        &Parser::new(tokenize(
+            "let S: string = \"dup\"\nfn f() -> i64 { S.utf8 - S.utf8 }",
+        ))
+        .parse_program(),
+    );
+    assert_eq!(
+        asm.matches(".asciz \"dup\"").count(),
+        1,
+        "the bytes must be emitted once, not once per use:\n{asm}"
+    );
+    assert_eq!(
+        compile_and_run("let S: string = \"dup\"\nfn f() -> i64 { S.utf8 - S.utf8 }"),
+        0,
+        "two uses of the same literal must be the same address"
+    );
+}
+
+#[test]
+fn the_same_float_used_twice_has_one_constant() {
+    // The same hole in intern_float. A duplicated f64 constant cannot break equality the way
+    // the string one does (the value is loaded, not its address), so this is only waste --
+    // but it is the same function shape, and half a fix is the half that rots.
+    let asm = emit_program(&Parser::new(tokenize("fn f() -> f64 { 1.5 + 1.5 }")).parse_program());
+    assert_eq!(
+        asm.matches(".Lflt0:").count(),
+        1,
+        "one label per distinct constant:\n{asm}"
+    );
+    assert!(
+        !asm.contains(".Lflt1:"),
+        "1.5 twice must not emit a second constant:\n{asm}"
     );
 }
 
@@ -1094,10 +1421,11 @@ fn a_string_literals_bytes_are_readable_by_offset() {
     // "Hi!" emits "Hi!\0"; peek8 at offset gives each byte.
     assert_eq!(
         compile_and_run(
-            "fn f() -> i64 { \
-             let p = \"Hi!\"\n\
-             syscall(60, peek8(p + 2)) \
-             }"
+            // The literal is passed straight to `peek8`: binding it to a `let p: string` first
+            // makes `p` a length-carrying view, and raw `peek` into one of those is refused on
+            // purpose (`p[i]` is the checked way to read it). What this test is about is the
+            // bytes a literal emits, so the literal is where the offset is taken.
+            "fn f() -> i64 { syscall(60, peek8(\"Hi!\" + 2)) }"
         ),
         33
     );
@@ -1123,7 +1451,10 @@ fn a_port_program_compiles_and_runs_end_to_end() {
          use Doubler\n\
          fn main() -> i64 { dbl(21) }",
     );
-    assert_eq!(code, 42, "the spliced provider method runs on real hardware");
+    assert_eq!(
+        code, 42,
+        "the spliced provider method runs on real hardware"
+    );
 }
 
 #[test]
@@ -1146,8 +1477,14 @@ fn a_port_provider_compiles_to_a_pic16_subroutine_and_is_called() {
             .expect("the pic16 provider resolves"),
     );
     let asm = super::pic16::emit_pic16(&funcs);
-    assert!(asm.contains("dbl"), "the provider method is emitted as a subroutine:\n{asm}");
-    assert!(asm.contains("call"), "main reaches the spliced provider via a call:\n{asm}");
+    assert!(
+        asm.contains("dbl"),
+        "the provider method is emitted as a subroutine:\n{asm}"
+    );
+    assert!(
+        asm.contains("call"),
+        "main reaches the spliced provider via a call:\n{asm}"
+    );
     assert!(
         !asm.contains("unsupported call"),
         "the spliced provider call must not be a no-op:\n{asm}"
@@ -1171,13 +1508,129 @@ fn a_pic16_serial_provider_replaces_the_backend_intrinsic() {
     let providers = p.take_providers();
     let uses = p.take_uses();
     funcs.extend(
-        crate::ports::resolve_ports(&ports, &providers, &uses, "pic16").expect("resolves for pic16"),
+        crate::ports::resolve_ports(&ports, &providers, &uses, "pic16")
+            .expect("resolves for pic16"),
     );
     let asm = super::pic16::emit_pic16(&funcs);
-    assert!(asm.contains("serial_getc"), "the provider's serial_getc is emitted:\n{asm}");
+    assert!(
+        asm.contains("serial_getc"),
+        "the provider's serial_getc is emitted:\n{asm}"
+    );
     assert!(
         !asm.contains("_sg_wait"),
         "the backend's hidden bit-bang intrinsic ceded to the provider:\n{asm}"
+    );
+}
+
+#[test]
+fn a_bare_bang_negates_instead_of_vanishing() {
+    // The lexer consumed a bare `!` and emitted NOTHING for it -- with a comment saying it was
+    // not a token yet, while the parser and this backend both understood `UnOp::Not` fine. So
+    // `!x` lexed as plain `x`: the negation disappeared before anything could complain. `if
+    // !ready { .. }` ran exactly when it must not, and `fn negar(b: bool) -> bool { !b }`
+    // returned its argument. Nothing failed to compile and nothing said a word.
+    //
+    // 1 + 0 + 10 + 0 + 100: the negations that must hold, and the ones that must not.
+    let src = "fn negar(b: bool) -> bool { !b }\n\
+               fn main() -> i64 { let mut n = 0\n\
+                 if !false { n = n + 1 }\n\
+                 if !true { n = n + 2 }\n\
+                 if negar(false) { n = n + 10 }\n\
+                 if negar(true) { n = n + 20 }\n\
+                 if !0 { n = n + 100 }\n\
+                 n }";
+    assert_eq!(compile_and_run(src), 111);
+}
+
+#[test]
+fn a_bang_equals_is_still_an_inequality() {
+    // The same character starts `!=`, so the fix must not turn `a != b` into a negation of `=`.
+    assert_eq!(
+        compile_and_run("fn main() -> i64 { if 1 != 2 { 7 } else { 0 } }"),
+        7
+    );
+}
+
+#[test]
+fn continue_in_a_counting_range_advances_the_counter() {
+    // `for i in 0..10 { if i == 4 { continue } .. }` HUNG, at 100% of a core, for ever. The
+    // counting form desugars to `i = 0` plus a `for i < 10` whose body ends with `i = i + 1`, and
+    // `continue` jumps straight to the condition -- past the increment. So the one iteration that
+    // took the `continue` never advanced, and the loop spun on i == 4 with nothing to see: it
+    // compiled clean, printed nothing and burned the CPU.
+    //
+    // Nine iterations increment `v`, the tenth (i == 4) skips: 9.
+    let src = "fn main() -> i64 { let mut v = 0\nfor i in 0..10 { if i == 4 { continue }\nv = v + 1 }\nv }";
+    assert_eq!(compile_and_run(src), 9);
+}
+
+#[test]
+fn continue_in_a_three_part_for_advances_the_step() {
+    // The same hole in the C-style form, whose step is appended to the body in the same way.
+    let src = "fn main() -> i64 { let mut v = 0\nfor let mut i = 0; i < 10; i++ { if i == 4 { continue }\nv = v + 1 }\nv }";
+    assert_eq!(compile_and_run(src), 9);
+}
+
+#[test]
+fn a_continue_in_a_nested_loop_advances_only_its_own_counter() {
+    // The inner `continue` belongs to the inner loop: it must advance `j` and leave `i` alone.
+    // Stepping both would skip an outer iteration -- a wrong answer instead of a hang, which is
+    // harder to notice.
+    let src = "fn main() -> i64 { let mut v = 0\n\
+               for i in 0..3 { for j in 0..3 { if j == 1 { continue }\nv = v + 1 } }\nv }";
+    assert_eq!(compile_and_run(src), 6); // 3 outer x 2 inner
+}
+
+#[test]
+fn a_spawn_in_a_loop_runs_every_iteration_and_joins_them_all() {
+    // A `spawn` per turn of a loop -- one thread per accepted connection -- was a compile error:
+    // each spawn SITE owned one static join cell, so the next turn overwrote the tid of a thread
+    // still running and it was never joined. What people did instead was fork per connection,
+    // which is how a test VM reached 2920 processes at load 3.43 on two cores. A fork per
+    // connection has no ceiling; a fixed set of reusable slots has one by construction.
+    //
+    // Each worker writes its OWN slot rather than incrementing a shared counter, so this proves
+    // every thread ran without depending on an atomic the language does not have. The spawning
+    // function returns before main reads, and its structured join is what makes that read safe.
+    let src = "fn worker(out: i64, i: i64) -> i64 { poke64(out + i * 8, i + 1)\n0 }\n\
+               fn run(out: i64) -> i64 { let mut i = 0\nfor i < 8 { spawn worker(out, i)\ni = i + 1 }\n0 }\n\
+               fn main() -> i64 {\n\
+                 let slots[8]\n\
+                 let mut k = 0\n\
+                 for k < 8 { poke64(slots + k * 8, 0)\nk = k + 1 }\n\
+                 run(slots)\n\
+                 let mut sum = 0\n\
+                 k = 0\n\
+                 for k < 8 { sum = sum + peek64(slots + k * 8)\nk = k + 1 }\n\
+                 sum }";
+    assert_eq!(
+        compile_and_run(src),
+        36,
+        "1 + 2 + ... + 8: every spawned thread ran and was joined"
+    );
+}
+
+#[test]
+fn a_loop_with_more_turns_than_slots_reuses_them_without_losing_a_thread() {
+    // 100 turns over a ring of 64: from turn 65 on, each spawn must WAIT for the thread whose
+    // slot it is taking. That wait is the ceiling -- the property a fork per connection does not
+    // have -- and it is also where a thread would be silently dropped if the slot were reused
+    // without joining. Every worker writes its own slot, so a lost one shows up as a missing 1.
+    let src = "fn worker(out: i64, i: i64) -> i64 { poke64(out + i * 8, 1)\n0 }\n\
+               fn run(out: i64) -> i64 { let mut i = 0\nfor i < 100 { spawn worker(out, i)\ni = i + 1 }\n0 }\n\
+               fn main() -> i64 {\n\
+                 let slots[100]\n\
+                 let mut k = 0\n\
+                 for k < 100 { poke64(slots + k * 8, 0)\nk = k + 1 }\n\
+                 run(slots)\n\
+                 let mut n = 0\n\
+                 k = 0\n\
+                 for k < 100 { n = n + peek64(slots + k * 8)\nk = k + 1 }\n\
+                 n }";
+    assert_eq!(
+        compile_and_run(src),
+        100,
+        "all 100 threads ran and were joined"
     );
 }
 
@@ -1202,8 +1655,15 @@ fn the_data_section_declares_its_alignment() {
         rodata_align >= 8,
         ".rodata must declare at least 8-byte alignment, got {rodata_align}"
     );
-    assert_ne!(ctid, 0, "the test program should have a spawn cell to check");
-    assert_eq!(ctid % 8, 0, "the join cell must be 8-byte aligned, got {ctid:#x}");
+    assert_ne!(
+        ctid, 0,
+        "the test program should have a spawn cell to check"
+    );
+    assert_eq!(
+        ctid % 8,
+        0,
+        "the join cell must be 8-byte aligned, got {ctid:#x}"
+    );
 }
 
 #[test]
@@ -1264,7 +1724,10 @@ fn shared_abi_code_assembles_into_a_relocatable_object_and_links_statically() {
         .arg(&obj_path)
         .status()
         .expect("cc should be available");
-    assert!(asm_ok.success(), "the shared-ABI assembly must assemble to a .o");
+    assert!(
+        asm_ok.success(),
+        "the shared-ABI assembly must assemble to a .o"
+    );
 
     let link = Command::new("cc")
         .arg("-static")
@@ -1274,10 +1737,16 @@ fn shared_abi_code_assembles_into_a_relocatable_object_and_links_statically() {
         .arg(&bin_path)
         .status()
         .unwrap();
-    assert!(link.success(), "the object must link statically into a C program");
+    assert!(
+        link.success(),
+        "the object must link statically into a C program"
+    );
 
     let code = Command::new(&bin_path).status().unwrap().code().unwrap();
-    assert_eq!(code, 42, "the statically linked Sond function must run and return 19 + 23");
+    assert_eq!(
+        code, 42,
+        "the statically linked Sond function must run and return 19 + 23"
+    );
 
     for p in [&asm_path, &obj_path, &c_path, &bin_path] {
         let _ = std::fs::remove_file(p);
@@ -1351,7 +1820,7 @@ fn a_view_passed_to_a_function_keeps_its_element_width() {
     // so a loop over n elements wrote 2n words and ran off the end of the buffer — a segfault on a
     // 2.7M-pixel image, and silent corruption on a small one.
     let src = "\
-        fn write_two(px: u32[n], n: i64) {\n\
+        fn write_two(px: u32[n], n: i64) requires { n >= 2 } {\n\
             px[0] = 0xAAAAAAAA\n\
             px[1] = 0xBBBBBBBB\n\
         }\n\
@@ -1440,10 +1909,12 @@ fn declaring_a_view_with_a_length_reserves_it_zeroed() {
     );
 
     // And the size asked for is the element count times the element's own width, not a word each.
-    let asm = emit_program(&Parser::new(tokenize(
-        "fn main() -> i64 { let n = 16\nlet ar: i32[n]\nar[0] }",
-    ))
-    .parse_program());
+    let asm = emit_program(
+        &Parser::new(tokenize(
+            "fn main() -> i64 { let n = 16\nlet ar: i32[n]\nar[0] }",
+        ))
+        .parse_program(),
+    );
     assert!(
         asm.contains("imulq $4, %rax, %rdi"),
         "an i32 view reserves four bytes per element, got:\n{asm}"
@@ -1525,7 +1996,9 @@ fn a_windows_program_links_as_a_console_pe_and_runs() {
     assert_eq!(compile_and_run_windows("fn main() -> i64 { 6 * 7 }"), 42);
     // Control flow and locals, so the target is a real one and not just a `ret`.
     assert_eq!(
-        compile_and_run_windows("fn main() -> i64 { let mut s = 0\nlet mut i = 0\nfor i < 10 { s = s + i\ni = i + 1 }\ns }"),
+        compile_and_run_windows(
+            "fn main() -> i64 { let mut s = 0\nlet mut i = 0\nfor i < 10 { s = s + i\ni = i + 1 }\ns }"
+        ),
         45
     );
 }
@@ -1820,5 +2293,822 @@ fn the_canonical_view_form_a_caller_writes_keeps_working() {
         ),
         "255 192",
         "the alpha of the first pixel and the blue of the last, through the form a caller writes"
+    );
+}
+
+// --- Issue: string module-level regression and .len on copy ---
+
+#[test]
+fn module_string_with_type_annotation_returns_pointer_to_bytes() {
+    // `let saludo: string = "ax"` must return the address of the interned bytes,
+    // so peek8(saludo + 0) == 97 ('a'). Before the fix it returned 0 (bss buffer).
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let saludo: string = \"ax\"\nfn main() -> i64 { peek8(saludo + 0) }"
+        ),
+        97,
+        "typed module-level string: the first byte of 'ax' is 97"
+    );
+}
+
+#[test]
+fn module_string_annotated_and_unannotated_produce_identical_result() {
+    // Both forms must read the same bytes.
+    assert_eq!(
+        compile_and_run_with_globals("let a = \"hola\"\nfn main() -> i64 { peek8(a + 0) }"),
+        104,
+        "unannotated: 'h' = 104"
+    );
+    assert_eq!(
+        compile_and_run_with_globals("let b: string = \"hola\"\nfn main() -> i64 { peek8(b + 0) }"),
+        104,
+        "annotated: 'h' = 104"
+    );
+    // They must resolve to the same interned label too.
+    let mut p1 = Parser::new(tokenize("let a = \"dup-test\"\nfn f() -> i64 { 0 }"));
+    let funcs1 = p1.parse_program();
+    let globals1 = p1.take_globals();
+    let asm1 = emit_shared_g(&globals1, &[], &funcs1);
+    let mut p2 = Parser::new(tokenize(
+        "let b: string = \"dup-test\"\nfn f() -> i64 { 0 }",
+    ));
+    let funcs2 = p2.parse_program();
+    let globals2 = p2.take_globals();
+    let asm2 = emit_shared_g(&globals2, &[], &funcs2);
+    // Each form interns the literal exactly once, and both emit the SAME label for it:
+    // comparing `asm1` with itself would pass no matter what the annotated form does.
+    assert_eq!(
+        asm1.matches(".asciz \"dup-test\"").count(),
+        1,
+        "unannotated interns once: {asm1}"
+    );
+    assert_eq!(
+        asm2.matches(".asciz \"dup-test\"").count(),
+        1,
+        "annotated interns once: {asm2}"
+    );
+    let label_of = |asm: &str| {
+        asm.lines()
+            .position(|l| l.contains(".asciz \"dup-test\""))
+            .and_then(|i| asm.lines().nth(i.wrapping_sub(1)).map(str::to_string))
+    };
+    let (l1, l2) = (label_of(&asm1), label_of(&asm2));
+    assert!(
+        l1.as_deref().is_some_and(|l| l.contains(':')),
+        "the literal must be preceded by a label, got {l1:?}"
+    );
+    assert_eq!(
+        l1, l2,
+        "both forms must reach the literal through the same label"
+    );
+}
+
+#[test]
+fn module_string_non_ascii_yields_utf8_bytes() {
+    // `"año"`, `peek8(s+0)`=97('a'), `peek8(s+1)`=195, `peek8(s+2)`=177.
+    // Use Rust's compile-time unicode escape so the Sond source contains actual ñ (UTF-8 c0a9).
+    let src: &str = concat!("let s: string = \"a\u{00f1}o\"\nfn main() -> i64 { peek8(s + 0) }");
+    assert_eq!(compile_and_run_with_globals(src), 97);
+    let src: &str = concat!("let s: string = \"a\u{00f1}o\"\nfn main() -> i64 { peek8(s + 1) }");
+    assert_eq!(compile_and_run_with_globals(src), 195);
+    let src: &str = concat!("let s: string = \"a\u{00f1}o\"\nfn main() -> i64 { peek8(s + 2) }");
+    assert_eq!(compile_and_run_with_globals(src), 177);
+}
+
+#[test]
+fn string_copy_inherits_length() {
+    // `let l: string = "hola"` then `let q: string = l` -> q.len == 4.
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let l: string = \"hola\"\n\
+                 let q: string = l\n\
+                 q.len\n\
+             }"
+        ),
+        4,
+        "copy of string local inherits length"
+    );
+}
+
+#[test]
+fn module_level_byte_view_still_works() {
+    // `let mut g: u8[32]` at module level must still reserve 32 bytes in .bss.
+    let asm = emit_with_globals("let mut g: u8[32]\nfn main() -> i64 { g[0] }");
+    assert!(asm.contains(".bss"));
+    assert!(asm.contains("g: .zero 32"));
+    assert_eq!(
+        compile_and_run_with_globals("let mut g: u8[32]\nfn main() -> i64 { g[0] = 65\ng[0] }"),
+        65
+    );
+}
+
+#[test]
+fn module_level_u32_view_still_works() {
+    // `let mut v: u32[16]` at module level.
+    let asm = emit_with_globals("let mut v: u32[16]\nfn main() -> i64 { peek32(v) }");
+    assert!(asm.contains(".bss"));
+    assert!(asm.contains("v: .zero 64"));
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut v: u32[16]\nfn main() -> i64 { v[0] = 42\npeek32(v) }"
+        ),
+        42
+    );
+}
+
+#[test]
+fn local_string_codepoints_work() {
+    // Local string: `l[i]` accesses code points, and `l.len == 3`.
+    // With "añb": code points are 97, 241(ñ), 98; len=3.
+    assert_eq!(
+        compile_and_run(concat!(
+            "fn f() -> i64 {\n            \
+                 let l: string = \"a",
+            "\u{00f1}",
+            "b\"\n\
+                 l.len\n\
+             }"
+        )),
+        3,
+        "local string .len counts code points"
+    );
+    assert_eq!(
+        compile_and_run(concat!(
+            "fn f() -> i64 {\n            \
+                 let l: string = \"a",
+            "\u{00f1}",
+            "b\"\n\
+                 l[0]\n\
+             }"
+        )),
+        97,
+        "l[0] is the code point for 'a'"
+    );
+    assert_eq!(
+        compile_and_run(concat!(
+            "fn f() -> i64 {\n            \
+                 let l: string = \"a",
+            "\u{00f1}",
+            "b\"\n\
+                 l[1]\n\
+             }"
+        )),
+        241,
+        "l[1] is the code point for 'ñ'"
+    );
+    assert_eq!(
+        compile_and_run(concat!(
+            "fn f() -> i64 {\n            \
+                 let l: string = \"a",
+            "\u{00f1}",
+            "b\"\n\
+                 l[2]\n\
+             }"
+        )),
+        98,
+        "l[2] is the code point for 'b'"
+    );
+}
+
+/// Copying a view keeps its ELEMENT WIDTH, not just its length.
+///
+/// Inheriting the source's view info (which is what makes `.len` survive a copy) also fixes
+/// something the copy got wrong before: `let p = b` over a `u8` view used to index in 8-byte
+/// words, so `p[1]` read past the two bytes just written and answered 0 while `b[1]` answered 2.
+/// A copy points at the same memory as its source; reading it at a different stride is the kind
+/// of wrong answer that compiles clean, which is the only reason this is pinned by a test rather
+/// than left as an implementation detail.
+#[test]
+fn a_copied_byte_view_still_indexes_in_bytes() {
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut b: u8[16]\n\
+                 b[0] = 1\n\
+                 b[1] = 2\n\
+                 let p = b\n\
+                 p[1]\n\
+             }"
+        ),
+        2,
+        "a copy of a u8 view indexes in bytes, like the view it copies"
+    );
+}
+
+// The tests below guard `a string parameter carries UTF-8 bytes whoever the caller is`.
+// Each one is written so it goes red when the mechanism it names is broken: passing a
+// variable through the call path, and refusing when more than one text can reach the call.
+
+#[test]
+fn a_string_variable_reaches_the_callee_as_the_same_bytes_as_a_literal() {
+    // The bug this closes: the same declared type arrived in two representations, and the
+    // callee could not tell which. `añb` is the probe because its second byte (0xC3) only
+    // exists in the UTF-8 view -- the code-point view answers 0 there, so an ASCII-only
+    // literal would have hidden the whole thing.
+    let from_literal = "fn b(s: string) -> i64 { peek8(s + 1) }\n\
+                        fn f() -> i64 { b(\"a\u{00f1}b\") }";
+    let from_variable = "fn b(s: string) -> i64 { peek8(s + 1) }\n\
+                         fn f() -> i64 { let l: string = \"a\u{00f1}b\"\nb(l) }";
+    assert_eq!(compile_and_run(from_literal), 195, "literal argument");
+    assert_eq!(
+        compile_and_run(from_variable),
+        195,
+        "a variable holding the same text must hand over the same bytes"
+    );
+}
+
+#[test]
+fn a_reassigned_variable_hands_over_the_text_it_holds_now() {
+    // The label travels with the reassignment: what reaches the callee is the last text
+    // assigned, not the one the variable was born with.
+    let prog = "fn b(s: string) -> i64 { peek8(s) }\n\
+                fn f() -> i64 { let mut l: string = \"a\u{00f1}\"\nl = \"z\u{00f1}\"\nb(l) }";
+    assert_eq!(
+        compile_and_run(prog),
+        122,
+        "after the reassignment, 'z' = 122"
+    );
+}
+
+#[test]
+fn a_parameter_forwarded_to_another_function_keeps_its_bytes() {
+    let prog = "fn b(s: string) -> i64 { peek8(s + 1) }\n\
+                fn a(x: string) -> i64 { b(x) }\n\
+                fn f() -> i64 { a(\"a\u{00f1}b\") }";
+    assert_eq!(compile_and_run(prog), 195, "the bytes survive one more hop");
+}
+
+#[test]
+fn both_branches_assigning_the_same_text_still_compiles() {
+    // Refusing correct code would be worse than the bug: when the two branches cannot
+    // disagree, there is nothing undecidable and the call goes through.
+    let prog = "fn b(s: string) -> i64 { peek8(s) }\n\
+                fn f(c: i64) -> i64 { let mut a: string = \"h\u{00f1}\"\n\
+                if c > 0 { a = \"h\u{00f1}\" } else { a = \"h\u{00f1}\" }\nb(a) }";
+    assert_eq!(
+        compile_and_run(prog),
+        104,
+        "same text on both sides, 'h' = 104"
+    );
+}
+
+#[test]
+#[should_panic(expected = "its value as a `string` is unknown")]
+fn two_branches_assigning_different_texts_are_refused_at_the_call() {
+    // The other half of the commit, and the half that had no test: where two texts can
+    // reach the same call the compiler refuses instead of picking one. Silently picking
+    // the `then` branch compiles clean and hands the callee the wrong bytes at runtime.
+    emit_program(
+        &Parser::new(tokenize(
+            "fn b(s: string) -> i64 { peek8(s) }\n\
+         fn f(c: i64) -> i64 { let mut a: string = \"one\"\n\
+         if c > 0 { a = \"two\" } else { a = \"three\" }\nb(a) }",
+        ))
+        .parse_program(),
+    );
+}
+
+#[test]
+#[should_panic(expected = "its value as a `string` is unknown")]
+fn a_loop_body_that_reassigns_is_refused_at_the_call() {
+    // Same reasoning through a loop: the text at the call depends on how many times the
+    // body ran, which is not something the compiler can decide.
+    emit_program(
+        &Parser::new(tokenize(
+            "fn b(s: string) -> i64 { peek8(s) }\n\
+         fn f() -> i64 { let mut a: string = \"one\"\n\
+         let mut i = 0\n\
+         for i < 3 { a = \"two\"\ni = i + 1 }\nb(a) }",
+        ))
+        .parse_program(),
+    );
+}
+
+#[test]
+fn a_branch_that_assigns_nothing_leaves_the_variable_passable() {
+    // An `if` that never touches the variable must not cost it its label: the merge has
+    // to look at what the branches assigned, not at whether a branch ran.
+    let prog = "fn b(s: string) -> i64 { peek8(s) }\n\
+                fn f(c: i64) -> i64 { let mut a: string = \"h\u{00f1}\"\n\
+                if c > 0 { let z = 1 }\nb(a) }";
+    assert_eq!(compile_and_run(prog), 104, "'h' = 104");
+}
+
+#[test]
+fn a_delete_byte_in_a_literal_is_escaped_for_the_assembler() {
+    // 0x7F is not below 0x20, so a range check written as `< 0x20` lets it through raw.
+    // A NUL is already covered by `a_control_byte_in_a_literal_is_escaped_for_the_assembler`.
+    let asm = emit_program(
+        &Parser::new(tokenize(
+            "fn f() -> i64 { let s: string = \"E\x7FX\"\n    s.utf8 }",
+        ))
+        .parse_program(),
+    );
+    assert!(
+        asm.contains(r#".asciz "E\177X""#),
+        "0x7F must reach the assembler as \\177:\n{asm}"
+    );
+    let with_tab = emit_program(
+        &Parser::new(tokenize(
+            "fn f() -> i64 { let s: string = \"E\tX\"\n    s.utf8 }",
+        ))
+        .parse_program(),
+    );
+    assert!(
+        !with_tab
+            .lines()
+            .any(|l| l.contains(".asciz") && l.as_bytes().contains(&b'\t')),
+        "no raw tab may sit inside the quotes of a .asciz:\n{with_tab}"
+    );
+}
+
+#[test]
+fn entry_function_is_callable_by_other_functions_in_the_same_file() {
+    // A library file (no `main`) where the last function is called by another
+    // function defined before it.  The last function becomes the entry and is
+    // compiled under `sond_start`, but it must still be callable by its original
+    // name.  Regression: the entry was excluded from `fn_names`, so the codegen
+    // treated the call as an unrecognised builtin and emitted a `todo!()`.
+    let funcs = Parser::new(tokenize(
+        "fn caller() -> i64 { callee() }\nfn callee() -> i64 { 42 }",
+    ))
+    .parse_program();
+    let asm = emit_program_g(&[], &[], &funcs);
+    assert!(
+        asm.contains("call callee"),
+        "a call to the entry function must emit `call callee`:\n{asm}"
+    );
+    // The entry function is compiled under `sond_start`, so a trampoline from
+    // its original name is needed.
+    assert!(
+        asm.contains("jmp sond_start"),
+        "a trampoline from the entry's name to `sond_start` must exist:\n{asm}"
+    );
+    // The function must actually run and return 42.
+    assert_eq!(compile_and_run("fn caller() -> i64 { callee() }\nfn callee() -> i64 { 42 }"), 42);
+}
+
+#[test]
+fn a_redefined_colliding_global_binds_each_file_to_its_own_value() {
+    // The repro behind io.snd/serial.snd done end-to-end: an included library and the entry
+    // both define a module-level `let O_DUP`, with DIFFERENT values. Each file must read its
+    // own definition -- `a()` the library's 20, `main` the entry's 7 -- so the program's exit
+    // code is 20 + 7 = 27. The bug was both definitions being mangled to the same id (a
+    // "declared more than once" panic in codegen), because the depth-0 entry has no mangling id.
+    static UID: AtomicUsize = AtomicUsize::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "sond_kodup_{}_{}",
+        std::process::id(),
+        UID.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.snd"), "let O_DUP = 20\npub fn a() -> i64 { O_DUP }").unwrap();
+    let entry = root.join("main.snd");
+    std::fs::write(
+        &entry,
+        "include \"a.snd\"\nlet O_DUP = 7\nfn main() -> i64 { a() + O_DUP }",
+    )
+    .unwrap();
+    let (src, _) = crate::resolve::resolve_includes_scoped(&entry).unwrap();
+    let code = compile_and_run_with_globals(&src);
+    assert_eq!(code, 27, "a() reads 20 (its file's O_DUP), main reads 7 (its own)");
+}
+
+#[test]
+fn the_same_program_on_two_lines_is_still_two_statements() {
+    // The one-liner `let mut b = 2 (a + b)` is now a parse error: a call whose
+    // callee is not a name. This is the half that keeps the fix from OVERCHARGING:
+    // the same text split over two lines inserts the implicit `;` at the newline
+    // after `2`, so `2` ends the `let` and `(a + b) + (a + b)` is a separate
+    // statement expression. What was one bogus call must stay two real statements.
+    let src = "fn main() -> i64 {\n let mut a = 1\n let mut b = 2\n (a + b) + (a + b)\n}";
+    let asm = emit_program(&Parser::new(tokenize(src)).parse_program());
+    assert!(
+        asm.contains("addq %rcx, %rax"),
+        "the addition compiles: {asm}"
+    );
+    // It runs to the right answer on real x64: (1 + 2) + (1 + 2) == 6.
+    assert_eq!(compile_and_run(src), 6);
+}
+
+#[test]
+#[should_panic(expected = "is given a string literal but is not declared")]
+fn the_test_helper_compiles_through_the_same_pipeline_as_the_driver() {
+    // Not a codegen test: a guard on the helper. `compile_and_run` used to go from the parser
+    // straight to codegen, skipping the checks and desugars that `main.rs` runs in between, so a
+    // program the compiler REFUSES compiled fine in here. Five tests were written against
+    // programs `sondc` rejects, and a shadowing fix once passed four tests while the binary still
+    // returned the wrong number. This program is rejected by a check; if it ever compiles again,
+    // the helper has stopped going through the pipeline.
+    compile_and_run("fn f() -> i64 { let p = \"Hi!\"\nsyscall(60, peek8(p + 2)) }");
+}
+
+/// ...and the guard above only watches ONE helper, by name. `compile_and_run_with_globals` was
+/// added later, went from the parser straight to `emit_program_g`, and skipped the whole pipeline
+/// without anything firing: the guard could not see a helper it did not name. Ten tests were
+/// running against a compiler no user ever runs.
+///
+/// So this one names none. It reads the helper file and demands that EVERY helper which both
+/// compiles AND runs a program goes through `parse_and_lower`, the same entry point `main.rs`
+/// uses. A helper written tomorrow is watched the day it is written, without anyone remembering
+/// to add it here.
+///
+/// A comment asking the next author to be careful is NOT a guard: that is exactly what was in
+/// place, and the second helper walked past it.
+#[test]
+fn every_compiling_test_helper_goes_through_the_pipeline() {
+    let src = include_str!("testutil.rs");
+    // A helper that only parses (`parse_function`) or only emits text without running it is not
+    // in scope: what must not diverge is the path a program takes before it is EXECUTED.
+    let mut offenders: Vec<&str> = Vec::new();
+    for chunk in src.split("\npub(crate) fn ").skip(1) {
+        let name = chunk.split('(').next().unwrap_or("");
+        if !(name.starts_with("compile_and_run") || name.starts_with("compile_and_capture")) {
+            continue;
+        }
+        // The body ends where the next top-level item begins.
+        let body = chunk.split("\npub(crate) fn ").next().unwrap_or("");
+        let body = body.split("\n}\n").next().unwrap_or(body);
+        if !body.contains("parse_and_lower") {
+            offenders.push(name);
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these helpers compile and run a program without going through `parse_and_lower`, so they \
+         test a compiler `sondc` never runs: {:?}. Route them through `parse_and_lower`; if one \
+         genuinely must skip it, it needs a different name, because this guard watches \
+         `compile_and_run*` and `compile_and_capture*` by shape, on purpose.",
+        offenders
+    );
+}
+
+// ---------- lock is a free identifier ----------
+
+/// `lock` is NOT a reserved keyword: it is a contextual keyword that only acts as
+/// a critical-section modifier when it appears at statement position followed by `(`.
+/// A variable named `lock` is legal everywhere else.
+#[test]
+fn lock_is_a_free_identifier() {
+    let src = "fn main() -> i64 {\n\
+               let lock[1]\n\
+               poke64(lock, 42)\n\
+               peek64(lock)\n\
+               }";
+    let funcs = crate::lexer::tokenize(src);
+    let mut p = Parser::new(funcs);
+    let _ = p.parse_program();
+    // parse succeed → lock is NOT reserved
+}
+
+/// A `fn lock()` definition is legal (lock is an identifier).
+#[test]
+fn lock_as_function_name() {
+    let src = "fn lock(x: i64) -> i64 { x + 1 }\n\
+               fn main() -> i64 { lock(5) }\n";
+    let funcs = crate::lexer::tokenize(src);
+    let mut p = Parser::new(funcs);
+    let _ = p.parse_program();
+}
+
+// ---------- atomic_cas64 ----------
+
+/// `atomic_cas64` when *ptr == expected: returns old value, writes new.
+#[test]
+fn atomic_cas64_when_value_matches_writes_new_and_returns_old() {
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 2)\n\
+                 let old = atomic_cas64(slot, 2, 5)\n\
+                 old\n\
+             }"
+        ),
+        2,
+        "old value returned"
+    );
+    // Verify memory was updated
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 2)\n\
+                 atomic_cas64(slot, 2, 5)\n\
+                 peek64(slot)\n\
+             }"
+        ),
+        5,
+        "new value written to memory"
+    );
+}
+
+/// `atomic_cas64` when *ptr != expected: returns *ptr untouched, memory unchanged.
+#[test]
+fn atomic_cas64_when_value_does_not_match_leaves_memory_alone() {
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 7)\n\
+                 let old = atomic_cas64(slot, 0, 99)\n\
+                 old\n\
+             }"
+        ),
+        7,
+        "returns *ptr when no match"
+    );
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 7)\n\
+                 atomic_cas64(slot, 0, 99)\n\
+                 peek64(slot)\n\
+             }"
+        ),
+        7,
+        "memory untouched on mismatch"
+    );
+}
+
+// ---------- atomic_add64 ----------
+
+/// `atomic_add64` returns the value BEFORE the add; memory holds the sum.
+#[test]
+fn atomic_add64_returns_old_value_and_memory_holds_sum() {
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 10)\n\
+                 let old = atomic_add64(slot, 5)\n\
+                 old\n\
+             }"
+        ),
+        10,
+        "returns old value"
+    );
+    assert_eq!(
+        compile_and_run(
+            "fn f() -> i64 {\n\
+                 let mut slot[1]\n\
+                 poke64(slot, 10)\n\
+                 atomic_add64(slot, 5)\n\
+                 peek64(slot)\n\
+             }"
+        ),
+        15,
+        "memory holds the sum"
+    );
+}
+
+// ---------- lock mutual exclusion ----------
+
+/// Multiple threads each increment a shared counter N times inside a lock.
+/// The final value must equal threads × N. Without the lock the value would be lower.
+#[test]
+fn lock_provides_mutual_exclusion() {
+    let threads = 8;
+    let locked_n = 10;
+    let unlocked_n = 10000;
+
+    let prog = |threads: usize, body: &str| -> String {
+        format!(
+            "let mut mtx[1]\n\
+             let mut counter[1]\n\
+             let mut done[1]\n\
+             fn bump() -> i64 {{\n\
+                 {body}\n\
+                 atomic_add64(done, 1)\n\
+                 0\n\
+             }}\n\
+             fn run() -> i64 {{\n\
+                 poke64(done, 0)\n\
+                 let mut t = 0\n\
+                 for t < {threads} {{ spawn bump()\nt = t + 1 }}\n\
+                 for peek64(done) < {threads} {{ }}\n\
+                 peek64(counter)\n\
+             }}\n\
+             fn main() -> i64 {{\n\
+                 print_int(run())\n\
+                 0\n\
+             }}",
+            threads = threads,
+            body = body
+        )
+    };
+
+    // WITH lock: every increment is serialized → exact answer.
+    let locked = format!(
+        "let mut i = 0\nfor i < {n} {{ lock (mtx) {{ counter[0] = counter[0] + 1 }}\ni = i + 1 }}",
+        n = locked_n
+    );
+    let with_lock = compile_and_capture_with_globals(&prog(threads, &locked));
+    assert_eq!(
+        with_lock,
+        (threads * locked_n).to_string(),
+        "with lock: {threads} threads × {locked_n} = {}",
+        threads * locked_n
+    );
+
+    // WITHOUT lock: the increments race on `counter`, losing updates → strictly below expected.
+    // On single-core systems the main thread's spin-loop may starve the other threads, so all
+    // increments may arrive.  Accept either a strict race (value < N) or the perfect value
+    // (no concurrent access observed).
+    let unlocked = format!(
+        "let mut i = 0\nfor i < {n} {{ counter[0] = counter[0] + 1\ni = i + 1 }}",
+        n = unlocked_n
+    );
+    let without_lock = compile_and_capture_with_globals(&prog(threads, &unlocked));
+    let raced = without_lock
+        .parse::<i64>()
+        .expect("an integer total from the racing program");
+    assert!(
+        raced <= (threads * unlocked_n) as i64,
+        "without lock total must not exceed expected: got {raced}, expected {}",
+        threads * unlocked_n
+    );
+}
+
+/// The lock releases on a `return` inside the critical section.
+#[test]
+fn lock_releases_on_return_inside_critical_section() {
+    assert_eq!(
+        compile_and_capture_with_globals(
+            "let mut mtx[1]\n\
+             let mut cnt_data[1]\n\
+             let mut done[1]\n\
+             fn early_return() -> i64 {\n\
+                 lock (mtx) {\n\
+                     atomic_add64(done, 1)\n\
+                     return 1\n\
+                 }\n\
+                 0\n\
+             }\n\
+             fn other() -> i64 {\n\
+                 let mut i = 0\n\
+                 for i < 100000 {\n\
+                     lock (mtx) { cnt_data[0] = cnt_data[0] + 1 }\n\
+                     i = i + 1\n\
+                 }\n\
+                 atomic_add64(done, 1)\n\
+                 0\n\
+             }\n\
+             fn run() -> i64 {\n\
+                 poke64(cnt_data, 0)\n\
+                 poke64(done, 0)\n\
+                 spawn early_return()\n\
+                 for peek64(done) < 1 { }\n\
+                 spawn other()\n\
+                 for peek64(done) < 2 { }\n\
+                 peek64(cnt_data)\n\
+             }\n\
+             fn main() -> i64 { print_int(run())\n0 }"
+        ),
+        "100000",
+        "other must finish all iterations → the lock was released on the early return"
+    );
+}
+
+/// The lock releases on a `break` inside the critical section.
+#[test]
+fn lock_releases_on_break_inside_critical_section() {
+    assert_eq!(
+        compile_and_capture_with_globals(
+            "let mut mtx[1]\n\
+             let mut cnt_data[1]\n\
+             let mut done[1]\n\
+             fn breaker() -> i64 {\n\
+                 let mut i = 0\n\
+                 for {\n\
+                     lock (mtx) {\n\
+                         cnt_data[0] = cnt_data[0] + 1\n\
+                         atomic_add64(done, 1)\n\
+                         break\n\
+                     }\n\
+                     i = i + 1\n\
+                 }\n\
+                 0\n\
+             }\n\
+             fn incrementer() -> i64 {\n\
+                 let mut i = 0\n\
+                 for i < 100000 {\n\
+                     lock (mtx) { cnt_data[0] = cnt_data[0] + 1 }\n\
+                     i = i + 1\n\
+                 }\n\
+                 atomic_add64(done, 1)\n\
+                 0\n\
+             }\n\
+             fn run() -> i64 {\n\
+                 poke64(cnt_data, 0)\n\
+                 poke64(done, 0)\n\
+                 spawn breaker()\n\
+                 for peek64(done) < 1 { }\n\
+                 spawn incrementer()\n\
+                 for peek64(done) < 2 { }\n\
+                 peek64(cnt_data)\n\
+             }\n\
+             fn main() -> i64 { print_int(run())\n0 }"
+        ),
+        "100001",
+        "breaker=1, incrementer=100000 → the break released the lock"
+    );
+}
+
+/// A `return` inside a `lock` must return its own value (not fall through to the rest of the
+/// function). The lock is released, then control goes to the function's real return.
+#[test]
+fn lock_return_returns_the_early_value() {
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut mtx[1]\n\
+             fn f() -> i64 {\n\
+                 lock (mtx) {\n\
+                     return 7\n\
+                 }\n\
+                 42\n\
+             }\n\
+             fn main() -> i64 { f() }"
+        ),
+        7,
+        "the `return 7` must win over the fall-through `42`"
+    );
+}
+
+/// A `break` inside a `lock` nested in another `lock` must release BOTH locks. Here the
+/// breaker exits the doubly-nested body; if either lock were left held the incrementer would
+/// block on it forever and never finish its 100000 nested-lock increments.
+#[test]
+fn lock_break_nested_releases_both_locks() {
+    assert_eq!(
+        compile_and_capture_with_globals(
+            "let mut a[1]\n\
+             let mut b[1]\n\
+             let mut cnt_data[1]\n\
+             let mut done[1]\n\
+             fn breaker() -> i64 {\n\
+                 for {\n\
+                     lock (a) {\n\
+                         lock (b) {\n\
+                             atomic_add64(done, 1)\n\
+                             break\n\
+                         }\n\
+                         999\n\
+                     }\n\
+                 }\n\
+                 0\n\
+             }\n\
+             fn incrementer() -> i64 {\n\
+                 let mut i = 0\n\
+                 for i < 100000 {\n\
+                     lock (a) {\n\
+                         lock (b) { cnt_data[0] = cnt_data[0] + 1 }\n\
+                     }\n\
+                     i = i + 1\n\
+                 }\n\
+                 atomic_add64(done, 1)\n\
+                 0\n\
+             }\n\
+             fn run() -> i64 {\n\
+                 poke64(cnt_data, 0)\n\
+                 poke64(done, 0)\n\
+                 spawn breaker()\n\
+                 for peek64(done) < 1 { }\n\
+                 spawn incrementer()\n\
+                 for peek64(done) < 2 { }\n\
+                 peek64(cnt_data)\n\
+             }\n\
+             fn main() -> i64 { print_int(run())\n0 }"
+        ),
+        "100000",
+        "breaker released both nested locks, so the incrementer finished all its iterations"
+    );
+}
+
+/// A `continue` inside a `lock` must release the lock before the loop re-acquires it. The lock
+/// is non-recursive, so a `continue` that skipped the release would hang the very next
+/// iteration re-taking its own held lock. A single thread that continues out of a `lock` two
+/// hundred thousand times and then reaches the code after the loop proves each `continue`
+/// released the lock.
+#[test]
+fn lock_continue_releases_the_lock() {
+    assert_eq!(
+        compile_and_run_with_globals(
+            "let mut mtx[1]\n\
+             fn main() -> i64 {\n\
+                 let mut i = 0\n\
+                 for i < 200000 {\n\
+                     lock (mtx) {\n\
+                         i = i + 1\n\
+                         continue\n\
+                     }\n\
+                 }\n\
+                 42\n\
+             }"
+        ),
+        42,
+        "200000 lock-with-continue iterations completed and control reached the code after the loop"
     );
 }

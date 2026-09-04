@@ -121,6 +121,11 @@ fn check_block(block: &Block, env: &mut Env) -> Result<Ty, TypeError> {
                 }
                 check_block(body, env)?;
             }
+            Stmt::Lock { name, body } => {
+                // The mutex is a 64-bit word (the futex). Any integer type is accepted.
+                infer(&Expr::Var(name.clone()), env)?;
+                check_block(body, env)?;
+            }
             Stmt::Break | Stmt::Continue => {}
         }
     }

@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/x86_64/linux/time.snd.
+//
+// These read the REAL system clock, so they cannot assert an exact value. They assert what is
+// true of every future run instead, and deliberately avoid comparing two separate clock reads
+// field by field: that would pass ~99.9% of the time and fail whenever the two calls land on
+// either side of a second, which is the worst kind of test.
+//
+// The calendar arithmetic itself is pinned exactly, against an independent oracle, in
+// lib/any/civil_test.snd. This file only checks the wiring to the kernel.
+
+include "x86_64/linux/time.snd"
+include "x86_64/linux/testing.snd"
+
+// 1 August 2026, safely in the past for every run of this suite.
+let PAST = 1785542400
+// 1 January 2100, safely in the future for the working life of this code.
+let FUTURE = 4102444800
+
+let mut now14[4]
+let mut ref14[4]
+
+// 1 if the first `n` bytes of `a` and `b` are equal.
+fn bytes_eq(a: i64, b: i64, n: i64) -> i64 {
+    for i in 0..n {
+        if peek8(a + i) != peek8(b + i) { return 0 }
+    }
+    1
+}
+
+// 1 if every one of the `n` bytes at `p` is an ASCII digit.
+fn all_digits(p: i64, n: i64) -> i64 {
+    for i in 0..n {
+        let c = peek8(p + i)
+        if c < 48 { return 0 }
+        if c > 57 { return 0 }
+    }
+    1
+}
+
+// The decimal value of the `n` digits at `p`.
+fn digits_value(p: i64, n: i64) -> i64 {
+    let mut v = 0
+    for i in 0..n {
+        v = v * 10 + (peek8(p + i) - 48)
+    }
+    v
+}
+
+test "the system clock reads a plausible present" {
+    let e = now_epoch()
+    assert(e > PAST)
+    assert(e < FUTURE)
+}
+
+test "the clock does not go backwards between two reads" {
+    let a = now_epoch()
+    let b = now_epoch()
+    assert(b >= a)
+}
+
+test "the timestamp is exactly 14 digits and NUL-terminated" {
+    assert_eq(format_now14(now14), 14)
+    assert_eq(all_digits(now14, 14), 1)
+    assert_eq(peek8(now14 + 14), 0)
+}
+
+test "the formatted year is the year the clock is in" {
+    // Reads the year back out of the digits rather than trusting the string: this is what
+    // catches a timestamp built from the wrong epoch or with the fields in the wrong order.
+    format_now14(now14)
+    let y = digits_value(now14, 4)
+    assert(y >= 2026)
+    assert(y < 2100)
+}
+
+test "the timestamp is the one the clock read, not one shifted from it" {
+    // The bound above only catches a skew big enough to leave the century, so it would sleep
+    // through a drift of days or months. This compares what format_now14 produced against
+    // format_epoch14 applied to the clock DIRECTLY: any offset introduced in between shows up.
+    //
+    // The clock is bracketed with a read on each side, and either one may match: that removes
+    // the only source of flakiness, the run whose two reads land on opposite sides of midnight.
+    let before = now_epoch()
+    format_now14(now14)
+    let after = now_epoch()
+    format_epoch14(before, ref14)
+    if bytes_eq(now14, ref14, 8) == 1 { return }
+    format_epoch14(after, ref14)
+    assert_eq(bytes_eq(now14, ref14, 8), 1)
+}
+
+test "the month and day fields are inside the calendar" {
+    format_now14(now14)
+    let m = digits_value(now14 + 4, 2)
+    let d = digits_value(now14 + 6, 2)
+    assert(m >= 1)
+    assert(m <= 12)
+    assert(d >= 1)
+    assert(d <= 31)
+}
+
+test "the time fields are inside the day" {
+    format_now14(now14)
+    assert(digits_value(now14 + 8, 2) <= 23)
+    assert(digits_value(now14 + 10, 2) <= 59)
+    assert(digits_value(now14 + 12, 2) <= 59)
+}

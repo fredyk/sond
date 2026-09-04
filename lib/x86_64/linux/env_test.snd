@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/x86_64/linux/env.snd.
+//
+// A test process cannot choose its own environment, so these do not assert the value of any
+// particular variable. They assert the two things that are true of ANY environment -- that a
+// lookup agrees with the raw list it reads from, and that a name that is not there is not found
+// -- plus the prefix cases, which is where a hand-written comparison usually goes wrong.
+
+include "x86_64/linux/env.snd"
+include "x86_64/linux/testing.snd"
+
+let PATH_NAME: string    = "PATH"
+let PATH_PREFIX: string  = "PAT"
+let PATH_LONGER: string  = "PATHX"
+let EMPTY_NAME: string   = ""
+let ABSENT: string       = "SOND_DEFINITELY_NOT_SET_9f3a"
+let FALLBACK: string     = "/fallback"
+
+let mut keybuf[32]
+
+test "a variable that is in the environment is found" {
+    // PATH is not guaranteed by POSIX, but it is present in every environment this suite can
+    // realistically run in; if it ever is not, the assertion below says so plainly.
+    assert(env_get(PATH_NAME.utf8) != 0)
+}
+
+test "a name that is not in the environment is not found" {
+    assert_eq(env_get(ABSENT.utf8), 0)
+}
+
+test "a PREFIX of a real name does not match it" {
+    // The bug this pins: comparing only as many bytes as the name has would make "PAT" match
+    // the entry "PATH=...". The comparison has to reach the `=`.
+    assert_eq(env_get(PATH_PREFIX.utf8), 0)
+}
+
+test "a name LONGER than a real one does not match it" {
+    assert_eq(env_get(PATH_LONGER.utf8), 0)
+}
+
+test "an empty name matches nothing" {
+    assert_eq(env_get(EMPTY_NAME.utf8), 0)
+}
+
+test "the environment has entries and the list ends with a NULL" {
+    let n = env_count()
+    assert(n > 0)
+    assert_eq(envp(n), 0)
+}
+
+test "every entry can be looked up by its own key, and yields its own value" {
+    // The strongest check available without control of the environment: for each entry, split
+    // it at the `=`, look the key up, and require the answer to be the very pointer that
+    // follows that `=`. It catches an off-by-one at the separator, a lookup that returns the
+    // whole entry instead of the value, and a search that stops at the first entry.
+    let n = env_count()
+    for i in 0..n {
+        let e = envp(i)
+        let eq = env_name_len(e)
+        if eq < 32 {
+            for k in 0..eq {
+                poke8(keybuf + k, peek8(e + k))
+            }
+            poke8(keybuf + eq, 0)
+            assert_eq(env_get(keybuf), e + eq + 1)
+        }
+    }
+}
+
+test "an unset variable falls back, a set one does not" {
+    assert_eq(env_get_or(ABSENT.utf8, FALLBACK.utf8), FALLBACK.utf8)
+    assert(env_get_or(PATH_NAME.utf8, FALLBACK.utf8) != FALLBACK.utf8)
+}
