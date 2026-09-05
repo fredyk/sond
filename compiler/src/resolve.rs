@@ -719,6 +719,10 @@ pub fn resolve_includes_located_with_resolver(
     let mut spans: Vec<SpliceLine> = Vec::new();
     let mut depth0 = HashSet::new();
     let mut depth1 = HashSet::new();
+    // Which file each depth-1 function came from, so the scope rule below can ask of each module
+    // the only question that matters: is anybody else measuring it?
+    let mut depth1_files: std::collections::HashMap<PathBuf, HashSet<String>> =
+        std::collections::HashMap::new();
     let ns = Namespaces {
         resolve_map: &resolve_map,
         module_maps: &module_maps,
@@ -734,6 +738,7 @@ pub fn resolve_includes_located_with_resolver(
         0,
         &mut depth0,
         &mut depth1,
+        &mut depth1_files,
         &ns,
         &g.import_errors,
         &g.aliases,
@@ -758,7 +763,31 @@ pub fn resolve_includes_located_with_resolver(
     } else if depth0.is_empty() {
         depth1
     } else {
-        depth0
+        // A program answers for its own functions AND for every module of its own that nothing
+        // else measures. Leaving the includes out wholesale rested on "each module has its own
+        // `_test.snd`", which nothing checked: a module without one was in NO denominator, and
+        // `sond test main.snd` reported 100% having read the entry file and nothing else.
+        //
+        // Two things stay out, and for the same reason they were out before: the standard
+        // library (it lives under an include root, not beside the entry, and a program is not on
+        // the hook for it), and a module that HAS its own `_test.snd` (already measured there,
+        // and counting it twice would stop the figure meaning "the code this entry answers for").
+        let mut s = depth0;
+        let entry_dir = entry
+            .parent()
+            .map(|d| if d.as_os_str().is_empty() { Path::new(".") } else { d })
+            .unwrap_or_else(|| Path::new("."));
+        let entry_dir = std::fs::canonicalize(entry_dir).unwrap_or_else(|_| entry_dir.to_path_buf());
+        for (file, names) in &depth1_files {
+            if file.parent().is_none_or(|d| d != entry_dir) {
+                continue;
+            }
+            if measured_by_its_own_test_file(file) {
+                continue;
+            }
+            s.extend(names.iter().cloned());
+        }
+        s
     };
     Ok(ResolvedProgram {
         src: out,
@@ -913,6 +942,16 @@ fn include_closure(
     seen
 }
 
+/// Whether `file` has a `<name>_test.snd` beside it: the file whose whole job is to measure it.
+/// That sibling is what lets a program leave the module out of its own denominator without the
+/// code going unmeasured.
+fn measured_by_its_own_test_file(file: &Path) -> bool {
+    let Some(stem) = file.file_stem().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    file.with_file_name(format!("{stem}_test.snd")).exists()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_into(
     path: &Path,
@@ -921,6 +960,7 @@ fn resolve_into(
     depth: usize,
     depth0: &mut HashSet<String>,
     depth1: &mut HashSet<String>,
+    depth1_files: &mut std::collections::HashMap<PathBuf, HashSet<String>>,
     ns: &Namespaces,
     import_errors: &[(PathBuf, usize, String)],
     aliases: &std::collections::HashMap<String, String>,
@@ -974,6 +1014,7 @@ fn resolve_into(
                 depth + 1,
                 depth0,
                 depth1,
+                depth1_files,
                 ns,
                 import_errors,
                 aliases,
@@ -992,6 +1033,7 @@ fn resolve_into(
                         depth + 1,
                         depth0,
                         depth1,
+                        depth1_files,
                         ns,
                         import_errors,
                         aliases,
@@ -1017,7 +1059,8 @@ fn resolve_into(
                             depth0.insert(name);
                         }
                         1 => {
-                            depth1.insert(name);
+                            depth1.insert(name.clone());
+                            depth1_files.entry(canon.clone()).or_default().insert(name);
                         }
                         _ => {}
                     }
@@ -1522,17 +1565,82 @@ mod tests {
         );
     }
 
+
+    // A directory that is its own little project: `<root>/src/` holds the entry and its modules,
+    // `<root>/lib/` is a library root. Returns the root. `tmp()` puts everything in the shared
+    // temp dir, where every fixture is a sibling of every other, so it cannot tell a project's
+    // own module from a dependency.
+    fn project_fixture() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("sond_proj_{}_{}", std::process::id(), uid()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_program_covers_the_module_of_its_own_that_nothing_else_measures() {
+        // The gate is worth what it measures. Before this, the scope of a program entry was its
+        // OWN functions and nothing else, on the assumption that each module it includes is
+        // already measured by its own `_test.snd`. Nothing checked that assumption, so a module
+        // without one was in nobody's denominator: `sond test main.snd` covered one function of
+        // its own and printed 100% while the rest of the program went unread.
+        let root = project_fixture();
+        std::fs::write(
+            root.join("src/motor.snd"),
+            "fn arranca() -> i64 { 1 }\nfn para() -> i64 { 2 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.snd"),
+            "include \"motor.snd\"\nfn mia() -> i64 { arranca() }\ntest \"t\" { }\n",
+        )
+        .unwrap();
+        let (_, scope) = resolve_includes_scoped(&root.join("src/main.snd")).unwrap();
+        assert!(scope.contains("mia"), "its own functions, as before");
+        assert!(
+            scope.contains("arranca") && scope.contains("para"),
+            "and the module nobody else measures: {scope:?}"
+        );
+    }
+
+    #[test]
+    fn a_module_with_its_own_test_file_stays_out_of_the_programs_denominator() {
+        // The other half: a module that IS measured elsewhere must not be counted twice, or every
+        // program would drag its whole tested tree into its own number and the figure would stop
+        // meaning "the code this entry answers for".
+        let root = project_fixture();
+        std::fs::write(root.join("src/motor.snd"), "fn arranca() -> i64 { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("src/motor_test.snd"),
+            "include \"motor.snd\"\ntest \"t\" { }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.snd"),
+            "include \"motor.snd\"\nfn mia() -> i64 { arranca() }\ntest \"t\" { }\n",
+        )
+        .unwrap();
+        let (_, scope) = resolve_includes_scoped(&root.join("src/main.snd")).unwrap();
+        assert!(scope.contains("mia"), "its own functions");
+        assert!(
+            !scope.contains("arranca"),
+            "motor_test.snd already answers for it: {scope:?}"
+        );
+    }
     #[test]
     fn a_program_is_still_measured_on_its_own_functions() {
-        // The counterpart: a program that includes the standard library is not on the hook
-        // for covering the standard library.
-        let lib = tmp("sond_progdep.snd", "fn dep() -> i64 { 1 }");
-        let libname = lib.file_name().unwrap().to_str().unwrap();
-        let entry = tmp(
-            "sond_prog.snd",
-            &format!("include \"{libname}\"\nfn mine() -> i64 {{ dep() }}\ntest \"t\" {{ }}"),
-        );
-        let (_, scope) = resolve_includes_scoped(&entry).unwrap();
+        // The counterpart: a program that includes the standard library is not on the hook for
+        // covering the standard library. The dependency has to LIVE like one for this to be the
+        // question -- under a `lib/` root rather than beside the entry -- or the fixture is a
+        // program's own module wearing the name of a dependency, which is the case above.
+        let root = project_fixture();
+        std::fs::write(root.join("lib/dep.snd"), "fn dep() -> i64 { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("src/prog.snd"),
+            "include \"dep.snd\"\nfn mine() -> i64 { dep() }\ntest \"t\" { }\n",
+        )
+        .unwrap();
+        let (_, scope) = resolve_includes_scoped(&root.join("src/prog.snd")).unwrap();
         assert!(scope.contains("mine"), "its own functions");
         assert!(!scope.contains("dep"), "not its dependencies");
     }
