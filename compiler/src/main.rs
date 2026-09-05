@@ -141,12 +141,16 @@ fn main() -> ExitCode {
     // The PIC16 path uses gpasm and produces a HEX, not an ELF/PE, keep it out of the x86
     // binary cache (whose hit message and copied artefact assume a native binary).
     //
-    // `--entry-info` is a QUESTION about the file, and a question must not produce an artefact.
-    // The cache hit below copies a binary out under `output` -- which, with no `-o`, is the
-    // source's basename in the CALLER's working directory -- and returns before the query is ever
-    // read. `sond test <dir>` asks this of every file it sweeps, so a run from inside a checkout
-    // was dropping an ELF next to the sources for each one whose cache was warm.
-    let solo_pregunta = args.iter().any(|a| a == "--entry-info");
+    // A QUERY is a question about the file, and a question must not produce an artefact. The
+    // cache hit below copies a binary out under `output` -- which, with no `-o`, is the source's
+    // basename in the CALLER's working directory -- and returns before the query is ever read.
+    // `sond test <dir>` asks this of every file it sweeps, so a run from inside a checkout was
+    // dropping an ELF next to the sources for each one whose cache was warm.
+    //
+    // Which flags those are is `sondc::CONSULTAS`, not a name written here: this was fixed once
+    // for `--entry-info` alone, and `--emit-header` -- whose stdout `tools/install.sh` redirects
+    // straight into the header it PUBLISHES -- kept returning the cache line as the header.
+    let solo_pregunta = args.iter().any(|a| sondc::CONSULTAS.contains(&a.as_str()));
     let cache_path = if is_test_build || pic16 || solo_pregunta {
         None
     } else {

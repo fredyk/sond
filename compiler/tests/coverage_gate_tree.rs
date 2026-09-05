@@ -467,14 +467,17 @@ fn a_file_with_nothing_to_measure_is_not_reported_as_unmeasured() {
     );
 }
 
-/// Asking the compiler ABOUT a file must not compile it into the working directory.
+/// Preguntar por un fichero no produce un artefacto, sea cual sea la pregunta.
 ///
-/// `sond test <dir>` calls `sondc --entry-info` once per file to find out which of them a gate
-/// answers for. That is a question, and it was writing answers to disk: the compilation cache
-/// runs before the query is read, so a warm cache copied the cached binary out under the source's
-/// basename and returned success. A `sond test lib` from inside the checkout therefore dropped an
-/// ELF named after the module next to the sources -- and a `git add -A` later put one in the
-/// history of this repository.
+/// El acierto de cache copia un binario a `output` -- que, sin `-o`, es el nombre base del fuente
+/// en el directorio de trabajo de QUIEN LLAMA -- y devuelve antes de que nadie lea la pregunta.
+/// Se arreglo una vez para `--entry-info` porque `sond test <dir>` dejaba un ELF al lado de cada
+/// fuente. `--emit-header` se quedo fuera, y ahi el daño es peor: `tools/install.sh` redirige su
+/// salida al fichero que PUBLICA, asi que con la cache caliente la cabecera que se entrega es la
+/// linea «sondc: wrote native x86-64 binary ...».
+///
+/// Por eso el caso recorre `sondc::CONSULTAS` en vez de nombrar una bandera: arreglar la de hoy y
+/// dejar la lista sin cerrar es lo que hizo falta dos veces.
 #[test]
 fn asking_what_a_file_is_never_writes_a_binary() {
     let base = scratch("consulta-sin-artefacto");
@@ -490,25 +493,35 @@ fn asking_what_a_file_is_never_writes_a_binary() {
         .expect("sondc runs");
     assert!(salida.status.success(), "{}", String::from_utf8_lossy(&salida.stderr));
 
-    let cwd = base.join("cwd");
-    std::fs::create_dir_all(&cwd).unwrap();
-    let salida = Command::new(env!("CARGO_BIN_EXE_sondc"))
-        .current_dir(&cwd)
-        .arg("--entry-info")
-        .arg(&fuente)
-        .output()
-        .expect("sondc runs");
-    assert!(salida.status.success(), "{}", String::from_utf8_lossy(&salida.stderr));
-    assert!(
-        String::from_utf8_lossy(&salida.stdout).contains("tests: "),
-        "the query still has to answer"
-    );
+    assert!(!sondc::CONSULTAS.is_empty(), "la lista de consultas no puede estar vacia");
+    for consulta in sondc::CONSULTAS {
+        let cwd = base.join(format!("cwd{}", consulta.trim_start_matches('-')));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let salida = Command::new(env!("CARGO_BIN_EXE_sondc"))
+            .current_dir(&cwd)
+            .arg(consulta)
+            .arg(&fuente)
+            .output()
+            .expect("sondc runs");
+        assert!(
+            salida.status.success(),
+            "`{consulta}`: {}",
+            String::from_utf8_lossy(&salida.stderr)
+        );
+        let respuesta = String::from_utf8_lossy(&salida.stdout);
+        assert!(
+            !respuesta.contains("wrote native"),
+            "`{consulta}` contesto con el parte de una compilacion, no con la respuesta: \
+             {respuesta}"
+        );
+        assert!(!respuesta.trim().is_empty(), "`{consulta}` no contesto nada");
 
-    let dejado: Vec<String> = std::fs::read_dir(&cwd)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    assert!(dejado.is_empty(), "a query left {dejado:?} in the working directory");
+        let dejado: Vec<String> = std::fs::read_dir(&cwd)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(dejado.is_empty(), "`{consulta}` dejo {dejado:?} en el directorio de trabajo");
+    }
 }
 
 /// A file NAMED like a suite that declares no tests is a dead suite, not a module without a gate.
