@@ -11,6 +11,26 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// Runs a binary this test just copied into place, waiting out the window in which the kernel
+/// still sees a writer on it.
+///
+/// `std::fs::copy` closes its descriptor before returning, but the other tests in this file are
+/// spawning processes on other threads at the same time, and a fork in that window inherits the
+/// descriptor: until that child execs, `exec` on the new file is refused with ETXTBSY. That is a
+/// fact about the copy, never about what is being tested, so it is waited out rather than
+/// reported. `sond` itself does the same when it launches a gate it has just written.
+fn ejecuta_reintentando(cmd: &mut Command) -> std::process::Output {
+    for _ in 0..50 {
+        match cmd.output() {
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            otro => return otro.expect("sond runs"),
+        }
+    }
+    panic!("the copied `sond` was still busy after five seconds");
+}
+
 fn scratch(nombre: &str) -> sondc::scratch::Temporal {
     sondc::scratch::Temporal::nuevo(&format!("sond-cov-{nombre}"))
 }
@@ -285,13 +305,13 @@ fn a_gate_that_could_not_be_started_says_so_instead_of_reading_as_a_hang() {
     std::fs::create_dir_all(&solo).unwrap();
     std::fs::copy(env!("CARGO_BIN_EXE_sond"), solo.join("sond")).unwrap();
 
-    let out = Command::new(solo.join("sond"))
-        .arg("test")
-        .arg("--timeout=20")
-        .arg(base.join("src"))
-        .env("PATH", "")
-        .output()
-        .expect("sond runs");
+    let out = ejecuta_reintentando(
+        Command::new(solo.join("sond"))
+            .arg("test")
+            .arg("--timeout=20")
+            .arg(base.join("src"))
+            .env("PATH", ""),
+    );
     let mut texto = String::from_utf8_lossy(&out.stdout).into_owned();
     texto.push_str(&String::from_utf8_lossy(&out.stderr));
 
@@ -445,4 +465,48 @@ fn a_file_with_nothing_to_measure_is_not_reported_as_unmeasured() {
         !salida.contains("testing.snd"),
         "and neither has the test harness itself:\n{salida}"
     );
+}
+
+/// Asking the compiler ABOUT a file must not compile it into the working directory.
+///
+/// `sond test <dir>` calls `sondc --entry-info` once per file to find out which of them a gate
+/// answers for. That is a question, and it was writing answers to disk: the compilation cache
+/// runs before the query is read, so a warm cache copied the cached binary out under the source's
+/// basename and returned success. A `sond test lib` from inside the checkout therefore dropped an
+/// ELF named after the module next to the sources -- and a `git add -A` later put one in the
+/// history of this repository.
+#[test]
+fn asking_what_a_file_is_never_writes_a_binary() {
+    let base = scratch("consulta-sin-artefacto");
+    let fuente = base.join("motor.snd");
+    write(&fuente, "fn arranca() -> i64 { 1 }\nfn main() -> i64 { arranca() - 1 }\n");
+
+    // Build it once, so the query below meets a warm cache: that is the path that wrote the file.
+    let salida = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(&fuente)
+        .arg("-o")
+        .arg(base.join("motor-build"))
+        .output()
+        .expect("sondc runs");
+    assert!(salida.status.success(), "{}", String::from_utf8_lossy(&salida.stderr));
+
+    let cwd = base.join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let salida = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .current_dir(&cwd)
+        .arg("--entry-info")
+        .arg(&fuente)
+        .output()
+        .expect("sondc runs");
+    assert!(salida.status.success(), "{}", String::from_utf8_lossy(&salida.stderr));
+    assert!(
+        String::from_utf8_lossy(&salida.stdout).contains("tests: "),
+        "the query still has to answer"
+    );
+
+    let dejado: Vec<String> = std::fs::read_dir(&cwd)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(dejado.is_empty(), "a query left {dejado:?} in the working directory");
 }
