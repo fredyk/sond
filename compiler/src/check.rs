@@ -3361,6 +3361,17 @@ fn negate_cond(e: &Expr) -> Option<Expr> {
     let Expr::Binary(op, l, r) = e else {
         return None;
     };
+    // De Morgan on a disjunctive guard: `!(a || b)` is `!a && !b`, so the two-sided bound written
+    // as ONE guard clause — `if n < 0 || n >= 23 { return }` — yields BOTH bounds to the code
+    // after it, which is how a table lookup is normally guarded. Every disjunct must negate for
+    // the conjunction to be sound, so one that cannot be expressed drops the whole fact.
+    if let BinOp::Or = op {
+        return Some(Expr::Binary(
+            BinOp::And,
+            Box::new(negate_cond(l)?),
+            Box::new(negate_cond(r)?),
+        ));
+    }
     let nop = match op {
         BinOp::Lt => BinOp::Ge,
         BinOp::Le => BinOp::Gt,
@@ -3656,16 +3667,21 @@ fn bounds_block(
                 {
                     if else_branch.is_none() && block_diverges(then_branch) {
                         if let Some(neg) = negate_cond(cond) {
-                            seed_interval_bound(flow, &neg);
-                            flow.facts.push(neg);
+                            // Each conjunct is seeded on its own: the interval analysis reads a
+                            // `v OP const` shape, and a raw `&&` is not one of those.
+                            for c in conjuncts(&neg) {
+                                seed_interval_bound(flow, c);
+                                flow.facts.push(c.clone());
+                            }
                         }
                     } else if let Some(eb) = else_branch
                         && block_diverges(eb)
                         && !block_diverges(then_branch)
                     {
-                        let c = cond.as_ref().clone();
-                        seed_interval_bound(flow, &c);
-                        flow.facts.push(c);
+                        for c in conjuncts(cond) {
+                            seed_interval_bound(flow, c);
+                            flow.facts.push(c.clone());
+                        }
                     }
                 }
             }
@@ -4495,6 +4511,49 @@ mod tests {
                    fn open() { let fi = alloc()\nused[fi] = 1 }\n\
                    fn main() -> i64 { open()\n0 }";
         assert!(bounds(src).is_err(), "no lower bound without the guard");
+    }
+
+    #[test]
+    fn a_two_sided_guard_written_as_one_or_refines_the_continuation() {
+        // The idiomatic way to bound an index on both sides is ONE guard with `||`:
+        // `if n < 0 || n >= 23 { return 0 }`. Reaching the code after it means the whole
+        // disjunction was false, and `!(a || b)` is `!a && !b`: BOTH bounds hold. This is the
+        // shape of every table lookup written as a guard clause.
+        let src = "let mut letters[23]\n\
+                   fn pick(n: i64) -> i64 { if n < 0 || n >= 23 { return 0 }\nletters[n] }\n\
+                   fn main() -> i64 { pick(3) }";
+        assert!(
+            bounds(src).is_ok(),
+            "a guard on `||` must establish both `n >= 0` and `n < 23`"
+        );
+    }
+
+    #[test]
+    fn a_guard_on_an_and_gives_no_facts_because_its_negation_is_a_disjunction() {
+        // `if n >= 0 && n < 23 { return 0 }` negates to `n < 0 || n >= 23`: a disjunction, which
+        // says nothing about either side on its own. Assuming a conjunct of it would be unsound,
+        // so the index after the guard stays correctly unproven.
+        let src = "let mut letters[23]\n\
+                   fn pick(n: i64) -> i64 { if n >= 0 && n < 23 { return 0 }\nletters[n] }\n\
+                   fn main() -> i64 { pick(3) }";
+        assert!(
+            bounds(src).is_err(),
+            "the negation of a conjunction is a disjunction: no usable fact"
+        );
+    }
+
+    #[test]
+    fn a_diverging_else_contributes_both_halves_of_its_and_condition() {
+        // The mirror shape: the check is in the THEN branch and the `else` is what returns.
+        // Reaching the code after it means the condition held, and a condition written as
+        // `a && b` holds in both halves — each is a fact on its own.
+        let src = "let mut letters[23]\n\
+                   fn pick(n: i64) -> i64 { if n >= 0 && n < 23 { } else { return 0 }\nletters[n] }\n\
+                   fn main() -> i64 { pick(3) }";
+        assert!(
+            bounds(src).is_ok(),
+            "both conjuncts of a checked condition must survive the guard"
+        );
     }
 
     #[test]
