@@ -766,7 +766,29 @@ pub fn resolve_includes_located_with_resolver(
         .is_some_and(|n| n.ends_with("_test.snd"));
     let depth0_names: Vec<String> = depth0.iter().cloned().collect();
     let scope = if is_test_file {
-        if depth1.is_empty() { depth0 } else { depth1 }
+        if depth1.is_empty() {
+            depth0
+        } else {
+            // A module with a gate of its own is already measured there, and counting it again
+            // here makes this figure mean something else: not "what this entry answers for" but
+            // "what it happens to include". Measured on the standard library, `xml_test.snd` came
+            // out at 77% carrying five functions of `bytes.snd` that `bytes_test.snd` covers next
+            // door -- and the only way to pass was to test `bytes` a second time inside the xml
+            // suite.
+            //
+            // Unless that leaves nothing: an entry whose includes are ALL measured elsewhere
+            // would be judged against an empty denominator, and 0 of 0 passes anything. With
+            // nobody else left to answer, this entry answers.
+            let yo = std::fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf());
+            let mut s: HashSet<String> = HashSet::new();
+            for (file, names) in &depth1_files {
+                if measured_by_another_test_file(file, &yo) {
+                    continue;
+                }
+                s.extend(names.iter().cloned());
+            }
+            if s.is_empty() { depth1 } else { s }
+        }
     } else if depth0.is_empty() {
         depth1
     } else {
@@ -966,10 +988,23 @@ fn include_closure(
 /// That sibling is what lets a program leave the module out of its own denominator without the
 /// code going unmeasured.
 fn measured_by_its_own_test_file(file: &Path) -> bool {
-    let Some(stem) = file.file_stem().and_then(|s| s.to_str()) else {
-        return false;
-    };
-    file.with_file_name(format!("{stem}_test.snd")).exists()
+    test_file_of(file).is_some_and(|t| t.exists())
+}
+
+/// Like [`measured_by_its_own_test_file`], but somebody ELSE has to be the one measuring it.
+///
+/// The subject of `xml_test.snd` is `xml.snd`, whose test file is that very entry. Asking only
+/// "does a `_test.snd` exist beside it" excludes the entry's own subject, empties the scope, and
+/// the fallback then puts everything back -- which is how the first cut of this changed nothing.
+fn measured_by_another_test_file(file: &Path, entry_canon: &Path) -> bool {
+    test_file_of(file).is_some_and(|t| {
+        t.exists() && std::fs::canonicalize(&t).unwrap_or(t) != entry_canon
+    })
+}
+
+fn test_file_of(file: &Path) -> Option<PathBuf> {
+    let stem = file.file_stem().and_then(|s| s.to_str())?;
+    Some(file.with_file_name(format!("{stem}_test.snd")))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1673,6 +1708,62 @@ mod tests {
             .collect();
         assert!(nombres.contains("frenos.snd"), "the subject: {nombres:?}");
         assert!(!nombres.contains("frenos_test.snd"), "not the harness: {nombres:?}");
+    }
+
+    #[test]
+    fn a_test_file_does_not_answer_for_a_module_that_has_a_gate_of_its_own() {
+        // Measured on the standard library: `webdav/xml_test.snd` came out at 77% -- under the
+        // gate -- carrying five functions of `bytes.snd`, which `bytes_test.snd` already covers
+        // next door. The only way to pass was to write tests for `bytes` inside the xml suite,
+        // which is duplicated work AND a figure that stops meaning "what this entry answers for".
+        let root = project_fixture();
+        std::fs::write(root.join("src/xml.snd"), "fn parse() -> i64 { 1 }\n").unwrap();
+        std::fs::write(root.join("src/bytes.snd"), "fn push() -> i64 { 2 }\n").unwrap();
+        std::fs::write(root.join("src/bytes_test.snd"), "include \"bytes.snd\"\ntest \"t\" { }\n")
+            .unwrap();
+        std::fs::write(
+            root.join("src/xml_test.snd"),
+            "include \"xml.snd\"\ninclude \"bytes.snd\"\ntest \"t\" { }\n",
+        )
+        .unwrap();
+
+        let r = resolve_includes_scoped_located(&root.join("src/xml_test.snd")).unwrap();
+        assert!(r.cov_scope.contains("parse"), "the subject is in: {:?}", r.cov_scope);
+        assert!(
+            !r.cov_scope.contains("push"),
+            "a module measured by its own gate is not counted twice: {:?}",
+            r.cov_scope
+        );
+        let nombres: HashSet<String> = r
+            .cov_files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(nombres.contains("xml.snd"), "{nombres:?}");
+        assert!(!nombres.contains("bytes.snd"), "{nombres:?}");
+    }
+
+    #[test]
+    fn a_test_file_whose_includes_are_all_measured_elsewhere_still_answers_for_them() {
+        // The exclusion cannot empty the denominator: a suite that includes only modules with
+        // gates of their own would then be measured against nothing, and 0 of 0 passes anything.
+        // With nobody else left to answer, this entry answers.
+        let root = project_fixture();
+        std::fs::write(root.join("src/bytes.snd"), "fn push() -> i64 { 2 }\n").unwrap();
+        std::fs::write(root.join("src/bytes_test.snd"), "include \"bytes.snd\"\ntest \"t\" { }\n")
+            .unwrap();
+        std::fs::write(
+            root.join("src/integracion_test.snd"),
+            "include \"bytes.snd\"\ntest \"t\" { }\n",
+        )
+        .unwrap();
+
+        let r = resolve_includes_scoped_located(&root.join("src/integracion_test.snd")).unwrap();
+        assert!(
+            r.cov_scope.contains("push"),
+            "with nothing else to measure, the subject stays: {:?}",
+            r.cov_scope
+        );
     }
 
     #[test]

@@ -305,3 +305,33 @@ fn a_gate_that_could_not_be_started_says_so_instead_of_reading_as_a_hang() {
         "and the report says what could not be started:\n{texto}"
     );
 }
+
+/// A gate whose denominator is empty is not a gate that passes.
+///
+/// `covered * 100 / n` with n = 0 is a divide by zero: the harness died with the line half
+/// printed (`coverage 0/0 (`), and the run had no verdict at all. And had it survived, the gate
+/// reads `0 * 100 < 80 * 0`, which is false: measuring nothing would have passed at 100%.
+/// Found on `x509/realcert_test.snd`, whose includes are all measured by gates of their own.
+#[test]
+fn a_gate_that_measures_nothing_fails_instead_of_passing_at_full_marks() {
+    let base = arbol("sin-denominador");
+    // Includes only the test harness, which is never instrumented: nothing to measure.
+    write(
+        &base.join("src/vacio_test.snd"),
+        "include \"x86_64/linux/testing.snd\"\ntest \"t\" { assert_eq(1, 1) }\n",
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sond"))
+        .arg("test")
+        .arg(base.join("src/vacio_test.snd"))
+        .output()
+        .expect("sond runs");
+    let mut texto = String::from_utf8_lossy(&out.stdout).into_owned();
+    texto.push_str(&String::from_utf8_lossy(&out.stderr));
+
+    assert_ne!(out.status.code().unwrap_or(-1), 0, "measuring nothing is not a pass:\n{texto}");
+    assert!(
+        texto.contains("nothing measured"),
+        "and the report says the denominator is empty rather than dying mid-line:\n{texto}"
+    );
+}

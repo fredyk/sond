@@ -120,16 +120,27 @@ pub fn synth_coverage_harness(funcs: &[Function], min_coverage: u32) -> Function
     src.push_str("    print(\"/\")\n");
     src.push_str("    print_int(__n)\n");
     src.push_str("    print(\" (\")\n");
-    src.push_str("    print_int(__covered * 100 / __n)\n");
+    // An empty denominator is not 100%: `covered * 100 / 0` is a divide by zero, and the harness
+    // died with the line half printed, leaving the run with no verdict at all. It is also not a
+    // pass -- `0 * 100 < 80 * 0` is false -- so the entry that answers for nothing would have
+    // sailed through the gate. Both roads end at the same rule: measuring nothing is a failure.
+    src.push_str("    let __den = if __n == 0 { 1 } else { __n }\n");
+    src.push_str("    print_int(__covered * 100 / __den)\n");
     src.push_str("    print(\"%)\\n\")\n");
     // The gate: coverage below the threshold is a failure, distinct from test failures.
     // Integer form of `covered/n < min/100` is `covered*100 < min*n`.
     src.push_str(&format!(
-        "    let __gatefail = if __covered * 100 < {min_coverage} * __n {{ 1 }} else {{ 0 }}\n"
+        "    let mut __gatefail = if __covered * 100 < {min_coverage} * __n {{ 1 }} else {{ 0 }}\n"
     ));
     src.push_str(&format!(
         "    if __gatefail == 1 {{ print(\"coverage below {min_coverage}% threshold\\n\") }}\n"
     ));
+    src.push_str(
+        "    if __n == 0 {\n\
+         \x20       print(\"nothing measured: this entry answers for no instrumented code\\n\")\n\
+         \x20       __gatefail = 1\n\
+         \x20   }\n",
+    );
     src.push_str("    __failed + __gatefail\n}\n");
     parse_main(&src)
 }
