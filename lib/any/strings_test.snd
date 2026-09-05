@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/strings.snd, the byte helpers half the tree includes.
+//
+// `sond test lib` listed it as a file no gate reads. Everything here is the kind of function
+// whose bugs never announce themselves: a copy one byte short, a comparison that stops early, a
+// number that comes back rounded. What is pinned is the edge of each one -- the empty string,
+// the zero length, the boundary value -- because the middle of the range is what already works.
+
+include "any/strings.snd"
+include "x86_64/linux/testing.snd"
+
+let HOLA: string = "hola mundo"
+let VACIA: string = ""
+
+let mut a[8]
+let mut b[8]
+let mut num[4]
+
+test "strlen counts the bytes before the terminator, and an empty string has none" {
+    assert_eq(strlen(HOLA.utf8), 10)
+    assert_eq(strlen(VACIA.utf8), 0)
+}
+
+test "memcpy copies exactly n bytes and not one more" {
+    for i in 0..64 { poke8(b + i, 0xaa) }
+    memcpy(b, HOLA.utf8, 4)
+    for i in 0..4 { assert_eq(peek8(b + i), peek8(HOLA.utf8 + i)) }
+    assert_eq(peek8(b + 4), 0xaa)
+    // A copy of nothing writes nothing: the byte at the destination survives.
+    poke8(b, 0x11)
+    memcpy(b, HOLA.utf8, 0)
+    assert_eq(peek8(b), 0x11)
+}
+
+test "memcmp finds a difference in the last byte it is given" {
+    memcpy(a, HOLA.utf8, 10)
+    memcpy(b, HOLA.utf8, 10)
+    assert_eq(memcmp(a, b, 10), 0)
+    poke8(b + 9, 0x5a)
+    assert_ne(memcmp(a, b, 10), 0)
+    // ...and does not look past n: the differing byte is the tenth.
+    assert_eq(memcmp(a, b, 9), 0)
+    assert_eq(memcmp(a, b, 0), 0)
+}
+
+test "streq is not fooled by a prefix" {
+    // The failure this pins: comparing until the shorter string ends says "hola" == "hola mundo".
+    let corta: string = "hola"
+    assert_eq(streq(HOLA.utf8, HOLA.utf8), 1)
+    assert_eq(streq(HOLA.utf8, corta.utf8), 0)
+    assert_eq(streq(corta.utf8, HOLA.utf8), 0)
+    assert_eq(streq(VACIA.utf8, VACIA.utf8), 1)
+    assert_eq(streq(VACIA.utf8, corta.utf8), 0)
+}
+
+test "starts_with stops at the end of the prefix, and an empty prefix always matches" {
+    let pre: string = "hola"
+    let no: string = "holo"
+    let largo: string = "hola mundo entero"
+    assert_eq(starts_with(HOLA.utf8, pre.utf8), 1)
+    assert_eq(starts_with(HOLA.utf8, no.utf8), 0)
+    assert_eq(starts_with(HOLA.utf8, VACIA.utf8), 1)
+    // A prefix longer than the string is not a match: the string ends first.
+    assert_eq(starts_with(HOLA.utf8, largo.utf8), 0)
+}
+
+test "itoa writes the digits, the sign and the terminator" {
+    assert_eq(itoa(0, num), 1)
+    assert_eq(peek8(num), 48)
+    assert_eq(peek8(num + 1), 0)
+    assert_eq(itoa(1234, num), 4)
+    assert_eq(streq(num, "1234".utf8), 1)
+    assert_eq(itoa(0 - 42, num), 3)
+    assert_eq(streq(num, "-42".utf8), 1)
+    // The widest an i64 gets: 19 digits and a sign.
+    assert_eq(itoa(9223372036854775807, num), 19)
+    assert_eq(streq(num, "9223372036854775807".utf8), 1)
+}
+
+test "itoa prints the most negative i64 instead of just its sign" {
+    // Negating it does not fit in an i64: it stays negative, the digit loop never runs, and what
+    // comes out is a lone "-" that reads as a number nobody can see is missing.
+    let min = 0 - 9223372036854775807 - 1
+    assert_eq(itoa(min, num), 20)
+    assert_eq(streq(num, "-9223372036854775808".utf8), 1)
+}
+
+test "atoi reads a decimal number and its sign" {
+    assert_eq(atoi("0".utf8), 0)
+    assert_eq(atoi("1234".utf8), 1234)
+    assert_eq(atoi("-42".utf8), 0 - 42)
+    assert_eq(atoi(VACIA.utf8), 0)
+}
+
+test "atoi stops at the first byte that is not a digit" {
+    // Skipping the junk and carrying on reads "12a3" as 123 and "1 2" as 12: two numbers that
+    // are not in the input, returned with no way for the caller to tell.
+    assert_eq(atoi("12a3".utf8), 12)
+    assert_eq(atoi("1 2".utf8), 1)
+    assert_eq(atoi("abc".utf8), 0)
+    assert_eq(atoi("-".utf8), 0)
+    assert_eq(atoi("12\n".utf8), 12)
+}
+
+test "find_byte gives the first match, and -1 when there is none" {
+    memcpy(a, HOLA.utf8, 10)
+    assert_eq(find_byte(a, 10, 32), 4)   // the space
+    assert_eq(find_byte(a, 10, 111), 1)  // the first 'o', not the one in "mundo"
+    assert_eq(find_byte(a, 10, 122), 0 - 1)
+    // It does not look past n, even when the byte is there.
+    assert_eq(find_byte(a, 4, 32), 0 - 1)
+    assert_eq(find_byte(a, 0, 104), 0 - 1)
+}
