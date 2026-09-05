@@ -1,0 +1,161 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/tls/testserver.snd, the loopback TLS 1.3 server the client suites drive.
+//
+// A test double that nothing tests is a second implementation with no gate on it: when it and
+// the client disagree, the client is the one that gets blamed. So the server is exercised here
+// by the real client (`tls_connect`), which is the only thing that can say the bytes it puts on
+// the wire are TLS: the handshake either completes against it or it does not.
+
+include "any/tls/testserver.snd"
+include "x86_64/linux/testing.snd"
+
+let HEX_UP = "0A1B2C3DFF"
+let HEX_LO = "0a1b2c3dff"
+
+let mut ts_roots[4]
+let mut ts_resp[20000]
+let mut ts_hexbuf[8]
+let mut ts_der[16]
+let mut ts_val[4]
+
+// Listen on `port` and fork: the child serves one TLS exchange and exits, the parent gets the
+// listening fd back. Returns (pid << 32) | sfd.
+fn ts_spawn(port: i64, certlen: i64) -> i64 {
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        tlssrv_serve(afd, certlen)
+        close_fd(afd)
+        syscall(SYS_exit, 0)
+    }
+    (pid << 32) | sfd
+}
+
+// Reap the child and assert it left of its own accord with status 0. A server that wrote to a
+// socket the client had already closed would die of SIGPIPE instead, and the low seven bits of
+// the wait status would carry the signal: "the client got its answer" and "the server survived
+// giving it" are different claims, and only one of them is visible from the client side.
+fn ts_reap(pid: i64) {
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    assert_eq(peek32(st) & 0x7f, 0)          // not killed by a signal
+    assert_eq((peek32(st) >> 8) & 0xff, 0)   // exit code 0
+}
+
+test "tls testserver: a real client completes the handshake and reads the served response" {
+    let certlen = tlssrv_setup()
+    ts_roots[0] = tlssrv_cert()
+    let both = ts_spawn(55501, certlen)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let host: string = "127.0.0.1"
+    let sni: string = "sond.test"
+    let alpn: string = "http/1.1"
+    let now: string = "20270101000000"
+    let sess = tls_connect(host.utf8, 55501, sni.utf8, 9, alpn.utf8, 8, ts_roots, 1, now.utf8)
+    assert_eq(sess != 0, 1)
+
+    // Anything at all: the server reads one application record and answers, it does not parse
+    // the request. What is under test is that the record arrives readable at the other end.
+    let req: string = "GET / HTTP/1.1\r\n\r\n"
+    assert_eq(tls_write(sess, req.utf8, req.len), req.len)
+
+    let want: string = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+    let n = tls_read(sess, ts_resp, 20000)
+    assert_eq(n, want.len)
+    for i in 0..n { assert_eq(peek8(ts_resp + i), peek8(want.utf8 + i)) }
+
+    // And it hangs up the way a real server does, with a close_notify rather than by vanishing.
+    assert_eq(tls_read(sess, ts_resp, 20000), 0)
+    assert_eq(tls_sess_alert(sess), 256)      // level 1 (warning), description 0
+
+    tls_close(sess)
+    close_fd(sfd)
+    ts_reap(pid)
+}
+
+test "tls testserver: a client that rejects the certificate leaves the server exiting cleanly" {
+    // The certificate names sond.test, so a client asking for wrong.host must refuse the chain
+    // and hang up in the middle of the exchange. The server has to notice its reads coming back
+    // empty and leave, instead of going on to write into a dead socket.
+    let certlen = tlssrv_setup()
+    ts_roots[0] = tlssrv_cert()
+    let both = ts_spawn(55502, certlen)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let host: string = "127.0.0.1"
+    let sni: string = "wrong.host"
+    let now: string = "20270101000000"
+    assert_eq(tls_connect(host.utf8, 55502, sni.utf8, 10, 0, 0, ts_roots, 1, now.utf8), 0)
+    close_fd(sfd)
+    ts_reap(pid)
+}
+
+test "tls testserver: a peer that never sends a ClientHello is not answered" {
+    let certlen = tlssrv_setup()
+    let both = ts_spawn(55503, certlen)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, 55503)
+    assert(connect_sock(fd, sa, 16) >= 0)
+    close_fd(fd)                              // hang up before saying anything
+    close_fd(sfd)
+    ts_reap(pid)
+}
+
+test "tls testserver: hex loads both cases of a-f, and says how many bytes it wrote" {
+    // The certificate is written in lowercase, so the uppercase branch is reached by nothing
+    // else in the suite: a wrong digit there would quietly corrupt any vector added in capitals.
+    assert_eq(tlssrv_hex_load(HEX_UP, ts_hexbuf), 5)
+    assert_eq(peek8(ts_hexbuf + 0), 0x0a)
+    assert_eq(peek8(ts_hexbuf + 1), 0x1b)
+    assert_eq(peek8(ts_hexbuf + 2), 0x2c)
+    assert_eq(peek8(ts_hexbuf + 3), 0x3d)
+    assert_eq(peek8(ts_hexbuf + 4), 0xff)
+    for i in 0..5 { poke8(ts_hexbuf + i, 0) }
+    assert_eq(tlssrv_hex_load(HEX_LO, ts_hexbuf), 5)
+    assert_eq(peek8(ts_hexbuf + 0), 0x0a)
+    assert_eq(peek8(ts_hexbuf + 4), 0xff)
+}
+
+test "tls testserver: a DER integer drops leading zeros and pads what would read as negative" {
+    // Both are what an ECDSA signature runs into: r or s is a 32-byte big-endian value, and DER
+    // wants it minimal and signed. Getting either wrong produces a signature that some verifiers
+    // accept and others reject, which is the worst kind of broken.
+    for i in 0..32 { poke8(ts_val + i, 0) }
+    poke8(ts_val + 31, 0x05)
+    assert_eq(tlssrv_der_int(ts_der, ts_val), 3)
+    assert_eq(peek8(ts_der + 0), 2)
+    assert_eq(peek8(ts_der + 1), 1)
+    assert_eq(peek8(ts_der + 2), 0x05)
+
+    // Top bit set: a 0x00 goes in front, so the 32 bytes are not read as a negative number.
+    for i in 0..32 { poke8(ts_val + i, 0x11) }
+    poke8(ts_val, 0x80)
+    assert_eq(tlssrv_der_int(ts_der, ts_val), 35)
+    assert_eq(peek8(ts_der + 0), 2)
+    assert_eq(peek8(ts_der + 1), 33)
+    assert_eq(peek8(ts_der + 2), 0)
+    assert_eq(peek8(ts_der + 3), 0x80)
+    assert_eq(peek8(ts_der + 34), 0x11)
+
+    // All zeros still has to be an integer: 02 01 00, never an empty one.
+    for i in 0..32 { poke8(ts_val + i, 0) }
+    assert_eq(tlssrv_der_int(ts_der, ts_val), 3)
+    assert_eq(peek8(ts_der + 1), 1)
+    assert_eq(peek8(ts_der + 2), 0)
+}
