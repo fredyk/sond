@@ -447,6 +447,14 @@ fn snd_files(dir: &Path) -> Vec<PathBuf> {
 ///
 /// Which files an entry answers for is not decided here: it is asked of `sondc --entry-info`,
 /// which reports the same scope the gate itself runs on.
+/// Whether the NAME of a file promises a test suite. `<name>_test.snd` is the one shape the whole
+/// toolchain reads as "the gate of `<name>`": the runner collects it, `cov_scope` takes what it
+/// includes out of everybody else's denominator, and the tree report stops asking for a gate next
+/// to `<name>`. A file that takes that name owes tests.
+fn es_suite(f: &Path) -> bool {
+    f.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("_test.snd"))
+}
+
 fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, plazo: std::time::Duration) -> ExitCode {
     let ficheros = snd_files(dir);
     if ficheros.is_empty() {
@@ -456,11 +464,24 @@ fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, plazo: std::time::Durati
 
     let mut medidos: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let mut entradas: Vec<PathBuf> = Vec::new();
+    let mut sin_tests: Vec<PathBuf> = Vec::new();
     let mut ilegibles: Vec<PathBuf> = Vec::new();
     for f in &ficheros {
         match entry_info(sondc, f) {
             Ok(Some(info)) if info.tests > 0 => {
                 entradas.push(f.clone());
+                for c in info.covers {
+                    medidos.insert(std::fs::canonicalize(&c).unwrap_or(c));
+                }
+            }
+            // A file NAMED like a suite that declares no `test` block is a dead gate, and it gets
+            // said out loud. Before this, the runner simply skipped it and then accused the module
+            // beside it of having no test file -- while the test file sat right there, written and
+            // dead. Whoever read that went looking for a file that already existed. So what such a
+            // file covers counts as spoken for: the fault is one, and it is the missing tests.
+            Ok(Some(info)) if es_suite(f) => {
+                sin_tests.push(f.clone());
+                medidos.insert(std::fs::canonicalize(f).unwrap_or_else(|_| f.clone()));
                 for c in info.covers {
                     medidos.insert(std::fs::canonicalize(&c).unwrap_or(c));
                 }
@@ -514,12 +535,13 @@ fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, plazo: std::time::Durati
 
     println!();
     println!(
-        "{} file(s), {} gate(s), {} failed, {} hung, {} unmeasured",
+        "{} file(s), {} gate(s), {} failed, {} hung, {} unmeasured, {} without tests",
         ficheros.len(),
         entradas.len(),
         fallos.len(),
         colgadas.len(),
-        sin_puerta.len()
+        sin_puerta.len(),
+        sin_tests.len()
     );
     for f in &fallos {
         println!("  FAILED   {}", f.display());
@@ -529,6 +551,9 @@ fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, plazo: std::time::Durati
     }
     for f in &sin_puerta {
         println!("  NO GATE  {}", f.display());
+    }
+    for f in &sin_tests {
+        println!("  NO TESTS {}", f.display());
     }
     for f in &ilegibles {
         println!("  UNREAD   {}", f.display());
@@ -541,7 +566,21 @@ fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, plazo: std::time::Durati
             sin_puerta.len()
         );
     }
-    if fallos.is_empty() && colgadas.is_empty() && sin_puerta.is_empty() && ilegibles.is_empty() {
+    if !sin_tests.is_empty() {
+        eprintln!(
+            "sond: {} file(s) above are named `_test.snd` and declare no `test` block: they run \
+             nothing, and their name is what tells the rest of the toolchain that what they \
+             include is already measured. Give each one its `test` blocks, or rename it so it \
+             stops answering for code it never reads.",
+            sin_tests.len()
+        );
+    }
+    if fallos.is_empty()
+        && colgadas.is_empty()
+        && sin_puerta.is_empty()
+        && sin_tests.is_empty()
+        && ilegibles.is_empty()
+    {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

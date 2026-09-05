@@ -510,3 +510,74 @@ fn asking_what_a_file_is_never_writes_a_binary() {
         .collect();
     assert!(dejado.is_empty(), "a query left {dejado:?} in the working directory");
 }
+
+/// A file NAMED like a suite that declares no tests is a dead suite, not a module without a gate.
+///
+/// `lib/x86_64/linux/capture_test.snd` was a `main` returning 1 on failure. It declared zero
+/// `test` blocks, so the runner never collected it, `capture.snd` ended up in nobody's
+/// denominator, and the report accused `capture.snd` -- the module -- of missing a gate that was
+/// sitting next to it, written and dead. Whoever reads that goes looking for a test file that
+/// already exists.
+///
+/// And when everything the dead suite includes is measured somewhere else, it has nothing left to
+/// answer for, gets filed as "nothing here a gate could read", and vanishes from the report
+/// entirely: a file whose whole purpose is to test something, running nothing, reported as fine.
+#[test]
+fn a_file_named_like_a_suite_that_declares_no_tests_is_named_as_one() {
+    let base = arbol("suite-muerta");
+    write(&base.join("src/motor.snd"), "fn arranca() -> i64 { 1 }\n");
+    // Named `_test.snd`, and not a suite: it checks by returning 1, the way these files were
+    // written before `test` blocks existed.
+    write(
+        &base.join("src/motor_test.snd"),
+        "include \"x86_64/linux/testing.snd\"\ninclude \"motor.snd\"\n\
+         fn main() -> i64 { if arranca() != 1 { return 1 } 0 }\n",
+    );
+    // Measured by a gate of its own, so the dead suite next to it answers for nothing new: this
+    // is the shape that used to disappear without a word.
+    write(&base.join("src/frenos.snd"), "fn frena() -> i64 { 2 }\n");
+    write(
+        &base.join("src/frenos_test.snd"),
+        "include \"x86_64/linux/testing.snd\"\ninclude \"frenos.snd\"\n\
+         test \"frena\" { assert_eq(frena(), 2) }\n",
+    );
+    write(
+        &base.join("src/integra_test.snd"),
+        "include \"x86_64/linux/testing.snd\"\ninclude \"frenos.snd\"\n\
+         fn comprueba() -> i64 { frena() }\n",
+    );
+
+    let (rc, salida) = sond_test_dir(&base.join("src"));
+    assert_ne!(rc, 0, "a tree with a suite that runs nothing must not pass:\n{salida}");
+    assert!(
+        salida.contains("NO TESTS"),
+        "a dead suite needs a category of its own: it is not a module missing a gate, it is a \
+         gate missing its tests:\n{salida}"
+    );
+    for f in ["motor_test.snd", "integra_test.snd"] {
+        assert!(
+            salida.lines().any(|l| l.contains("NO TESTS") && l.ends_with(f)),
+            "{f} declares no tests and has to be named as such:\n{salida}"
+        );
+    }
+    assert!(
+        !salida.lines().any(|l| l.contains("NO GATE") && l.ends_with("/motor.snd")),
+        "the module has a test file, written and dead: accusing IT sends the reader looking for \
+         a file that already exists:\n{salida}"
+    );
+
+    // Give each one a real test block and the same tree passes: the check is about tests that
+    // run, not about file names.
+    write(
+        &base.join("src/motor_test.snd"),
+        "include \"x86_64/linux/testing.snd\"\ninclude \"motor.snd\"\n\
+         test \"arranca\" { assert_eq(arranca(), 1) }\n",
+    );
+    write(
+        &base.join("src/integra_test.snd"),
+        "include \"x86_64/linux/testing.snd\"\ninclude \"frenos.snd\"\n\
+         test \"integra\" { assert_eq(frena(), 2) }\n",
+    );
+    let (rc, salida) = sond_test_dir(&base.join("src"));
+    assert_eq!(rc, 0, "with every suite declaring tests the tree passes:\n{salida}");
+}
