@@ -265,8 +265,8 @@ fn public_names(toks: &[Token]) -> HashSet<String> {
                     names.insert(n.clone());
                 }
             }
-            Token::Let if depth == 0 => {
-                if i > 0 && matches!(toks[i - 1], Token::Pub) {
+            Token::Let if depth == 0
+                && i > 0 && matches!(toks[i - 1], Token::Pub) => {
                     let mut j = i + 1;
                     if let Some(Token::Ident(m)) = toks.get(j)
                         && m == "mut"
@@ -277,7 +277,6 @@ fn public_names(toks: &[Token]) -> HashSet<String> {
                         names.insert(n.clone());
                     }
                 }
-            }
             _ => {}
         }
     }
@@ -363,8 +362,8 @@ fn rewrite_line_mapped(line: &str, ctx: &LineCtx) -> Result<(String, Option<Vec<
                 }
             }
             '/' if i + 1 < chars.len() && chars[i + 1] == '/' => {
-                for k in i..chars.len() {
-                    out.push_verbatim(chars[k], k); // rest of the line is a comment
+                for (k, ch) in chars.iter().enumerate().skip(i) {
+                    out.push_verbatim(*ch, k); // rest of the line is a comment
                 }
                 break;
             }
@@ -579,12 +578,12 @@ pub fn resolve_includes_located_with_resolver(
 
     // Validate aliases: an alias must not clash with any module name already visible.
     let visible_modules: HashSet<&String> = g.modules.values().collect();
-    for (alias, _original) in &g.aliases {
+    for alias in g.aliases.keys() {
         if visible_modules.contains(alias) {
             // Find which file introduced this alias to report the line.
             for (file, lines) in &g.source_lines {
                 for (i, line) in lines.iter().enumerate() {
-                    if parse_import(line.trim()).is_some() && parse_import_alias(line.trim()).as_deref() == Some(alias.as_str()) {
+                    if parse_import(line.trim()).is_some() && parse_import_alias(line.trim()) == Some(alias.as_str()) {
                         g.import_errors.push((
                             file.clone(),
                             i + 1,
@@ -660,7 +659,7 @@ pub fn resolve_includes_located_with_resolver(
             // the collapsed single id of the other definers. Before this, when the entry (no id)
             // collided with an include, `ids` below shrank to one value and BOTH definitions were
             // renamed `name__f<id>`: a duplicate global at codegen time.
-            if definers.contains(&&f) {
+            if definers.contains(&f) {
                 if let Some(id) = g.ids.get(f) {
                     map.insert(name.clone(), *id);
                 }
@@ -693,15 +692,15 @@ pub fn resolve_includes_located_with_resolver(
             if let Some(m) = g.modules.get(c) {
                 // If this module name is hidden by an alias in this file, add the
                 // alias instead of the original name.
-                if let Some(hidden) = g.hidden_modules.get(f) {
-                    if hidden.contains(m) {
-                        for (alias, orig) in &g.aliases {
-                            if orig == m {
-                                mods.insert(alias.clone(), c.clone());
-                            }
+                if let Some(hidden) = g.hidden_modules.get(f)
+                    && hidden.contains(m)
+                {
+                    for (alias, orig) in &g.aliases {
+                        if orig == m {
+                            mods.insert(alias.clone(), c.clone());
                         }
-                        continue;
                     }
+                    continue;
                 }
                 mods.insert(m.clone(), c.clone());
             }

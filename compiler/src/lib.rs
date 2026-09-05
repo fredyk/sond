@@ -43,8 +43,8 @@ use std::collections::HashSet;
 /// struct desugaring; contract lowering AFTER verification (the prover sees
 /// source-level `s.len`, the codegen sees the lowered slot read).
 pub fn lower_program(
-    funcs: &mut Vec<Function>,
-    globals: &mut Vec<Global>,
+    funcs: &mut [Function],
+    globals: &mut [Global],
     structs: &mut Vec<StructDef>,
     enums: &[EnumDef],
     target: &str,

@@ -5454,16 +5454,8 @@ mod tests {
 #[cfg(test)]
 mod undeclared_tests {
     use super::*;
-    use crate::lexer::{tokenize, tokenize_located};
+    use crate::lexer::tokenize_located;
     use crate::parser::Parser;
-
-    fn parse(src: &str) -> (Vec<Function>, Vec<Global>, Vec<EnumDef>) {
-        let mut p = Parser::new(tokenize(src));
-        let funcs = p.parse_program();
-        let globals = p.take_globals();
-        let enums = p.take_enums();
-        (funcs, globals, enums)
-    }
 
     fn parse_located(src: &str) -> (Vec<Function>, Vec<Global>, Vec<EnumDef>) {
         let (toks, lines, _cols) = tokenize_located(src);
@@ -5472,14 +5464,6 @@ mod undeclared_tests {
         let globals = p.take_globals();
         let enums = p.take_enums();
         (funcs, globals, enums)
-    }
-
-    fn bounds(src: &str) -> Result<(), String> {
-        let (toks, lines, _cols) = tokenize_located(src);
-        let mut p = Parser::with_lines(toks, lines);
-        let funcs = p.parse_program();
-        let globals = p.take_globals();
-        check_constant_bounds(&funcs, &globals)
     }
 
     fn extract_line(err: &str) -> Option<u32> {
@@ -7448,7 +7432,7 @@ fn expr_string_index_with_name<'a>(
     rebased: Option<&str>,
     fname: &str,
 ) -> Result<(), String> {
-    let is_alive_string = |name: &str| rebased.map_or(true, |r| name != r) && alive.contains(name);
+    let is_alive_string = |name: &str| (rebased != Some(name)) && alive.contains(name);
 
     match e {
         Expr::Index(base, idx) => {
@@ -7476,7 +7460,7 @@ fn expr_string_index_with_name<'a>(
             expr_string_index_with_name(base, alive, rebased, fname)
         }
         Expr::Binary(_, l, r) => {
-            expr_string_index_with_name(&l, alive, rebased, fname)?;
+            expr_string_index_with_name(l, alive, rebased, fname)?;
             expr_string_index_with_name(r, alive, rebased, fname)
         }
         Expr::Unary(_, x) | Expr::Cast(x, _) | Expr::Field(x, _) => {
@@ -7528,10 +7512,10 @@ fn expr_string_index_with_name<'a>(
         Expr::SliceRange(b, lo, hi) => {
             expr_string_index_with_name(b, alive, rebased, fname)?;
             if let Some(l) = lo {
-                expr_string_index_with_name(&l, alive, rebased, fname)?;
+                expr_string_index_with_name(l, alive, rebased, fname)?;
             }
             if let Some(h) = hi {
-                expr_string_index_with_name(&h, alive, rebased, fname)?;
+                expr_string_index_with_name(h, alive, rebased, fname)?;
             }
             Ok(())
         }
@@ -7666,16 +7650,15 @@ fn pic16_block(b: &Block, fname: &str) -> Result<(), String> {
             Stmt::Let {
                 name, ty, value, ..
             } => {
-                if let Some(t) = &ty {
-                    if let Type::Named(ref n) = *t {
-                        if pic16_too_wide(t) {
-                            return Err(format!(
-                                "function `{fname}`: `{name}` is declared as `{n}` but the PIC16 \
-                                 backend stores each local in a single byte; a {n} is two or more bytes. \
-                                 Use separate `u8` variables for the high and low bytes."
-                            ));
-                        }
-                    }
+                if let Some(t) = &ty
+                    && let Type::Named(ref n) = *t
+                    && pic16_too_wide(t)
+                {
+                    return Err(format!(
+                        "function `{fname}`: `{name}` is declared as `{n}` but the PIC16 \
+                         backend stores each local in a single byte; a {n} is two or more bytes. \
+                         Use separate `u8` variables for the high and low bytes."
+                    ));
                 }
                 check_pic16_expr(value, fname)?;
             }
@@ -8293,7 +8276,7 @@ mod coverage_harness_globals {
             f.is_harness = true;
         }
         assert_eq!(
-            check_undeclared_variables(&funcs, &[], &[]).map_err(|e| e),
+            check_undeclared_variables(&funcs, &[], &[]),
             Ok(()),
             "a synthesized coverage harness must not trip the undeclared-variable check"
         );
@@ -8468,7 +8451,7 @@ mod raw_constant_offset_bounds_tests {
     use crate::parser::Parser;
 
     fn raw_bounds(src: &str) -> Result<(), String> {
-        let (toks, lines) = tokenize_located(src);
+        let (toks, lines, _cols) = tokenize_located(src);
         let mut p = Parser::with_lines(toks, lines);
         let funcs = p.parse_program();
         let globals = p.take_globals();

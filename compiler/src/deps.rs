@@ -251,12 +251,11 @@ pub fn load_deps(start_dir: &Path) -> Option<DepsFile> {
     let mut dir = Some(start_dir);
     while let Some(d) = dir {
         let path = d.join("deps.snd");
-        if path.exists() {
-            if let Ok(src) = std::fs::read_to_string(&path) {
-                if let Ok(deps) = parse_deps(&src) {
-                    return Some(deps);
-                }
-            }
+        if path.exists()
+            && let Ok(src) = std::fs::read_to_string(&path)
+            && let Ok(deps) = parse_deps(&src)
+        {
+            return Some(deps);
         }
         dir = d.parent();
     }
@@ -291,39 +290,39 @@ impl DepsResolver {
 impl crate::resolve::ModuleResolver for DepsResolver {
     fn resolve(&self, module_name: &str) -> Result<PathBuf, String> {
         // Try deps.snd first
-        if let Some(deps) = load_deps(&self.base_dir) {
-            if let Some(entry) = deps.entries.get(module_name) {
-                let cache =
-                    cache_dir_for_hash_at(&entry.hash, &self.cache_root)
-                        .ok_or("cannot determine cache directory")?;
-                if !cache.exists() {
-                    let origin = entry.from.as_deref().unwrap_or("");
-                    return Err(format!(
-                        "module `{module_name}` (hash {}{origin}) is not in the cache; \
-                         run `sond get {origin}` to download it",
-                        &entry.hash[..12],
-                    ));
-                }
-                // Verify content hash
-                verify_cache(&cache, &entry.hash)?;
-                // Look for the .snd file inside the cache dir
-                let target = cache.join(format!("{module_name}.snd"));
-                if target.exists() {
-                    return Ok(target);
-                }
-                // Try the candidates (with .snd extension, any/ prefix, etc.)
-                for cand in crate::resolve::include_candidates(module_name) {
-                    let p = cache.join(&cand);
-                    if p.exists() {
-                        return Ok(p);
-                    }
-                }
+        if let Some(deps) = load_deps(&self.base_dir)
+            && let Some(entry) = deps.entries.get(module_name)
+        {
+            let cache =
+                cache_dir_for_hash_at(&entry.hash, &self.cache_root)
+                    .ok_or("cannot determine cache directory")?;
+            if !cache.exists() {
+                let origin = entry.from.as_deref().unwrap_or("");
                 return Err(format!(
-                    "module `{module_name}` is declared in deps.snd but its cache directory \
-                     `{}` does not contain a matching .snd file",
-                    cache.display()
+                    "module `{module_name}` (hash {}{origin}) is not in the cache; \
+                     run `sond get {origin}` to download it",
+                    &entry.hash[..12],
                 ));
             }
+            // Verify content hash
+            verify_cache(&cache, &entry.hash)?;
+            // Look for the .snd file inside the cache dir
+            let target = cache.join(format!("{module_name}.snd"));
+            if target.exists() {
+                return Ok(target);
+            }
+            // Try the candidates (with .snd extension, any/ prefix, etc.)
+            for cand in crate::resolve::include_candidates(module_name) {
+                let p = cache.join(&cand);
+                if p.exists() {
+                    return Ok(p);
+                }
+            }
+            return Err(format!(
+                "module `{module_name}` is declared in deps.snd but its cache directory \
+                 `{}` does not contain a matching .snd file",
+                cache.display()
+            ));
         }
         // Fall back to default resolver
         self.default.resolve(module_name)
@@ -337,11 +336,6 @@ mod tests {
     static UID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     fn uid() -> usize {
         UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn tmp(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("deps_test_{}_{}", std::process::id(), uid()))
-            .join(name)
     }
 
     fn tmp_dir(name: &str) -> PathBuf {
@@ -558,7 +552,7 @@ mod tests {
         // Create the "strings" module (what will go in the cache)
         let mod_dir = tmp_dir("cp2_mod");
         std::fs::write(
-            &mod_dir.join("strings.snd"),
+            mod_dir.join("strings.snd"),
             "pub fn itoa(n: i64) -> i64 { n }\n",
         )
         .unwrap();
@@ -607,7 +601,7 @@ mod tests {
         // Create the "strings" module and compute its hash
         let mod_dir = tmp_dir("cp3_mod");
         std::fs::write(
-            &mod_dir.join("strings.snd"),
+            mod_dir.join("strings.snd"),
             "pub fn itoa(n: i64) -> i64 { n }\n",
         )
         .unwrap();
@@ -719,7 +713,7 @@ mod tests {
         // Create the "strings" module
         let mod_dir = tmp_dir("cp7_mod");
         std::fs::write(
-            &mod_dir.join("strings.snd"),
+            mod_dir.join("strings.snd"),
             "pub fn itoa(n: i64) -> i64 { n }\n",
         )
         .unwrap();

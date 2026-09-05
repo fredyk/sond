@@ -97,8 +97,10 @@ fn tree_compile_check() {
             ok_count += 1;
         } else if first_line.contains("no functions found") {
             mod_count += 1;
-            if let Some(expected_err) = modules_map.get(rel.as_str()) {
-                if first_line.contains(expected_err) { *modules_matched.get_mut(rel.as_str()).unwrap() = true; }
+            if let Some(expected_err) = modules_map.get(rel.as_str())
+                && first_line.contains(expected_err)
+            {
+                *modules_matched.get_mut(rel.as_str()).unwrap() = true;
             }
         } else {
             if let Some(expected_err) = exceptions_map.get(rel.as_str()) {
@@ -120,11 +122,10 @@ fn tree_compile_check() {
         }
     }
     for (rel, expected) in KNOWN_EXCEPTIONS {
-        if !exceptions_matched[rel] {
-            if !new_failures.iter().any(|m| m.contains(rel)) {
+        if !exceptions_matched[rel]
+            && !new_failures.iter().any(|m| m.contains(rel)) {
                 new_failures.push(format!("KNOWN_EXCEPTION error changed: `{}` expected `{}` but error differs", rel, expected));
             }
-        }
     }
     let total = ok_count + ko_count + mod_count;
     println!("\n=== tree_compile_check summary ===");

@@ -2122,8 +2122,7 @@ pub fn proves_gt_for_bounds(
                 return None;
             };
             holds_cons(&ap.op, &l, &r)
-                .map(|cs| cs.into_iter().next())
-                .flatten()
+                .and_then(|cs| cs.into_iter().next())
         })
         .collect();
     // Add variable range constraints from int_types (same as prove).
@@ -2205,8 +2204,7 @@ pub fn proves_le_for_bounds(
                 return None;
             };
             holds_cons(&ap.op, &l, &r)
-                .map(|cs| cs.into_iter().next())
-                .flatten()
+                .and_then(|cs| cs.into_iter().next())
         })
         .collect();
     // Add variable range constraints.

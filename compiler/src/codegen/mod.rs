@@ -966,9 +966,9 @@ enum Scope {
     /// A `for` loop: `start` is the top-of-loop label (a `continue` target) and `end` is the
     /// label just after the loop (a `break` target).
     Loop { start: String, end: String },
-    /// A `lock (m) { .. }` body. `name` is the lock variable and `body_cont` is the label
-    /// just after the body's own release code (where a `break` with no enclosing loop lands).
-    Lock { name: String, body_cont: String },
+    /// A `lock (m) { .. }` body. `name` is the lock variable, which an early exit reads in
+    /// order to release the mutex on its way out.
+    Lock { name: String },
 }
 
 #[derive(Default)]
@@ -1914,7 +1914,6 @@ fn emit_lock(&mut self, name: &str, body: &Block) {
         self.line(&format!("{acquired}:"));
         self.scopes.push(Scope::Lock {
             name: name.to_string(),
-            body_cont: body_cont.clone(),
         });
         self.block(body);
         self.scopes.pop();

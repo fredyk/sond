@@ -65,39 +65,6 @@ pub(crate) fn compile_and_run(src: &str) -> i32 {
     code
 }
 
-/// Compiles a hosted program, runs it, and returns its stdout.  Uses the full
-/// compilation pipeline (`lower_program`)./// Compiles a program that has module-level globals, runs it, and returns its exit code.
-/// Used by tests that check the return value of a function with globals.
-pub(crate) fn compile_and_run_with_globals(src: &str) -> i32 {
-    static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let (funcs, globals, structs) = parse_and_lower(src, "host");
-    let asm = emit_program_g(&globals, &structs, &funcs);
-    let dir = std::env::temp_dir();
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let stem = format!("sondc_cgout_{}_{}", std::process::id(), n);
-    let asm_path = dir.join(format!("{stem}.s"));
-    let bin_path = dir.join(&stem);
-    std::fs::write(&asm_path, asm).unwrap();
-    assert!(
-        Command::new("cc")
-            .arg(&asm_path)
-            .arg("-o")
-            .arg(&bin_path)
-            .status()
-            .unwrap()
-            .success(),
-        "compile failed"
-    );
-    let code = Command::new(&bin_path)
-        .status()
-        .unwrap()
-        .code()
-        .unwrap();
-    let _ = std::fs::remove_file(&asm_path);
-    let _ = std::fs::remove_file(&bin_path);
-    code
-}
-
 /// Compiles a hosted program, runs it, and returns its stdout.
 pub(crate) fn compile_and_capture(src: &str) -> String {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);

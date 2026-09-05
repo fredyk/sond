@@ -954,11 +954,8 @@ fn check_block_invariants(b: &Block, ctx: usize) {
     if b.stmt_lines.len() == b.stmts.len() {
         for (i, stmt) in b.stmts.iter().enumerate() {
             let _line = b.stmt_lines[i];
-            match stmt {
-                Stmt::For { body, .. } => {
-                    check_block_invariants(body, i);
-                }
-                _ => {}
+            if let Stmt::For { body, .. } = stmt {
+                check_block_invariants(body, i);
             }
         }
     }
@@ -1032,11 +1029,10 @@ fn for_body_and_cond(f: &Function) -> Option<(&crate::ast::Block, &crate::ast::E
 
 fn for_cond_right_var(f: &Function) -> Option<String> {
     let (_, cond) = for_body_and_cond(f)?;
-    if let crate::ast::Expr::Binary(_, _, right) = cond {
-        if let crate::ast::Expr::Var(v) = right.as_ref() {
+    if let crate::ast::Expr::Binary(_, _, right) = cond
+        && let crate::ast::Expr::Var(v) = right.as_ref() {
             return Some(v.clone());
         }
-    }
     None
 }
 
@@ -1054,11 +1050,10 @@ fn has_counter_let(f: &Function, var: &str) -> bool {
 /// was materialised into a local, or `None` if the bound is used directly.
 fn captured_end_name(f: &Function) -> Option<String> {
     for s in &f.body.stmts {
-        if let crate::ast::Stmt::Let { name, .. } = s {
-            if name.starts_with("__end") {
+        if let crate::ast::Stmt::Let { name, .. } = s
+            && name.starts_with("__end") {
                 return Some(name.clone());
             }
-        }
     }
     None
 }

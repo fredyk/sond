@@ -880,7 +880,7 @@ fn walk_sizes_block(b: &mut Block, sizes: &mut Vec<HashMap<String, i64>>) {
     }
 }
 
-fn insert_array_into_scope(s: &mut Stmt, sizes: &mut Vec<HashMap<String, i64>>) {
+fn insert_array_into_scope(s: &mut Stmt, sizes: &mut [HashMap<String, i64>]) {
     if let Stmt::Let { name, array_len: Some(arr_n), .. } = s {
         sizes.last_mut().unwrap().insert(name.clone(), *arr_n);
     } else if let Stmt::Let { name, ty: Some(Type::View(_, Some(len_str))), .. } = s

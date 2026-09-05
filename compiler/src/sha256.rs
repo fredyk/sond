@@ -69,11 +69,10 @@ fn process_block(h: &mut [u32; 8], block: &[u8; 64]) {
         ]);
     }
     for i in 16..64 {
-        w[i] = (small_s1(w[i - 2])
+        w[i] = small_s1(w[i - 2])
             .wrapping_add(w[i - 7])
             .wrapping_add(small_s0(w[i - 15]))
-            .wrapping_add(w[i - 16]))
-            & 0xFFFFFFFF;
+            .wrapping_add(w[i - 16]);
     }
     let mut a = h[0];
     let mut b = h[1];

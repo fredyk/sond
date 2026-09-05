@@ -2367,11 +2367,11 @@ fn module_string_annotated_and_unannotated_produce_identical_result() {
 fn module_string_non_ascii_yields_utf8_bytes() {
     // `"año"`, `peek8(s+0)`=97('a'), `peek8(s+1)`=195, `peek8(s+2)`=177.
     // Use Rust's compile-time unicode escape so the Sond source contains actual ñ (UTF-8 c0a9).
-    let src: &str = concat!("let s: string = \"a\u{00f1}o\"\nfn main() -> i64 { peek8(s + 0) }");
+    let src: &str = "let s: string = \"año\"\nfn main() -> i64 { peek8(s + 0) }";
     assert_eq!(compile_and_run_with_globals(src), 97);
-    let src: &str = concat!("let s: string = \"a\u{00f1}o\"\nfn main() -> i64 { peek8(s + 1) }");
+    let src: &str = "let s: string = \"año\"\nfn main() -> i64 { peek8(s + 1) }";
     assert_eq!(compile_and_run_with_globals(src), 195);
-    let src: &str = concat!("let s: string = \"a\u{00f1}o\"\nfn main() -> i64 { peek8(s + 2) }");
+    let src: &str = "let s: string = \"año\"\nfn main() -> i64 { peek8(s + 2) }";
     assert_eq!(compile_and_run_with_globals(src), 177);
 }
 
