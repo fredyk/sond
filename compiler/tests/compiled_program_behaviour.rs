@@ -922,3 +922,46 @@ fn empty_local_slice_without_index_compiles() {
     );
     assert_eq!(printed.trim(), "0", "empty slice with len 0 is fine");
 }
+
+/// A slice that arrives from a call is a slice: its indices are proven or refused, and where it
+/// was built decides nothing. Before this, `s[3]` on a call-returned slice reached memory with
+/// no check at all.
+#[test]
+fn an_index_into_a_slice_from_a_call_is_refused_without_a_bound() {
+    let dicho = compile_error(
+        "slice-from-call-oob",
+        "fn make(a: i64) -> (s: Slice) { Slice { ptr: a, len: 4 } }\n\
+         fn main() -> i64 {\n\
+         let buf[8]\n\
+         let s = make(buf)\n\
+         print_int(s[3])\n\
+         0\n\
+         }\n",
+    );
+    assert!(
+        dicho.contains("cannot prove") && dicho.contains("slice `s`"),
+        "an unbounded index into a call-returned slice must be refused, got: {dicho}"
+    );
+}
+
+/// And the way out is the one the language already teaches: the loop condition IS the bound, so
+/// walking the slice needs no annotation. This pins that the refusal above has a remedy — a
+/// check whose only answer is "you cannot write this" would be worse than no check.
+#[test]
+fn walking_a_slice_from_a_call_needs_no_annotation() {
+    let printed = compile_and_print(
+        "slice-from-call-loop",
+        "fn make(a: i64) -> (s: Slice) { Slice { ptr: a, len: 4 } }\n\
+         fn main() -> i64 {\n\
+         let mut buf[4]\n\
+         buf[0] = 1  buf[1] = 2  buf[2] = 3  buf[3] = 4\n\
+         let s = make(buf)\n\
+         let mut i = 0\n\
+         let mut total = 0\n\
+         for i < s.len { total = total + s[i]  i = i + 1 }\n\
+         print_int(total)\n\
+         0\n\
+         }\n",
+    );
+    assert_eq!(printed.trim(), "10", "the four words must add up to 10");
+}

@@ -3419,6 +3419,22 @@ fn mentions_any(e: &Expr, names: &HashSet<String>) -> bool {
     }
 }
 
+/// Whether `value` is a call to a function declared `-> Slice`. A slice that arrives from a call
+/// is a slice: where it was built decides nothing about whether its indices are watched, and the
+/// length the caller must prove against is the same `name.len` field, bounded by whatever the
+/// callee's `ensures` says about it.
+fn call_returns_a_slice(value: &Expr, funcs: &[Function]) -> bool {
+    let Expr::Call(callee, _) = value else {
+        return false;
+    };
+    let Expr::Var(fname) = callee.as_ref() else {
+        return false;
+    };
+    funcs.iter().any(|f| {
+        f.name == *fname && matches!(&f.ret, Some(Type::Named(n)) if n == "Slice")
+    })
+}
+
 /// Instantiates a callee's `ensures` at a `let name = f(args)` binding and returns the sound
 /// facts about `name`: the return name mapped to `name`, and (only for all-positional calls)
 /// each parameter mapped to its argument. A clause still mentioning an unmapped parameter is
@@ -3568,7 +3584,8 @@ fn bounds_block(
                 // and `flow.slices` with a Field(s, "len") expression so the prover can match the
                 // loop condition i < s.len against it.
                 let is_slice = ty.as_ref().is_some_and(|t| matches!(t, Type::Named(n) if n == "Slice"))
-                    || matches!(&value, Expr::StructLit(n, _) if n == "Slice");
+                    || matches!(&value, Expr::StructLit(n, _) if n == "Slice")
+                    || call_returns_a_slice(value, funcs);
                 if is_slice {
                     if let Expr::StructLit(_, fields) = &value
                         && let Some(c) = fields
@@ -5567,16 +5584,35 @@ mod tests {
     }
 
     #[test]
-    fn a_slice_that_arrives_from_a_call_is_not_tracked_yet() {
-        // `let s = make()` binds a slice the checker does not follow: the length lives in the
-        // callee's `ensures`, and nothing here reads it, so `s[3]` passes unexamined. The
-        // `ensures` below does not even bound the index (`s.len < 8` says nothing about
-        // `3 < s.len`), which is exactly why this must not be read as a proof.
-        let result = bounds(
+    fn an_index_into_a_slice_returned_by_a_call_must_be_proven_too() {
+        // `let s = make()` is a slice like any other: where it was built decides nothing about
+        // whether its indices are watched. The `ensures` here does not bound the index —
+        // `s.len < 8` says nothing about `3 < s.len`, and a returned length of 0 is allowed by
+        // it — so `s[3]` must be refused rather than waved through for want of an annotation.
+        let err = bounds(
             "fn make() -> (s: Slice) ensures { s.len >= 0; s.len < 8 } { 0 }\n\
              fn f() -> i64 { let s = make()\ns[3] }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot prove") && err.contains("slice"),
+            "an unproven index into a call-returned slice must be rejected, got: {err}"
         );
-        assert!(result.is_ok(), "the call-returned slice is unchecked today");
+    }
+
+    #[test]
+    fn a_callees_ensures_bounds_an_index_into_the_slice_it_returned() {
+        // The other half: when the callee does say how long the slice is, the caller needs no
+        // annotation of its own. Same postcondition machinery that already bounds a returned
+        // `i64`, now reaching the `len` of a returned slice.
+        assert!(
+            bounds(
+                "fn make() -> (s: Slice) ensures { s.len == 8 } { 0 }\n\
+                 fn f() -> i64 { let s = make()\ns[3] }",
+            )
+            .is_ok(),
+            "`ensures {{ s.len == 8 }}` proves `s[3]`"
+        );
     }
 
     #[test]
