@@ -24,7 +24,7 @@ pub mod token;
 pub mod typeck;
 pub mod verify;
 
-use ast::{EnumDef, Function, Global, StructDef};
+use ast::{EnumDef, Function, Global, Signature, StructDef};
 use std::collections::HashSet;
 
 /// The shared compilation pipeline: checks and desugars run between parsing
@@ -47,6 +47,7 @@ pub fn lower_program(
     globals: &mut [Global],
     structs: &mut Vec<StructDef>,
     enums: &[EnumDef],
+    externs: &[Signature],
     target: &str,
 ) -> Result<(), String> {
     // ── checks (pre-desugar) ─────────────────────────────────────────────
@@ -54,6 +55,7 @@ pub fn lower_program(
     check::check_no_duplicate_functions(funcs)?;
     check::check_spawn_not_in_loop(funcs)?;
     check::check_call_arity(funcs)?;
+    check::check_calls_resolve(funcs, externs, structs, enums)?;
     check::check_par_let_arity(funcs)?;
     check::check_par_confluence(funcs, globals)?;
     check::check_graph_acyclic(funcs)?;

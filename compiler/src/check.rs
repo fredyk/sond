@@ -10,7 +10,8 @@
 //! Runs BEFORE struct desugaring, so it sees the original `p.field` form.
 
 use crate::ast::{
-    Arg, BinOp, Block, EnumDef, Expr, Function, Global, Param, Stmt, StructDef, Type, UnOp,
+    Arg, BinOp, Block, EnumDef, Expr, Function, Global, Param, Signature, Stmt, StructDef, Type,
+    UnOp,
 };
 
 /// Exhaustiveness: every `match` on a sum type must cover ALL of its enum's variants,
@@ -939,6 +940,175 @@ pub fn check_par_confluence(funcs: &[Function], globals: &[Global]) -> Result<()
 /// Rejects a `graph { .. }` block whose nodes form a dependency CYCLE (`node a = b  node b = a`):
 /// there is no order in which to evaluate them, so it cannot be scheduled (RFC-0008 §10 forbids
 /// pure data cycles in v1). A DFS with an in-progress mark finds a back edge.
+/// Every name the backends emit without a declaration anywhere in the program. The union across
+/// targets on purpose: `serial_init` exists only on PIC16 and `readkey` only on UEFI, and a name
+/// that belongs to ANOTHER backend is a refusal for that backend to make ("no codegen for X on
+/// this target"), not a missing definition. What this list is for is the third case -- a name that
+/// exists nowhere at all -- which used to travel all the way to codegen and come out as the
+/// compiler's own limitation.
+///
+/// Kept honest by `every_backend_builtin_is_listed`, which reads the match arms out of the backend
+/// sources: a builtin added there without a line here fires that test red.
+pub const BUILTIN_NAMES: &[&str] = &[
+    // x86-64 (codegen/builtins.rs)
+    "addr_of",
+    "alloc",
+    "argc",
+    "argv",
+    "arena_tcb",
+    "asm",
+    "atomic_add64",
+    "atomic_cas64",
+    "cstr",
+    "envp",
+    "exit_boot_services",
+    "halt",
+    "inb",
+    "inl",
+    "inw",
+    "lidt",
+    "outb",
+    "outl",
+    "outw",
+    "peek16",
+    "peek32",
+    "peek64",
+    "peek8",
+    "poke16",
+    "poke32",
+    "poke64",
+    "poke8",
+    "poweroff",
+    "print",
+    "print_char",
+    "print_int",
+    "read_cs",
+    "readkey",
+    "serial_int",
+    "serial_print",
+    "serial_putc",
+    "swtch",
+    "syscall",
+    "write",
+    // PIC16 (codegen/pic16.rs)
+    "delay",
+    "delay_loop",
+    "serial_getc",
+    "serial_init",
+];
+
+/// Rejects a call to a name that is not defined anywhere: not a function in the program, not an
+/// `extern`, not a struct or enum constructor, not a builtin of any backend.
+///
+/// It compiled until codegen and then died with `not yet implemented: x64 codegen for
+/// builtin/function `read_file``, which reads as a hole in the compiler. It is not: `read_file` is
+/// declared in `lib/x86_64/linux/io.snd` and the program simply never included it. The author goes
+/// looking for a compiler bug, and the one line missing is theirs. Naming the call, in the check
+/// phase, with the line it sits on, is what makes the mistake findable.
+pub fn check_calls_resolve(
+    funcs: &[Function],
+    externs: &[Signature],
+    structs: &[StructDef],
+    enums: &[EnumDef],
+) -> Result<(), String> {
+    let mut known: HashSet<&str> = HashSet::new();
+    known.extend(funcs.iter().map(|f| f.name.as_str()));
+    known.extend(externs.iter().map(|e| e.name.as_str()));
+    known.extend(structs.iter().map(|s| s.name.as_str()));
+    for e in enums {
+        known.insert(e.name.as_str());
+        known.extend(e.variants.iter().map(|v| v.name.as_str()));
+    }
+    known.extend(BUILTIN_NAMES.iter().copied());
+
+    fn walk_expr(e: &Expr, known: &HashSet<&str>, fname: &str, line: u32) -> Result<(), String> {
+        if let Expr::Call(callee, _) = e
+            && let Expr::Var(name) = callee.as_ref()
+            // A `__`-prefixed name is synthesized by the compiler itself (the test harness, the
+            // debug agent, a lowered call), never written by an author, so it is not this
+            // check's business.
+            && !name.starts_with("__")
+            && !known.contains(name.as_str())
+        {
+            return Err(format!(
+                "function `{fname}`: `{name}` is not defined at line {line} -- no function, \
+                 `extern`, type or builtin by that name; `include` the module that declares it, \
+                 or write it"
+            ));
+        }
+        match e {
+            Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+                walk_expr(l, known, fname, line)?;
+                walk_expr(r, known, fname, line)
+            }
+            Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
+                walk_expr(x, known, fname, line)
+            }
+            Expr::Call(c, args) => {
+                walk_expr(c, known, fname, line)?;
+                for a in args {
+                    walk_expr(&a.value, known, fname, line)?;
+                }
+                Ok(())
+            }
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                walk_expr(cond, known, fname, line)?;
+                walk_block(then_branch, known, fname, line)?;
+                match else_branch {
+                    Some(b) => walk_block(b, known, fname, line),
+                    None => Ok(()),
+                }
+            }
+            Expr::Match { scrutinee, arms } => {
+                walk_expr(scrutinee, known, fname, line)?;
+                for a in arms {
+                    walk_block(&a.body, known, fname, line)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn walk_block(b: &Block, known: &HashSet<&str>, fname: &str, line: u32) -> Result<(), String> {
+        for (i, s) in b.stmts.iter().enumerate() {
+            // `stmts` and `stmt_lines` are parallel by index; a block that lost its lines (a
+            // synthesized one) falls back to the line of whatever encloses it.
+            let sl = b.stmt_lines.get(i).copied().unwrap_or(line);
+            match s {
+                Stmt::Let { value, .. }
+                | Stmt::Return(Some(value))
+                | Stmt::Expr(value)
+                | Stmt::Spawn(value) => walk_expr(value, known, fname, sl)?,
+                Stmt::Assign { target, value } => {
+                    walk_expr(target, known, fname, sl)?;
+                    walk_expr(value, known, fname, sl)?;
+                }
+                Stmt::For { cond, body, .. } => {
+                    if let Some(c) = cond {
+                        walk_expr(c, known, fname, sl)?;
+                    }
+                    walk_block(body, known, fname, sl)?;
+                }
+                _ => {}
+            }
+        }
+        match &b.tail {
+            Some(t) => walk_expr(t, known, fname, b.stmt_lines.last().copied().unwrap_or(line)),
+            None => Ok(()),
+        }
+    }
+
+    for f in funcs {
+        walk_block(&f.body, &known, &f.name, 0)?;
+    }
+    Ok(())
+}
+
 /// Rejects a call whose argument count does not match the callee's declaration.
 ///
 /// Both directions compiled in silence. Too MANY arguments: the extras were evaluated and
@@ -4126,6 +4296,16 @@ mod tests {
         check_string_literal_types(&funcs, &globals)
     }
 
+    fn calls_resolve(src: &str) -> Result<(), String> {
+        let (toks, lines, _cols) = tokenize_located(src);
+        let mut p = Parser::with_lines(toks, lines);
+        let funcs = p.parse_program();
+        let externs = p.take_externs();
+        let structs = p.take_structs();
+        let enums = p.take_enums();
+        check_calls_resolve(&funcs, &externs, &structs, &enums)
+    }
+
     fn bounds(src: &str) -> Result<(), String> {
         let (toks, lines, _cols) = tokenize_located(src);
         let mut p = Parser::with_lines(toks, lines);
@@ -4554,6 +4734,111 @@ mod tests {
             bounds(src).is_ok(),
             "both conjuncts of a checked condition must survive the guard"
         );
+    }
+
+    #[test]
+    fn a_call_to_a_name_nobody_defined_names_the_missing_definition() {
+        // `read_file` lives in `lib/x86_64/linux/io.snd`; a program that forgets to `include` it
+        // used to reach codegen and die with "not yet implemented: x64 codegen for
+        // builtin/function `read_file`" -- a diagnosis that sends the author to fix the compiler
+        // when what is missing is one line of their own file.
+        let err = calls_resolve("fn main() -> i64 { read_file(0, 0, 64) }").unwrap_err();
+        assert!(err.contains("read_file"), "must name the call: {err}");
+        assert!(
+            err.contains("not defined") && err.contains("include"),
+            "must say what is missing and how to supply it: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_call_reports_the_line_it_is_written_on() {
+        // Lines:
+        //   1  fn main() -> i64 {
+        //   2      let n = 1
+        //   3      read_file(n, 0, 64)   <- here
+        //   4  }
+        // The function name alone is not a location in a file of any size.
+        let err = calls_resolve("fn main() -> i64 {\n    let n = 1\n    read_file(n, 0, 64)\n}")
+            .unwrap_err();
+        assert!(
+            err.contains("at line 3"),
+            "must point at the call site: {err}"
+        );
+    }
+
+    #[test]
+    fn a_call_to_a_declared_function_resolves() {
+        assert!(calls_resolve("fn helper() -> i64 { 1 }\nfn main() -> i64 { helper() }").is_ok());
+    }
+
+    #[test]
+    fn a_call_to_a_builtin_resolves() {
+        // `poke8` has no declaration anywhere: the backend emits it. The check must know the
+        // builtins or it would reject every program that touches memory.
+        assert!(calls_resolve("fn main() -> i64 { poke8(0, 0)\n0 }").is_ok());
+    }
+
+    #[test]
+    fn every_backend_builtin_is_listed() {
+        // BUILTIN_NAMES is a second copy of what the backends dispatch on, and a second copy
+        // rots. This reads the arms straight out of the backend sources, so a builtin added
+        // there and not here fires red instead of surfacing months later as a program that the
+        // checker rejects and the codegen would have compiled.
+        let x64 = include_str!("codegen/builtins.rs");
+        let pic = include_str!("codegen/pic16.rs");
+        let mut found: Vec<String> = Vec::new();
+        // x86-64: `"name" =>`, `"a" | "b" =>`, `"name" if guard =>`, at the head of a line.
+        for line in x64.lines() {
+            let t = line.trim_start();
+            if !t.starts_with('"') {
+                continue;
+            }
+            let Some(head) = t.split("=>").next() else {
+                continue;
+            };
+            if !t.contains("=>") {
+                continue;
+            }
+            for piece in head.split('|') {
+                let piece = piece.trim();
+                if let Some(rest) = piece.strip_prefix('"')
+                    && let Some(end) = rest.find('"')
+                {
+                    found.push(rest[..end].to_string());
+                }
+            }
+        }
+        // PIC16 dispatches on `(name, arity)`: `("serial_init", 0) =>`.
+        for line in pic.lines() {
+            let t = line.trim_start();
+            if let Some(rest) = t.strip_prefix("(\"")
+                && let Some(end) = rest.find('"')
+                && t.contains("=>")
+            {
+                found.push(rest[..end].to_string());
+            }
+        }
+        assert!(
+            found.len() > 30,
+            "the backend sources were read wrong: only {} arms found",
+            found.len()
+        );
+        let listed: HashSet<&str> = BUILTIN_NAMES.iter().copied().collect();
+        let missing: Vec<&String> = found
+            .iter()
+            .filter(|n| !listed.contains(n.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these builtins are dispatched by a backend and missing from BUILTIN_NAMES: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn a_call_to_a_builtin_of_another_backend_resolves() {
+        // `serial_init` is a PIC16 builtin. The x86-64 backend has no codegen for it, and that
+        // refusal belongs to the backend: this check only rules out names that exist NOWHERE.
+        assert!(calls_resolve("fn main() -> i64 { serial_init()\n0 }").is_ok());
     }
 
     #[test]

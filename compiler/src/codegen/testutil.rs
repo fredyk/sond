@@ -27,13 +27,14 @@ pub(crate) fn parse_and_lower(src: &str, target: &str) -> (Vec<Function>, Vec<Gl
     let mut globals = p.take_globals();
     let mut structs = p.take_structs();
     let enums = p.take_enums();
+    let externs = p.take_externs();
     let ports = p.take_ports();
     let providers = p.take_providers();
     let uses = p.take_uses();
     let spliced = crate::ports::resolve_ports(&ports, &providers, &uses, target)
         .expect("port resolution should succeed in this test");
     funcs.extend(spliced);
-    crate::lower_program(&mut funcs, &mut globals, &mut structs, &enums, target)
+    crate::lower_program(&mut funcs, &mut globals, &mut structs, &enums, &externs, target)
         .expect("lower_program should succeed in this test");
     (funcs, globals, structs)
 }

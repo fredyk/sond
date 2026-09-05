@@ -264,7 +264,14 @@ fn main() -> ExitCode {
     // it: the checks now share one exit, and a compiler that says which file it is talking about
     // is the behaviour worth keeping when the two spellings meet.
     if let Err(msg) =
-        sondc::lower_program(&mut funcs, &mut globals, &mut structs, &enums, lower_target)
+        sondc::lower_program(
+            &mut funcs,
+            &mut globals,
+            &mut structs,
+            &enums,
+            &externs,
+            lower_target,
+        )
     {
         // The line numbers these checks carry are lines of the SPLICED text. Translate them back
         // into the file the line was written in, and name that file when it is not the entry --
