@@ -99,6 +99,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let cov_files = resolved.cov_files.clone();
     let mut src = resolved.src;
     let cov_scope = resolved.cov_scope;
     let spans = resolved.spans;
@@ -217,6 +218,19 @@ fn main() -> ExitCode {
             eprintln!("sondc: {msg}");
             return ExitCode::FAILURE;
         }
+    }
+
+    // `--entry-info`: what a tool needs to reason about a whole tree, from the compiler that
+    // decides it rather than from a second copy of the rule that drifts. Two facts:
+    //   tests: N        how many `test` blocks the parser saw (0 = this file is not an entry)
+    //   covers: <path>  one line per file this entry answers for in its coverage denominator
+    // A module that appears in no entry's `covers:` is a module no gate ever reads.
+    if args.iter().any(|a| a == "--entry-info") {
+        println!("tests: {}", funcs.iter().filter(|f| f.is_test).count());
+        for f in &cov_files {
+            println!("covers: {}", f.display());
+        }
+        return ExitCode::SUCCESS;
     }
 
     // `test "..." { .. }` blocks are inert in an ordinary compile, only `sond test`
