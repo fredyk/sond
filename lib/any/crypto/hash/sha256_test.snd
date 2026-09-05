@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/crypto/hash/sha256.snd, against the FIPS 180-4 vectors.
+//
+// SHA-256 is under HMAC, HKDF, PBKDF2, SCRAM, the TLS key schedule and the package manager's
+// content hashes, and `sond test lib` listed it as a file no gate reads: every one of those
+// gates measures its own module and takes this one on faith. A wrong digest here is not a
+// visible failure anywhere, it is a different key or a different package hash.
+//
+// The lengths are chosen around the padding rule, which is where a hash implementation breaks:
+// 55 bytes is the last message whose 1 + 8 padding bytes still fit in the same block, and 56 is
+// the first that needs a whole extra block for the length. Both branches are here.
+
+include "any/crypto/hash/sha256.snd"
+include "x86_64/linux/testing.snd"
+
+let H_EMPTY: string = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+let H_ABC: string   = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+// The 448-bit message of FIPS 180-4's second example.
+let MSG448: string  = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+let H_448: string   = "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+// 55, 56, 64 and 1000 bytes of 'a': the padding boundary from both sides, an exact block, and a
+// message long enough that the block loop has to carry state across many rounds.
+let H_A55: string   = "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"
+let H_A56: string   = "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a"
+let H_A64: string   = "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"
+let H_A1000: string = "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3"
+
+let mut dig[5]      // 32 bytes of digest plus room for a sentinel behind it
+let mut aes[125]    // 1000 bytes of 'a'
+
+fn hexval(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    c - 55
+}
+
+fn eq_hex(buf: i64, n: i64, hexstr: i64) -> i64 {
+    for i in 0..n {
+        let hi = hexval(peek8(hexstr + i * 2))
+        let lo = hexval(peek8(hexstr + i * 2 + 1))
+        if peek8(buf + i) != (hi * 16 + lo) { return 0 }
+    }
+    1
+}
+
+// The digest of `n` bytes of 'a', as hex, compared against `esperado`.
+fn aes_hash_es(n: i64, esperado: i64) -> i64 {
+    for i in 0..1000 { poke8(aes + i, 97) }
+    sha256_hash(aes, n, dig)
+    eq_hex(dig, 32, esperado)
+}
+
+test "the empty message hashes to the digest FIPS prints" {
+    // Nothing to process and everything to pad: the whole digest comes out of the padding block.
+    sha256_hash(aes, 0, dig)
+    assert_eq(eq_hex(dig, 32, H_EMPTY.utf8), 1)
+}
+
+test "\"abc\" hashes to the digest FIPS prints" {
+    let msg: string = "abc"
+    sha256_hash(msg.utf8, 3, dig)
+    assert_eq(eq_hex(dig, 32, H_ABC.utf8), 1)
+}
+
+test "the 448-bit example of FIPS 180-4 hashes to its published digest" {
+    sha256_hash(MSG448.utf8, 56, dig)
+    assert_eq(eq_hex(dig, 32, H_448.utf8), 1)
+}
+
+test "55 bytes pad inside their own block" {
+    assert_eq(aes_hash_es(55, H_A55.utf8), 1)
+}
+
+test "56 bytes need a second block for the length, and get it" {
+    // One byte more than the case above, and the padding no longer fits: the length goes into a
+    // block of its own. Getting this wrong gives a digest that looks fine and is not.
+    assert_eq(aes_hash_es(56, H_A56.utf8), 1)
+}
+
+test "a message of exactly one block is not a message of none" {
+    assert_eq(aes_hash_es(64, H_A64.utf8), 1)
+}
+
+test "a thousand bytes hash across sixteen blocks" {
+    assert_eq(aes_hash_es(1000, H_A1000.utf8), 1)
+}
+
+test "one bit of the message changes the digest" {
+    let otro: string = "abd"
+    sha256_hash(otro.utf8, 3, dig)
+    assert_eq(eq_hex(dig, 32, H_ABC.utf8), 0)
+}
+
+test "nothing is written past the 32 bytes of the digest" {
+    // `out` is the caller's buffer, and the loop that writes it counts words, not bytes.
+    poke8(dig + 32, 0xcd)
+    let msg: string = "abc"
+    sha256_hash(msg.utf8, 3, dig)
+    assert_eq(peek8(dig + 32), 0xcd)
+}
