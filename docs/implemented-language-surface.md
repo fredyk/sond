@@ -47,6 +47,11 @@ fn efi_main() -> i64 {
   the LAST function. Its integer value is the exit code (hosted) or EFI status.
 - Functions call each other by position, at most 6 args. Statements are newline-terminated
   (no `;`); `//` is a line comment. A block's value is its tail expression (the `0` above).
+- `(pub|priv)? extern fn name(params) -> Type`, with no body, DECLARES a function this
+  program calls and does not define; the linker resolves it. It takes contracts like any
+  other signature. This is the shape of a `.snd` header: `sondc --emit-header` writes the
+  public interface of a module as `extern` declarations, so the header is a file this
+  compiler can read.
 
 ## Types
 

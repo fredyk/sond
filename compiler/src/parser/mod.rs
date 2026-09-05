@@ -166,8 +166,7 @@ impl Parser {
                     | Token::Impl
                     | Token::Test
             )
-        ) || (matches!(self.peek(), Some(Token::Ident(k)) if k == "extern")
-            && self.tokens.get(self.pos + 1) == Some(&Token::Fn))
+        ) || self.abre_extern()
         {
             // `impl` opens one of two blocks, told apart by a `for` after the name:
             //   `impl Iface for Target { fn .. }`  a per-target interface implementation
@@ -176,14 +175,17 @@ impl Parser {
             //   `impl Type { fn m(self, ..) .. }`  inherent methods: each becomes a free function
             //                                      `Type_m` with `self` typed as the struct;
             //                                      `p.m(a)` lowers to `Type_m(p, a)` by desugar.
-            // `extern fn name(params) -> T`: a function this program CALLS but does not define,
-            // resolved by the linker. `extern` is a contextual keyword (a plain identifier
-            // elsewhere), recognized only here, directly before `fn`.
-            if matches!(self.peek(), Some(Token::Ident(k)) if k == "extern")
-                && self.tokens.get(self.pos + 1) == Some(&Token::Fn)
-            {
+            // `(pub|priv)? extern fn name(params) -> T`: a function this program CALLS but does
+            // not define, resolved by the linker. `extern` is a contextual keyword (a plain
+            // identifier elsewhere), recognized only here, directly before `fn`. The visibility
+            // goes in FRONT of it, like on every other declaration -- a header is nothing but
+            // public declarations without bodies, and without this it could not say `pub`.
+            if self.abre_extern() {
+                let vis = self.parse_visibility();
                 self.advance(); // `extern`
-                let sig = self.parse_signature();
+                self.expect(Token::Fn);
+                let name = self.expect_ident();
+                let sig = self.parse_sig_tail(vis, name);
                 self.externs.push(sig);
                 self.skip_semicolons();
                 continue;
@@ -288,6 +290,19 @@ impl Parser {
 
     /// Eats an optional `pub`/`priv` prefix and returns the visibility. Absent =
     /// `Priv` (private by default).
+    /// Whether an `extern fn` declaration starts here, with or without the visibility every other
+    /// declaration accepts. `extern` is a contextual keyword: a plain identifier anywhere else, so
+    /// what makes it one is the `fn` right after it.
+    fn abre_extern(&self) -> bool {
+        let n = if matches!(self.peek(), Some(Token::Pub | Token::Priv)) {
+            self.pos + 1
+        } else {
+            self.pos
+        };
+        matches!(self.tokens.get(n), Some(Token::Ident(k)) if k == "extern")
+            && self.tokens.get(n + 1) == Some(&Token::Fn)
+    }
+
     fn parse_visibility(&mut self) -> Visibility {
         if self.eat(Token::Pub) {
             Visibility::Pub

@@ -3,15 +3,15 @@
 pub struct Slice { ptr: i64, len: i64 }
 
 // Assert a condition is true (nonzero). On failure, abort the test.
-pub fn assert(cond: i64)
+pub extern fn assert(cond: i64)
 
 // Assert two i64 values are equal. On failure, print expected vs actual and abort.
-pub fn assert_eq(actual: i64, expected: i64)
+pub extern fn assert_eq(actual: i64, expected: i64)
 
 // Assert two i64 values are different.
-pub fn assert_ne(a: i64, b: i64)
+pub extern fn assert_ne(a: i64, b: i64)
 
 // Report one test's wait4 status word (0 == the forked child exited cleanly = the test
 // passed; anything else = a failed assertion or a crash). Prints the outcome and returns
 // the updated failure count. Used by the `sond test` harness, not user-facing.
-pub fn __test_report(status: i64, failed: i64) -> i64
+pub extern fn __test_report(status: i64, failed: i64) -> i64

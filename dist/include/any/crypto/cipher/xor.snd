@@ -9,4 +9,4 @@ pub struct Slice { ptr: i64, len: i64 }
 // Portable (arch: any). Include with: include "any/crypto/cipher/xor.snd".
 // xor_crypt XORs `len` bytes at `buf` in place with the `keylen`-byte key at `key`;
 // calling it twice with the same key is a round-trip (encrypt then decrypt).
-pub fn xor_crypt(buf: i64, len: i64, key: i64, keylen: i64) -> i64
+pub extern fn xor_crypt(buf: i64, len: i64, key: i64, keylen: i64) -> i64
