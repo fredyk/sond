@@ -31,6 +31,27 @@ fn sshkex_wstr(base, off, src, n) {
     sshkex_wcopy(base, off + 4, src, n)
 }
 
+// Write an SSH `mpint`: RFC 4251 §5, a signed big-endian integer with no unnecessary leading
+// zero bytes, and a 0x00 in front when the top bit would otherwise read as a sign. Zero is the
+// empty string. Return the new off.
+fn sshkex_wmpint(base, off, src, n) {
+    let mut i = 0
+    for i < n {
+        if peek8(src + i) != 0 { break }
+        i = i + 1
+    }
+    if i == n {
+        sshkex_poke32be(base + off, 0)
+        return off + 4
+    }
+    let mut lead = 0
+    if peek8(src + i) >= 0x80 { lead = 1 }
+    sshkex_poke32be(base + off, n - i + lead)
+    let mut o = off + 4
+    if lead == 1 { poke8(base + o, 0); o = o + 1 }
+    sshkex_wcopy(base, o, src + i, n - i)
+}
+
 // The reusable server side of the curve25519-sha256 KEX. Given the server
 // ephemeral private `eph`, the client ephemeral public `qc`, the Ed25519 host
 // secret key `hsk` and public key `hpub`, and the transcript fields
@@ -48,6 +69,10 @@ fn server_kex(eph, qc, hsk, hpub, vc, vs, ic, is, edstr, qs_out, k_out, h_out, s
     x25519(eph, bp, qs_out) // Q_S = server ephemeral public
     x25519(eph, qc, k_out)  // K   = shared secret
 
+    // 200 bytes, which is the widest this transcript gets: 4+9 twice for the banners, 4+1 twice
+    // for the KEXINIT payloads, 4 for the K_S length, 4+11 for "ssh-ed25519", 4+32 three times
+    // for the host key and the two ephemeral publics, and 4+33 for K when its top byte forces
+    // the mpint's leading zero.
     let buf[25]
     let mut off = 0
     off = sshkex_wstr(buf, off, vc, 9)
@@ -60,7 +85,14 @@ fn server_kex(eph, qc, hsk, hpub, vc, vs, ic, is, edstr, qs_out, k_out, h_out, s
     off = sshkex_wstr(buf, off, hpub, 32)
     off = sshkex_wstr(buf, off, qc, 32)
     off = sshkex_wstr(buf, off, qs_out, 32)
-    off = sshkex_wstr(buf, off, k_out, 32)
+    // K goes on the transcript as an mpint, NOT as a 32-byte string. RFC 8731 §3.1: "The 32 or
+    // 56 bytes of X are converted into K by interpreting the octets as an unsigned fixed-length
+    // integer encoded in network byte order", and "that K value is encoded as a variable-length
+    // signed `mpint` before being fed to the hash algorithm". The client hashes the mpint, so a
+    // server that hashes a fixed string computes a different H; the signature it then sends is
+    // over the wrong value, the client rejects it, and the connection dies with nothing on
+    // either side pointing at why.
+    off = sshkex_wmpint(buf, off, k_out, 32)
     sha256_hash(buf, off, h_out)         // H
     ed25519_sign_h(hsk, h_out, sig_out)  // signature over H
 }
