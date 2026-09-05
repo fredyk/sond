@@ -263,3 +263,61 @@ test "a query with nobody answering times out instead of blocking forever" {
     assert(dns_query_fd(cli, 0x7f000001, 1, HOST_EXAMPLE.utf8, 7, out, 128) < 0)
     close_fd(cli)
 }
+
+// Every length in a DNS reply is attacker-controlled, so each one has a check behind it, and
+// each check has a packet here that trips it. The lengths are chosen against the real
+// example.com capture above: header 12, question ends at 25 with its QTYPE/QCLASS at 29, the
+// answer's compression pointer at 29, its record header at 31, and its four bytes of address
+// at 41.
+test "a name running off the end of the packet is refused, not read past" {
+    let n = unhex(R_EXAMPLE.utf8, pkt)
+    // 20 bytes: the first label of the question claims seven bytes that are not all there.
+    assert_eq(dns_parse_a(pkt, 20, 0x72b3), DNS_EFORMAT)
+}
+
+test "a question with no room for its QTYPE and QCLASS is refused" {
+    let n = unhex(R_EXAMPLE.utf8, pkt)
+    // 27 bytes: the name ends at 25, and the four bytes that must follow it do not fit.
+    assert_eq(dns_parse_a(pkt, 27, 0x72b3), DNS_EFORMAT)
+}
+
+test "an answer with no room for its record header is refused" {
+    let n = unhex(R_EXAMPLE.utf8, pkt)
+    // 35 bytes: past the answer's name at 31, but short of the ten bytes of type/class/length.
+    assert_eq(dns_parse_a(pkt, 35, 0x72b3), DNS_EFORMAT)
+}
+
+test "an rdlength reaching past the end of the packet is refused" {
+    let n = unhex(R_EXAMPLE.utf8, pkt)
+    // 44 bytes: the record says four bytes of address at 41, and only three are there. This is
+    // the check that keeps a hostile length from turning into a read past the buffer.
+    assert_eq(dns_parse_a(pkt, 44, 0x72b3), DNS_EFORMAT)
+}
+
+let RESOLV_CUT: string = "namese"
+
+test "a resolv.conf that ends inside the word `nameserver` reports no server" {
+    // The comparison walks ten bytes; without the bounds check it walks them off the end of
+    // what was read.
+    write_fixture(RESOLV_PATH.utf8, RESOLV_CUT.utf8, 6)
+    assert(resolv_nameserver(RESOLV_PATH.utf8) < 0)
+    remove_file(RESOLV_PATH.utf8)
+}
+
+test "a query on a closed socket reports the kernel's error, not a timeout" {
+    // A send that never happened is not a server that did not answer, and reading it as one
+    // would hide a broken socket behind a plausible-looking network fault.
+    let fd = udp_socket()
+    assert(fd >= 0)
+    close_fd(fd)
+    let r = dns_query_fd(fd, 0x7f000001, 53, HOST_EXAMPLE.utf8, 7, out, 128)
+    assert(r < 0)
+    assert(r != DNS_ETIMEOUT)
+}
+
+test "a name that cannot be encoded never reaches the network through dns_resolve either" {
+    // The convenience entry point reads the machine's own resolv.conf, so this is the one test
+    // that touches it -- and it still sends nothing: the name is refused while the query is
+    // being built, before any socket is used.
+    assert(dns_resolve(HOST_LONGLABEL.utf8) < 0)
+}
