@@ -89,3 +89,18 @@ test "poll_readable reports the writer hanging up, not just data" {
     assert_eq(poll_readable(rd, 1000), 1)
     syscall(SYS_close, rd)
 }
+
+test "a descriptor that is not open is not read as 'nothing yet'" {
+    // POLLNVAL: the fd is closed. `poll` returns 1 -- there IS an event -- but the event is
+    // "this is not a descriptor". Counting only POLLIN|POLLHUP|POLLERR turned that into the same
+    // 0 the deadline returns, so `while poll_readable(fd, t) == 0 { }` spins forever on a
+    // descriptor that will never be anything: the answer never changes and nothing ever fails.
+    let p[1]
+    assert(syscall(SYS_pipe, p) >= 0)
+    let rd = peek32(p)
+    let wr = peek32(p + 4)
+    syscall(SYS_close, rd)
+    syscall(SYS_close, wr)
+    // Not 0: a read on it returns EBADF at once, which is how the caller learns.
+    assert_ne(poll_readable(rd, 50), 0)
+}
