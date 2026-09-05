@@ -16,6 +16,10 @@
 // API: json_parse(data,len) -> root node, or -1 on error. json_type(node).
 // json_get(obj,key_cstr) -> value node or -1. json_int/json_bool/json_str/
 // json_str_len. json_arr_len/json_arr_get.
+//
+// Those two -1s are handles that name no node, and json_type reports them as JSON_NONE
+// instead of reading through them, so `if json_type(x) != JSON_OBJ` is a guard and not a
+// crash. The value accessors below still expect a node of their own type: ask json_type first.
 
 include "any/strings.snd"
 include "x86_64/linux/heap.snd"
@@ -28,6 +32,12 @@ let JSON_INT  = 2
 let JSON_STR  = 3
 let JSON_ARR  = 4
 let JSON_OBJ  = 5
+
+// The type of a handle that names no node: a key that is not in the object, a document that
+// did not parse. It is the value of the sentinel those two return, so `json_type` can answer
+// for it without dereferencing anything, and it is distinct from JSON_NULL on purpose --
+// "the field is not there" and "the field is there and holds null" are different answers.
+let JSON_NONE = 0 - 1
 
 let JSON_EOF = 256           // sentinel returned past the end (no real byte is 256)
 
@@ -182,7 +192,11 @@ pub fn json_parse(data: i64, len: i64) -> i64 {
     if __j_err == 1 { 0 - 1 } else { root }
 }
 
-pub fn json_type(node: i64) -> i64 { node[0] }
+// Total on purpose: `json_parse` and `json_get` hand back a sentinel when there is nothing to
+// hand back, and this is the accessor callers use to find out. Reading node[0] off that
+// sentinel is a wild dereference, so the guard that exists to reject bad input was the thing
+// that died on it.
+pub fn json_type(node: i64) -> i64 { if node <= 0 { JSON_NONE } else { node[0] } }
 pub fn json_int(node: i64) -> i64 { node[1] }
 pub fn json_bool(node: i64) -> i64 { node[1] }
 pub fn json_str(node: i64) -> i64 { node[1] }        // NUL-terminated cstr
