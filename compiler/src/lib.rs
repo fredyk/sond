@@ -56,6 +56,7 @@ pub fn lower_program(
     check::check_spawn_not_in_loop(funcs)?;
     check::check_call_arity(funcs)?;
     check::check_calls_resolve(funcs, externs, structs, enums)?;
+    check::check_unreachable_statements(funcs)?;
     check::check_par_let_arity(funcs)?;
     check::check_par_confluence(funcs, globals)?;
     check::check_graph_acyclic(funcs)?;

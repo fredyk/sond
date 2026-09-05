@@ -997,6 +997,76 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "serial_init",
 ];
 
+/// Rejects a statement that can never run: one that follows a `return`, `break` or `continue` in
+/// the same block. It is always a mistake -- the author believes those lines run -- and it is
+/// invisible, because nothing fails: the program does the right thing for the wrong reason, and
+/// the lines sit there being read as if they meant something.
+///
+/// It also drags a whole repository under its coverage gate. `sond test` requires 80% and
+/// unreachable statements cannot be covered by any test, so the number cannot be fixed by writing
+/// more of them -- only by deleting code that was never running.
+pub fn check_unreachable_statements(funcs: &[Function]) -> Result<(), String> {
+    fn walk_block(b: &Block, fname: &str) -> Result<(), String> {
+        for (i, s) in b.stmts.iter().enumerate() {
+            if matches!(s, Stmt::Return(_) | Stmt::Break | Stmt::Continue)
+                && i + 1 < b.stmts.len()
+            {
+                let line = b.stmt_lines.get(i + 1).copied().unwrap_or(0);
+                let kind = match s {
+                    Stmt::Return(_) => "return",
+                    Stmt::Break => "break",
+                    _ => "continue",
+                };
+                return Err(format!(
+                    "function `{fname}`: the statement at line {line} can never run -- the \
+                     `{kind}` above it always leaves the block"
+                ));
+            }
+            match s {
+                Stmt::For { body, .. } => walk_block(body, fname)?,
+                Stmt::Let { value, .. }
+                | Stmt::Return(Some(value))
+                | Stmt::Expr(value)
+                | Stmt::Spawn(value)
+                | Stmt::Assign { value, .. } => walk_expr(value, fname)?,
+                _ => {}
+            }
+        }
+        match &b.tail {
+            Some(t) => walk_expr(t, fname),
+            None => Ok(()),
+        }
+    }
+
+    fn walk_expr(e: &Expr, fname: &str) -> Result<(), String> {
+        match e {
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                walk_block(then_branch, fname)?;
+                match else_branch {
+                    Some(b) => walk_block(b, fname),
+                    None => Ok(()),
+                }
+            }
+            Expr::Match { arms, .. } => {
+                for a in arms {
+                    walk_block(&a.body, fname)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    for f in funcs {
+        walk_block(&f.body, &f.name)?;
+    }
+    Ok(())
+}
+
 /// Rejects a call to a name that is not defined anywhere: not a function in the program, not an
 /// `extern`, not a struct or enum constructor, not a builtin of any backend.
 ///
@@ -4839,6 +4909,48 @@ mod tests {
         // `serial_init` is a PIC16 builtin. The x86-64 backend has no codegen for it, and that
         // refusal belongs to the backend: this check only rules out names that exist NOWHERE.
         assert!(calls_resolve("fn main() -> i64 { serial_init()\n0 }").is_ok());
+    }
+
+    fn unreachable_stmts(src: &str) -> Result<(), String> {
+        let (toks, lines, _cols) = tokenize_located(src);
+        let mut p = Parser::with_lines(toks, lines);
+        let funcs = p.parse_program();
+        check_unreachable_statements(&funcs)
+    }
+
+    #[test]
+    fn a_statement_written_after_a_return_is_rejected_by_the_line_it_sits_on() {
+        // Nothing fails at runtime when this is compiled: the program does the right thing for
+        // the wrong reason, and the lines below the `return` are read as if they meant something.
+        let err = unreachable_stmts("fn f(n: i64) -> i64 {\nlet mut m = n\nreturn m\nm = m + 1\n}")
+            .expect_err("a statement below a `return` must be rejected");
+        assert!(err.contains("line 4"), "the message must name line 4; got: {err}");
+        assert!(err.contains("can never run"), "the message must say why; got: {err}");
+        assert!(err.contains("`f`"), "the message must name the function; got: {err}");
+    }
+
+    #[test]
+    fn a_return_inside_an_if_leaves_the_code_after_the_if_reachable() {
+        // The `return` ends the `if` block, not the function body: everything below the `if` runs
+        // whenever the guard is false. Rejecting this would be rejecting every early exit.
+        assert!(
+            unreachable_stmts("fn f(n: i64) -> i64 {\nif n < 0 { return 0 }\nlet m = n + 1\nm\n}")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_statement_written_after_a_break_is_rejected_too() {
+        // `break` and `continue` leave the block exactly like `return` does.
+        let err = unreachable_stmts("fn f() -> i64 { let mut i = 0\nfor i < 4 { break\ni = i + 1 }\n0 }")
+            .expect_err("a statement below a `break` must be rejected");
+        assert!(err.contains("line 3"), "the message must name line 3; got: {err}");
+        assert!(err.contains("`break`"), "the message must name the `break`; got: {err}");
+    }
+
+    #[test]
+    fn a_return_as_the_last_statement_of_a_block_is_not_dead_code() {
+        assert!(unreachable_stmts("fn f(n: i64) -> i64 {\nreturn n\n}").is_ok());
     }
 
     #[test]
