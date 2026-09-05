@@ -1,29 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
-// Ed25519 signing (RFC 8032 §5.1.6): Test 1 signature verification
+// Ed25519 signing (RFC 8032 §5.1.6): sign a 32-byte message with a 32-byte secret key.
 
 include "any/crypto/group/ed25519-group.snd"
 include "any/crypto/scalar/ed25519-scalar.snd"
-
-// RFC 8032 Test 1 secret key (32 bytes, LE layout)
-let SK[4] = [
-    0x605afdef9db1619d,
-    0xc42cec92f44a84ba,
-    0x1969327b69c54944,
-    0x607fae1c03ac3b70
-]
-
-// Expected signature (64 bytes, LE layout)
-let EXP_SIG[8] = [
-    0x72ac60c3004356e5,
-    0x8a826e80cce28690,
-    0x74d9e5b81e7f8784,
-    0x5501492265e073d8,
-    0xac3ba3901582b85f,
-    0x6bb4f91c70391ec6,
-    0x24be5b59f0f55bd2,
-    0x0b107a8e43415165
-]
 
 fn bytes32_to_limbs16(dst, src) {
     let mut j = 0

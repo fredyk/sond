@@ -4,6 +4,26 @@
 
 include "any/crypto/sign/ed25519-sign.snd"
 
+// RFC 8032 Test 1 secret key (32 bytes, LE layout)
+let SK[4] = [
+    0x605afdef9db1619d,
+    0xc42cec92f44a84ba,
+    0x1969327b69c54944,
+    0x607fae1c03ac3b70
+]
+
+// Expected signature (64 bytes, LE layout)
+let EXP_SIG[8] = [
+    0x72ac60c3004356e5,
+    0x8a826e80cce28690,
+    0x74d9e5b81e7f8784,
+    0x5501492265e073d8,
+    0xac3ba3901582b85f,
+    0x6bb4f91c70391ec6,
+    0x24be5b59f0f55bd2,
+    0x0b107a8e43415165
+]
+
 fn main() -> i64 {
     // 1. SHA512(sk) → 64-byte hash
     let hash[8]
