@@ -19,6 +19,7 @@ pub mod ports;
 pub mod deps;
 pub mod sha256;
 pub mod resolve;
+pub mod scratch;
 pub mod testing;
 pub mod token;
 pub mod typeck;

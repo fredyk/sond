@@ -871,11 +871,12 @@ fn uefi_exit_boot_services_gets_the_map_then_exits() {
 fn compile_and_status(src: &str) -> std::process::ExitStatus {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let asm = emit_program(&Parser::new(tokenize(src)).parse_program());
-    let dir = std::env::temp_dir();
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let stem = format!("sondc_st_{}_{}", std::process::id(), n);
-    let asm_path = dir.join(format!("{stem}.s"));
-    let bin_path = dir.join(&stem);
+    let _ = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // The scratch dir goes on drop, even when an assert below panics: the `remove_file` calls on
+    // the happy path left every FAILING run's files behind for good, and this temp dir is RAM.
+    let dir = crate::scratch::Temporal::nuevo("sondc_st");
+    let asm_path = dir.join("prog.s");
+    let bin_path = dir.join("prog");
     std::fs::write(&asm_path, asm).unwrap();
     assert!(
         Command::new("cc")
@@ -937,11 +938,12 @@ fn compile_and_run_with_globals(src: &str) -> i32 {
     let funcs = p.parse_program();
     let globals = p.take_globals();
     let asm = emit_program_g(&globals, &[], &funcs);
-    let dir = std::env::temp_dir();
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let stem = format!("sondc_g_{}_{}", std::process::id(), n);
-    let asm_path = dir.join(format!("{stem}.s"));
-    let bin_path = dir.join(&stem);
+    let _ = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // The scratch dir goes on drop, even when an assert below panics: the `remove_file` calls on
+    // the happy path left every FAILING run's files behind for good, and this temp dir is RAM.
+    let dir = crate::scratch::Temporal::nuevo("sondc_g");
+    let asm_path = dir.join("prog.s");
+    let bin_path = dir.join("prog");
     std::fs::write(&asm_path, asm).unwrap();
     assert!(
         Command::new("cc")
@@ -963,11 +965,12 @@ fn compile_and_run_with_globals_lowered(src: &str) -> i32 {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
     let (funcs, globals, _structs) = super::testutil::parse_and_lower(src, "host");
     let asm = emit_program_g(&globals, &[], &funcs);
-    let dir = std::env::temp_dir();
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let stem = format!("sondc_g_l_{}_{}", std::process::id(), n);
-    let asm_path = dir.join(format!("{stem}.s"));
-    let bin_path = dir.join(&stem);
+    let _ = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // The scratch dir goes on drop, even when an assert below panics: the `remove_file` calls on
+    // the happy path left every FAILING run's files behind for good, and this temp dir is RAM.
+    let dir = crate::scratch::Temporal::nuevo("sondc_g_l");
+    let asm_path = dir.join("prog.s");
+    let bin_path = dir.join("prog");
     std::fs::write(&asm_path, asm).unwrap();
     assert!(
         Command::new("cc")
@@ -1726,12 +1729,11 @@ fn shared_abi_code_assembles_into_a_relocatable_object_and_links_statically() {
     let structs = p.take_structs();
     let asm = emit_shared_g(&globals, &structs, &funcs);
 
-    let dir = std::env::temp_dir();
-    let stem = format!("sondc_obj_{}", std::process::id());
-    let asm_path = dir.join(format!("{stem}.s"));
-    let obj_path = dir.join(format!("{stem}.o"));
-    let c_path = dir.join(format!("{stem}.c"));
-    let bin_path = dir.join(&stem);
+    let dir = crate::scratch::Temporal::nuevo("sondc_obj");
+    let asm_path = dir.join("prog.s");
+    let obj_path = dir.join("prog.o");
+    let c_path = dir.join("prog.c");
+    let bin_path = dir.join("prog");
     std::fs::write(&asm_path, asm).unwrap();
     std::fs::write(
         &c_path,
@@ -2678,13 +2680,7 @@ fn a_redefined_colliding_global_binds_each_file_to_its_own_value() {
     // own definition -- `a()` the library's 20, `main` the entry's 7 -- so the program's exit
     // code is 20 + 7 = 27. The bug was both definitions being mangled to the same id (a
     // "declared more than once" panic in codegen), because the depth-0 entry has no mangling id.
-    static UID: AtomicUsize = AtomicUsize::new(0);
-    let root = std::env::temp_dir().join(format!(
-        "sond_kodup_{}_{}",
-        std::process::id(),
-        UID.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+    let root = crate::scratch::Temporal::nuevo("sond_kodup");
     std::fs::write(root.join("a.snd"), "let O_DUP = 20\npub fn a() -> i64 { O_DUP }").unwrap();
     let entry = root.join("main.snd");
     std::fs::write(

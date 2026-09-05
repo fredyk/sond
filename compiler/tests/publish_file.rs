@@ -15,17 +15,8 @@ fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!(
-        "sond_pubf_{}_{}_{name}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn scratch(name: &str) -> sondc::scratch::Temporal {
+    sondc::scratch::Temporal::nuevo(&format!("sond_pubf_{name}"))
 }
 
 fn publish(src: &Path, dst: &Path) -> std::process::Output {

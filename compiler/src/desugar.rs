@@ -1368,11 +1368,12 @@ mod tests {
         // Pass structs to codegen too, so a function returning a small struct/enum
         // returns it by value (RAX:RDX), the driver does the same.
         let asm = emit_program_g(&[], &structs, &funcs);
-        let dir = std::env::temp_dir();
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let stem = format!("sondc_desugar_{}_{}", std::process::id(), n);
-        let asm_path = dir.join(format!("{stem}.s"));
-        let bin_path = dir.join(&stem);
+        // The scratch dir goes even if the assert below panics: a `remove_file` on the happy
+        // path leaves the failing run's files behind for good, and this temp dir is RAM.
+        let _ = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = crate::scratch::Temporal::nuevo("sondc_desugar");
+        let asm_path = dir.join("prog.s");
+        let bin_path = dir.join("prog");
         std::fs::write(&asm_path, asm).unwrap();
         assert!(
             Command::new("cc")
@@ -1385,8 +1386,6 @@ mod tests {
             "compile failed"
         );
         let out = Command::new(&bin_path).output().unwrap();
-        let _ = std::fs::remove_file(&asm_path);
-        let _ = std::fs::remove_file(&bin_path);
         String::from_utf8_lossy(&out.stdout).to_string()
     }
 

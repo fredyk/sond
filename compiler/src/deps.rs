@@ -338,11 +338,11 @@ mod tests {
         UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn tmp_dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("deps_test_{}_{}", std::process::id(), uid()))
-            .join(name);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    /// A scratch directory the caller HOLDS: dropping the returned value deletes the tree. The
+    /// first version built the path from a `Temporal` and returned the inner `PathBuf`, which
+    /// dropped the owner on the spot and left the directory behind -- the exact leak this is for.
+    fn tmp_dir(name: &str) -> crate::scratch::Temporal {
+        crate::scratch::Temporal::nuevo_en("deps_test", name)
     }
 
     // ── deps.snd parsing ───────────────────────────────────────────────
@@ -577,7 +577,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base);
+        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base.to_path_buf());
         let combined =
             crate::resolve::resolve_includes_with_resolver(&root.join("project/main.snd"), &resolver)
                 .expect("import must resolve");
@@ -628,7 +628,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base);
+        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base.to_path_buf());
         let err =
             crate::resolve::resolve_includes_with_resolver(&root.join("project/main.snd"), &resolver)
                 .unwrap_err()
@@ -658,7 +658,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base);
+        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base.to_path_buf());
         let err =
             crate::resolve::resolve_includes_with_resolver(&root.join("project/main.snd"), &resolver)
                 .unwrap_err()
@@ -692,7 +692,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base);
+        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base.to_path_buf());
         let err =
             crate::resolve::resolve_includes_with_resolver(&root.join("project/main.snd"), &resolver)
                 .unwrap_err()
@@ -736,7 +736,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = DepsResolver::with_cache_root(root.join("project"), custom_cache);
+        let resolver = DepsResolver::with_cache_root(root.join("project"), custom_cache.to_path_buf());
         let result =
             crate::resolve::resolve_includes_with_resolver(&root.join("project/main.snd"), &resolver);
 
@@ -761,7 +761,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base);
+        let resolver = DepsResolver::with_cache_root(root.join("project"), cache_base.to_path_buf());
         let combined =
             crate::resolve::resolve_includes_with_resolver(&root.join("project/main.snd"), &resolver)
                 .expect("no deps.snd must not be an error");

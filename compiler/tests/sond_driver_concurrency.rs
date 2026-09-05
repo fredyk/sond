@@ -24,10 +24,8 @@ fn write(p: &Path, s: &str) {
 
 /// A scratch project holding its own `lib/`, so the run resolves `include` by walking up to it
 /// and never depends on what this machine happens to have in ~/.local/lib/sond.
-fn proyecto() -> PathBuf {
-    let base = std::env::temp_dir().join(format!("sond-conc-{}-{:?}", std::process::id(), std::thread::current().id()));
-    let _ = std::fs::remove_dir_all(&base);
-    std::fs::create_dir_all(&base).unwrap();
+fn proyecto() -> sondc::scratch::Temporal {
+    let base = sondc::scratch::Temporal::nuevo("sond-conc");
     let salida = Command::new("cp").arg("-R").arg(repo().join("lib")).arg(&base).output().unwrap();
     assert!(salida.status.success(), "the scratch project needs a lib/ of its own");
 
@@ -88,5 +86,4 @@ fn two_runs_of_files_with_the_same_name_each_get_their_own_verdict() {
         "in {vueltas} concurrent pairs the passing file was called failing {verde_mal} times and \
          -- the one that costs money -- the FAILING file was called passing {rojo_mal} times"
     );
-    let _ = std::fs::remove_dir_all(&base);
 }
