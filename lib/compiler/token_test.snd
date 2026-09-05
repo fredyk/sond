@@ -1,0 +1,163 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/compiler/token.snd, the token kinds the Sond-in-Sond lexer emits.
+//
+// `lexer_test.snd` includes `lexer.snd`, and `lexer.snd` includes this one, so token.snd sat two
+// levels down and in nobody's coverage denominator: `sond test lib` listed it as a file no gate
+// reads.
+//
+// What is worth pinning here is not the arithmetic of `tk_is_value`, it is the TABLE. These
+// numbers are a wire format between the lexer and whoever reads its output, and the failure they
+// invite is a new token given a number some other token already has: the lexer then emits one
+// kind and the reader acts on another, with no error anywhere. Nothing checks a `let` list for
+// duplicates, so it is checked here.
+
+include "compiler/token.snd"
+include "x86_64/linux/testing.snd"
+
+// Every kind the table names, in one place, so a new one is added here too and gets checked.
+// TK_FN_KW2 is left out on purpose: it is a declared alias of TK_FN_KW, not a kind of its own.
+let mut kinds[60]
+
+fn cargar_kinds() -> i64 {
+    let mut n = 0
+    poke64(kinds + n * 8, TK_INT) n = n + 1
+    poke64(kinds + n * 8, TK_DECIMAL) n = n + 1
+    poke64(kinds + n * 8, TK_STR) n = n + 1
+    poke64(kinds + n * 8, TK_BOOL) n = n + 1
+    poke64(kinds + n * 8, TK_IDENT) n = n + 1
+    poke64(kinds + n * 8, TK_SEMICOLON) n = n + 1
+    poke64(kinds + n * 8, TK_PLUS) n = n + 1
+    poke64(kinds + n * 8, TK_MINUS) n = n + 1
+    poke64(kinds + n * 8, TK_STAR) n = n + 1
+    poke64(kinds + n * 8, TK_SLASH) n = n + 1
+    poke64(kinds + n * 8, TK_PERCENT) n = n + 1
+    poke64(kinds + n * 8, TK_CARET) n = n + 1
+    poke64(kinds + n * 8, TK_TILDE) n = n + 1
+    poke64(kinds + n * 8, TK_SHL) n = n + 1
+    poke64(kinds + n * 8, TK_SHR) n = n + 1
+    poke64(kinds + n * 8, TK_LSHR) n = n + 1
+    poke64(kinds + n * 8, TK_EQ) n = n + 1
+    poke64(kinds + n * 8, TK_EQEQ) n = n + 1
+    poke64(kinds + n * 8, TK_NE) n = n + 1
+    poke64(kinds + n * 8, TK_LT) n = n + 1
+    poke64(kinds + n * 8, TK_LE) n = n + 1
+    poke64(kinds + n * 8, TK_GT) n = n + 1
+    poke64(kinds + n * 8, TK_GE) n = n + 1
+    poke64(kinds + n * 8, TK_ARROW) n = n + 1
+    poke64(kinds + n * 8, TK_FAT_ARROW) n = n + 1
+    poke64(kinds + n * 8, TK_AMP) n = n + 1
+    poke64(kinds + n * 8, TK_AMP_AMP) n = n + 1
+    poke64(kinds + n * 8, TK_PIPE) n = n + 1
+    poke64(kinds + n * 8, TK_PIPE_PIPE) n = n + 1
+    poke64(kinds + n * 8, TK_DOT) n = n + 1
+    poke64(kinds + n * 8, TK_DOT_DOT) n = n + 1
+    poke64(kinds + n * 8, TK_LPAREN) n = n + 1
+    poke64(kinds + n * 8, TK_RPAREN) n = n + 1
+    poke64(kinds + n * 8, TK_LBRACE) n = n + 1
+    poke64(kinds + n * 8, TK_RBRACE) n = n + 1
+    poke64(kinds + n * 8, TK_LBRACKET) n = n + 1
+    poke64(kinds + n * 8, TK_RBRACKET) n = n + 1
+    poke64(kinds + n * 8, TK_COMMA) n = n + 1
+    poke64(kinds + n * 8, TK_COLON) n = n + 1
+    poke64(kinds + n * 8, TK_TEST) n = n + 1
+    poke64(kinds + n * 8, TK_LET_KW) n = n + 1
+    poke64(kinds + n * 8, TK_FN_KW) n = n + 1
+    poke64(kinds + n * 8, TK_INTERRUPT_KW) n = n + 1
+    poke64(kinds + n * 8, TK_WRAPPING_KW) n = n + 1
+    poke64(kinds + n * 8, TK_STRUCT_KW) n = n + 1
+    poke64(kinds + n * 8, TK_ENUM_KW) n = n + 1
+    poke64(kinds + n * 8, TK_MATCH_KW) n = n + 1
+    poke64(kinds + n * 8, TK_AS_KW) n = n + 1
+    poke64(kinds + n * 8, TK_IMPL_KW) n = n + 1
+    poke64(kinds + n * 8, TK_PUB_KW) n = n + 1
+    poke64(kinds + n * 8, TK_PRIV_KW) n = n + 1
+    poke64(kinds + n * 8, TK_REQUIRES_KW) n = n + 1
+    poke64(kinds + n * 8, TK_WHERE_KW) n = n + 1
+    poke64(kinds + n * 8, TK_ENSURES_KW) n = n + 1
+    poke64(kinds + n * 8, TK_INVARIANT_KW) n = n + 1
+    poke64(kinds + n * 8, TK_EFFECTS_KW) n = n + 1
+    poke64(kinds + n * 8, TK_RETURN_KW) n = n + 1
+    poke64(kinds + n * 8, TK_IF_KW) n = n + 1
+    poke64(kinds + n * 8, TK_ELSE_KW) n = n + 1
+    n
+}
+
+let mut kinds2[20]
+
+fn cargar_resto() -> i64 {
+    let mut n = 0
+    poke64(kinds2 + n * 8, TK_FOR_KW) n = n + 1
+    poke64(kinds2 + n * 8, TK_WHILE_KW) n = n + 1
+    poke64(kinds2 + n * 8, TK_BREAK_KW) n = n + 1
+    poke64(kinds2 + n * 8, TK_CONTINUE_KW) n = n + 1
+    poke64(kinds2 + n * 8, TK_AND_KW) n = n + 1
+    poke64(kinds2 + n * 8, TK_OR_KW) n = n + 1
+    poke64(kinds2 + n * 8, TK_NOT_KW) n = n + 1
+    poke64(kinds2 + n * 8, TK_IMPLIES_KW) n = n + 1
+    poke64(kinds2 + n * 8, TK_IN_KW) n = n + 1
+    poke64(kinds2 + n * 8, TK_TRUE_KW) n = n + 1
+    poke64(kinds2 + n * 8, TK_FALSE_KW) n = n + 1
+    n
+}
+
+test "no two token kinds share a number" {
+    // The one failure this file can have that nothing else would catch: a token added with a
+    // number already in use. The lexer would emit one kind and the reader would act on another.
+    let n1 = cargar_kinds()
+    let n2 = cargar_resto()
+    assert_eq(n1, 59)
+    assert_eq(n2, 11)
+    for i in 0..n1 {
+        for j in 0..n1 {
+            if i != j {
+                assert_ne(peek64(kinds + i * 8), peek64(kinds + j * 8))
+            }
+        }
+        for j in 0..n2 {
+            assert_ne(peek64(kinds + i * 8), peek64(kinds2 + j * 8))
+        }
+    }
+    for i in 0..n2 {
+        for j in 0..n2 {
+            if i != j {
+                assert_ne(peek64(kinds2 + i * 8), peek64(kinds2 + j * 8))
+            }
+        }
+    }
+}
+
+test "the three bands of the table stay where the file says they are" {
+    // Value-carrying below 10, punctuation and operators from 10, keywords from 50. The bands are
+    // what `tk_is_value` reads, so a token filed in the wrong one changes its meaning.
+    let n1 = cargar_kinds()
+    let n2 = cargar_resto()
+    assert(TK_IDENT < 10)
+    assert(TK_SEMICOLON >= 10)
+    assert(TK_COLON < 50)
+    assert(TK_TEST < 50)
+    assert(TK_LET_KW >= 50)
+    for i in 0..n2 { assert(peek64(kinds2 + i * 8) >= 50) }
+    // And nothing runs off the end of the byte the kind is carried in.
+    for i in 0..n1 { assert(peek64(kinds + i * 8) < 128) }
+}
+
+test "tk_is_value names the five kinds that carry one, and no others" {
+    // Checked over the whole range rather than by listing the five: adding a value-carrying kind
+    // without teaching this function about it is exactly the mistake to catch.
+    assert_eq(tk_is_value(TK_INT), 1)
+    assert_eq(tk_is_value(TK_DECIMAL), 1)
+    assert_eq(tk_is_value(TK_STR), 1)
+    assert_eq(tk_is_value(TK_BOOL), 1)
+    assert_eq(tk_is_value(TK_IDENT), 1)
+    for k in 5..128 {
+        assert_eq(tk_is_value(k), 0)
+    }
+}
+
+test "the alias for the fn keyword is the fn keyword" {
+    // TK_FN_KW2 exists for callers that spell it that way; if it ever drifted, one of the two
+    // spellings would silently mean nothing.
+    assert_eq(TK_FN_KW2, TK_FN_KW)
+}
