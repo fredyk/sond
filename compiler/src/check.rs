@@ -2191,6 +2191,11 @@ struct Flow {
     /// declaration gave no length). A view whose length is knowable another way — one taken
     /// directly over a measurable array — is recorded as a size instead, like the array itself.
     views: HashMap<String, Option<String>>,
+    /// Local slices whose length is tracked by the `len` field (a `Field(s, "len")` expression)
+    /// or the raw constant. A local slice must be bounded the same way a slice parameter is:
+    /// against its `.len` at runtime, so the same prover that discharges `for i < s.len {}`
+    /// also discharges `s[i]` inside that loop.
+    slices: HashMap<String, Box<Expr>>,
 }
 
 impl Flow {
@@ -2215,6 +2220,7 @@ impl Flow {
         self.counters.remove(v);
         self.ceilings.remove(v);
         self.consts.remove(v);
+        self.slices.remove(v);
     }
 }
 
@@ -3557,6 +3563,28 @@ fn bounds_block(
                         }
                     }
                 }
+                // Register local slices AFTER the match array_len block (which calls sizes.remove(name)
+                // for the None arm). Use BOTH maps: `sizes` for constant-index fast-path checks,
+                // and `flow.slices` with a Field(s, "len") expression so the prover can match the
+                // loop condition i < s.len against it.
+                let is_slice = ty.as_ref().is_some_and(|t| matches!(t, Type::Named(n) if n == "Slice"))
+                    || matches!(&value, Expr::StructLit(n, _) if n == "Slice");
+                if is_slice {
+                    if let Expr::StructLit(_, fields) = &value
+                        && let Some(c) = fields
+                            .iter()
+                            .find_map(|(k, v)| if k == "len" { const_index(v) } else { None })
+                    {
+                        sizes.insert(name.clone(), c);
+                    }
+                    flow.slices.insert(
+                        name.clone(),
+                        Box::new(Expr::Field(
+                            Box::new(Expr::Var(name.clone())),
+                            "len".to_string(),
+                        )),
+                    );
+                }
             }
             Stmt::Assign {
                 target: Expr::Var(v),
@@ -3785,18 +3813,34 @@ fn bounds_expr(
                 // Checked-by-default: a VARIABLE index must be PROVEN in `[0, N)` (from a
                 // `requires`, a `where`, branch guards, or a loop condition + counter floor).
                 None => {
-                    // Either a derived interval confines the index (`bit >> 3`, `i / 8`, `x & 7`),
-                    // or the linear prover discharges it (`i`, `i - 16` from a counter + condition).
-                    let in_range =
-                        matches!(expr_range(idx, flow), Some((lo, hi)) if lo >= 0 && hi < n);
-                    if !in_range
-                        && !crate::verify::index_proven_in_bounds(
-                            idx,
-                            &Expr::Int(n),
-                            &flow.assumptions(),
-                            params,
-                        )
-                    {
+                    // VARIABLE index: prove it in bounds.
+                    // For a local slice, try the field-based bound first (matches `for i < s.len`).
+                    // Then always try the constant-sized bound (from `sizes`), which works for both
+                    // constant-len slices and regular arrays. If either proves it, accept it.
+                    let mut proved = false;
+                    if let Some(bound) = flow.slices.get(a) {
+                        // Slice: try field-based bound first (canonical `for i < s.len` form).
+                        if crate::verify::index_proven_in_bounds(
+                            idx, bound, &flow.assumptions(), params,
+                        ) {
+                            proved = true;
+                        }
+                    }
+                    if crate::verify::index_proven_in_bounds(
+                        idx, &Expr::Int(n), &flow.assumptions(), params,
+                    ) {
+                        proved = true;
+                    }
+                    // A derived interval confines the index (bit >> 3, i / 8, x & 7) — check via
+                    // expr_range as an early exit.
+                    if !proved {
+                        let in_range =
+                            matches!(expr_range(idx, flow), Some((lo, hi)) if lo >= 0 && hi < n);
+                        if in_range {
+                            proved = true;
+                        }
+                    }
+                    if !proved {
                         return Err(format!(
                             "function `{fname}`: cannot prove `{}` is in bounds for `{a}` of size {n} at line {line}; bound it with a `where`/`requires`/loop condition to 0..{n}",
                             expr_to_string(idx)
@@ -3810,6 +3854,16 @@ fn bounds_expr(
             let bound = Expr::Field(Box::new(Expr::Var(a.clone())), "len".to_string());
             let asm = flow.assumptions();
             if !crate::verify::index_proven_in_bounds(idx, &bound, &asm, params) {
+                return Err(format!(
+                    "function `{fname}`: cannot prove `{}` is in bounds for slice `{a}` at line {line}; bound it with a `where`/`requires`/loop condition to 0..{a}.len",
+                    expr_to_string(idx)
+                ));
+            }
+        } else if let Some(bound) = flow.slices.get(a) {
+            // A locally-bound slice: same treatment as a slice parameter, but the length expression
+            // comes from the Flow map (stored when the `let` was processed), not from the params list.
+            let asm = flow.assumptions();
+            if !crate::verify::index_proven_in_bounds(idx, bound, &asm, params) {
                 return Err(format!(
                     "function `{fname}`: cannot prove `{}` is in bounds for slice `{a}` at line {line}; bound it with a `where`/`requires`/loop condition to 0..{a}.len",
                     expr_to_string(idx)
@@ -5448,6 +5502,112 @@ mod tests {
              0\n\
              }"
         ).is_ok(), "len from variable cannot be checked at compile time");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Local Slice bounds checking (un-slice-local-no-comprueba-ni-un-indice)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn rejects_const_index_out_of_local_slice_range() {
+        let err = bounds(
+            "fn f() -> i64 { let a[4]\nlet s = Slice { ptr: a, len: 4 }\ns[7] }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("out of bounds") || (err.contains("cannot prove") && err.contains("slice")),
+            "constant out-of-bounds index into a local slice must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn accepts_const_index_in_local_slice_range() {
+        let result = bounds("fn f() -> i64 { let a[4]\nlet s = Slice { ptr: a, len: 4 }\ns[3] }");
+        assert!(result.is_ok(), "constant index within slice length must pass");
+    }
+
+    #[test]
+    fn accepts_loop_over_local_slice_with_bounded_index() {
+        // Using `for i < s.len` matches the field expression in flow.slices, so the prover
+        // discharges i < s.len from the loop condition itself.
+        let result = bounds(
+            "fn f() -> i64 { let mut t[4]\nlet s = Slice { ptr: t, len: 4 }\n\
+             let mut i = 0\nfor i < s.len { let _t = s[i]; i = i + 1 }\n0 }",
+        );
+        assert!(result.is_ok(), "canonical loop form for i < s.len");
+    }
+
+    #[test]
+    fn rejects_out_of_range_index_on_empty_local_slice() {
+        let err = bounds(
+            "fn f() -> i64 { let a[4]\nlet s = Slice { ptr: a, len: 0 }\ns[0] }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("out of bounds") || err.contains("cannot prove"),
+            "any index on empty slice must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn slice_parameter_still_works_as_before() {
+        assert!(
+            bounds("fn f(s: Slice, i: i64 where 0 <= i && i < s.len) -> i64 { s[i] }").is_ok(),
+            "slice parameter with bound must still work"
+        );
+    }
+
+    #[test]
+    fn rejects_slice_param_index_without_bound() {
+        let err = bounds("fn f(s: Slice, i: i64) -> i64 { s[i] }").unwrap_err();
+        assert!(
+            err.contains("cannot prove") && err.contains("slice"),
+            "unbounded slice param index must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_slice_that_arrives_from_a_call_is_not_tracked_yet() {
+        // `let s = make()` binds a slice the checker does not follow: the length lives in the
+        // callee's `ensures`, and nothing here reads it, so `s[3]` passes unexamined. The
+        // `ensures` below does not even bound the index (`s.len < 8` says nothing about
+        // `3 < s.len`), which is exactly why this must not be read as a proof.
+        let result = bounds(
+            "fn make() -> (s: Slice) ensures { s.len >= 0; s.len < 8 } { 0 }\n\
+             fn f() -> i64 { let s = make()\ns[3] }",
+        );
+        assert!(result.is_ok(), "the call-returned slice is unchecked today");
+    }
+
+    #[test]
+    fn a_name_rebound_to_an_array_stops_being_a_slice() {
+        // The second `let s` is a different variable that happens to reuse the name; from there
+        // on `s` is the array, so its own size bounds the index and the slice's `len` does not.
+        let result = bounds(
+            "fn f() -> i64 { let a[4]\na[3] = 1\nlet s = Slice { ptr: a, len: 4 }\nlet s = a\ns[3] }",
+        );
+        assert!(result.is_ok(), "after rebinding the name is no longer a slice");
+    }
+
+    #[test]
+    fn uses_the_local_slice_len_not_the_backing_array_size() {
+        let err = bounds(
+            "fn f() -> i64 { let a[8]\na[0] = 0\nlet s = Slice { ptr: a, len: 2 }\ns[3] }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("s") && (err.contains("out of bounds") || err.contains("cannot prove")),
+            "the slice's declared len, not the backing array size, must bound the index, got: {err}"
+        );
+    }
+
+    #[test]
+    fn lets_explicit_type_annotation_as_slice() {
+        assert!(
+            bounds("fn f() -> i64 { let a[4]\nlet s: Slice = Slice { ptr: a, len: 4 }\ns[3] }")
+                .is_ok(),
+            "an explicit Slice type annotation should register the local as a slice"
+        );
     }
 }
 
