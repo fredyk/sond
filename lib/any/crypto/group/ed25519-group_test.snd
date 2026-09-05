@@ -1,0 +1,126 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/crypto/group/ed25519-group.snd: extended twisted-Edwards coordinates and
+// the scalar ladder on top of them.
+//
+// Points are compared the way the protocol compares them -- encoded to 32 bytes -- because
+// (X:Y:Z:T) has many representatives of the same point and the encoding has one.
+
+include "any/crypto/group/ed25519-group.snd"
+include "x86_64/linux/testing.snd"
+
+// RFC 8032 Test 1: this secret key's public key, both as 32 bytes in LE memory order.
+let SEC1[4] = [0x605afdef9db1619d, 0xc42cec92f44a84ba, 0x1969327b69c54944, 0x607fae1c03ac3b70]
+let PUB1[4] = [0xb70ab18201985ad7, 0x3a0764c9d3fe4bd5, 0x2523a6daf372e10e, 0x1a5107f7681a02af]
+
+// The base point encoded: y = 4/5 mod p is 0x66..6658 little-endian, and x is even, so the
+// sign bit in the last byte stays clear.
+let BENC[4] = [0x6666666666666658, 0x6666666666666666, 0x6666666666666666, 0x6666666666666666]
+
+// The identity (0, 1): y = 1, x even.
+let IDENC[4] = [1, 0, 0, 0]
+
+fn set_base(bz, bt) {
+    fe_one(bz)
+    fe_mul(bt, BX, BY)
+}
+
+test "the identity encodes as one, and adding it to a point gives the point back" {
+    let x[16]; let y[16]; let z[16]; let t[16]
+    let out[4]
+    point_set_identity(x, y, z, t)
+    point_encode(out, x, y, z)
+    assert_eq(bytes_cmp(out, IDENC, 32), 1)
+
+    let bz[16]; let bt[16]
+    set_base(bz, bt)
+    let rx[16]; let ry[16]; let rz[16]; let rt[16]
+    point_add(rx, ry, rz, rt, x, y, z, t, BX, BY, bz, bt)
+    point_encode(out, rx, ry, rz)
+    assert_eq(bytes_cmp(out, BENC, 32), 1)
+}
+
+test "the ladder with the scalar one gives the base point, and with two gives it doubled" {
+    let bz[16]; let bt[16]
+    set_base(bz, bt)
+    let sc[16]
+    sc[0] = 1; sc[1] = 0; sc[2] = 0; sc[3] = 0; sc[4] = 0; sc[5] = 0; sc[6] = 0; sc[7] = 0
+    sc[8] = 0; sc[9] = 0; sc[10] = 0; sc[11] = 0; sc[12] = 0; sc[13] = 0; sc[14] = 0; sc[15] = 0
+    let px[16]; let py[16]; let pz[16]; let pt[16]
+    let out[4]
+    point_scalar_mul(px, py, pz, pt, sc, BX, BY, bz, bt)
+    point_encode(out, px, py, pz)
+    assert_eq(bytes_cmp(out, BENC, 32), 1)
+
+    // [2]B has to be B+B: the doubling inside the ladder and an explicit addition agree.
+    let dx[16]; let dy[16]; let dz[16]; let dt[16]
+    let dbl[4]
+    point_add(dx, dy, dz, dt, BX, BY, bz, bt, BX, BY, bz, bt)
+    point_encode(dbl, dx, dy, dz)
+    sc[0] = 2
+    point_scalar_mul(px, py, pz, pt, sc, BX, BY, bz, bt)
+    point_encode(out, px, py, pz)
+    assert_eq(bytes_cmp(out, dbl, 32), 1)
+    // ...and [2]B is not B, or the comparison above would pass for the wrong reason.
+    assert_eq(bytes_cmp(out, BENC, 32), 0)
+}
+
+test "the ladder with the scalar zero gives the identity" {
+    let bz[16]; let bt[16]
+    set_base(bz, bt)
+    let sc[16]
+    sc[0] = 0; sc[1] = 0; sc[2] = 0; sc[3] = 0; sc[4] = 0; sc[5] = 0; sc[6] = 0; sc[7] = 0
+    sc[8] = 0; sc[9] = 0; sc[10] = 0; sc[11] = 0; sc[12] = 0; sc[13] = 0; sc[14] = 0; sc[15] = 0
+    let px[16]; let py[16]; let pz[16]; let pt[16]
+    let out[4]
+    point_scalar_mul(px, py, pz, pt, sc, BX, BY, bz, bt)
+    point_encode(out, px, py, pz)
+    assert_eq(bytes_cmp(out, IDENC, 32), 1)
+}
+
+test "the base point times the RFC 8032 Test 1 scalar is that test's public key" {
+    let bz[16]; let bt[16]
+    set_base(bz, bt)
+    let hash[8]
+    sha512_hash(SEC1, 32, hash)
+    let sc[16]
+    get_clamped_scalar(hash, sc)
+    let px[16]; let py[16]; let pz[16]; let pt[16]
+    point_scalar_mul(px, py, pz, pt, sc, BX, BY, bz, bt)
+    let out[4]
+    point_encode(out, px, py, pz)
+    assert_eq(bytes_cmp(out, PUB1, 32), 1)
+}
+
+test "clamping clears the low three bits and pins bit 254, whatever the hash was" {
+    let hash[8]
+    let sc[16]
+    for i in 0..64 { poke8(hash + i, 0xFF) }
+    get_clamped_scalar(hash, sc)
+    assert_eq(sc[0], 0xFFF8)      // low three bits gone
+    assert_eq(sc[15], 0x7FFF)     // bit 255 gone, bit 254 already set
+    for i in 0..64 { poke8(hash + i, 0) }
+    get_clamped_scalar(hash, sc)
+    assert_eq(sc[0], 0)
+    assert_eq(sc[15], 0x4000)     // bit 254 set even though the hash had nothing
+    // Only the first 32 bytes of the hash are the scalar; the prefix half is not touched.
+    for i in 32..64 { poke8(hash + i, 0xFF) }
+    get_clamped_scalar(hash, sc)
+    assert_eq(sc[15], 0x4000)
+}
+
+test "bytes_cmp says no on the last byte as readily as on the first" {
+    let a[4]
+    let b[4]
+    for i in 0..32 { poke8(a + i, i) }
+    for i in 0..32 { poke8(b + i, i) }
+    assert_eq(bytes_cmp(a, b, 32), 1)
+    poke8(b + 31, 0xFF)
+    assert_eq(bytes_cmp(a, b, 32), 0)
+    assert_eq(bytes_cmp(a, b, 31), 1)   // the difference is outside the length asked for
+    poke8(b + 31, 31)
+    poke8(b, 0xFF)
+    assert_eq(bytes_cmp(a, b, 32), 0)
+    assert_eq(bytes_cmp(a, b, 0), 1)    // nothing to compare is not a difference
+}
