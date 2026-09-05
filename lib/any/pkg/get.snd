@@ -102,19 +102,6 @@ fn pkg_b_startswith(b: i64, pre: i64) -> i64 {
     1
 }
 
-// Returns 1 if bytes buffer `b` ends with the cstr `suf`.
-fn pkg_b_endswith(b: i64, suf: i64) -> i64 {
-    let n = bytes_len(b)
-    let sl = strlen(suf)
-    if n < sl { return 0 }
-    let mut i = 0
-    for i < sl {
-        if bytes_get(b, n - sl + i) != peek8(suf + i) { return 0 }
-        i = i + 1
-    }
-    1
-}
-
 // 1 if the cstr `s` (length `sl`) ends with ".snd".
 fn pkg_snd_suffix(s: i64, sl: i64) -> i64 {
     let lit: string = ".snd"
@@ -198,13 +185,16 @@ fn pkg_parse_spec(spec: i64, host: i64, owner: i64, repo: i64, ref: i64, name: i
         rlen = seglen[2]
     }
     if nseg != 2 && nseg != 3 { return 0 - 1 }
+    // The ref cannot be empty here: the `at >= len - 1` test above is what rejects a spec whose
+    // '@' is the last byte, so by this point there is at least one byte after it.
     let mut refb = bytes_slice(b, at + 1, bytes_len(b))
-    if bytes_len(refb) == 0 { return 0 - 1 }
     if pkg_copy_cstr_out(hsrc, hlen, host, 128) != 0 { return 0 - 1 }
     if pkg_copy_cstr_out(osrc, olen, owner, 128) != 0 { return 0 - 1 }
     if pkg_copy_cstr_out(rsrc, rlen, repo, 128) != 0 { return 0 - 1 }
     if pkg_copy_cstr_out(peek64(refb), bytes_len(refb), ref, 128) != 0 { return 0 - 1 }
-    if pkg_copy_cstr_out(rsrc, rlen, name, 128) != 0 { return 0 - 1 }
+    // `name` is the repo basename: the same bytes into a field of the same size the copy just
+    // above accepted, so this one cannot come up short.
+    pkg_copy_cstr_out(rsrc, rlen, name, 128)
     0
 }
 
@@ -543,7 +533,8 @@ fn pkg_resolve_sha(owner:i64, repo:i64, ref:i64, sha_out:i64) -> i64 {
         if sv <= 0 { return 0 - 1 }
         if json_type(sv) != JSON_STR { return 0 - 1 }
         if json_str_len(sv) != 40 { return 0 - 1 }
-        if pkg_copy_cstr_out(json_str(sv), 40, sha_out, 64) != 0 { return 0 - 1 }
+        // 40 bytes and a NUL into 64: the length test above is what makes this fit.
+        pkg_copy_cstr_out(json_str(sv), 40, sha_out, 64)
         return 0
     }
     if st == 404 {

@@ -446,3 +446,520 @@ test "pkg: verify reads several blocks, including one without a from" {
     h_write_file(dep.utf8, b)
     assert_eq(pkg_verify(), 0)
 }
+
+// ── The deps.snd line parsers ───────────────────────────────────────────────────────────────
+//
+// These take no network and were the biggest hole in this file: two thirds of `pkg_parse_use`
+// is `return 0`, and every one of those returns is a line of a deps.snd that must NOT be read
+// as a pin. A `use` line accepted when it should have been refused resolves a module to a hash
+// nobody wrote down, so the refusals are the part worth pinning, not the happy path.
+
+let USE_OK: string = "use strings = sond:sha256:abc123"
+// Where "sond:sha256:" starts in USE_OK: "use strings = " is 14 bytes.
+let USE_SCHEME_AT = 14
+
+// A bytes buffer holding the cstr `s` with the byte at `i` replaced by `c`.
+fn h_alterado(s: i64, i: i64, c: i64) -> i64 {
+    let b = bytes_new()
+    let n = strlen(s)
+    let mut k = 0
+    for k < n {
+        if k == i { bytes_push(b, c) } else { bytes_push(b, peek8(s + k)) }
+        k = k + 1
+    }
+    b
+}
+
+test "pkg: a well formed use line yields the name and the bare hash" {
+    let b = bytes_from_str("use strings = sond:sha256:abc123")
+    let no2[1]
+    let nl[1]
+    let ho[1]
+    let hl[1]
+    assert_eq(pkg_parse_use(b, 0, bytes_len(b), no2, nl, ho, hl), 1)
+    assert_eq(nl[0], 7)                 // "strings"
+    assert_eq(bytes_get(b, no2[0]), 115) // 's'
+    // The hash comes back WITHOUT the scheme, because that is the name of the cache directory.
+    assert_eq(hl[0], 6)
+    assert_eq(bytes_get(b, ho[0]), 97)  // 'a'
+}
+
+test "pkg: a use line whose scheme prefix is wrong in any single byte is refused" {
+    // Twelve separate comparisons in the parser, each one a way of accepting a hash under an
+    // algorithm nobody named. Checked byte by byte rather than once, so a missing comparison
+    // cannot hide behind the eleven that are there.
+    let no2[1]
+    let nl[1]
+    let ho[1]
+    let hl[1]
+    for i in 0..12 {
+        let malo = h_alterado(USE_OK.utf8, USE_SCHEME_AT + i, 88) // 'X'
+        assert_eq(pkg_parse_use(malo, 0, bytes_len(malo), no2, nl, ho, hl), 0)
+    }
+}
+
+test "pkg: a use line missing any of its parts is refused" {
+    let no2[1]
+    let nl[1]
+    let ho[1]
+    let hl[1]
+    // A keyword that is not "use", in each of its three bytes.
+    for i in 0..3 {
+        let malo = h_alterado(USE_OK.utf8, i, 88)
+        assert_eq(pkg_parse_use(malo, 0, bytes_len(malo), no2, nl, ho, hl), 0)
+    }
+    let vacia = bytes_from_str("")
+    assert_eq(pkg_parse_use(vacia, 0, bytes_len(vacia), no2, nl, ho, hl), 0)
+    let corta = bytes_from_str("us strings = sond:sha256:abc123")
+    assert_eq(pkg_parse_use(corta, 0, bytes_len(corta), no2, nl, ho, hl), 0)
+    let sin_nombre = bytes_from_str("use = sond:sha256:abc123")
+    assert_eq(pkg_parse_use(sin_nombre, 0, bytes_len(sin_nombre), no2, nl, ho, hl), 0)
+    let solo_nombre = bytes_from_str("use strings")
+    assert_eq(pkg_parse_use(solo_nombre, 0, bytes_len(solo_nombre), no2, nl, ho, hl), 0)
+    let sin_igual = bytes_from_str("use strings sond:sha256:abc123")
+    assert_eq(pkg_parse_use(sin_igual, 0, bytes_len(sin_igual), no2, nl, ho, hl), 0)
+    let prefijo_cortado = bytes_from_str("use strings = sond:sha")
+    assert_eq(pkg_parse_use(prefijo_cortado, 0, bytes_len(prefijo_cortado), no2, nl, ho, hl), 0)
+    // The scheme with nothing after it: an empty hash names the cache root itself.
+    let sin_hash = bytes_from_str("use strings = sond:sha256:")
+    assert_eq(pkg_parse_use(sin_hash, 0, bytes_len(sin_hash), no2, nl, ho, hl), 0)
+}
+
+test "pkg: a from line gives its value with the quotes off, and refuses what is not one" {
+    let vo[1]
+    let vl[1]
+    let con = bytes_from_str("    from \"github.com/fredyk/sond-strings@1111\"   ")
+    assert_eq(pkg_line_is_from(con, 0, bytes_len(con), vo, vl), 1)
+    assert_eq(vl[0], 35)
+    assert_eq(bytes_get(con, vo[0]), 103) // 'g', the quote is gone
+    // Unquoted is accepted too: the quotes are convention in what `sond get` writes, not syntax.
+    let sin = bytes_from_str("from github.com/x/y@1")
+    assert_eq(pkg_line_is_from(sin, 0, bytes_len(sin), vo, vl), 1)
+    assert_eq(vl[0], 16)
+    for i in 0..4 {
+        let malo = h_alterado("from github.com/x/y@1".utf8, i, 88)
+        assert_eq(pkg_line_is_from(malo, 0, bytes_len(malo), vo, vl), 0)
+    }
+    let vacia = bytes_from_str("")
+    assert_eq(pkg_line_is_from(vacia, 0, bytes_len(vacia), vo, vl), 0)
+    let otra = bytes_from_str("grants {}")
+    assert_eq(pkg_line_is_from(otra, 0, bytes_len(otra), vo, vl), 0)
+    let sin_valor = bytes_from_str("from   ")
+    assert_eq(pkg_line_is_from(sin_valor, 0, bytes_len(sin_valor), vo, vl), 0)
+    // Two quotes and nothing between them is not a source URL.
+    let comillas = bytes_from_str("from \"\"")
+    assert_eq(pkg_line_is_from(comillas, 0, bytes_len(comillas), vo, vl), 0)
+}
+
+test "pkg: a grants line is recognised, and a word that merely looks like one is not" {
+    let ok = bytes_from_str("  grants {}")
+    assert_eq(pkg_line_is_grants(ok, 0, bytes_len(ok)), 1)
+    for i in 0..6 {
+        let malo = h_alterado("grants {}".utf8, i, 88)
+        assert_eq(pkg_line_is_grants(malo, 0, bytes_len(malo)), 0)
+    }
+    let vacia = bytes_from_str("")
+    assert_eq(pkg_line_is_grants(vacia, 0, bytes_len(vacia)), 0)
+    let larga = bytes_from_str("granted {}")
+    assert_eq(pkg_line_is_grants(larga, 0, bytes_len(larga)), 0)
+}
+
+test "pkg: fields are counted past the runs of spaces, and a missing one says so" {
+    let b = bytes_from_str("   use   strings   =  x")
+    let o[1]
+    let l[1]
+    assert_eq(pkg_field(b, 0, bytes_len(b), 0, o, l), 1)
+    assert_eq(l[0], 3)
+    assert_eq(pkg_field(b, 0, bytes_len(b), 1, o, l), 1)
+    assert_eq(l[0], 7)
+    assert_eq(pkg_field(b, 0, bytes_len(b), 3, o, l), 1)
+    assert_eq(l[0], 1)
+    assert_eq(pkg_field(b, 0, bytes_len(b), 4, o, l), 0)
+    let blancos = bytes_from_str("      ")
+    assert_eq(pkg_field(blancos, 0, bytes_len(blancos), 0, o, l), 0)
+}
+
+// ── The pieces a spec is taken apart with ───────────────────────────────────────────────────
+
+// A heap cstr of `n` copies of 'a', to overrun the 128-byte fields of a spec.
+fn h_relleno(n: i64) -> i64 {
+    let p = heap_alloc(n + 1)
+    for i in 0..n { poke8(p + i, 97) }
+    poke8(p + n, 0)
+    p
+}
+
+test "pkg: a spec is refused when any of its parts does not fit its 128-byte field" {
+    // The buffers a caller hands in are fixed size, and a repo name longer than one of them is
+    // exactly what an attacker-supplied spec would be. Refused whole, never copied in part.
+    let host[16]
+    let owner[16]
+    let repo[16]
+    let ref[16]
+    let name[16]
+    let largo = h_relleno(130)
+    let cola: string = "@v1"
+    let barra: string = "/"
+    let corto: string = "x"
+    // host too long
+    let e1 = pkg_cat4(largo, barra.utf8, corto.utf8, barra.utf8)
+    assert_eq(pkg_parse_spec(pkg_cat3(e1, corto.utf8, cola.utf8), host, owner, repo, ref, name), 0 - 1)
+    // owner too long
+    let e2 = pkg_cat4(corto.utf8, barra.utf8, largo, barra.utf8)
+    assert_eq(pkg_parse_spec(pkg_cat3(e2, corto.utf8, cola.utf8), host, owner, repo, ref, name), 0 - 1)
+    // repo too long
+    let e3 = pkg_cat4(corto.utf8, barra.utf8, corto.utf8, barra.utf8)
+    assert_eq(pkg_parse_spec(pkg_cat3(e3, largo, cola.utf8), host, owner, repo, ref, name), 0 - 1)
+    // ref too long
+    let arroba: string = "@"
+    let e4 = pkg_cat4(corto.utf8, barra.utf8, corto.utf8, arroba.utf8)
+    assert_eq(pkg_parse_spec(pkg_cat2(e4, largo), host, owner, repo, ref, name), 0 - 1)
+}
+
+test "pkg: a spec is refused when it does not name exactly a host, an owner and a repo" {
+    let host[16]
+    let owner[16]
+    let repo[16]
+    let ref[16]
+    let name[16]
+    let uno: string = "repo@v1"
+    assert_eq(pkg_parse_spec(uno.utf8, host, owner, repo, ref, name), 0 - 1)
+    let cuatro: string = "github.com/a/b/c@v1"
+    assert_eq(pkg_parse_spec(cuatro.utf8, host, owner, repo, ref, name), 0 - 1)
+    // A leading slash opens an empty segment, which is not a host.
+    let vacio: string = "/owner/repo@v1"
+    assert_eq(pkg_parse_spec(vacio.utf8, host, owner, repo, ref, name), 0 - 1)
+}
+
+test "pkg: the scheme is accepted in either form and does not become part of the host" {
+    let host[16]
+    let owner[16]
+    let repo[16]
+    let ref[16]
+    let name[16]
+    assert_eq(pkg_parse_spec("https://github.com/fredyk/sond-strings@v1".utf8, host, owner, repo, ref, name), 0)
+    assert_eq(peek8(host), 103) // 'g' of github.com, not 'h' of https
+    assert_eq(pkg_parse_spec("http://github.com/fredyk/sond-strings@v1".utf8, host, owner, repo, ref, name), 0)
+    assert_eq(peek8(host), 103)
+}
+
+test "pkg: a prefix longer than the buffer it is compared against does not match" {
+    // The guard that keeps the "https://" comparison from reading past a two-byte spec.
+    let corto = bytes_from_str("ht")
+    assert_eq(pkg_b_startswith(corto, pkg_https_lit()), 0)
+    let ok = bytes_from_str("https://x")
+    assert_eq(pkg_b_startswith(ok, pkg_https_lit()), 1)
+}
+
+test "pkg: only a name that really ends in .snd is a module file" {
+    // What decides whether a file of the repository is fetched at all. The four bytes are
+    // checked one at a time, because ".sn" plus anything would otherwise walk in.
+    assert_eq(pkg_snd_suffix("a.snd".utf8, 5), 1)
+    assert_eq(pkg_snd_suffix(".snd".utf8, 4), 1)
+    assert_eq(pkg_snd_suffix("snd".utf8, 3), 0)
+    for i in 0..4 {
+        let malo = h_alterado("a.snd".utf8, 1 + i, 88)
+        assert_eq(pkg_snd_suffix(peek64(malo), 5), 0)
+    }
+}
+
+test "pkg: a copy that does not fit reports it instead of writing what it can" {
+    let out[2] // 16 bytes
+    assert_eq(pkg_copy_cstr_out("0123456789abcdef".utf8, 16, out, 16), 0 - 1)
+    poke8(out, 111)
+    assert_eq(pkg_copy_cstr_out("0123456789abcde".utf8, 15, out, 16), 0)
+    assert_eq(peek8(out), 48)
+    assert_eq(peek8(out + 15), 0)
+}
+
+test "pkg: the url path keeps what RFC 3986 allows verbatim and encodes the rest" {
+    // Every class named in the function, one probe each: a digit, an upper and a lower letter,
+    // and the four punctuation marks that survive, plus the separator.
+    assert_eq(pkg_url_safe(48), 1)   // '0'
+    assert_eq(pkg_url_safe(57), 1)   // '9'
+    assert_eq(pkg_url_safe(65), 1)   // 'A'
+    assert_eq(pkg_url_safe(90), 1)   // 'Z'
+    assert_eq(pkg_url_safe(97), 1)   // 'a'
+    assert_eq(pkg_url_safe(45), 1)   // '-'
+    assert_eq(pkg_url_safe(46), 1)   // '.'
+    assert_eq(pkg_url_safe(95), 1)   // '_'
+    assert_eq(pkg_url_safe(126), 1)  // '~'
+    assert_eq(pkg_url_safe(47), 1)   // '/'
+    assert_eq(pkg_url_safe(32), 0)   // a space
+    assert_eq(pkg_url_safe(37), 0)   // '%', which must not survive as itself
+    assert_eq(pkg_url_safe(195), 0)  // the first byte of 'ñ'
+}
+
+test "pkg: asking for a field past the end of the line says there is none" {
+    // Not the same path as asking for the field right after the last: this one runs out of line
+    // while still counting, and used to be the only way to walk off the end.
+    let b = bytes_from_str("use strings")
+    let o[1]
+    let l[1]
+    assert_eq(pkg_field(b, 0, bytes_len(b), 6, o, l), 0)
+}
+
+// ── What a hostile or broken API answer must not become ─────────────────────────────────────
+//
+// Everything above this line assumes the server says something sensible. These do not: the
+// recorded seam serves malformed bodies, and what is being pinned is that each one comes back
+// as an error instead of as a sha, a path or an empty module. A JSON body is not a promise.
+
+let R_SIN_CUERPO: string = "HTTP/1.1 200 OK\r\nContent-Type: application/json"
+let R_NO_JSON: string = "HTTP/1.1 200 OK\r\n\r\nthis is not json at all"
+let R_JSON_ARRAY: string = "HTTP/1.1 200 OK\r\n\r\n[1,2,3]"
+let R_SIN_SHA: string = "HTTP/1.1 200 OK\r\n\r\n{\"name\":\"v1.4.2\"}"
+let R_SHA_NUM: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":1111}"
+let R_SHA_CORTO: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"1111\"}"
+let R_500: string = "HTTP/1.1 500 Internal Server Error\r\n\r\n{}"
+let R_TREE_SIN_TREE: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"1111222233334444555566667777888899990000\"}"
+let R_TREE_NO_ARR: string = "HTTP/1.1 200 OK\r\n\r\n{\"tree\":{\"path\":\"a.snd\"}}"
+// One entry of every shape the walk has to step over: not an object, no type, a type that is
+// not a string, a type that is not a blob, no path, and a path that is not a string.
+let R_TREE_BASURA: string = "HTTP/1.1 200 OK\r\n\r\n{\"truncated\":false,\"tree\":[7,{\"path\":\"a.snd\"},{\"type\":9,\"path\":\"b.snd\"},{\"type\":\"tree\",\"path\":\"sub\"},{\"type\":\"blob\"},{\"type\":\"blob\",\"path\":5}]}"
+let R_TREE_DOS: string = "HTTP/1.1 200 OK\r\n\r\n{\"truncated\":false,\"tree\":[{\"type\":\"blob\",\"path\":\"a.snd\"},{\"type\":\"blob\",\"path\":\"b.snd\"}]}"
+
+fn h_owner() -> i64 { let s: string = "fredyk"; s.utf8 }
+fn h_repo() -> i64 { let s: string = "sond-strings"; s.utf8 }
+fn h_ref() -> i64 { let s: string = "v1.4.2"; s.utf8 }
+
+// Arms the seam with a single recorded answer for the commits endpoint.
+fn h_rec_commits(resp: i64) {
+    h_rec_clear()
+    h_rec_add(H_PATH_COMMITS.utf8, resp)
+    pkg_rec_n = h_rec_cnt
+}
+
+// Arms the seam with a single recorded answer for the recursive tree of TEST_SHA.
+fn h_rec_tree(resp: i64) {
+    h_rec_clear()
+    h_rec_add(H_TREE_CHANGED.utf8, resp)
+    pkg_rec_n = h_rec_cnt
+}
+
+test "pkg: a 200 that is not a commit object never becomes a sha" {
+    // Each of these would otherwise leave `sha_out` holding whatever was there before, and the
+    // caller would go on to fetch a tree under it.
+    let sha[8] // 64 bytes
+    h_rec_commits(R_SIN_CUERPO.utf8)
+    assert_eq(pkg_resolve_sha(h_owner(), h_repo(), h_ref(), sha), 0 - 1)
+    h_rec_commits(R_NO_JSON.utf8)
+    assert_eq(pkg_resolve_sha(h_owner(), h_repo(), h_ref(), sha), 0 - 1)
+    h_rec_commits(R_JSON_ARRAY.utf8)
+    assert_eq(pkg_resolve_sha(h_owner(), h_repo(), h_ref(), sha), 0 - 1)
+    h_rec_commits(R_SIN_SHA.utf8)
+    assert_eq(pkg_resolve_sha(h_owner(), h_repo(), h_ref(), sha), 0 - 1)
+    h_rec_commits(R_SHA_NUM.utf8)
+    assert_eq(pkg_resolve_sha(h_owner(), h_repo(), h_ref(), sha), 0 - 1)
+    // A sha of the wrong length is the one that would still look like a sha further down.
+    h_rec_commits(R_SHA_CORTO.utf8)
+    assert_eq(pkg_resolve_sha(h_owner(), h_repo(), h_ref(), sha), 0 - 1)
+    h_rec_clear()
+}
+
+test "pkg: a tree listing that is not a tree is an error, not an empty module" {
+    // An empty module is the dangerous reading: `sond get` would write a deps block and a cache
+    // entry for a module with no files in it, and every later build would resolve to that.
+    let paths[8]
+    h_rec_tree(R_500.utf8)
+    assert_eq(pkg_fetch_tree(h_owner(), h_repo(), TEST_SHA.utf8, paths, 8), 0 - 6)
+    h_rec_tree(R_SIN_CUERPO.utf8)
+    assert_eq(pkg_fetch_tree(h_owner(), h_repo(), TEST_SHA.utf8, paths, 8), 0 - 1)
+    h_rec_tree(R_NO_JSON.utf8)
+    assert_eq(pkg_fetch_tree(h_owner(), h_repo(), TEST_SHA.utf8, paths, 8), 0 - 1)
+    h_rec_tree(R_JSON_ARRAY.utf8)
+    assert_eq(pkg_fetch_tree(h_owner(), h_repo(), TEST_SHA.utf8, paths, 8), 0 - 1)
+    h_rec_tree(R_TREE_SIN_TREE.utf8)
+    assert_eq(pkg_fetch_tree(h_owner(), h_repo(), TEST_SHA.utf8, paths, 8), 0 - 1)
+    h_rec_tree(R_TREE_NO_ARR.utf8)
+    assert_eq(pkg_fetch_tree(h_owner(), h_repo(), TEST_SHA.utf8, paths, 8), 0 - 1)
+    h_rec_clear()
+}
+
+test "pkg: the entries of a tree that are not .snd blobs are stepped over, not guessed at" {
+    let paths[8]
+    h_rec_tree(R_TREE_BASURA.utf8)
+    // Six entries, not one of them a usable blob path: the walk ends with nothing, and does not
+    // read a number as a path along the way.
+    assert_eq(pkg_fetch_tree(h_owner(), h_repo(), TEST_SHA.utf8, paths, 8), 0)
+    h_rec_clear()
+}
+
+test "pkg: a tree with more .snd files than the caller has room for is refused" {
+    // Filling the array to its cap and returning it would hand back a module missing files,
+    // which hashes to something nobody published.
+    let paths[8]
+    h_rec_tree(R_TREE_DOS.utf8)
+    assert_eq(pkg_fetch_tree(h_owner(), h_repo(), TEST_SHA.utf8, paths, 1), 0 - 6)
+    assert_eq(pkg_fetch_tree(h_owner(), h_repo(), TEST_SHA.utf8, paths, 8), 2)
+    h_rec_clear()
+}
+
+test "pkg: an endpoint nobody recorded is a transport error, not a silent empty answer" {
+    // The seam serves a table; a request outside it is what a lost connection looks like from
+    // up here, and both must come back negative rather than as zero bytes read.
+    let sha[8]
+    let paths[8]
+    h_rec_commits(R_COMMITS_OK.utf8)
+    assert_eq(pkg_fetch_tree(h_owner(), h_repo(), TEST_SHA.utf8, paths, 8), 0 - 1)
+    h_rec_clear()
+}
+
+// ── deps.snd as it is actually found on disk, and the pin doing its job ──────────────────────
+
+// The same block as h_block with CRLF line endings: a deps.snd edited on Windows, or one that
+// went through a tool that rewrote its newlines. Every line parser here trims a trailing CR,
+// and nothing was exercising that -- a CR left on the end of a hash makes the cache directory
+// name wrong, so the module silently re-downloads and re-pins on every single get.
+fn h_block_crlf(name: i64, src: i64, sha: i64, hash: i64) -> i64 {
+    let b = bytes_new()
+    let u: string = "use "
+    bytes_append_str(b, u)
+    bytes_append_cstr(b, name)
+    let e1: string = " = sond:sha256:"
+    bytes_append_str(b, e1)
+    bytes_append_cstr(b, hash)
+    bytes_push(b, 13)
+    bytes_push(b, 10)
+    let f1: string = "    from \""
+    bytes_append_str(b, f1)
+    bytes_append_cstr(b, src)
+    bytes_push(b, 64)
+    bytes_append_cstr(b, sha)
+    bytes_push(b, 34)
+    bytes_push(b, 13)
+    bytes_push(b, 10)
+    let g1: string = "    grants {}"
+    bytes_append_str(b, g1)
+    bytes_push(b, 13)
+    bytes_push(b, 10)
+    b
+}
+
+fn h_src() -> i64 { let s: string = "github.com/fredyk/sond-strings"; s.utf8 }
+
+test "pkg: a deps.snd with CRLF line endings pins exactly what one with LF pins" {
+    let troot: string = "/tmp/sond-pkg-t11"
+    let cac: string = "/tmp/sond-pkg-t11/cache"
+    let dep: string = "/tmp/sond-pkg-t11/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_ok()
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0)
+    // Same pin, same bytes, CRLF. If the CR rode along into the hash, the cache dir named by
+    // it would not exist and this get would download the whole module again.
+    h_write_file(dep.utf8, h_block_crlf(pkg_test_modname(), h_src(), TEST_SHA.utf8, EXPECTED_HASH.utf8))
+    h_rec_clear()
+    h_rec_add(H_PATH_COMMITS.utf8, R_COMMITS_OK.utf8)
+    pkg_rec_n = h_rec_cnt
+    assert_eq(pkg_get(spec.utf8), 0)
+    assert_eq(pkg_rec_calls, 1)
+}
+
+test "pkg: a block in a CRLF deps.snd is replaced, not appended to" {
+    let troot: string = "/tmp/sond-pkg-t12"
+    let cac: string = "/tmp/sond-pkg-t12/cache"
+    let dep: string = "/tmp/sond-pkg-t12/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_write_file(dep.utf8, h_block_crlf(pkg_test_modname(), h_src(), TEST_SHA.utf8, EXPECTED_HASH.utf8))
+    h_rec_ok2()
+    let spec2: string = "github.com/fredyk/sond-strings@v1.4.3"
+    assert_eq(pkg_get(spec2.utf8), 0)
+    // One block, pinning the new commit: two would make the resolution ambiguous.
+    let dbuf = heap_alloc(4096)
+    let dlen = read_file(dep.utf8, dbuf, 4096)
+    assert(dlen > 0)
+    assert_eq(bytes_eq(bytes_from_raw(dbuf, dlen), h_block(pkg_test_modname(), h_src(), TEST_SHA2.utf8, EXPECTED_HASH.utf8)), 1)
+}
+
+test "pkg: content that changed behind a pinned ref is refused, and nothing is written" {
+    // The case the whole pin exists for: the cache was cleared, the ref still resolves to the
+    // same commit, and what comes down the wire now hashes to something else. Someone moved the
+    // bytes under a name that is supposed to be immutable, and a get that quietly re-pinned it
+    // would launder that into the build.
+    let troot: string = "/tmp/sond-pkg-t13"
+    let cac: string = "/tmp/sond-pkg-t13/cache"
+    let dep: string = "/tmp/sond-pkg-t13/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    h_rec_ok()
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0)
+    let dbuf1 = heap_alloc(4096)
+    let dlen1 = read_file(dep.utf8, dbuf1, 4096)
+    let antes = bytes_from_raw(dbuf1, dlen1)
+    // The cache is gone (purged, another machine, a fresh checkout), so the files are fetched
+    // again -- and año.snd comes back with a different body.
+    pkg_rmtree(pkg_join2(cac.utf8, EXPECTED_HASH.utf8))
+    h_rec_clear()
+    h_rec_add(H_PATH_COMMITS.utf8, R_COMMITS_OK.utf8)
+    h_rec_add(H_TREE_CHANGED.utf8, R_TREE_OK.utf8)
+    h_rec_add(H_PATH_RAW_A.utf8, R_RAW_A_CHANGED.utf8)
+    h_rec_add(H_PATH_RAW_SUB.utf8, R_RAW_SUB.utf8)
+    pkg_rec_n = h_rec_cnt
+    assert_eq(pkg_get(spec.utf8), 0 - 5)
+    // Neither the cache nor the pin moved.
+    assert_eq(pkg_dir_exists(pkg_join2(cac.utf8, EXPECTED_HASH.utf8)), 0)
+    let dbuf2 = heap_alloc(4096)
+    let dlen2 = read_file(dep.utf8, dbuf2, 4096)
+    assert_eq(bytes_eq(antes, bytes_from_raw(dbuf2, dlen2)), 1)
+}
+
+test "pkg: verify names a module whose cache dir is not there, origin or no origin" {
+    let troot: string = "/tmp/sond-pkg-t14"
+    let cac: string = "/tmp/sond-pkg-t14/cache"
+    let dep: string = "/tmp/sond-pkg-t14/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    // A pin with no `from` line at all, and nothing in the cache under its hash: verify has to
+    // report it by name even though it cannot say where it came from.
+    let b = bytes_new()
+    let u: string = "use huerfano = sond:sha256:"
+    bytes_append_str(b, u)
+    bytes_append_cstr(b, EXPECTED_HASH.utf8)
+    bytes_push(b, 10)
+    h_write_file(dep.utf8, b)
+    assert_eq(pkg_verify(), 1)
+}
+
+test "pkg: verify with no deps.snd is nothing to check, not a failure" {
+    let troot: string = "/tmp/sond-pkg-t15"
+    let cac: string = "/tmp/sond-pkg-t15/cache"
+    let dep: string = "/tmp/sond-pkg-t15/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    assert_eq(pkg_verify(), 0)
+}
+
+test "pkg: the hash of a directory that is not there is no hash at all" {
+    // Not zero files hashed to the empty digest: that digest would be a valid-looking pin.
+    let falta: string = "/tmp/sond-pkg-t16/no-existe"
+    assert_eq(pkg_dir_hash(falta.utf8), 0)
+}
+
+test "pkg: a spec with more segments than the parser holds is refused" {
+    // Sixteen slots, and a spec is host/owner/repo. Anything deeper is refused rather than
+    // parsed as far as it fits.
+    let host[16]
+    let owner[16]
+    let repo[16]
+    let ref[16]
+    let name[16]
+    let hondo: string = "a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r@v1"
+    assert_eq(pkg_parse_spec(hondo.utf8, host, owner, repo, ref, name), 0 - 1)
+}
+
+test "pkg: a deps.snd that cannot be written stops the get instead of half-doing it" {
+    // The pin is what makes the cache meaningful. If it cannot be recorded, the module must not
+    // be reported as fetched.
+    let troot: string = "/tmp/sond-pkg-t17"
+    let cac: string = "/tmp/sond-pkg-t17/cache"
+    // A regular file where a directory would have to be: the parents cannot be created and the
+    // open cannot succeed, which is what a read-only checkout looks like from in here.
+    let tope: string = "/tmp/sond-pkg-t17/tope"
+    let dep: string = "/tmp/sond-pkg-t17/tope/deps.snd"
+    h_cfg(troot.utf8, cac.utf8, dep.utf8)
+    let vacio = bytes_new()
+    bytes_push(vacio, 10)
+    h_write_file(tope.utf8, vacio)
+    h_rec_ok()
+    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    assert_eq(pkg_get(spec.utf8), 0 - 7)
+}
