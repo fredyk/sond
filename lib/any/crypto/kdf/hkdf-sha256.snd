@@ -20,12 +20,25 @@ fn hmac_sha256(key: i64, klen: i64, msg: i64, mlen: i64, out: i64) {
     let ipad = 0x36
     let opad = 0x5c
 
+    // RFC 2104: a key longer than the 64-byte block is REPLACED BY ITS OWN HASH. This used to
+    // keep the first 64 bytes and drop the rest, which is a different MAC from the one every
+    // other implementation computes -- and silently so, because 32 plausible bytes still come
+    // out. RFC 5869's Test Case 2, whose salt is 80 bytes, is the vector that says which.
+    let khash[4]
+    let mut k = key
+    let mut kl = klen
+    if klen > 64 {
+        sha256_hash(key, klen, khash)
+        k = khash
+        kl = 32
+    }
+
     // K_ipad block: key XOR 0x36 padded to 64 bytes
     let ipad_block[64]
     let mut i = 0
     for i < 64 {
-        if i < klen {
-            let kb = peek8(key + i)
+        if i < kl {
+            let kb = peek8(k + i)
             poke8(ipad_block + i, kb ^ ipad)
         } else {
             poke8(ipad_block + i, ipad)
@@ -54,8 +67,8 @@ fn hmac_sha256(key: i64, klen: i64, msg: i64, mlen: i64, out: i64) {
     let opad_block[64]
     i = 0
     for i < 64 {
-        if i < klen {
-            let kb = peek8(key + i)
+        if i < kl {
+            let kb = peek8(k + i)
             poke8(opad_block + i, kb ^ opad)
         } else {
             poke8(opad_block + i, opad)
