@@ -329,11 +329,14 @@ pub fn emit_windows_g(
 /// it executed into a shared buffer reached through the global `__cov_ptr` (which the test
 /// harness points at an `mmap(MAP_SHARED)` region before forking each test). The total number
 /// of points is published as `__cov_total`. Used only by the `sond test` coverage build.
+/// `locate` turns a line of the SPLICED buffer the compiler parses into the `file:line` a person
+/// can open. Without it the report would name lines of a file nobody wrote.
 pub fn emit_program_coverage_g(
     globals: &[Global],
     structs: &[StructDef],
     funcs: &[Function],
     scope: &HashSet<String>,
+    locate: &dyn Fn(u32) -> String,
 ) -> String {
     let mut cg = Codegen {
         check_contracts: true,
@@ -347,8 +350,10 @@ pub fn emit_program_coverage_g(
     cg.global_names.insert("__cov_ptr".to_string());
     cg.global_names.insert("__cov_total".to_string());
     cg.global_names.insert("__cov_nfns".to_string());
-    // The harness indexes `__cov_fn_table` by address, so it resolves like an array global.
+    // The harness indexes `__cov_fn_table` and `__cov_loc_table` by address, so they resolve
+    // like array globals.
     cg.global_arrays.insert("__cov_fn_table".to_string());
+    cg.global_arrays.insert("__cov_loc_table".to_string());
     emit_all(&mut cg, structs, funcs, "main");
     cg.line(".globl main");
     cg.line("main:");
@@ -371,6 +376,15 @@ pub fn emit_program_coverage_g(
         .iter()
         .map(|(name, start, count)| (cg.intern_string(name), name.len(), *start, *count))
         .collect();
+    // And one `file:line` per point, so a missed point is a place and not a search.
+    let cov_lines = cg.cov_lines.clone();
+    let locs: Vec<(String, usize)> = cov_lines
+        .iter()
+        .map(|line| {
+            let texto = locate(*line);
+            (cg.intern_string(&texto), texto.len())
+        })
+        .collect();
     cg.emit_rodata();
     let total = cg.cov_points;
     let nfns = table.len();
@@ -384,6 +398,10 @@ pub fn emit_program_coverage_g(
     cg.line("__cov_fn_table:");
     for (label, len, start, count) in table {
         cg.line(&format!("    .quad {label}, {len}, {start}, {count}"));
+    }
+    cg.line("__cov_loc_table:");
+    for (label, len) in locs {
+        cg.line(&format!("    .quad {label}, {len}"));
     }
     cg.emit_gnu_stack_note();
     cg.out
@@ -1043,6 +1061,10 @@ struct Codegen {
     /// Per-instrumented-function coverage ranges: `(name, first_point_id, point_count)`. Emitted
     /// as `__cov_fn_table` so the harness can name which functions are not fully covered.
     cov_fns: Vec<(String, usize, usize)>,
+    /// The source line of each coverage point, by point id. Naming the function is not enough to
+    /// act on: `tls_handshake_auth` is 130 lines, and "not fully covered" over it is a reading
+    /// task, not a location. Emitted (resolved to file and line) as `__cov_loc_table`.
+    cov_lines: Vec<u32>,
     /// The function names coverage is scoped to (the code the entry is responsible for). Empty
     /// = cover every non-skipped function (used when no scope is supplied).
     cov_scope: HashSet<String>,
@@ -2348,12 +2370,13 @@ fn emit_lock(&mut self, name: &str, body: &Block) {
     /// Emits a coverage mark for the next statement, records that this point executed, into
     /// the shared buffer via `__cov_ptr`. A no-op unless `coverage` is on (so ordinary builds
     /// are byte-identical). Uses `%r11`, a scratch register free at a statement boundary.
-    fn cov_mark(&mut self) {
+    fn cov_mark(&mut self, line: u32) {
         if !self.cov_active {
             return;
         }
         let id = self.cov_points;
         self.cov_points += 1;
+        self.cov_lines.push(line);
         self.line("    movq __cov_ptr(%rip), %r11");
         self.line(&format!("    movq $1, {}(%r11)", id * 8));
     }
@@ -2363,7 +2386,7 @@ fn emit_lock(&mut self, name: &str, body: &Block) {
         // each `if`/`match` branch is emitted as its own block (recursive `block()` call) and
         // gets its own mark, so this is branch-level coverage, and it captures expression-
         // bodied blocks (a tail with no statements) that per-statement marking would miss.
-        self.cov_mark();
+        self.cov_mark(block.stmt_lines.first().copied().unwrap_or(0));
         for (i, stmt) in block.stmts.iter().enumerate() {
             // RFC-0016 --debug checkpoint: announce the statement's source line before running it,
             // and hand the agent this function's frame base (%rbp) so it can read the debuggee's

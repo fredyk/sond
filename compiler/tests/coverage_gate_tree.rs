@@ -335,3 +335,44 @@ fn a_gate_that_measures_nothing_fails_instead_of_passing_at_full_marks() {
         "and the report says the denominator is empty rather than dying mid-line:\n{texto}"
     );
 }
+
+/// A function named without its lines is not actionable.
+///
+/// `tls_handshake_auth` is 130 lines; "not fully covered: tls_handshake_auth" leaves whoever
+/// has to close the gap reading the whole thing to guess which seven of its thirty-two points
+/// never ran. The report has to say WHERE.
+#[test]
+fn a_partly_covered_function_names_the_lines_that_never_ran() {
+    let base = arbol("lineas");
+    // `si_es_par` runs; the `else` arm of `clasifica` and the whole of `nunca` do not.
+    write(
+        &base.join("src/motor.snd"),
+        "fn clasifica(n: i64) -> i64 {\n\
+         \x20   if n == 0 {\n\
+         \x20       return 10\n\
+         \x20   } else {\n\
+         \x20       return 20\n\
+         \x20   }\n\
+         }\n",
+    );
+    write(
+        &base.join("src/motor_test.snd"),
+        "include \"x86_64/linux/testing.snd\"\ninclude \"motor.snd\"\n\
+         test \"cero\" { assert_eq(clasifica(0), 10) }\n",
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sond"))
+        .arg("test")
+        .arg(base.join("src/motor_test.snd"))
+        .output()
+        .expect("sond runs");
+    let mut texto = String::from_utf8_lossy(&out.stdout).into_owned();
+    texto.push_str(&String::from_utf8_lossy(&out.stderr));
+
+    assert!(texto.contains("clasifica"), "the function is named:\n{texto}");
+    // Line 5 of motor.snd is `return 20`, the only statement the test never reaches.
+    assert!(
+        texto.contains("motor.snd:5"),
+        "and the line that never ran is named, file and all:\n{texto}"
+    );
+}

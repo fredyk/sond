@@ -335,6 +335,13 @@ fn main() -> ExitCode {
     // the block closes. Runs last: a pure, semantically-neutral rename of body locals.
     sondc::desugar::disambiguate_shadows(&mut funcs);
 
+    // A coverage point's id means nothing to a person: it has to come back as the file and line
+    // they can open. The spliced buffer knows where each of its lines came from; this carries it
+    // through to the report the gate prints.
+    let cov_locate = |line: u32| match spans.locate_line(line) {
+        Some(loc) => format!("{}:{}", loc.file.display(), loc.line),
+        None => format!("{input}:{line}"),
+    };
     let asm = match std::panic::catch_unwind(|| {
         if pic16 {
             sondc::codegen::pic16::emit_pic16(&funcs)
@@ -347,7 +354,7 @@ fn main() -> ExitCode {
         } else if shared || object {
             emit_shared_g(&globals, &structs, &funcs)
         } else if coverage {
-            emit_program_coverage_g(&globals, &structs, &funcs, &cov_scope)
+            emit_program_coverage_g(&globals, &structs, &funcs, &cov_scope, &cov_locate)
         } else if debug {
             emit_program_debug_g(&globals, &structs, &funcs)
         } else {

@@ -1369,7 +1369,8 @@ pub fn check_no_duplicate_functions(funcs: &[Function]) -> Result<(), String> {
 }
 
 /// The `__cov_` prefix is RESERVED for the compiler's coverage bookkeeping: `sond test
-/// --coverage` publishes `__cov_total`, `__cov_ptr`, `__cov_nfns` and `__cov_fn_table` as
+/// --coverage` publishes `__cov_total`, `__cov_ptr`, `__cov_nfns`, `__cov_fn_table` and
+/// `__cov_loc_table` as
 /// `.data` symbols on its own, and its synthesized harness reads and writes them. Author
 /// code may neither USE nor BIND an identifier with that prefix — any such name would
 /// either reach into compiler internals as if it were an ordinary variable, or collide
@@ -1385,7 +1386,8 @@ fn reject_cov_prefix(kind: &str, name: &str) -> Result<(), String> {
         Err(format!(
             "cannot declare {kind} `{name}`: the `__cov_` prefix is reserved for the coverage \
              bookkeeping the compiler publishes itself (`__cov_total`, `__cov_ptr`, \
-             `__cov_nfns`, `__cov_fn_table`, for `sond test --coverage`). Rename it without \
+             `__cov_nfns`, `__cov_fn_table`, `__cov_loc_table`, for `sond test --coverage`). \
+             Rename it without \
              the `__cov_` prefix."
         ))
     } else {
@@ -1433,7 +1435,13 @@ pub fn check_undeclared_variables(
     // everywhere else the names are refused, by the prefix rejection on binds above and by
     // the reserved-prefix error on unresolved uses below. Predeclaring them in every
     // function of every program is what let a user program read `__cov_ptr` in silence.
-    let cov_reserved: [&str; 4] = ["__cov_total", "__cov_ptr", "__cov_nfns", "__cov_fn_table"];
+    let cov_reserved: [&str; 5] = [
+        "__cov_total",
+        "__cov_ptr",
+        "__cov_nfns",
+        "__cov_fn_table",
+        "__cov_loc_table",
+    ];
     // Collect all enum variant names and function names — they are identifiers, not variables.
     let mut known_names: HashSet<String> = HashSet::new();
     for e in enums {
@@ -1450,7 +1458,7 @@ pub fn check_undeclared_variables(
         func: &Function,
         globals: &[Global],
         known_names: &HashSet<String>,
-        cov_reserved: &[&str; 4],
+        cov_reserved: &[&str],
     ) -> Result<(), String> {
         let mut scopes: ScopeStack = Vec::new();
         let mut top: HashSet<String> = HashSet::new();

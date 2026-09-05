@@ -21,8 +21,14 @@ fn emits_a_constant_return() {
 
 #[test]
 fn coverage_build_instruments_each_statement() {
-    let funcs = Parser::new(tokenize("fn f() -> i64 { let x = 1\nx + 1 }")).parse_program();
-    let asm = emit_program_coverage_g(&[], &[], &funcs, &std::collections::HashSet::new());
+    // Through the LOCATED lexer: the point table carries source lines, and a parser built
+    // without them would report every point at line 0.
+    let (toks, lines, _) = crate::lexer::tokenize_located("fn f() -> i64 { let x = 1\nx + 1 }");
+    let funcs = Parser::with_lines(toks, lines).parse_program();
+    let asm =
+        emit_program_coverage_g(&[], &[], &funcs, &std::collections::HashSet::new(), &|l| {
+            format!("f.snd:{l}")
+        });
     // Each statement records that it executed into the shared buffer via __cov_ptr.
     assert!(
         asm.contains("movq __cov_ptr(%rip), %r11"),
@@ -33,6 +39,12 @@ fn coverage_build_instruments_each_statement() {
         asm.contains("__cov_total:"),
         "publishes the total point count"
     );
+    // And each point carries the place a person can open, not just an id.
+    assert!(
+        asm.contains("__cov_loc_table:"),
+        "publishes where every point is"
+    );
+    assert!(asm.contains("f.snd:1"), "resolved through the caller's locator, at the right line");
 }
 
 #[test]

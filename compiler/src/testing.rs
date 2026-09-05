@@ -93,22 +93,37 @@ pub fn synth_coverage_harness(funcs: &[Function], min_coverage: u32) -> Function
          \x20       __i = __i + 1\n\
          \x20   }\n",
     );
-    // Name each function that is not fully covered, so a blocked build is actionable. Each
-    // __cov_fn_table entry is 4 words: [name_ptr, name_len, first_point, point_count].
+    // Name each function that is not fully covered AND where. Each __cov_fn_table entry is 4
+    // words: [name_ptr, name_len, first_point, point_count]; __cov_loc_table holds a
+    // [file:line ptr, len] pair per point, indexed by point id. The function alone is not a
+    // location: `tls_handshake_auth` is 130 lines, and closing its gap started by reading all
+    // of them to guess which seven of thirty-two points never ran.
     src.push_str(
         "    let mut __fi = 0\n\
          \x20   for __fi < __cov_nfns {\n\
          \x20       let __base = __cov_fn_table + __fi * 32\n\
+         \x20       let __first = peek64(__base + 16)\n\
+         \x20       let __cnt = peek64(__base + 24)\n\
          \x20       let __miss = 0\n\
          \x20       let mut __j = 0\n\
-         \x20       for __j < peek64(__base + 24) {\n\
-         \x20           if peek64(__buf + (peek64(__base + 16) + __j) * 8) == 0 { __miss = 1 }\n\
+         \x20       for __j < __cnt {\n\
+         \x20           if peek64(__buf + (__first + __j) * 8) == 0 { __miss = 1 }\n\
          \x20           __j = __j + 1\n\
          \x20       }\n\
          \x20       if __miss == 1 {\n\
          \x20           print(\"  not fully covered: \")\n\
          \x20           syscall(SYS_write, 1, peek64(__base), peek64(__base + 8))\n\
          \x20           print(\"\\n\")\n\
+         \x20           __j = 0\n\
+         \x20           for __j < __cnt {\n\
+         \x20               if peek64(__buf + (__first + __j) * 8) == 0 {\n\
+         \x20                   let __loc = __cov_loc_table + (__first + __j) * 16\n\
+         \x20                   print(\"      \")\n\
+         \x20                   syscall(SYS_write, 1, peek64(__loc), peek64(__loc + 8))\n\
+         \x20                   print(\"\\n\")\n\
+         \x20               }\n\
+         \x20               __j = __j + 1\n\
+         \x20           }\n\
          \x20       }\n\
          \x20       __fi = __fi + 1\n\
          \x20   }\n",
