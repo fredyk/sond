@@ -376,3 +376,43 @@ fn a_partly_covered_function_names_the_lines_that_never_ran() {
         "and the line that never ran is named, file and all:\n{texto}"
     );
 }
+
+/// The other kind of empty denominator: one that was handed to somebody else.
+///
+/// `x509/realcert_test.snd` drives the DER walk with a real cloudflare certificate, and every
+/// module it includes has a `_test.snd` next door. Measuring those again here would make the
+/// figure mean "what this file happens to include", so it answers for nothing NEW -- and that
+/// is the system working, not a hole. It must not be read as the failure above.
+#[test]
+fn a_gate_whose_modules_are_all_measured_next_door_is_not_a_hole() {
+    let base = arbol("delegado");
+    write(&base.join("src/bytes.snd"), "fn empuja() -> i64 { 2 }\n");
+    write(
+        &base.join("src/bytes_test.snd"),
+        "include \"x86_64/linux/testing.snd\"\ninclude \"bytes.snd\"\n\
+         test \"empuja\" { assert_eq(empuja(), 2) }\n",
+    );
+    write(
+        &base.join("src/integracion_test.snd"),
+        "include \"x86_64/linux/testing.snd\"\ninclude \"bytes.snd\"\n\
+         test \"junto\" { assert_eq(empuja(), 2) }\n",
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_sond"))
+        .arg("test")
+        .arg(base.join("src/integracion_test.snd"))
+        .output()
+        .expect("sond runs");
+    let mut texto = String::from_utf8_lossy(&out.stdout).into_owned();
+    texto.push_str(&String::from_utf8_lossy(&out.stderr));
+
+    assert_eq!(out.status.code().unwrap_or(-1), 0, "nothing is unmeasured here:\n{texto}");
+    assert!(
+        !texto.contains("nothing measured"),
+        "an empty denominator that was DELEGATED is not the hole:\n{texto}"
+    );
+    assert!(
+        texto.contains("measured by their own gates"),
+        "and the report says where the code is measured instead:\n{texto}"
+    );
+}

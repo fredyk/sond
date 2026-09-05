@@ -102,6 +102,7 @@ fn main() -> ExitCode {
     let cov_files = resolved.cov_files.clone();
     let mut src = resolved.src;
     let cov_scope = resolved.cov_scope;
+    let cov_delegated = resolved.cov_delegated;
     let spans = resolved.spans;
     // RFC-0016: in a --debug build, append the debug agent, WRITTEN IN SOND (see `debug_agent`). The
     // per-statement checkpoint (emitted by codegen) calls `__dbg_step(line)`; the agent is the Sond
@@ -256,7 +257,7 @@ fn main() -> ExitCode {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(80);
         let harness = if coverage {
-            sondc::testing::synth_coverage_harness(&funcs, min_coverage)
+            sondc::testing::synth_coverage_harness(&funcs, min_coverage, cov_delegated)
         } else {
             sondc::testing::synth_harness(&funcs)
         };
@@ -338,6 +339,14 @@ fn main() -> ExitCode {
     // A coverage point's id means nothing to a person: it has to come back as the file and line
     // they can open. The spliced buffer knows where each of its lines came from; this carries it
     // through to the report the gate prints.
+    // An empty scope means two different things and only the resolver can tell them apart: no
+    // scope was decided (measure everything), or the entry delegated its whole denominator to
+    // the gates next door (measure nothing).
+    let cov_scope_arg = if cov_scope.is_empty() && !cov_delegated {
+        None
+    } else {
+        Some(&cov_scope)
+    };
     let cov_locate = |line: u32| match spans.locate_line(line) {
         Some(loc) => format!("{}:{}", loc.file.display(), loc.line),
         None => format!("{input}:{line}"),
@@ -354,7 +363,7 @@ fn main() -> ExitCode {
         } else if shared || object {
             emit_shared_g(&globals, &structs, &funcs)
         } else if coverage {
-            emit_program_coverage_g(&globals, &structs, &funcs, &cov_scope, &cov_locate)
+            emit_program_coverage_g(&globals, &structs, &funcs, cov_scope_arg, &cov_locate)
         } else if debug {
             emit_program_debug_g(&globals, &structs, &funcs)
         } else {

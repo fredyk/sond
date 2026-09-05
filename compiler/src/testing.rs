@@ -70,7 +70,7 @@ pub fn synth_harness(funcs: &[Function]) -> Function {
 /// `__cov_total` words (so the instrumentation in the forked children accumulates into it),
 /// points `__cov_ptr` at it, runs the tests, then counts the covered points and reports the
 /// coverage. Compiled with `emit_program_coverage_g`, which instruments the code under test.
-pub fn synth_coverage_harness(funcs: &[Function], min_coverage: u32) -> Function {
+pub fn synth_coverage_harness(funcs: &[Function], min_coverage: u32, delegated: bool) -> Function {
     let tests: Vec<&Function> = funcs.iter().filter(|f| f.is_test).collect();
     let n = tests.len();
     // PROT_READ|PROT_WRITE = 3; MAP_SHARED|MAP_ANONYMOUS = 1|32 = 33; fd = -1; offset = 0.
@@ -150,12 +150,25 @@ pub fn synth_coverage_harness(funcs: &[Function], min_coverage: u32) -> Function
     src.push_str(&format!(
         "    if __gatefail == 1 {{ print(\"coverage below {min_coverage}% threshold\\n\") }}\n"
     ));
-    src.push_str(
-        "    if __n == 0 {\n\
-         \x20       print(\"nothing measured: this entry answers for no instrumented code\\n\")\n\
-         \x20       __gatefail = 1\n\
-         \x20   }\n",
-    );
+    // An empty denominator has two shapes and only one of them is a hole. `x509/realcert_test.snd`
+    // drives the DER walk with a real certificate and every module it includes has a `_test.snd`
+    // next door: it answers for nothing NEW, all of that code IS in somebody's denominator, and
+    // failing it would push whoever hits it to re-measure the neighbours here. The entry that
+    // includes nothing measurable at all is the hole, and that one still fails.
+    if delegated {
+        src.push_str(
+            "    if __n == 0 {\n\
+             \x20       print(\"nothing new here: the modules it includes are measured by their own gates\\n\")\n\
+             \x20   }\n",
+        );
+    } else {
+        src.push_str(
+            "    if __n == 0 {\n\
+             \x20       print(\"nothing measured: this entry answers for no instrumented code\\n\")\n\
+             \x20       __gatefail = 1\n\
+             \x20   }\n",
+        );
+    }
     src.push_str("    __failed + __gatefail\n}\n");
     parse_main(&src)
 }
@@ -189,7 +202,7 @@ mod tests {
     #[test]
     fn coverage_harness_maps_the_buffer_and_counts() {
         let funcs = parse("test \"a\" { let x = 1 }\ntest \"b\" { let y = 2 }");
-        let main = synth_coverage_harness(&funcs, 80);
+        let main = synth_coverage_harness(&funcs, 80, false);
         assert_eq!(main.name, "main");
         let src = format!("{:?}", main.body);
         // Reads the point count, mmaps a shared buffer, points __cov_ptr at it, and both

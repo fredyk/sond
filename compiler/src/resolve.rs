@@ -531,6 +531,16 @@ pub struct ResolvedProgram {
     /// question it exists to answer is "which entry, if any, measures this module", and a tree
     /// with modules that no entry claims is a tree with code no gate ever reads.
     pub cov_files: Vec<PathBuf>,
+    /// True when the denominator came out EMPTY because every module this entry includes is
+    /// measured by a gate of its own.
+    ///
+    /// An empty denominator is otherwise a failure: `covered * 100 / 0` divides by zero, and
+    /// `0 * 100 < 80 * 0` is false, so an entry answering for nothing would sail through at
+    /// 100%. But an integration suite whose every include has a `_test.snd` next door is not a
+    /// hole -- all of that code IS in somebody's denominator -- and re-measuring it here would
+    /// make the figure mean "what this file happens to include". The two look identical from
+    /// inside the harness, so the difference is decided here, where the includes are known.
+    pub cov_delegated: bool,
     pub spans: SpanMap,
 }
 
@@ -765,6 +775,11 @@ pub fn resolve_includes_located_with_resolver(
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.ends_with("_test.snd"));
     let depth0_names: Vec<String> = depth0.iter().cloned().collect();
+    // Set when this entry's denominator came out empty because every module it includes is
+    // measured by a gate of its own. That is not a hole -- all of it IS in somebody's
+    // denominator -- so the gate has nothing to fail on. Distinct from an entry that includes
+    // nothing measurable at all, which is a hole and does fail.
+    let mut cov_delegated = false;
     let scope = if is_test_file {
         if depth1.is_empty() {
             depth0
@@ -776,18 +791,27 @@ pub fn resolve_includes_located_with_resolver(
             // door -- and the only way to pass was to test `bytes` a second time inside the xml
             // suite.
             //
-            // Unless that leaves nothing: an entry whose includes are ALL measured elsewhere
-            // would be judged against an empty denominator, and 0 of 0 passes anything. With
-            // nobody else left to answer, this entry answers.
+            // And when that leaves nothing at all -- an integration suite over modules that
+            // every one of them has a gate next door, which is what `x509/realcert_test.snd`
+            // is -- the entry answers for nothing NEW, and says so instead of borrowing a
+            // denominator it does not own.
             let yo = std::fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf());
             let mut s: HashSet<String> = HashSet::new();
+            let mut alguno_delegado = false;
             for (file, names) in &depth1_files {
                 if measured_by_another_test_file(file, &yo) {
+                    alguno_delegado = true;
                     continue;
                 }
-                s.extend(names.iter().cloned());
+                s.extend(
+                    names
+                        .iter()
+                        .filter(|n| !crate::codegen::never_instrumented(n))
+                        .cloned(),
+                );
             }
-            if s.is_empty() { depth1 } else { s }
+            cov_delegated = s.is_empty() && alguno_delegado;
+            s
         }
     } else if depth0.is_empty() {
         depth1
@@ -834,6 +858,7 @@ pub fn resolve_includes_located_with_resolver(
         src: out,
         cov_scope: scope,
         cov_files,
+        cov_delegated,
         spans: SpanMap {
             entry: entry.to_path_buf(),
             lines: spans,
@@ -1744,10 +1769,15 @@ mod tests {
     }
 
     #[test]
-    fn a_test_file_whose_includes_are_all_measured_elsewhere_still_answers_for_them() {
-        // The exclusion cannot empty the denominator: a suite that includes only modules with
-        // gates of their own would then be measured against nothing, and 0 of 0 passes anything.
-        // With nobody else left to answer, this entry answers.
+    fn a_test_file_whose_includes_are_all_measured_elsewhere_delegates_instead_of_answering() {
+        // An integration suite over modules that all have gates of their own answers for nothing
+        // NEW, and that is not a hole: every one of those modules is already in somebody's
+        // denominator. Measuring them a second time here would make the figure mean "what this
+        // file happens to include". So it says so, and the gate has nothing to fail on.
+        //
+        // The distinction that matters: an entry whose denominator is empty because it DELEGATED
+        // it, against one that is empty because it includes nothing measurable at all. The second
+        // is a hole; the first is the system working.
         let root = project_fixture();
         std::fs::write(root.join("src/bytes.snd"), "fn push() -> i64 { 2 }\n").unwrap();
         std::fs::write(root.join("src/bytes_test.snd"), "include \"bytes.snd\"\ntest \"t\" { }\n")
@@ -1760,10 +1790,22 @@ mod tests {
 
         let r = resolve_includes_scoped_located(&root.join("src/integracion_test.snd")).unwrap();
         assert!(
-            r.cov_scope.contains("push"),
-            "with nothing else to measure, the subject stays: {:?}",
+            !r.cov_scope.contains("push"),
+            "a module measured by its own gate is not counted twice: {:?}",
             r.cov_scope
         );
+        assert!(r.cov_delegated, "and the empty denominator is a delegation, not a hole");
+    }
+
+    #[test]
+    fn an_entry_that_includes_nothing_measurable_is_not_delegating() {
+        // Nobody else is measuring anything on its behalf, so an empty denominator here is the
+        // hole `x509/realcert_test.snd` was mistaken for: the gate has to fail on it.
+        let root = project_fixture();
+        std::fs::write(root.join("src/solo_test.snd"), "test \"t\" { }\n").unwrap();
+
+        let r = resolve_includes_scoped_located(&root.join("src/solo_test.snd")).unwrap();
+        assert!(!r.cov_delegated, "nothing was handed to anyone else: {:?}", r.cov_scope);
     }
 
     #[test]

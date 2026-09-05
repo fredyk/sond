@@ -26,7 +26,7 @@ fn coverage_build_instruments_each_statement() {
     let (toks, lines, _) = crate::lexer::tokenize_located("fn f() -> i64 { let x = 1\nx + 1 }");
     let funcs = Parser::with_lines(toks, lines).parse_program();
     let asm =
-        emit_program_coverage_g(&[], &[], &funcs, &std::collections::HashSet::new(), &|l| {
+        emit_program_coverage_g(&[], &[], &funcs, None, &|l| {
             format!("f.snd:{l}")
         });
     // Each statement records that it executed into the shared buffer via __cov_ptr.

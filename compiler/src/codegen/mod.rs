@@ -335,13 +335,13 @@ pub fn emit_program_coverage_g(
     globals: &[Global],
     structs: &[StructDef],
     funcs: &[Function],
-    scope: &HashSet<String>,
+    scope: Option<&HashSet<String>>,
     locate: &dyn Fn(u32) -> String,
 ) -> String {
     let mut cg = Codegen {
         check_contracts: true,
         coverage: true,
-        cov_scope: scope.clone(),
+        cov_scope: scope.cloned(),
         ..Default::default()
     };
     cg.set_globals(globals);
@@ -1065,9 +1065,12 @@ struct Codegen {
     /// act on: `tls_handshake_auth` is 130 lines, and "not fully covered" over it is a reading
     /// task, not a location. Emitted (resolved to file and line) as `__cov_loc_table`.
     cov_lines: Vec<u32>,
-    /// The function names coverage is scoped to (the code the entry is responsible for). Empty
-    /// = cover every non-skipped function (used when no scope is supplied).
-    cov_scope: HashSet<String>,
+    /// The function names coverage is scoped to (the code the entry is responsible for).
+    /// `None` = no scope was supplied, so cover every non-skipped function. `Some(empty)` is a
+    /// scope like any other and covers NOTHING: an entry whose modules are all measured by gates
+    /// of their own answers for nothing, and reading that as "cover everything" reported it at
+    /// 100% over code it is not responsible for.
+    cov_scope: Option<HashSet<String>>,
     /// Names of the module-level globals (to resolve a `Var` to a `.data` label).
     global_names: HashSet<String>,
     /// The scalar globals to emit in `.data`, as `(label, constant value)`.
@@ -1167,12 +1170,20 @@ struct Codegen {
 /// (`main`), the test bodies themselves (always run, and their coverage is uninteresting),
 /// and the testing library. Coverage measures the code under test, not the test scaffold.
 fn should_skip_coverage(func: &Function) -> bool {
-    func.is_test
-        || func.name == "main"
-        || matches!(
-            func.name.as_str(),
-            "assert" | "assert_eq" | "assert_ne" | "fail" | "__test_report"
-        )
+    func.is_test || never_instrumented(&func.name)
+}
+
+/// The names a coverage build never instruments, by name alone.
+///
+/// The scope is decided in `resolve.rs` and the instrumentation here, and while the two read the
+/// same list from different places they can disagree: a scope holding only names that are never
+/// instrumented looks non-empty there and measures nothing here, which is how the entry that had
+/// delegated its whole denominator was reported as a hole. One list, one reading.
+pub fn never_instrumented(name: &str) -> bool {
+    matches!(
+        name,
+        "main" | "assert" | "assert_eq" | "assert_ne" | "fail" | "__test_report"
+    )
 }
 
 impl Codegen {
@@ -1202,7 +1213,10 @@ impl Codegen {
         // testing library (measuring those is noise, and the harness must run its `__cov_ptr`
         // setup before any mark fires); and, when a coverage scope is set, only functions in
         // it (the entry's own code, not already-tested transitive dependencies).
-        let in_scope = self.cov_scope.is_empty() || self.cov_scope.contains(&func.name);
+        let in_scope = self
+            .cov_scope
+            .as_ref()
+            .is_none_or(|s| s.contains(&func.name));
         self.cov_active = self.coverage && !should_skip_coverage(func) && in_scope;
         // Does this function return a small struct/enum by value? If so, the body leaves
         // its base ADDRESS in %rax; the return point expands that to the value in RAX:RDX.

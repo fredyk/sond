@@ -9081,7 +9081,7 @@ mod coverage_harness_globals {
         // the harness touches (`syscall`, `peek64`, `print`, `__test_report`) is a call
         // target, which this check does not police.
         let tests = parse_fns("test \"a\" { let x = 1 }\ntest \"b\" { let y = 2 }");
-        let main = crate::testing::synth_coverage_harness(&tests, 80);
+        let main = crate::testing::synth_coverage_harness(&tests, 80, false);
         let sys_globals: Vec<Global> = ["SYS_mmap", "SYS_fork", "SYS_exit", "SYS_wait4", "SYS_write"]
             .iter()
             .map(|n| Global {

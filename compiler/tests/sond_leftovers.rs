@@ -22,9 +22,14 @@ fn pid_muerto() -> u32 {
     panic!("every pid on the machine is taken");
 }
 
-/// A scratch directory shaped exactly like `sond`'s, with a process running out of it.
-fn resto_de(pid: u32) -> (Temporal, std::process::Child) {
-    let dir = Temporal::con_nombre(&format!(".sond-{pid}-{:016x}", 0xfeedfaceu32));
+/// A scratch directory shaped exactly like `sond`'s, with a process running out of it. Built
+/// INSIDE `tmp`, which is the `TMPDIR` the run under test is given: the sweep is global over the
+/// temp directory by design, so a leftover left in the shared `/tmp` is fair game for any other
+/// `sond` the suite starts in parallel -- and one of them swept this fixture out from under the
+/// spawn, which came back as ENOENT.
+fn resto_de(pid: u32, tmp: &Path) -> (PathBuf, std::process::Child) {
+    let dir = tmp.join(format!(".sond-{pid}-{:016x}", 0xfeedfaceu32));
+    std::fs::create_dir(&dir).unwrap();
     let gate = dir.join("gate");
     std::fs::copy("/bin/sleep", &gate).unwrap();
     // ETXTBSY: another test in this binary forked while `gate` was still open for writing, and
@@ -44,11 +49,16 @@ fn resto_de(pid: u32) -> (Temporal, std::process::Child) {
     (dir, hijo.expect("the leftover runs"))
 }
 
-/// Any `sond` invocation, used here only for its side effect of starting up.
-fn corre_sond(dir: &Path) {
+/// Any `sond` invocation, used here only for its side effect of starting up. `tmp` is the
+/// temp directory it sweeps.
+fn corre_sond(dir: &Path, tmp: &Path) {
     let f = dir.join("t.snd");
     std::fs::write(&f, "fn main() -> i64 { 0 }\n").unwrap();
-    let _ = Command::new(env!("CARGO_BIN_EXE_sond")).arg("build").arg(&f).output();
+    let _ = Command::new(env!("CARGO_BIN_EXE_sond"))
+        .env("TMPDIR", tmp)
+        .arg("build")
+        .arg(&f)
+        .output();
 }
 
 /// A tree with a `lib/` of its own and one gate that never finishes.
@@ -75,9 +85,9 @@ fn arbol_colgado(nombre: &str) -> Temporal {
 #[test]
 fn the_next_run_sweeps_what_a_killed_run_left_spinning() {
     let trabajo = Temporal::nuevo("sond-restos");
-    let (resto, mut proceso) = resto_de(pid_muerto());
+    let (resto, mut proceso) = resto_de(pid_muerto(), &trabajo);
 
-    corre_sond(&trabajo);
+    corre_sond(&trabajo, &trabajo);
 
     // `try_wait`, not /proc: a killed child of this test stays a zombie -- with a live
     // /proc/<pid> -- until its parent reaps it, which reads exactly like "still running".
@@ -108,7 +118,7 @@ fn a_run_that_is_still_going_is_left_alone() {
     // verdict. Swept, its gate is killed early and the run reports a failure it never had.
     let base = arbol_colgado("sond-vivo");
     let inicio = std::time::Instant::now();
-    let mut vivo = Command::new(env!("CARGO_BIN_EXE_sond"))
+    let vivo = Command::new(env!("CARGO_BIN_EXE_sond"))
         .arg("test")
         .arg("--timeout=20")
         .arg(base.join("src"))
@@ -120,7 +130,7 @@ fn a_run_that_is_still_going_is_left_alone() {
     // Long enough that the live run is past its own sweep and into the gate.
     std::thread::sleep(std::time::Duration::from_secs(3));
     let otro = Temporal::nuevo("sond-otro");
-    corre_sond(&otro);
+    corre_sond(&otro, &otro);
 
     let salida = vivo.wait_with_output().expect("the live run ends on its own");
     let texto = String::from_utf8_lossy(&salida.stdout).into_owned();
