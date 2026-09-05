@@ -68,7 +68,7 @@ addresses. I checked how this codebase itself ports C string functions of
 the exact same shape (`lib/any/strings.snd`: `strlen`, `memcpy`, `streq`,
 `starts_with`, `find_byte`), every one of them is written with
 `peek8`/`poke8` pointer arithmetic over `i64` addresses, matching C's own
-pointer style almost line for line, and `tests/strings_test.snd` builds its
+pointer style almost line for line, and `lib/any/strings_test.snd` builds its
 test buffers with `let mut buf[N]` + `poke8`. I followed that established
 idiom rather than the `Slice` API: `set_cmnd()` itself is raw C pointer
 arithmetic over a NUL-terminated buffer, and `peek8`/`poke8` is the direct,
@@ -88,8 +88,8 @@ structure: `if c == BACKSLASH && not is_space_byte(c1) { from_i = from_i + 1 }`
 real code.
 
 **Buffers.** `Sond.md`'s `let a[N]` allocates *N words* (8 bytes each), not
-N bytes, and `tests/strings_test.snd` uses that generously (`let mut
-buf[20]` for a 3-byte string), so a naive small demo buffer would give
+N bytes, and `lib/any/strings_test.snd` uses that generously (`let mut
+a[8]`, 64 bytes, for a 3-byte string), so a naive small demo buffer would give
 many bytes of slack and never cross a real allocation boundary even when
 the bug fires. To keep the demo a *genuine* out-of-bounds access rather
 than a logic-only bug that happens to stay inside slack space, I sized the
