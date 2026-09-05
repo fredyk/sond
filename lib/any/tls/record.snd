@@ -26,6 +26,12 @@ let mut tls_inner[16640]
 // ChaCha20-Poly1305 helper works one buffer at a time, so records stay well under it.
 let TLS_INNER_MAX = 16384
 
+// The most CONTENT one record can carry: the inner plaintext is the content plus the one byte
+// that says what type it is. Anyone splitting a payload into records has to split on THIS
+// number -- `tls_seal` refuses anything above it -- and not on a 2^14 written out by hand
+// somewhere else, which is a number that stops describing this file the moment it moves.
+let TLS_CONTENT_MAX = 16383
+
 // Writes the 12-byte per-record nonce into `out`: iv, with `seq` XORed big-endian
 // into the last 8 bytes (the first 4 bytes are the iv unchanged).
 fn tls_nonce(iv: i64, seq: i64, out: i64) {
@@ -43,7 +49,7 @@ fn tls_nonce(iv: i64, seq: i64, out: i64) {
 // record in `out`. key=32B, iv=12B, seq=this record's sequence number. Returns the
 // total record length written (5 + n + 1 + 16), or -1 if `n` exceeds the per-record cap.
 fn tls_seal(key: i64, iv: i64, seq: i64, ctype: i64, content: i64, n: i64, out: i64) -> i64 {
-    if n + 1 > TLS_INNER_MAX { return 0 - 1 }
+    if n > TLS_CONTENT_MAX { return 0 - 1 }
     // inner (TLSInnerPlaintext) = content || real content type; no zero padding in v1.
     
     let mut i = 0

@@ -1,0 +1,373 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/tls/session.snd.
+//
+// Two shapes of test, because one alone leaves a hole.
+//
+// Most of it needs no network: a session is built by hand over a pipe, and the records the
+// "peer" sends are sealed with the same keys the session is given. That is what can drive
+// tls_read over a record the caller's buffer cannot hold, which no real server can be asked to
+// produce on demand.
+//
+// But a session built by hand never runs the handshake, and the handshake is two thirds of this
+// file. So the rest goes through `tlssrv_serve` (any/tls/testserver.snd) on the loopback: a
+// forked child speaking real TLS 1.3, which is the only thing that can say tls_connect_fd
+// negotiated anything rather than returning a handle full of zeros.
+
+include "any/tls/session.snd"
+include "any/tls/testserver.snd"
+include "x86_64/linux/testing.snd"
+
+let SESS_BYTES = 53416
+
+let mut fds[1]
+let mut key[4]
+let mut iv[2]
+let mut plain[2048]
+let mut sealed[2100]
+let mut out[2100]
+let mut roots[4]
+
+// A session over `rfd`, with the server side keyed exactly as the records below are sealed.
+fn fake_session(rfd: i64) -> i64 {
+    let s = heap_alloc(SESS_BYTES)
+    poke64(s, rfd)
+    poke64(s + 8, 0)
+    poke64(s + 16, 0)
+    poke64(s + 112, 0 - 1)
+    for i in 0..32 { poke8(tls_sess_skey(s) + i, peek8(key + i)) }
+    for i in 0..12 { poke8(tls_sess_siv(s) + i, peek8(iv + i)) }
+    s
+}
+
+fn make_keys() {
+    for i in 0..32 { poke8(key + i, i + 1) }
+    for i in 0..12 { poke8(iv + i, 0x30 + i) }
+}
+
+// Put one sealed record of `n` bytes of inner type `ctype` on the pipe. Returns the write fd.
+fn send_record(seq: i64, ctype: i64, n: i64) -> i64 {
+    let sl = tls_seal(key, iv, seq, ctype, plain, n, sealed)
+    write_buf(peek32(fds + 4), sealed, sl)
+    sl
+}
+
+test "a record larger than the caller's buffer does not write past it" {
+    make_keys()
+    assert(syscall(SYS_pipe, fds) >= 0)
+    for i in 0..600 { poke8(plain + i, 0x41 + (i % 26)) }
+    for i in 0..2048 { poke8(out + i, 0xEE) }
+    let s = fake_session(peek32(fds))
+    assert(send_record(0, 23, 600) > 0)
+    // The caller offers room for 64 bytes. Everything from `out + 64` on belongs to whoever
+    // called, and a 600-byte record must not reach it.
+    let got = tls_read(s, out, 64)
+    assert_eq(got, 64)
+    for i in 64..2048 { assert_eq(peek8(out + i), 0xEE) }
+    for i in 0..64 { assert_eq(peek8(out + i), 0x41 + (i % 26)) }
+    close_fd(peek32(fds))
+    close_fd(peek32(fds + 4))
+}
+
+test "the part of a record that did not fit comes back on the next read" {
+    make_keys()
+    assert(syscall(SYS_pipe, fds) >= 0)
+    for i in 0..600 { poke8(plain + i, 0x41 + (i % 26)) }
+    for i in 0..2048 { poke8(out + i, 0xEE) }
+    let s = fake_session(peek32(fds))
+    assert(send_record(0, 23, 600) > 0)
+    assert_eq(tls_read(s, out, 64), 64)
+    // Reading again continues where the last call stopped instead of losing 536 bytes and
+    // blocking on a record the peer never sent. And what is left over can be too big AGAIN: a
+    // caller reading in small bites has to be able to empty one record over many calls.
+    assert_eq(tls_read(s, out, 64), 64)
+    for i in 0..64 { assert_eq(peek8(out + i), 0x41 + ((i + 64) % 26)) }
+    let n2 = tls_read(s, out, 2048)
+    assert_eq(n2, 600 - 128)
+    for i in 0..n2 { assert_eq(peek8(out + i), 0x41 + ((i + 128) % 26)) }
+    close_fd(peek32(fds))
+    close_fd(peek32(fds + 4))
+}
+
+test "a record that fits comes back whole" {
+    make_keys()
+    assert(syscall(SYS_pipe, fds) >= 0)
+    for i in 0..40 { poke8(plain + i, 0x61 + (i % 26)) }
+    for i in 0..2048 { poke8(out + i, 0xEE) }
+    let s = fake_session(peek32(fds))
+    assert(send_record(0, 23, 40) > 0)
+    assert_eq(tls_read(s, out, 2048), 40)
+    for i in 0..40 { assert_eq(peek8(out + i), 0x61 + (i % 26)) }
+    assert_eq(peek8(out + 40), 0xEE)
+    close_fd(peek32(fds))
+    close_fd(peek32(fds + 4))
+}
+
+test "reading many records does not grow the heap without end" {
+    // The scratch buffers used to be allocated per call, in an arena that has no free: a tunnel
+    // that read a million records burned twenty gigabytes to hold one.
+    make_keys()
+    assert(syscall(SYS_pipe, fds) >= 0)
+    for i in 0..40 { poke8(plain + i, 0x61) }
+    let s = fake_session(peek32(fds))
+    for i in 0..8 { send_record(i, 23, 40) }
+    assert_eq(tls_read(s, out, 2048), 40)
+    let before = heap_used()
+    for i in 0..7 { assert_eq(tls_read(s, out, 2048), 40) }
+    assert_eq(heap_used(), before)
+    close_fd(peek32(fds))
+    close_fd(peek32(fds + 4))
+}
+
+test "an alert says which one it was, and the end of data says nothing was wrong" {
+    make_keys()
+    assert(syscall(SYS_pipe, fds) >= 0)
+    let s = fake_session(peek32(fds))
+    assert_eq(tls_sess_alert(s), 0 - 1)
+    poke8(plain, 1)          // level: warning
+    poke8(plain + 1, 0)      // description: close_notify
+    assert(send_record(0, 21, 2) > 0)
+    assert_eq(tls_read(s, out, 2048), 0)
+    assert_eq(tls_sess_alert(s), (1 << 8) | 0)
+    close_fd(peek32(fds))
+    close_fd(peek32(fds + 4))
+}
+
+// A session that WRITES to the pipe, keyed on the client side the way the reads above are keyed
+// on the server side.
+fn fake_writer(wfd: i64) -> i64 {
+    let s = heap_alloc(SESS_BYTES)
+    poke64(s, wfd)
+    poke64(s + 8, 0)
+    poke64(s + 16, 0)
+    poke64(s + 112, 0 - 1)
+    for i in 0..32 { poke8(tls_sess_ckey(s) + i, peek8(key + i)) }
+    for i in 0..12 { poke8(tls_sess_civ(s) + i, peek8(iv + i)) }
+    s
+}
+
+test "what tls_write seals is what the other end opens, and the sequence advances" {
+    make_keys()
+    assert(syscall(SYS_pipe, fds) >= 0)
+    for i in 0..300 { poke8(plain + i, 0x30 + (i % 10)) }
+    let w = fake_writer(peek32(fds + 4))
+    assert_eq(tls_write(w, plain, 300), 300)
+    assert_eq(peek64(w + 8), 1)               // one record went out
+
+    let r = fake_session(peek32(fds))
+    for i in 0..2048 { poke8(out + i, 0xEE) }
+    assert_eq(tls_read(r, out, 2048), 300)
+    for i in 0..300 { assert_eq(peek8(out + i), 0x30 + (i % 10)) }
+    // Writing nothing sends nothing: the sequence must not move for an empty payload.
+    assert_eq(tls_write(w, plain, 0), 0)
+    assert_eq(peek64(w + 8), 1)
+    close_fd(peek32(fds))
+    close_fd(peek32(fds + 4))
+}
+
+test "a payload over the record limit goes out as more than one record" {
+    // A record carries at most TLS_CONTENT_MAX bytes of content; a caller handing over more
+    // must not have it silently truncated, nor have the whole write fail.
+    make_keys()
+    assert(syscall(SYS_pipe, fds) >= 0)
+    let big = heap_alloc(20000)
+    for i in 0..20000 { poke8(big + i, i % 251) }
+    let w = fake_writer(peek32(fds + 4))
+    assert_eq(tls_write(w, big, 20000), 20000)
+    assert_eq(peek64(w + 8), 2)               // TLS_CONTENT_MAX + the rest
+
+    let r = fake_session(peek32(fds))
+    let back = heap_alloc(20000)
+    assert_eq(tls_read(r, back, 20000), TLS_CONTENT_MAX)
+    assert_eq(tls_read(r, back + TLS_CONTENT_MAX, 20000), 20000 - TLS_CONTENT_MAX)
+    for i in 0..20000 { assert_eq(peek8(back + i), i % 251) }
+    close_fd(peek32(fds))
+    close_fd(peek32(fds + 4))
+}
+
+test "tls_close closes the session's socket" {
+    make_keys()
+    assert(syscall(SYS_pipe, fds) >= 0)
+    let s = fake_session(peek32(fds))
+    tls_close(s)
+    // Closing it again fails with EBADF: the first close really happened.
+    assert_eq(close_fd(peek32(fds)), 0 - 9)
+    close_fd(peek32(fds + 4))
+}
+
+test "a connection that cannot be made is not a session" {
+    // Port 1 on the loopback has nothing listening, so connect() fails and tls_connect has to
+    // report that as 0 rather than hand back a handle whose fd is a failed socket.
+    let localhost: string = "127.0.0.1"
+    assert_eq(tls_connect(localhost.utf8, 1, localhost.utf8, 9, 0, 0, 0, 0, 0), 0)
+}
+
+test "a handshake that gets nothing back is not a session either" {
+    // The far end of a pipe never answers a ClientHello, so tls_connect_fd has to give up and
+    // close the fd it was handed instead of returning a half-built session.
+    assert(syscall(SYS_pipe, fds) >= 0)
+    let sni: string = "localhost"
+    close_fd(peek32(fds + 4))                 // EOF on the read side straight away
+    assert_eq(tls_connect_fd(peek32(fds), sni.utf8, 9, 0, 0, 0, 0, 0), 0)
+}
+
+// Listen on `port`, fork, and have the child serve one real TLS 1.3 exchange. Returns
+// (pid << 32) | listening fd.
+fn serve_one(port: i64, certlen: i64) -> i64 {
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        tlssrv_serve(afd, certlen)
+        close_fd(afd)
+        syscall(SYS_exit, 0)
+    }
+    (pid << 32) | sfd
+}
+
+test "a handshake against a real server yields a session that carries data both ways" {
+    // Everything a hand-built session skips: the key share, the transcript, both Finished
+    // messages and the chain validation. A session whose keys came out of the handshake is the
+    // only one that can talk to a peer that did not have them handed to it.
+    let certlen = tlssrv_setup()
+    roots[0] = tlssrv_cert()
+    let both = serve_one(55504, certlen)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let host: string = "127.0.0.1"
+    let sni: string = "sond.test"
+    let alpn: string = "http/1.1"
+    let now: string = "20270101000000"
+    let sess = tls_connect(host.utf8, 55504, sni.utf8, 9, alpn.utf8, 8, roots, 1, now.utf8)
+    assert_eq(sess != 0, 1)
+    assert_eq(tls_sess_alert(sess), 0 - 1)
+
+    let req: string = "GET / HTTP/1.1\r\n\r\n"
+    assert_eq(tls_write(sess, req.utf8, req.len), req.len)
+    assert_eq(peek64(sess + 8), 1)
+
+    let want: string = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+    let n = tls_read(sess, out, 2100)
+    assert_eq(n, want.len)
+    for i in 0..n { assert_eq(peek8(out + i), peek8(want.utf8 + i)) }
+    // The server sent a NewSessionTicket first: tls_read had to skip it and hand back the
+    // application data, not the ticket, and the server sequence has to count both records.
+    assert_eq(peek64(sess + 16), 2)
+
+    assert_eq(tls_read(sess, out, 2100), 0)
+    assert_eq(tls_sess_alert(sess), 256)
+    tls_close(sess)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+
+test "an upgrade on a socket the caller connected refuses a chain that names another host" {
+    // The STARTTLS shape: the TCP connection is already up (a PostgreSQL SSLRequest has just
+    // been answered on it) and only the handshake is asked for. The certificate says sond.test,
+    // so a client asking for wrong.host must come back with no session AND with the socket
+    // closed -- a caller that got 0 has no handle to close it with, and a descriptor leaked per
+    // failed upgrade is a pool that runs out.
+    let certlen = tlssrv_setup()
+    roots[0] = tlssrv_cert()
+    let both = serve_one(55505, certlen)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, 55505)
+    assert(connect_sock(fd, sa, 16) >= 0)
+
+    let sni: string = "wrong.host"
+    let now: string = "20270101000000"
+    assert_eq(tls_connect_fd(fd, sni.utf8, 10, 0, 0, roots, 1, now.utf8), 0)
+    assert_eq(close_fd(fd), 0 - 9)            // EBADF: it was already closed
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+
+test "a peer whose first record is not a handshake gives no session" {
+    // A ServerHello is the only thing that can come back here. Application data at this point is
+    // a peer talking under keys nobody has agreed yet, and it has to end the attempt rather than
+    // be fed to the key schedule.
+    assert(syscall(SYS_pipe, fds) >= 0)
+    poke8(sealed, 23); poke8(sealed + 1, 3); poke8(sealed + 2, 3)
+    poke8(sealed + 3, 0); poke8(sealed + 4, 8)
+    for i in 0..8 { poke8(sealed + 5 + i, 0x41) }
+    write_buf(peek32(fds + 4), sealed, 13)
+    close_fd(peek32(fds + 4))
+    let sni: string = "localhost"
+    assert_eq(tls_connect_fd(peek32(fds), sni.utf8, 9, 0, 0, 0, 0, 0), 0)
+}
+
+test "a server that sends its ServerHello and then hangs up gives no session" {
+    // Everything through the key schedule runs, and the flight never arrives. The read loop that
+    // waits for the server Finished has to end on that, not spin waiting for a record nobody is
+    // going to send.
+    assert(syscall(SYS_pipe, fds) >= 0)
+    let spriv[32]
+    tls_random(spriv, 32)
+    let base9[32]
+    poke8(base9, 9)
+    for i in 0..31 { poke8(base9 + 1 + i, 0) }
+    let spub[32]
+    x25519(spriv, base9, spub)
+    let srand[32]
+    tls_random(srand, 32)
+    let sh[64]
+    let shlen = tlssrv_build_sh(srand, spub, sh)
+    tls_send_plain_handshake(peek32(fds + 4), sh, shlen, sealed)
+    close_fd(peek32(fds + 4))
+    let sni: string = "localhost"
+    assert_eq(tls_connect_fd(peek32(fds), sni.utf8, 9, 0, 0, 0, 0, 0), 0)
+}
+
+test "a read with nothing left on the socket is the end of the data, not an error" {
+    make_keys()
+    assert(syscall(SYS_pipe, fds) >= 0)
+    let s = fake_session(peek32(fds))
+    close_fd(peek32(fds + 4))                 // EOF straight away
+    assert_eq(tls_read(s, out, 2048), 0)
+    // And nothing was said about an alert: the peer did not refuse, it just stopped.
+    assert_eq(tls_sess_alert(s), 0 - 1)
+    close_fd(peek32(fds))
+}
+
+test "a record that does not decrypt is an error, and never partial plaintext" {
+    // A record whose tag does not check out has been tampered with or is out of sequence. What
+    // it must not do is hand the caller whatever came out of the cipher.
+    make_keys()
+    assert(syscall(SYS_pipe, fds) >= 0)
+    let s = fake_session(peek32(fds))
+    poke8(sealed, 23); poke8(sealed + 1, 3); poke8(sealed + 2, 3)
+    poke8(sealed + 3, 0); poke8(sealed + 4, 32)
+    for i in 0..32 { poke8(sealed + 5 + i, 0xAA) }
+    write_buf(peek32(fds + 4), sealed, 37)
+    for i in 0..64 { poke8(out + i, 0xEE) }
+    assert_eq(tls_read(s, out, 2048), 0 - 1)
+    assert_eq(peek8(out), 0xEE)
+    close_fd(peek32(fds))
+    close_fd(peek32(fds + 4))
+}
+
+test "a write to a socket that is gone reports the failure instead of counting the bytes" {
+    // Returning n here would tell the caller the peer has the data. It does not, and a protocol
+    // that sends the next message on that answer loses whatever it thought it had delivered.
+    make_keys()
+    assert(syscall(SYS_pipe, fds) >= 0)
+    let w = fake_writer(peek32(fds + 4))
+    close_fd(peek32(fds))
+    close_fd(peek32(fds + 4))
+    for i in 0..40 { poke8(plain + i, 0x41) }
+    assert_eq(tls_write(w, plain, 40), 0 - 1)
+}
