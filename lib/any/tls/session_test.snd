@@ -169,21 +169,39 @@ test "what tls_write seals is what the other end opens, and the sequence advance
 test "a payload over the record limit goes out as more than one record" {
     // A record carries at most TLS_CONTENT_MAX bytes of content; a caller handing over more
     // must not have it silently truncated, nor have the whole write fail.
+    //
+    // The writer goes in a child. Both records together are over 20000 bytes and nothing was
+    // reading the other end, so writing them from this process only worked while the pipe
+    // happened to have room for all of it: run inside the whole suite, with the kernel handing
+    // out small pipe buffers, `write_buf` blocked on a reader that was the same process, and the
+    // gate reported a hang where the code was fine. A test that needs a 64 KB pipe to pass is
+    // not testing the split.
     make_keys()
     assert(syscall(SYS_pipe, fds) >= 0)
     let big = heap_alloc(20000)
     for i in 0..20000 { poke8(big + i, i % 251) }
-    let w = fake_writer(peek32(fds + 4))
-    assert_eq(tls_write(w, big, 20000), 20000)
-    assert_eq(peek64(w + 8), 2)               // TLS_CONTENT_MAX + the rest
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        close_fd(peek32(fds))
+        let w = fake_writer(peek32(fds + 4))
+        if tls_write(w, big, 20000) != 20000 { syscall(SYS_exit, 1) }
+        close_fd(peek32(fds + 4))
+        syscall(SYS_exit, 0)
+    }
+    close_fd(peek32(fds + 4))
 
+    // Two reads, and each one answers with exactly one record: that IS the split, measured on
+    // the wire instead of read off the writer's own counter.
     let r = fake_session(peek32(fds))
     let back = heap_alloc(20000)
     assert_eq(tls_read(r, back, 20000), TLS_CONTENT_MAX)
     assert_eq(tls_read(r, back + TLS_CONTENT_MAX, 20000), 20000 - TLS_CONTENT_MAX)
     for i in 0..20000 { assert_eq(peek8(back + i), i % 251) }
     close_fd(peek32(fds))
-    close_fd(peek32(fds + 4))
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    assert_eq(peek32(st) & 0x7f, 0)
+    assert_eq((peek32(st) >> 8) & 0xff, 0)    // the writer said it sent all 20000
 }
 
 test "tls_close closes the session's socket" {
