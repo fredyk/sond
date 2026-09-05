@@ -452,7 +452,16 @@ impl Codegen {
         }
         let strings = std::mem::take(&mut self.strings);
         if self.uefi {
-            // Note: efi_main already emitted `.data` for sond_systab.
+            // Declarada, no heredada. Esto se apoyaba en el `.data` que `efi_main` abre para
+            // `sond_systab`, y entre medias se emiten los arrays a ceros del modulo, que abren
+            // `.bss`: las cadenas caian dentro y `as` rechazaba el fichero entero con «attempt to
+            // store non-zero value in section `.bss'», senalando la linea de la cadena y no a
+            // quien dejo abierta la seccion. Una seccion vigente es estado global del fichero:
+            // quien escribe dice en cual escribe.
+            self.line(".data");
+            // Los punteros a estas etiquetas se guardan como `.quad`, y una seccion que no
+            // declara alineacion registra AddrAlign 1 y puede empezar donde sea.
+            self.line(".p2align 3");
             for (label, bytes) in &strings {
                 let mut units: Vec<String> = bytes
                     .chars()

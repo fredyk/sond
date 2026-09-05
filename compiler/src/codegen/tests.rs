@@ -656,6 +656,64 @@ fn the_uefi_entry_zeroes_bss_before_it_stashes_anything_of_its_own() {
     );
 }
 
+/// La seccion vigente en cada linea, y lo que escribe un valor distinto de cero.
+///
+/// El ensamblador lleva UNA seccion abierta y todo lo que sigue cae dentro, asi que un emisor que
+/// no declara la suya hereda la del anterior. `as` rechaza con «attempt to store non-zero value in
+/// section `.bss'» y nombra la linea, no a quien abrio la seccion.
+fn lineas_no_cero_en_bss(asm: &str) -> Vec<String> {
+    let datos = [".quad", ".long", ".short", ".byte", ".asciz", ".ascii", ".double"];
+    let mut seccion = ".text";
+    let mut malas = Vec::new();
+    for linea in asm.lines() {
+        let t = linea.trim();
+        if t == ".bss" || t.starts_with(".section .bss") {
+            seccion = ".bss";
+            continue;
+        }
+        if t == ".data" || t == ".text" || t.starts_with(".section ") {
+            seccion = ".data";
+            continue;
+        }
+        if seccion != ".bss" {
+            continue;
+        }
+        // `.zero N` es lo unico que `.bss` admite: reserva sin escribir.
+        let cuerpo = t.split_once(':').map(|(_, r)| r.trim()).unwrap_or(t);
+        let Some(d) = datos.iter().find(|d| cuerpo.starts_with(**d)) else {
+            continue;
+        };
+        let valores = cuerpo[d.len()..].trim();
+        if !valores.split(',').all(|v| v.trim() == "0") {
+            malas.push(t.chars().take(90).collect());
+        }
+    }
+    malas
+}
+
+#[test]
+fn a_uefi_string_declares_its_own_section_instead_of_inheriting_whatever_is_open() {
+    // Las cadenas UEFI se emitian SIN declarar seccion, apoyandose en un `.data` que abria
+    // `efi_main` mucho antes para `sond_systab`. En cuanto el programa tiene un array a ceros a
+    // nivel de modulo, entre medias se abre `.bss` -- y las cadenas caen ahi. `as` lo rechaza:
+    // `lib/any/crypto/kdf/hkdf-sha256_test.snd --uefi` no compilaba por esto, y el error senala la
+    // linea de la cadena, que es la unica que no tiene la culpa.
+    //
+    // No se comprueba que ponga `.data`: se comprueba lo que el ensamblador comprueba, que en
+    // `.bss` no se escriba nada distinto de cero. Asi el caso cubre tambien al proximo emisor que
+    // herede una seccion sin saberlo.
+    let asm = emit_uefi_with_globals(
+        "let mut px[8]\nfn efi_main() -> i64 { print(\"hola\")\n px[0] }",
+    );
+    assert!(asm.contains(".Lstr0"), "el programa tiene una cadena, got:\n{asm}");
+    let malas = lineas_no_cero_en_bss(&asm);
+    assert!(
+        malas.is_empty(),
+        "estas lineas escriben en `.bss`, que solo admite reservas, y `as` rechaza el fichero \
+         entero: {malas:?}\n{asm}"
+    );
+}
+
 /// Emits a UEFI program that has module-level globals, returning the assembly.
 fn emit_uefi_with_globals(src: &str) -> String {
     let mut p = Parser::new(tokenize(src));
