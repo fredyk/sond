@@ -541,6 +541,11 @@ pub struct ResolvedProgram {
     /// make the figure mean "what this file happens to include". The two look identical from
     /// inside the harness, so the difference is decided here, where the includes are known.
     pub cov_delegated: bool,
+    /// The functions the ENTRY FILE itself defines. What it answers is "is there anything here a
+    /// gate could ever measure": a file of pure constants, or one holding only the assertions the
+    /// coverage build skips by name, cannot be given a gate, and listing it as unmeasured asks
+    /// for one that could not exist.
+    pub own_funcs: Vec<String>,
     pub spans: SpanMap,
 }
 
@@ -859,6 +864,7 @@ pub fn resolve_includes_located_with_resolver(
         cov_scope: scope,
         cov_files,
         cov_delegated,
+        own_funcs: depth0_names,
         spans: SpanMap {
             entry: entry.to_path_buf(),
             lines: spans,

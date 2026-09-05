@@ -375,6 +375,11 @@ fn run_gated_tests_deadline(
 struct EntryInfo {
     tests: usize,
     covers: Vec<PathBuf>,
+    /// Functions of its own a gate could measure. Zero means no gate can exist for this file --
+    /// a header of constants, or the test harness, whose every function the coverage build skips
+    /// -- so it is not a hole in the tree, and asking for a `_test.snd` beside it asks for a gate
+    /// that would measure nothing.
+    measurable: usize,
 }
 
 /// `Err` is the compiler not running at all -- a different fact from a file that does not
@@ -401,6 +406,11 @@ fn entry_info(sondc: &PathBuf, file: &Path) -> Result<Option<EntryInfo>, String>
             .filter_map(|l| l.strip_prefix("covers: "))
             .map(PathBuf::from)
             .collect(),
+        measurable: texto
+            .lines()
+            .find_map(|l| l.strip_prefix("measurable: "))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0),
     }))
 }
 
@@ -454,6 +464,10 @@ fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, plazo: std::time::Durati
                 for c in info.covers {
                     medidos.insert(std::fs::canonicalize(&c).unwrap_or(c));
                 }
+            }
+            // Nothing here a gate could read, so there is no gate to ask for.
+            Ok(Some(info)) if info.measurable == 0 => {
+                medidos.insert(std::fs::canonicalize(f).unwrap_or_else(|_| f.clone()));
             }
             Ok(Some(_)) => {}
             Ok(None) => ilegibles.push(f.clone()),

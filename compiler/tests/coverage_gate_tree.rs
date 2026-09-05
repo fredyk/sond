@@ -416,3 +416,33 @@ fn a_gate_whose_modules_are_all_measured_next_door_is_not_a_hole() {
         "and the report says where the code is measured instead:\n{texto}"
     );
 }
+
+/// A file with no code a gate could ever measure is not a hole in the tree.
+///
+/// `x86_64/linux/testing.snd` holds `assert` and its siblings and nothing else; the coverage
+/// build never instruments a single one of them, so no entry can ever "answer for" it. Listing
+/// it as unmeasured asks for a gate that could not exist. Same for a file of pure constants.
+#[test]
+fn a_file_with_nothing_to_measure_is_not_reported_as_unmeasured() {
+    let base = arbol("nada-que-medir");
+    write(&base.join("src/puertos.snd"), "let PUERTO_HTTP = 80\nlet PUERTO_HTTPS = 443\n");
+    // The harness itself, in the swept directory: every function in it is one the coverage
+    // build skips by name, so no entry can ever answer for it.
+    std::fs::copy(base.join("lib/x86_64/linux/testing.snd"), base.join("src/testing.snd")).unwrap();
+    write(&base.join("src/motor.snd"), "fn arranca() -> i64 { 1 }\n");
+    write(
+        &base.join("src/motor_test.snd"),
+        "include \"x86_64/linux/testing.snd\"\ninclude \"motor.snd\"\n\
+         test \"arranca\" { assert_eq(arranca(), 1) }\n",
+    );
+
+    let (_, salida) = sond_test_dir(&base.join("src"));
+    assert!(
+        !salida.contains("puertos.snd"),
+        "a file of constants has no gate to give it:\n{salida}"
+    );
+    assert!(
+        !salida.contains("testing.snd"),
+        "and neither has the test harness itself:\n{salida}"
+    );
+}

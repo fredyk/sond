@@ -103,6 +103,7 @@ fn main() -> ExitCode {
     let mut src = resolved.src;
     let cov_scope = resolved.cov_scope;
     let cov_delegated = resolved.cov_delegated;
+    let own_funcs = resolved.own_funcs;
     let spans = resolved.spans;
     // RFC-0016: in a --debug build, append the debug agent, WRITTEN IN SOND (see `debug_agent`). The
     // per-statement checkpoint (emitted by codegen) calls `__dbg_step(line)`; the agent is the Sond
@@ -225,12 +226,20 @@ fn main() -> ExitCode {
     // decides it rather than from a second copy of the rule that drifts. Two facts:
     //   tests: N        how many `test` blocks the parser saw (0 = this file is not an entry)
     //   covers: <path>  one line per file this entry answers for in its coverage denominator
-    // A module that appears in no entry's `covers:` is a module no gate ever reads.
+    //   measurable: N   how many functions of ITS OWN a gate could measure
+    // A module that appears in no entry's `covers:` is a module no gate ever reads -- unless
+    // `measurable` is 0, in which case there is no gate to give it: a file of pure constants,
+    // or the test harness itself, whose every function the coverage build skips by name.
     if args.iter().any(|a| a == "--entry-info") {
         println!("tests: {}", funcs.iter().filter(|f| f.is_test).count());
         for f in &cov_files {
             println!("covers: {}", f.display());
         }
+        let medibles = own_funcs
+            .iter()
+            .filter(|n| !sondc::codegen::never_instrumented(n))
+            .count();
+        println!("measurable: {medibles}");
         return ExitCode::SUCCESS;
     }
 
