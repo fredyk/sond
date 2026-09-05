@@ -11,17 +11,22 @@ fi
 
 "$REPO/tools/sandbox.sh" --mem 4G --time 180 -- \
   cargo build --release --manifest-path "$REPO/compiler/Cargo.toml"
+# Every destination below is a path something else is reading right now -- another shell's
+# `sondc`, a worker resolving `include "any/..."`, a running build. So none of them is emptied
+# and refilled in place: each is staged beside itself and swapped in by rename, which is why the
+# copies go through publish-file.sh / publish-tree.sh instead of `install` and `cp -r`.
+PUBFILE="$REPO/tools/publish-file.sh"
+PUBTREE="$REPO/tools/publish-tree.sh"
+
 mkdir -p "$HOME/.local/bin"
-install -m 755 "$REPO/compiler/target/release/sondc" "$HOME/.local/bin/sondc"
+"$PUBFILE" "$REPO/compiler/target/release/sondc" "$HOME/.local/bin/sondc" 755
 # The `sond` toolchain driver (sond test / build / run) alongside the compiler.
-install -m 755 "$REPO/compiler/target/release/sond" "$HOME/.local/bin/sond"
-# Publish the .snd libraries at a stable system path (a symlink to lib/), so
-# isolated programs can `include "any/..."` them without seeing the compiler source.
-# COPY (not symlink) the .snd libraries so an isolated worker can include them
-# but has NO path back to the compiler source: a symlink would leak the repo dir.
-rm -rf "$HOME/.local/lib/sond"
-mkdir -p "$HOME/.local/lib/sond"
-cp -r "$REPO/lib/." "$HOME/.local/lib/sond/"
+"$PUBFILE" "$REPO/compiler/target/release/sond" "$HOME/.local/bin/sond" 755
+# Publish the .snd libraries at a stable system path so isolated programs can
+# `include "any/..."` them without seeing the compiler source.
+# COPY (not symlink to the repo) the .snd libraries so an isolated worker can include them
+# but has NO path back to the compiler source: a link into lib/ would leak the repo dir.
+"$PUBTREE" "$REPO/lib" "$HOME/.local/lib/sond"
 
 # Generate .snd HEADERS (public interface = contract, no bodies) from each library
 # into the repo's dist/include/ (a build artifact) and install them to
@@ -29,24 +34,29 @@ cp -r "$REPO/lib/." "$HOME/.local/lib/sond/"
 # consumer will compile against these once separate compilation lands; today the
 # source-splice `include` still uses the full lib/ copy above.
 DIST="$REPO/dist/include"
-rm -rf "$DIST"; mkdir -p "$DIST"
+mkdir -p "$REPO/dist"
+# The headers are generated into a scratch tree first and published whole. Generating straight
+# into $DIST would leave it half-regenerated for the length of the loop, and a header that a
+# concurrent build spliced in mid-loop is a compile error with no cause anywhere near it.
+GEN="$(mktemp -d "$REPO/dist/.include.gen.XXXXXX")"
+trap 'rm -rf "$GEN"' EXIT
 while IFS= read -r src; do
   rel="${src#"$REPO"/lib/}"
-  dst="$DIST/$rel"
+  dst="$GEN/$rel"
   mkdir -p "$(dirname "$dst")"
   "$HOME/.local/bin/sondc" "$src" --emit-header > "$dst"
 done < <(find "$REPO/lib" -name '*.snd' -type f)
-rm -rf "$HOME/.local/include/sond"
-mkdir -p "$HOME/.local/include/sond"
-cp -r "$DIST/." "$HOME/.local/include/sond/" 2>/dev/null || true
+# --as-directory: git tracks files under dist/include, so that one stays a real directory.
+"$PUBTREE" --as-directory "$GEN" "$DIST"
+"$PUBTREE" "$GEN" "$HOME/.local/include/sond"
 
 # Generate the compact language reference (never hand-written) into
 # ~/.local/share/sond/Sond.md from the marked SOND-MD regions of the design docs.
 "$REPO/tools/build-docs.sh"
 
 mkdir -p "$HOME/.local/share/man/man1"
-install -m 644 "$REPO/docs/man/sondc.1" "$HOME/.local/share/man/man1/sondc.1"
-install -m 644 "$REPO/docs/man/sond.1" "$HOME/.local/share/man/man1/sond.1"
+"$PUBFILE" "$REPO/docs/man/sondc.1" "$HOME/.local/share/man/man1/sondc.1" 644
+"$PUBFILE" "$REPO/docs/man/sond.1" "$HOME/.local/share/man/man1/sond.1" 644
 
 echo "installed: $HOME/.local/bin/sondc"
 echo "  libs (source):  $HOME/.local/lib/sond  (copy of lib/)"
