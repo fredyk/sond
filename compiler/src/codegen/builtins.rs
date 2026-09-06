@@ -10,6 +10,18 @@ impl Codegen {
     /// foundation for a Sond init that talks to the console.
     pub(crate) fn call(&mut self, callee: &Expr, args: &[Arg]) {
         let Expr::Var(name) = callee else {
+            // `m.helper()` es lo que escribe todo el que viene de otro lenguaje, y hasta aqui
+            // llegaba como un nodo del AST en el mensaje. Un punto lee un CAMPO, y un campo no se
+            // llama; el nombre de otro modulo va con dos puntos. Decirlo aqui cuesta una linea y
+            // ahorra buscar en el compilador que es un Field.
+            if let Expr::Field(base, field) = callee
+                && let Expr::Var(m) = base.as_ref()
+            {
+                panic!(
+                    "`{m}.{field}(..)` no es una llamada: un nombre de otro modulo se escribe \
+                     `{m}::{field}(..)`. El punto lee un campo, y un campo no se llama."
+                );
+            }
             todo!("x64 codegen for call of {callee:?}");
         };
         // A call to an `extern fn`: the platform's C ABI, not Sond's. On Windows that is the

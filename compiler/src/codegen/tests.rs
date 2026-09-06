@@ -2082,6 +2082,24 @@ fn reserving_a_view_on_uefi_is_refused_rather_than_emitted_as_a_syscall() {
 }
 
 #[test]
+fn a_dotted_call_says_that_a_qualified_name_uses_the_double_colon() {
+    // `m.helper()` es lo que escribe cualquiera que venga de otro lenguaje. Antes llegaba hasta
+    // el codegen y salia como «not yet implemented: x64 codegen for call of Field(Var("m"),
+    // "helper")»: un nodo del AST, que no le dice a nadie que lo que falta son dos puntos.
+    let err = std::panic::catch_unwind(|| compile_and_run("fn main() -> i64 { m.helper() }"))
+        .expect_err("una llamada con punto tiene que rechazarse");
+    let msg = err
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    assert!(
+        msg.contains("m::helper"),
+        "el error tiene que ensenar como se escribe, salio: {msg}"
+    );
+}
+
+#[test]
 fn a_windows_program_links_as_a_console_pe_and_runs() {
     // The fotomaton runs on Windows and has to talk to vendor DLLs, so Sond needs a PE that a
     // Windows loader accepts. The compiler already emits PE for UEFI; this is the hosted-console
