@@ -233,6 +233,18 @@ fn parses_the_fiscal_function_signature_and_requires() {
 }
 
 #[test]
+fn parses_a_where_refinement_on_a_local_into_its_conjuncts() {
+    // `let y: T where a && b = v` guarda cada comparacion por separado: el probador trabaja con
+    // comparaciones sueltas, no con la conjuncion entera.
+    let mut p = Parser::new(tokenize("fn f() -> i64 { let y: i64 where 0 <= y && y < 4 = 2\ny }"));
+    let funcs = p.parse_program();
+    let Stmt::Let { refinement, .. } = &funcs[0].body.stmts[0] else {
+        panic!("el primer statement tiene que ser un let");
+    };
+    assert_eq!(refinement.len(), 2, "la cadena de && aporta dos conjunciones: {refinement:?}");
+}
+
+#[test]
 fn parses_where_refinements_on_a_parameter_into_requires() {
     // `where 0 <= i && i < 10` on the parameter desugars to two preconditions.
     let f = parse_fn("fn get(i: i64 where 0 <= i && i < 10) -> i64 { i }");

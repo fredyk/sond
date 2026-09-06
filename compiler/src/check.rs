@@ -1538,10 +1538,18 @@ fn check_undeclared_stmt(
             ty: _,
             value,
             array_len: _,
+            refinement,
         } => {
             check_undeclared_expr(value, scopes, fname, line)?;
             reject_cov_prefix("variable", name)?;
             scopes.last_mut().unwrap().insert(name.clone());
+            // El refinamiento habla del nombre que se acaba de ligar, asi que se mira DESPUES
+            // de meterlo en el scope. Una errata ahi es lo mismo que una errata en un invariant:
+            // el predicado no se puede demostrar, la cota no se lleva a ningun sitio y el
+            // programa compila creyendo que si.
+            for p in refinement {
+                check_undeclared_expr(p, scopes, fname, line)?;
+            }
         }
         Stmt::Assign { target, value } => {
             check_undeclared_expr(target, scopes, fname, line)?;
@@ -3771,11 +3779,37 @@ fn bounds_block(
                 value,
                 array_len,
                 ty,
+                refinement,
                 ..
             } => {
                 bounds_expr(value, fname, sizes, flow, params, funcs, stmt_line)?;
+                // A refinement `let y: T where P = value` is TRUSTED only if the value provably
+                // satisfies it (verified against the value's own contract — a call's `ensures`).
+                if !refinement.is_empty()
+                    && !crate::verify::value_satisfies(
+                        value,
+                        refinement,
+                        &flow.assumptions(),
+                        name,
+                        params,
+                        funcs,
+                    )
+                {
+                    return Err(format!(
+                        "function `{fname}`: cannot prove the value satisfies the refinement \
+                         `where ..` on `{name}` at line {stmt_line}; the bound must be PROVEN, \
+                         not asserted"
+                    ));
+                }
                 // Rebinding the name drops any prior fact/const/counter about it.
                 flow.invalidate(name);
+                // Carry each verified refinement as a fact (and interval bound) about `name` — a
+                // value bound the flow could not otherwise infer (it came from the value's
+                // contract), now usable for downstream indexing and arithmetic.
+                for p in refinement {
+                    flow.facts.push(p.clone());
+                    seed_interval_bound(flow, p);
+                }
                 // `let a: u32[] = backing` over an array whose size is known: the view's length is
                 // not missing, it is the backing store's capacity IN ELEMENTS (4 words of backing
                 // hold 8 `u32`s). Recording it means a local view is checked exactly like the array
@@ -5000,6 +5034,62 @@ mod tests {
             ),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn a_refined_let_carries_a_call_derived_bound() {
+        // A REFINEMENT type on a local (`let y: i64 where 0 <= y && y < 4 = ..`) is VERIFIED
+        // against the value's source contract (`byte`'s `ensures`) and then carried as a fact, so
+        // `a[y]` is provable.
+        let src = "fn byte() -> (r: i64) ensures { r >= 0; r < 4 } { 0 }\n\
+                   fn f() -> i64 { let a[4]\nlet y: i64 where 0 <= y && y < 4 = byte()\na[y] }";
+        assert!(
+            bounds(src).is_ok(),
+            "la cota refinada tiene que hacer demostrable a[y]: {:?}",
+            bounds(src).err()
+        );
+    }
+
+    /// La prueba de que el refinamiento aporta algo: aqui el flujo NO llega solo. El `ensures`
+    /// del callee acota el resultado a [1, 4], pero la resta se le escapa, asi que sin el `where`
+    /// el indice se rechaza. Con el, se demuestra en el enlace y se lleva como hecho.
+    #[test]
+    fn a_refinement_proves_what_the_bounds_flow_alone_does_not() {
+        let con = "fn uno_a_cuatro() -> (r: i64) ensures { r >= 1; r <= 4 } { 4 }\n\
+                   fn f() -> i64 { let a[4]\nlet y: i64 where 0 <= y && y < 4 = uno_a_cuatro() - 1\na[y] }";
+        let sin = "fn uno_a_cuatro() -> (r: i64) ensures { r >= 1; r <= 4 } { 4 }\n\
+                   fn f() -> i64 { let a[4]\nlet y = uno_a_cuatro() - 1\na[y] }";
+        assert!(
+            bounds(con).is_ok(),
+            "con el refinamiento el indice se demuestra: {:?}",
+            bounds(con).err()
+        );
+        assert!(
+            bounds(sin).is_err(),
+            "sin el refinamiento el flujo no llega: si esto pasa a verde, el test ya no mide nada"
+        );
+    }
+
+    #[test]
+    fn a_refinement_provable_by_the_interval_analysis_is_accepted() {
+        // A refinement the LINEAR evaluator cannot verify (it bails on `&`) but the INTERVAL
+        // analysis can -- `x & 255` is confined to [0, 255] -- must not be surprisingly rejected.
+        let src =
+            "fn f(x: i64) -> i64 { let a[256]\nlet y: i64 where 0 <= y && y < 256 = x & 255\na[y] }";
+        assert!(
+            bounds(src).is_ok(),
+            "un refinamiento que el analisis de intervalos demuestra tiene que aceptarse: {:?}",
+            bounds(src).err()
+        );
+    }
+
+    #[test]
+    fn rejects_a_refinement_the_value_does_not_provably_satisfy() {
+        // SOUNDNESS: a refinement is TRUSTED only after it is PROVEN of the value. An unbounded
+        // parameter does not satisfy `y < 4`, so the refined binding is rejected (it cannot be
+        // asserted, only proven).
+        let err = bounds("fn f(x: i64) -> i64 { let y: i64 where y < 4 = x\ny }").unwrap_err();
+        assert!(err.contains("refinement"), "salio: {err}");
     }
 
     #[test]

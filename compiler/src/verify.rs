@@ -173,6 +173,82 @@ pub fn loop_invariant_verified(
     eval_loop(vec![init], cond, invariant, body, &mut ctx).is_some()
 }
 
+/// Does `value` PROVABLY satisfy every refinement predicate in `preds` (with the bound name `name`
+/// standing for the value)? For `let y: T where P = value`, the compiler must PROVE `P[y := value]`
+/// before it trusts `P` about `y` — an assertion the value cannot back is rejected, not believed.
+/// The value is evaluated symbolically (so a CALL contributes its `ensures`, e.g. `read() < 256`
+/// bounds the result), and each predicate is discharged under those facts plus `pre` (the facts in
+/// scope at the binding). Sound: a `false` result (the value leaves the fragment, or a predicate is
+/// unprovable) rejects the refinement.
+pub fn value_satisfies(
+    value: &Expr,
+    preds: &[Expr],
+    pre: &[Expr],
+    name: &str,
+    params: &[Param],
+    all_funcs: &[Function],
+) -> bool {
+    if preds.is_empty() {
+        return true;
+    }
+    let contracts: HashMap<String, &Function> =
+        all_funcs.iter().map(|f| (f.name.clone(), f)).collect();
+    let mut names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+    names.insert(name.to_string());
+    collect_expr_vars(value, &mut names);
+    for p in preds {
+        collect_expr_vars(p, &mut names);
+    }
+    for e in pre {
+        collect_expr_vars(e, &mut names);
+    }
+    let env: HashMap<String, Sym> = names
+        .iter()
+        .map(|n| (n.clone(), Sym::Var(n.clone())))
+        .collect();
+    let facts: Vec<SymProp> = pre.iter().filter_map(|e| sym_prop(e, &env)).collect();
+    let named = |ty: &str| -> HashSet<String> {
+        params
+            .iter()
+            .filter(|p| matches!(&p.ty, Type::Named(n) if n == ty))
+            .map(|p| p.name.clone())
+            .collect()
+    };
+    let mut ctx = Ctx {
+        contracts: &contracts,
+        fresh: 0,
+        float_vars: named("f64"),
+        unsigned_vars: named("u64"),
+        int_types: int_types_of(params),
+        requires: facts.clone(),
+        bail: None,
+        refusal: None,
+    };
+    let init = State {
+        env: env.clone(),
+        cons: facts,
+        obligations: Vec::new(),
+        broke: false,
+    };
+    let Some(paths) = eval_expr_paths(value, init, &mut ctx) else {
+        return false; // the value leaves the verifiable fragment — cannot back the refinement
+    };
+    // On EVERY path the value can take, EVERY predicate must hold with `name` bound to the value.
+    for (state, sym) in paths {
+        let mut penv = state.env.clone();
+        penv.insert(name.to_string(), sym);
+        for pred in preds {
+            let Some(sp) = sym_prop(pred, &penv) else {
+                return false;
+            };
+            if !matches!(prove(&sp, &state.cons, &ctx.int_types), Outcome::Proven) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Collects every variable named anywhere in a block (statement values, targets, conditions, and
 /// nested blocks), so they can be seeded as free symbols before an isolated loop verification.
 fn collect_block_vars(block: &Block, out: &mut HashSet<String>) {

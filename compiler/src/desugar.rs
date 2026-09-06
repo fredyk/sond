@@ -295,6 +295,7 @@ fn arm_block(scrutinee: &Expr, arm: &MatchArm) -> Block {
                 ty: None,
                 value: Expr::Field(Box::new(scrutinee.clone()), PAYLOAD.to_string()),
                 array_len: None,
+                refinement: Vec::new(),
             },
             line,
         );
@@ -373,6 +374,7 @@ fn hoist_in_expr(e: &mut Expr, hoists: &mut Vec<Stmt>, counter: &mut usize) {
                 ty: None,
                 value: lit,
                 array_len: None,
+                refinement: Vec::new(),
             });
         }
         Expr::Call(c, args) => {

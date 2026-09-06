@@ -247,6 +247,7 @@ impl Parser {
                         value,
                         array_len,
                         ty,
+                        refinement: _,
                     } = self.parse_let()
                     else {
                         unreachable!("parse_let returns a Let")
@@ -715,6 +716,7 @@ impl Parser {
                                 ty: None,
                                 value: first,
                                 array_len: None,
+                                refinement: Vec::new(),
                             });
                             sink_tail(&mut body); // increment must run AFTER the body, not before
                             // ...and before every `continue`, which jumps past the end of the
@@ -739,6 +741,7 @@ impl Parser {
                                     ty: None,
                                     value: end,
                                     array_len: None,
+                                    refinement: Vec::new(),
                                 });
                                 Expr::Var(name)
                             };
@@ -770,6 +773,7 @@ impl Parser {
                                         Box::new(Expr::Var(idx.clone())),
                                     ),
                                     array_len: None,
+                                    refinement: Vec::new(),
                                 },
                                 for_line,
                             );
@@ -786,6 +790,7 @@ impl Parser {
                                 ty: None,
                                 value: Expr::Int(0),
                                 array_len: None,
+                                refinement: Vec::new(),
                             });
                             stmts.push(Stmt::For {
                                 cond: Some(Expr::Binary(
@@ -1023,6 +1028,15 @@ impl Parser {
                 }
             }
         }
+        // `let y: T where P = value` refina el enlace: `P` es un predicado que el valor tiene que
+        // demostrar, y solo entonces se lleva como hecho sobre `y`. Una cadena de `&&` aporta cada
+        // conjuncion por separado (una comparacion suelta, que es lo que el probador sabe usar).
+        // Se consume AQUI, entre el tipo y el `=`, que es donde se escribe: asi el resto de
+        // parse_let sigue viendo un `=` justo delante del valor.
+        let mut refinement = Vec::new();
+        if self.eat(Token::Where) {
+            split_conjuncts(self.parse_expr(), &mut refinement);
+        }
         // `let s: string = "..."`: `string` IS a type — a view of bytes whose length the
         // compiler counted when it emitted the literal, so it indexes with the same bounds check
         // as any other view and never has to be walked until a NUL turns up. Lowered here to
@@ -1071,6 +1085,7 @@ impl Parser {
                 ty,
                 value: Expr::Str(text),
                 array_len,
+                refinement,
             };
         }
         self.utf8_len = None;
@@ -1115,6 +1130,7 @@ impl Parser {
             ty,
             value,
             array_len,
+            refinement,
         }
     }
 
