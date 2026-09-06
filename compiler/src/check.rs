@@ -1478,27 +1478,26 @@ pub fn check_undeclared_variables(
             top.insert(n.clone());
         }
         scopes.push(top);
-        check_undeclared_block(&func.body, &mut scopes, &func.name, 0)?;
-        // `requires` lives at the top of the function, so parameters (and
-        // globals) are in scope.  The caller of the function is what
-        // guarantees the preconditions, so the expressions are still valid
-        // Sond and need the normal undeclared-variable check.
+        // Los contratos se comprueban ANTES de recorrer el cuerpo y sobre una COPIA del
+        // scope. `requires` y `ensures` se evaluan en la frontera de la funcion, donde
+        // solo existen los parametros, los globales y —en `ensures`— el nombre del
+        // retorno. Recorriendo el cuerpo primero, sus `let` de primer nivel entran en
+        // este mismo scope y una errata que apunte a un local de la implementacion pasa
+        // por buena: la misma trampa que dejaba colar una errata en el `invariant`.
+        let mut contrato = scopes.clone();
         for e in &func.requires {
-            check_undeclared_expr(e, &mut scopes, &func.name, 0)?;
+            check_undeclared_expr(e, &mut contrato, &func.name, 0)?;
         }
-        // `ensures` also sees all parameters; and if the function has a
-        // named return value (`-> (r: T)`) then `r` is bound in the scope
-        // by a `let` placed by the compiler before this check runs (the
-        // desugar pass inserts it).  Until desugaring the name may be
-        // absent from our scope stack, so we add the named return
-        // explicitly when present.
+        // El nombre del retorno (`-> (r: T)`) vive solo en el `ensures`: se anade a la
+        // copia, no al scope con el que se recorre el cuerpo.
         if let Some(ref ret_name) = func.ret_name {
             reject_cov_prefix("return value", ret_name)?;
-            scopes.last_mut().unwrap().insert(ret_name.clone());
+            contrato.last_mut().unwrap().insert(ret_name.clone());
         }
         for e in &func.ensures {
-            check_undeclared_expr(e, &mut scopes, &func.name, 0)?;
+            check_undeclared_expr(e, &mut contrato, &func.name, 0)?;
         }
+        check_undeclared_block(&func.body, &mut scopes, &func.name, 0)?;
         Ok(())
     }
     for f in funcs {
@@ -8835,6 +8834,57 @@ mod invariant_undeclared {
         assert!(
             err.contains("noexistenada"),
             "requires must reject undeclared vars, got: {err}"
+        );
+    }
+
+    /// Un local del CUERPO no existe para `requires`: la precondicion se evalua
+    /// al entrar, cuando en el cuerpo aun no se ha declarado nada. Verlo ahi es
+    /// la misma trampa que dejaba pasar una errata en el `invariant`.
+    #[test]
+    fn body_local_not_visible_in_requires() {
+        let err = check_undeclared(
+            "fn f(x: i64) -> i64 requires { soloDelCuerpo > 0 } {\n\
+             let soloDelCuerpo = x\n\
+             soloDelCuerpo\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("soloDelCuerpo"),
+            "un local del cuerpo no puede estar en scope en `requires`, salio: {err}"
+        );
+    }
+
+    /// Lo mismo para `ensures`: la postcondicion habla de los parametros y del
+    /// valor de retorno, no de las variables internas de la implementacion.
+    #[test]
+    fn body_local_not_visible_in_ensures() {
+        let err = check_undeclared(
+            "fn f(x: i64) -> (r: i64) ensures { soloDelCuerpo > 0 } {\n\
+             let soloDelCuerpo = x\n\
+             soloDelCuerpo\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("soloDelCuerpo"),
+            "un local del cuerpo no puede estar en scope en `ensures`, salio: {err}"
+        );
+    }
+
+    /// El nombre del retorno vive en el `ensures`, no en el cuerpo: usarlo dentro
+    /// del cuerpo es un nombre sin declarar.
+    #[test]
+    fn named_return_not_visible_in_body() {
+        let err = check_undeclared(
+            "fn f(x: i64) -> (r: i64) ensures { r > 0 } {\n\
+             r + x\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains('r'),
+            "el nombre del retorno no esta declarado en el cuerpo, salio: {err}"
         );
     }
 
