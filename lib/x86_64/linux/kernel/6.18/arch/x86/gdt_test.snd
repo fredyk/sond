@@ -19,9 +19,9 @@ include "gdt.snd"
 // byte 6 is limit[19:16]. Split across the entry because the 386 grew the field and left the
 // old bytes where the 286 had them.
 fn desc_limit(idx: i64) -> i64 {
-    let bajo = peek16(gdt_table + idx * 8)
-    let alto = peek8(gdt_table + idx * 8 + 6) & 0x0F
-    bajo | (alto << 16)
+    let low = peek16(gdt_table + idx * 8)
+    let high = peek8(gdt_table + idx * 8 + 6) & 0x0F
+    low | (high << 16)
 }
 
 // The 32-bit base, in the four places the descriptor keeps it.

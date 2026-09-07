@@ -20,8 +20,8 @@ fn repo() -> PathBuf {
         .to_path_buf()
 }
 
-fn scratch(name: &str) -> sondc::scratch::Temporal {
-    sondc::scratch::Temporal::nuevo(&format!("sond_pub_{name}"))
+fn scratch(name: &str) -> sondc::scratch::Scratch {
+    sondc::scratch::Scratch::new(&format!("sond_pub_{name}"))
 }
 
 fn write(p: &Path, body: &str) {
@@ -156,7 +156,7 @@ fn the_new_tree_is_staged_beside_the_destination_not_in_the_system_temp_dir() {
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 if let Ok(rd) = std::fs::read_dir(&parent) {
                     for e in rd.flatten() {
-                        if e.file_name().to_string_lossy().contains(".arbol.") {
+                        if e.file_name().to_string_lossy().contains(".tree.") {
                             seen.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                     }

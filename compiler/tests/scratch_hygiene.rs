@@ -43,13 +43,13 @@ fn lineas_de_test(file: &Path, body: &str) -> Vec<(usize, String)> {
     // the first version of this guard walked straight past codegen/tests.rs because of it.
     let en_tests_dir = file.components().any(|c| c.as_os_str() == "tests")
         || file.file_name().is_some_and(|n| n == "tests.rs");
-    let mut dentro = en_tests_dir;
+    let mut inside = en_tests_dir;
     let mut v = Vec::new();
     for (i, l) in body.lines().enumerate() {
         if l.trim_start().starts_with("mod tests") {
-            dentro = true;
+            inside = true;
         }
-        if dentro {
+        if inside {
             v.push((i + 1, l.to_string()));
         }
     }
@@ -115,6 +115,6 @@ fn no_test_names_a_scratch_path_without_getting_the_cleanup_with_it() {
     assert!(
         culprits.is_empty(),
         "these test lines build a scratch path by hand, so nothing deletes it when the test ends \
-         -- use sondc::scratch::Temporal, which removes its directory on drop: {culprits:#?}"
+         -- use sondc::scratch::Scratch, which removes its directory on drop: {culprits:#?}"
     );
 }

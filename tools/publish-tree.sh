@@ -20,8 +20,8 @@
 # site needs; do not guess from the path.
 set -euo pipefail
 
-COMO_DIRECTORIO=0
-if [ "${1:-}" = "--as-directory" ]; then COMO_DIRECTORIO=1; shift; fi
+AS_DIRECTORY=0
+if [ "${1:-}" = "--as-directory" ]; then AS_DIRECTORY=1; shift; fi
 
 SRC="${1:?usage: publish-tree.sh [--as-directory] SRC DST}"
 DST="${2:?usage: publish-tree.sh [--as-directory] SRC DST}"
@@ -35,50 +35,50 @@ parent="$(cd "$(dirname "$DST")" 2>/dev/null && pwd)" || {
 name="$(basename "$DST")"
 DST="$parent/$name"
 
-# `.arbol.` and not `.nuevo.`: in the symlink case this directory does not go away when
+# `.tree.` and not `.new.`: in the symlink case this directory does not go away when
 # the publish ends -- it IS the published tree from then on, and the link points at it
 # until the next publish. A name that says "new" would read as leftover staging to the
 # next person who looks, and deleting it takes the library down.
-nuevo="$(mktemp -d "$parent/.$name.arbol.XXXXXX")"
-enlace="$parent/.$name.enlace.$$"
-retirado=""
-limpiar() { rm -rf ${nuevo:+"$nuevo"} "$enlace" ${retirado:+"$retirado"}; }
-trap limpiar EXIT
+staged="$(mktemp -d "$parent/.$name.tree.XXXXXX")"
+link="$parent/.$name.link.$$"
+stepped_aside=""
+cleanup() { rm -rf ${staged:+"$staged"} "$link" ${stepped_aside:+"$stepped_aside"}; }
+trap cleanup EXIT
 
-cp -R "$SRC/." "$nuevo/"
-chmod 755 "$nuevo"
+cp -R "$SRC/." "$staged/"
+chmod 755 "$staged"
 
 # What DST points at right now, so it can be removed AFTER the swap and not before.
-anterior=""
+previous=""
 if [ -L "$DST" ]; then
-  anterior="$(cd "$parent" && readlink "$name")"
-  case "$anterior" in /*) : ;; *) anterior="$parent/$anterior" ;; esac
+  previous="$(cd "$parent" && readlink "$name")"
+  case "$previous" in /*) : ;; *) previous="$parent/$previous" ;; esac
 fi
 
-if [ "$COMO_DIRECTORIO" = 1 ]; then
+if [ "$AS_DIRECTORY" = 1 ]; then
   if [ -e "$DST" ] || [ -L "$DST" ]; then
-    retirado="$(mktemp -d "$parent/.$name.retirado.XXXXXX")"
-    rmdir "$retirado"
-    mv "$DST" "$retirado"
+    stepped_aside="$(mktemp -d "$parent/.$name.retirado.XXXXXX")"
+    rmdir "$stepped_aside"
+    mv "$DST" "$stepped_aside"
   fi
-  mv -T "$nuevo" "$DST"
-  nuevo=""
+  mv -T "$staged" "$DST"
+  staged=""
   trap - EXIT
-  [ -n "$anterior" ] && rm -rf "$anterior"
-  [ -n "$retirado" ] && rm -rf "$retirado"
+  [ -n "$previous" ] && rm -rf "$previous"
+  [ -n "$stepped_aside" ] && rm -rf "$stepped_aside"
   exit 0
 fi
 
-ln -s "$nuevo" "$enlace"
+ln -s "$staged" "$link"
 if [ -d "$DST" ] && [ ! -L "$DST" ]; then
   # First publish over a real directory: it has to give up the name before the link can take it.
-  retirado="$(mktemp -d "$parent/.$name.retirado.XXXXXX")"
-  rmdir "$retirado"
-  mv "$DST" "$retirado"
+  stepped_aside="$(mktemp -d "$parent/.$name.retirado.XXXXXX")"
+  rmdir "$stepped_aside"
+  mv "$DST" "$stepped_aside"
 fi
-mv -T "$enlace" "$DST"
+mv -T "$link" "$DST"
 
 trap - EXIT
-[ -n "$anterior" ] && [ "$anterior" != "$nuevo" ] && rm -rf "$anterior"
-[ -n "$retirado" ] && rm -rf "$retirado"
+[ -n "$previous" ] && [ "$previous" != "$staged" ] && rm -rf "$previous"
+[ -n "$stepped_aside" ] && rm -rf "$stepped_aside"
 exit 0

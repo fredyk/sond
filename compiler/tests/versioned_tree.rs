@@ -25,7 +25,7 @@ const EJECUTABLES: [(&[u8], &str); 4] = [
     (b"\xca\xfe\xba\xbe", "Mach-O universal"),
 ];
 
-fn raiz() -> PathBuf {
+fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("the compiler crate lives inside the repository")
@@ -34,27 +34,27 @@ fn raiz() -> PathBuf {
 
 #[test]
 fn ningun_binario_ejecutable_esta_versionado() {
-    let raiz = raiz();
-    let salida = Command::new("git")
+    let root = root();
+    let output = Command::new("git")
         .arg("-C")
-        .arg(&raiz)
+        .arg(&root)
         .args(["ls-files", "-z"])
         .output()
         .expect("git ls-files runs inside a checkout");
-    assert!(salida.status.success(), "git ls-files failed");
+    assert!(output.status.success(), "git ls-files failed");
 
     let mut culpables: Vec<String> = Vec::new();
-    for bruto in salida.stdout.split(|b| *b == 0) {
+    for bruto in output.stdout.split(|b| *b == 0) {
         if bruto.is_empty() {
             continue;
         }
         let rel = String::from_utf8_lossy(bruto).into_owned();
-        let ruta = raiz.join(&rel);
+        let path = root.join(&rel);
         // A tracked path that is not on disk is a deletion staged elsewhere, not a binary.
-        let Ok(datos) = std::fs::read(&ruta) else { continue };
-        for (magico, nombre) in EJECUTABLES {
+        let Ok(datos) = std::fs::read(&path) else { continue };
+        for (magico, name) in EJECUTABLES {
             if datos.starts_with(magico) {
-                culpables.push(format!("{rel} ({nombre})"));
+                culpables.push(format!("{rel} ({name})"));
                 break;
             }
         }

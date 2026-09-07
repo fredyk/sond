@@ -9,8 +9,8 @@
 
 include "x86_64/linux/bytes.snd"
 
-// Guarda las direcciones asignadas, escribe un patrón único por hilo, y al final
-// relee TODAS: si dos hilos comparten el mismo bump pointer, se pisan y falla.
+// Records the addresses it was handed, writes a pattern unique to its thread, and at the end
+// reads them ALL back: if two threads share one bump pointer they clobber each other and it fails.
 fn hammer(tag: i64, out: i64, addrs: i64) -> i64 {
     let mut i = 0
     for i < 3000 {

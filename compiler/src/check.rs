@@ -1478,24 +1478,24 @@ pub fn check_undeclared_variables(
             top.insert(n.clone());
         }
         scopes.push(top);
-        // Los contratos se comprueban ANTES de recorrer el cuerpo y sobre una COPIA del
-        // scope. `requires` y `ensures` se evaluan en la frontera de la funcion, donde
-        // solo existen los parametros, los globales y —en `ensures`— el nombre del
-        // retorno. Recorriendo el cuerpo primero, sus `let` de primer nivel entran en
-        // este mismo scope y una errata que apunte a un local de la implementacion pasa
-        // por buena: la misma trampa que dejaba colar una errata en el `invariant`.
-        let mut contrato = scopes.clone();
+        // Contracts are checked BEFORE walking the body, and against a COPY of the scope.
+        // `requires` and `ensures` are evaluated at the function boundary, where only the
+        // parameters, the globals and —in `ensures`— the return name exist. Walking the
+        // body first lets its top-level `let`s land in this very scope, so a typo pointing
+        // at an implementation local passes for good: the same trap that used to let a typo
+        // through in an `invariant`.
+        let mut boundary = scopes.clone();
         for e in &func.requires {
-            check_undeclared_expr(e, &mut contrato, &func.name, 0)?;
+            check_undeclared_expr(e, &mut boundary, &func.name, 0)?;
         }
-        // El nombre del retorno (`-> (r: T)`) vive solo en el `ensures`: se anade a la
-        // copia, no al scope con el que se recorre el cuerpo.
+        // The return name (`-> (r: T)`) lives only in the `ensures`: it goes into the copy,
+        // never into the scope the body is walked with.
         if let Some(ref ret_name) = func.ret_name {
             reject_cov_prefix("return value", ret_name)?;
-            contrato.last_mut().unwrap().insert(ret_name.clone());
+            boundary.last_mut().unwrap().insert(ret_name.clone());
         }
         for e in &func.ensures {
-            check_undeclared_expr(e, &mut contrato, &func.name, 0)?;
+            check_undeclared_expr(e, &mut boundary, &func.name, 0)?;
         }
         check_undeclared_block(&func.body, &mut scopes, &func.name, 0)?;
         Ok(())
@@ -1543,10 +1543,10 @@ fn check_undeclared_stmt(
             check_undeclared_expr(value, scopes, fname, line)?;
             reject_cov_prefix("variable", name)?;
             scopes.last_mut().unwrap().insert(name.clone());
-            // El refinamiento habla del nombre que se acaba de ligar, asi que se mira DESPUES
-            // de meterlo en el scope. Una errata ahi es lo mismo que una errata en un invariant:
-            // el predicado no se puede demostrar, la cota no se lleva a ningun sitio y el
-            // programa compila creyendo que si.
+            // The refinement talks about the name just bound, so it is checked AFTER that
+            // name enters the scope. A typo there is the same as a typo in an invariant: the
+            // predicate cannot be proven, the bound reaches nowhere, and the program compiles
+            // believing it did.
             for p in refinement {
                 check_undeclared_expr(p, scopes, fname, line)?;
             }
@@ -4239,18 +4239,18 @@ fn bounds_expr(
             // Only the case both halves of which are known: `ptr` is the name of an array whose
             // size was recorded by `let a[N]`, and `len` is a constant. A length that comes from
             // a variable, or a pointer with no known size, is not decided either way.
-            let mut apuntado: Option<&str> = None;
-            let mut prometido: Option<i64> = None;
-            for (campo, valor) in fields {
-                if campo == "ptr" {
-                    if let Expr::Var(v) = valor.as_ref() {
-                        apuntado = Some(v.as_str());
+            let mut pointed_at: Option<&str> = None;
+            let mut promised: Option<i64> = None;
+            for (field, value) in fields {
+                if field == "ptr" {
+                    if let Expr::Var(v) = value.as_ref() {
+                        pointed_at = Some(v.as_str());
                     }
-                } else if campo == "len" {
-                    prometido = const_index(valor);
+                } else if field == "len" {
+                    promised = const_index(value);
                 }
             }
-            if let (Some(ptr), Some(len)) = (apuntado, prometido)
+            if let (Some(ptr), Some(len)) = (pointed_at, promised)
                 && let Some(&n) = sizes.get(ptr)
                 && len > n
             {
@@ -5045,28 +5045,29 @@ mod tests {
                    fn f() -> i64 { let a[4]\nlet y: i64 where 0 <= y && y < 4 = byte()\na[y] }";
         assert!(
             bounds(src).is_ok(),
-            "la cota refinada tiene que hacer demostrable a[y]: {:?}",
+            "the refined bound must make a[y] provable: {:?}",
             bounds(src).err()
         );
     }
 
-    /// La prueba de que el refinamiento aporta algo: aqui el flujo NO llega solo. El `ensures`
-    /// del callee acota el resultado a [1, 4], pero la resta se le escapa, asi que sin el `where`
-    /// el indice se rechaza. Con el, se demuestra en el enlace y se lleva como hecho.
+    /// Proof that the refinement earns its keep: here the flow does NOT get there on its own.
+    /// The callee's `ensures` confines the result to [1, 4], but the subtraction escapes it, so
+    /// without the `where` the index is rejected. With it, the bound is proven at the binding and
+    /// carried onward as a fact.
     #[test]
     fn a_refinement_proves_what_the_bounds_flow_alone_does_not() {
-        let con = "fn uno_a_cuatro() -> (r: i64) ensures { r >= 1; r <= 4 } { 4 }\n\
-                   fn f() -> i64 { let a[4]\nlet y: i64 where 0 <= y && y < 4 = uno_a_cuatro() - 1\na[y] }";
-        let sin = "fn uno_a_cuatro() -> (r: i64) ensures { r >= 1; r <= 4 } { 4 }\n\
-                   fn f() -> i64 { let a[4]\nlet y = uno_a_cuatro() - 1\na[y] }";
+        let with = "fn one_to_four() -> (r: i64) ensures { r >= 1; r <= 4 } { 4 }\n\
+                    fn f() -> i64 { let a[4]\nlet y: i64 where 0 <= y && y < 4 = one_to_four() - 1\na[y] }";
+        let without = "fn one_to_four() -> (r: i64) ensures { r >= 1; r <= 4 } { 4 }\n\
+                       fn f() -> i64 { let a[4]\nlet y = one_to_four() - 1\na[y] }";
         assert!(
-            bounds(con).is_ok(),
-            "con el refinamiento el indice se demuestra: {:?}",
-            bounds(con).err()
+            bounds(with).is_ok(),
+            "with the refinement the index is proven: {:?}",
+            bounds(with).err()
         );
         assert!(
-            bounds(sin).is_err(),
-            "sin el refinamiento el flujo no llega: si esto pasa a verde, el test ya no mide nada"
+            bounds(without).is_err(),
+            "without the refinement the flow falls short: if this turns green the test measures nothing"
         );
     }
 
@@ -5078,7 +5079,7 @@ mod tests {
             "fn f(x: i64) -> i64 { let a[256]\nlet y: i64 where 0 <= y && y < 256 = x & 255\na[y] }";
         assert!(
             bounds(src).is_ok(),
-            "un refinamiento que el analisis de intervalos demuestra tiene que aceptarse: {:?}",
+            "a refinement the interval analysis proves must be accepted: {:?}",
             bounds(src).err()
         );
     }
@@ -8927,43 +8928,43 @@ mod invariant_undeclared {
         );
     }
 
-    /// Un local del CUERPO no existe para `requires`: la precondicion se evalua
-    /// al entrar, cuando en el cuerpo aun no se ha declarado nada. Verlo ahi es
-    /// la misma trampa que dejaba pasar una errata en el `invariant`.
+    /// A BODY local does not exist for `requires`: the precondition is evaluated on entry,
+    /// when nothing in the body has been declared yet. Seeing it there is the same trap that
+    /// used to let a typo through in an `invariant`.
     #[test]
     fn body_local_not_visible_in_requires() {
         let err = check_undeclared(
-            "fn f(x: i64) -> i64 requires { soloDelCuerpo > 0 } {\n\
-             let soloDelCuerpo = x\n\
-             soloDelCuerpo\n\
+            "fn f(x: i64) -> i64 requires { bodyOnly > 0 } {\n\
+             let bodyOnly = x\n\
+             bodyOnly\n\
              }",
         )
         .unwrap_err();
         assert!(
-            err.contains("soloDelCuerpo"),
-            "un local del cuerpo no puede estar en scope en `requires`, salio: {err}"
+            err.contains("bodyOnly"),
+            "a body local must not be in scope in `requires`, got: {err}"
         );
     }
 
-    /// Lo mismo para `ensures`: la postcondicion habla de los parametros y del
-    /// valor de retorno, no de las variables internas de la implementacion.
+    /// Same for `ensures`: the postcondition talks about the parameters and the return
+    /// value, never about the implementation's internal variables.
     #[test]
     fn body_local_not_visible_in_ensures() {
         let err = check_undeclared(
-            "fn f(x: i64) -> (r: i64) ensures { soloDelCuerpo > 0 } {\n\
-             let soloDelCuerpo = x\n\
-             soloDelCuerpo\n\
+            "fn f(x: i64) -> (r: i64) ensures { bodyOnly > 0 } {\n\
+             let bodyOnly = x\n\
+             bodyOnly\n\
              }",
         )
         .unwrap_err();
         assert!(
-            err.contains("soloDelCuerpo"),
-            "un local del cuerpo no puede estar en scope en `ensures`, salio: {err}"
+            err.contains("bodyOnly"),
+            "a body local must not be in scope in `ensures`, got: {err}"
         );
     }
 
-    /// El nombre del retorno vive en el `ensures`, no en el cuerpo: usarlo dentro
-    /// del cuerpo es un nombre sin declarar.
+    /// The return name lives in the `ensures`, not in the body: using it inside the body
+    /// is an undeclared name.
     #[test]
     fn named_return_not_visible_in_body() {
         let err = check_undeclared(
@@ -8974,7 +8975,7 @@ mod invariant_undeclared {
         .unwrap_err();
         assert!(
             err.contains('r'),
-            "el nombre del retorno no esta declarado en el cuerpo, salio: {err}"
+            "the return name is not declared inside the body, got: {err}"
         );
     }
 
@@ -9004,38 +9005,38 @@ mod invariant_undeclared {
     #[test]
     fn no_ellipsis_in_check_undeclared_stmt() {
         let source = include_str!("check.rs");
-        let desde = source
+        let from = source
             .find("fn check_undeclared_stmt(")
             .expect("the function this guard protects must exist");
-        let abre = source[desde..]
+        let open_brace = source[from..]
             .find(") -> Result<(), String> {")
-            .map(|i| desde + i + ") -> Result<(), String> {".len() - 1)
+            .map(|i| from + i + ") -> Result<(), String> {".len() - 1)
             .expect("the function signature must end in an opening brace");
 
-        let mut profundidad = 0usize;
-        let mut fin = abre;
-        for (i, c) in source[abre..].char_indices() {
+        let mut depth = 0usize;
+        let mut end = open_brace;
+        for (i, c) in source[open_brace..].char_indices() {
             match c {
-                '{' => profundidad += 1,
+                '{' => depth += 1,
                 '}' => {
-                    profundidad -= 1;
-                    if profundidad == 0 {
-                        fin = abre + i;
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open_brace + i;
                         break;
                     }
                 }
                 _ => {}
             }
         }
-        assert!(fin > abre, "the function body must be delimited");
+        assert!(end > open_brace, "the function body must be delimited");
 
-        let cuerpo: String = source[abre..fin]
+        let body: String = source[open_brace..end]
             .lines()
             .map(|l| l.split("//").next().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            !cuerpo.contains(".."),
+            !body.contains(".."),
             "check_undeclared_stmt must name every field of every Stmt arm: a bare `..` there \
              lets a field be added to the enum and never checked, which is how the `invariant` \
              clause went unwalked"

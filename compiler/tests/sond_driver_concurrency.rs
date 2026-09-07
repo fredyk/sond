@@ -24,23 +24,23 @@ fn write(p: &Path, s: &str) {
 
 /// A scratch project holding its own `lib/`, so the run resolves `include` by walking up to it
 /// and never depends on what this machine happens to have in ~/.local/lib/sond.
-fn proyecto() -> sondc::scratch::Temporal {
-    let base = sondc::scratch::Temporal::nuevo("sond-conc");
-    let salida = Command::new("cp").arg("-R").arg(repo().join("lib")).arg(&base).output().unwrap();
-    assert!(salida.status.success(), "the scratch project needs a lib/ of its own");
+fn proyecto() -> sondc::scratch::Scratch {
+    let base = sondc::scratch::Scratch::new("sond-conc");
+    let output = Command::new("cp").arg("-R").arg(repo().join("lib")).arg(&base).output().unwrap();
+    assert!(output.status.success(), "the scratch project needs a lib/ of its own");
 
     // Same stem, two directories, opposite verdicts: one passes, one fails on purpose.
     write(
-        &base.join("verde/mod.snd"),
+        &base.join("green/mod.snd"),
         "include \"x86_64/linux/testing.snd\"\n\
-         fn valor() -> i64 { 111 }\n\
-         test \"pasa\" { assert_eq(valor(), 111) }\n",
+         fn value() -> i64 { 111 }\n\
+         test \"passes\" { assert_eq(value(), 111) }\n",
     );
     write(
-        &base.join("rojo/mod.snd"),
+        &base.join("red/mod.snd"),
         "include \"x86_64/linux/testing.snd\"\n\
-         fn valor() -> i64 { 222 }\n\
-         test \"falla\" { assert_eq(valor(), 999) }\n",
+         fn value() -> i64 { 222 }\n\
+         test \"fails\" { assert_eq(value(), 999) }\n",
     );
     base
 }
@@ -59,19 +59,19 @@ fn sond_test(file: &Path) -> i32 {
 #[test]
 fn two_runs_of_files_with_the_same_name_each_get_their_own_verdict() {
     let base = proyecto();
-    let verde = base.join("verde/mod.snd");
-    let rojo = base.join("rojo/mod.snd");
+    let green = base.join("green/mod.snd");
+    let red = base.join("red/mod.snd");
 
     // On its own each file says what it is, which is why a sequential suite never sees this.
-    assert_eq!(sond_test(&verde), 0, "the passing file passes when it runs alone");
-    assert_eq!(sond_test(&rojo), 1, "the failing file fails when it runs alone");
+    assert_eq!(sond_test(&green), 0, "the passing file passes when it runs alone");
+    assert_eq!(sond_test(&red), 1, "the failing file fails when it runs alone");
 
     let vueltas = 20;
     let (mut verde_mal, mut rojo_mal) = (0, 0);
     for _ in 0..vueltas {
-        let v = verde.clone();
+        let v = green.clone();
         let hilo = std::thread::spawn(move || sond_test(&v));
-        let r = sond_test(&rojo);
+        let r = sond_test(&red);
         let vr = hilo.join().unwrap();
         if vr != 0 {
             verde_mal += 1;

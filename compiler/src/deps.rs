@@ -339,10 +339,10 @@ mod tests {
     }
 
     /// A scratch directory the caller HOLDS: dropping the returned value deletes the tree. The
-    /// first version built the path from a `Temporal` and returned the inner `PathBuf`, which
+    /// first version built the path from a `Scratch` and returned the inner `PathBuf`, which
     /// dropped the owner on the spot and left the directory behind -- the exact leak this is for.
-    fn tmp_dir(name: &str) -> crate::scratch::Temporal {
-        crate::scratch::Temporal::nuevo_en("deps_test", name)
+    fn tmp_dir(name: &str) -> crate::scratch::Scratch {
+        crate::scratch::Scratch::new_in("deps_test", name)
     }
 
     // ── deps.snd parsing ───────────────────────────────────────────────

@@ -51,8 +51,8 @@ let R_COMMITS_OK2: string = "HTTP/1.1 200 OK\r\n\r\n{\"sha\":\"44445555666677778
 let mut h_rec_cnt = 0
 
 fn h_rec_add(path: i64, resp: i64) {
-    // La tabla son 16 huecos. Pasarse no se traga en silencio: no se escribe, y el hueco que
-    // falta hace que pkg_raw_get devuelva -2 sobre ese target, o sea un test ROJO que se ve.
+    // The table is 16 slots. Overflowing it is not swallowed in silence: nothing is written, and
+    // the missing slot makes pkg_raw_get return -2 for that target, which is a RED test you see.
     if h_rec_cnt >= 0 && h_rec_cnt < 16 {
         pkg_rec_path[h_rec_cnt] = path
         pkg_rec_resp[h_rec_cnt] = resp
@@ -582,7 +582,7 @@ test "pkg: fields are counted past the runs of spaces, and a missing one says so
 // ── The pieces a spec is taken apart with ───────────────────────────────────────────────────
 
 // A heap cstr of `n` copies of 'a', to overrun the 128-byte fields of a spec.
-fn h_relleno(n: i64) -> i64 {
+fn h_filler(n: i64) -> i64 {
     let p = heap_alloc(n + 1)
     for i in 0..n { poke8(p + i, 97) }
     poke8(p + n, 0)
@@ -597,23 +597,23 @@ test "pkg: a spec is refused when any of its parts does not fit its 128-byte fie
     let repo[16]
     let ref[16]
     let name[16]
-    let largo = h_relleno(130)
-    let cola: string = "@v1"
-    let barra: string = "/"
-    let corto: string = "x"
+    let long_s = h_filler(130)
+    let tail: string = "@v1"
+    let slash: string = "/"
+    let short_s: string = "x"
     // host too long
-    let e1 = pkg_cat4(largo, barra.utf8, corto.utf8, barra.utf8)
-    assert_eq(pkg_parse_spec(pkg_cat3(e1, corto.utf8, cola.utf8), host, owner, repo, ref, name), 0 - 1)
+    let e1 = pkg_cat4(long_s, slash.utf8, short_s.utf8, slash.utf8)
+    assert_eq(pkg_parse_spec(pkg_cat3(e1, short_s.utf8, tail.utf8), host, owner, repo, ref, name), 0 - 1)
     // owner too long
-    let e2 = pkg_cat4(corto.utf8, barra.utf8, largo, barra.utf8)
-    assert_eq(pkg_parse_spec(pkg_cat3(e2, corto.utf8, cola.utf8), host, owner, repo, ref, name), 0 - 1)
+    let e2 = pkg_cat4(short_s.utf8, slash.utf8, long_s, slash.utf8)
+    assert_eq(pkg_parse_spec(pkg_cat3(e2, short_s.utf8, tail.utf8), host, owner, repo, ref, name), 0 - 1)
     // repo too long
-    let e3 = pkg_cat4(corto.utf8, barra.utf8, corto.utf8, barra.utf8)
-    assert_eq(pkg_parse_spec(pkg_cat3(e3, largo, cola.utf8), host, owner, repo, ref, name), 0 - 1)
+    let e3 = pkg_cat4(short_s.utf8, slash.utf8, short_s.utf8, slash.utf8)
+    assert_eq(pkg_parse_spec(pkg_cat3(e3, long_s, tail.utf8), host, owner, repo, ref, name), 0 - 1)
     // ref too long
-    let arroba: string = "@"
-    let e4 = pkg_cat4(corto.utf8, barra.utf8, corto.utf8, arroba.utf8)
-    assert_eq(pkg_parse_spec(pkg_cat2(e4, largo), host, owner, repo, ref, name), 0 - 1)
+    let at_sign: string = "@"
+    let e4 = pkg_cat4(short_s.utf8, slash.utf8, short_s.utf8, at_sign.utf8)
+    assert_eq(pkg_parse_spec(pkg_cat2(e4, long_s), host, owner, repo, ref, name), 0 - 1)
 }
 
 test "pkg: a spec is refused when it does not name exactly a host, an owner and a repo" {
@@ -645,8 +645,8 @@ test "pkg: the scheme is accepted in either form and does not become part of the
 
 test "pkg: a prefix longer than the buffer it is compared against does not match" {
     // The guard that keeps the "https://" comparison from reading past a two-byte spec.
-    let corto = bytes_from_str("ht")
-    assert_eq(pkg_b_startswith(corto, pkg_https_lit()), 0)
+    let short_s = bytes_from_str("ht")
+    assert_eq(pkg_b_startswith(short_s, pkg_https_lit()), 0)
     let ok = bytes_from_str("https://x")
     assert_eq(pkg_b_startswith(ok, pkg_https_lit()), 1)
 }

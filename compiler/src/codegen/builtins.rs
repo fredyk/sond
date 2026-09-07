@@ -10,16 +10,16 @@ impl Codegen {
     /// foundation for a Sond init that talks to the console.
     pub(crate) fn call(&mut self, callee: &Expr, args: &[Arg]) {
         let Expr::Var(name) = callee else {
-            // `m.helper()` es lo que escribe todo el que viene de otro lenguaje, y hasta aqui
-            // llegaba como un nodo del AST en el mensaje. Un punto lee un CAMPO, y un campo no se
-            // llama; el nombre de otro modulo va con dos puntos. Decirlo aqui cuesta una linea y
-            // ahorra buscar en el compilador que es un Field.
+            // `m.helper()` is what everyone coming from another language writes, and up to here
+            // it reached the message as a raw AST node. A dot reads a FIELD, and a field is not
+            // callable; another module's name takes two colons. Saying so here costs one line and
+            // saves someone digging through the compiler to find out it is a Field.
             if let Expr::Field(base, field) = callee
                 && let Expr::Var(m) = base.as_ref()
             {
                 panic!(
-                    "`{m}.{field}(..)` no es una llamada: un nombre de otro modulo se escribe \
-                     `{m}::{field}(..)`. El punto lee un campo, y un campo no se llama."
+                    "`{m}.{field}(..)` is not a call: another module's name is written \
+                     `{m}::{field}(..)`. The dot reads a field, and a field is not callable."
                 );
             }
             todo!("x64 codegen for call of {callee:?}");

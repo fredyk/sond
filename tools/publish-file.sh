@@ -22,9 +22,9 @@ mkdir -p "$(dirname "$DST")"
 parent="$(cd "$(dirname "$DST")" && pwd)"
 name="$(basename "$DST")"
 
-nuevo="$(mktemp "$parent/.$name.nuevo.XXXXXX")"
-trap 'rm -f "$nuevo"' EXIT
-cp "$SRC" "$nuevo"
-chmod "$MODE" "$nuevo"
-mv -f "$nuevo" "$parent/$name"
+staged="$(mktemp "$parent/.$name.new.XXXXXX")"
+trap 'rm -f "$staged"' EXIT
+cp "$SRC" "$staged"
+chmod "$MODE" "$staged"
+mv -f "$staged" "$parent/$name"
 trap - EXIT

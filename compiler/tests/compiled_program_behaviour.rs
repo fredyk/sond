@@ -23,31 +23,31 @@ const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 /// that keeps `timeout` anywhere else silently lost the protection, and a test that hangs does
 /// not fail: it holds the whole suite with nothing on screen, which reads as "slow today".
 fn run_with_deadline(bin: &Path) -> Option<(i32, String)> {
-    let salida = bin.with_extension("stdout");
-    let fichero = std::fs::File::create(&salida).expect("the output file must be writable");
-    let mut hijo = Command::new(bin)
+    let output = bin.with_extension("stdout");
+    let fichero = std::fs::File::create(&output).expect("the output file must be writable");
+    let mut child = Command::new(bin)
         .stdout(std::process::Stdio::from(fichero))
         .spawn()
         .expect("the compiled program must be runnable");
-    let inicio = std::time::Instant::now();
-    let estado = loop {
-        match hijo.try_wait().expect("waiting on the child must work") {
-            Some(estado) => break estado,
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait().expect("waiting on the child must work") {
+            Some(status) => break status,
             None => {
-                if inicio.elapsed() >= DEADLINE {
-                    let _ = hijo.kill();
-                    let _ = hijo.wait();
-                    let _ = std::fs::remove_file(&salida);
+                if started.elapsed() >= DEADLINE {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_file(&output);
                     return None;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
         }
     };
-    let impreso = std::fs::read_to_string(&salida).unwrap_or_default();
-    let _ = std::fs::remove_file(&salida);
+    let impreso = std::fs::read_to_string(&output).unwrap_or_default();
+    let _ = std::fs::remove_file(&output);
     Some((
-        estado
+        status
             .code()
             .expect("the program must exit normally, not by signal"),
         impreso,
@@ -572,7 +572,7 @@ fn a_program_that_never_ends_fails_instead_of_hanging_the_suite() {
                }\n\
                0\n\
                }\n";
-    let inicio = std::time::Instant::now();
+    let started = std::time::Instant::now();
     let r = std::panic::catch_unwind(|| compile_and_run("never-ends", src));
     assert!(
         r.is_err(),
@@ -580,9 +580,9 @@ fn a_program_that_never_ends_fails_instead_of_hanging_the_suite() {
         r.ok()
     );
     assert!(
-        inicio.elapsed() < std::time::Duration::from_secs(60),
+        started.elapsed() < std::time::Duration::from_secs(60),
         "the deadline must cut the run short; it took {:?}",
-        inicio.elapsed()
+        started.elapsed()
     );
 }
 

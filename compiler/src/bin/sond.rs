@@ -62,7 +62,7 @@ unsafe extern "C" {
 /// so a crashing test cannot take the run down with it, which puts the code that actually spins
 /// one level below whatever `Child::kill` can reach. Without a group of its own, killing a hung
 /// gate kills the bookkeeping and leaves the loop running.
-fn lanzar(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+fn spawn_in_group(cmd: &mut Command) -> std::io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
     // ETXTBSY is not a failure, it is a race: another process forked while this binary was still
@@ -80,15 +80,15 @@ fn lanzar(cmd: &mut Command) -> std::io::Result<std::process::Child> {
 }
 
 /// SIGKILL to a process group, by the group leader's pid.
-fn matar_grupo(lider: u32) {
+fn kill_group(leader: u32) {
     // SAFETY: kill(2) with a negative pid and SIGKILL; the pid is one this process spawned and
     // has not reaped, so it cannot have been reused by an unrelated process.
     unsafe {
-        kill(-(lider as i32), 9);
+        kill(-(leader as i32), 9);
     }
 }
 
-/// Waits for `hijo` up to `plazo`, killing it if it runs past. `None` means it was killed.
+/// Waits for `child` up to `deadline`, killing it if it runs past. `None` means it was killed.
 ///
 /// A gate that never finishes does not fail: it holds the run with nothing on screen, which reads
 /// exactly like a slow machine until somebody gives up. So the wait has a deadline HERE, in the
@@ -97,17 +97,17 @@ fn matar_grupo(lider: u32) {
 /// What gets killed is the process GROUP, not the process. A grandchild that survives keeps a
 /// core at 100% for as long as the machine is up, and -- because it inherited the run's stdout --
 /// it holds that pipe open: the same run finished in 20s writing to a file and had not returned
-/// after 200s through a pipe. `hijo` must therefore come from `lanzar`.
-fn esperar(mut hijo: std::process::Child, plazo: std::time::Duration) -> Option<bool> {
-    let inicio = std::time::Instant::now();
+/// after 200s through a pipe. `child` must therefore come from `spawn_in_group`.
+fn wait_for(mut child: std::process::Child, deadline: std::time::Duration) -> Option<bool> {
+    let started = std::time::Instant::now();
     loop {
-        match hijo.try_wait() {
-            Ok(Some(estado)) => return Some(estado.success()),
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
             Ok(None) => {
-                if inicio.elapsed() >= plazo {
-                    matar_grupo(hijo.id());
-                    let _ = hijo.kill();
-                    let _ = hijo.wait();
+                if started.elapsed() >= deadline {
+                    kill_group(child.id());
+                    let _ = child.kill();
+                    let _ = child.wait();
                     return None;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -153,11 +153,11 @@ struct Scratch {
 }
 
 impl Scratch {
-    fn nuevo() -> Option<Scratch> {
+    fn new() -> Option<Scratch> {
         use std::os::unix::fs::PermissionsExt;
         let base = env::temp_dir();
-        for intento in 0..64u32 {
-            let n = azar(intento);
+        for attempt in 0..64u32 {
+            let n = azar(attempt);
             let dir = base.join(format!(".sond-{}-{n:016x}", std::process::id()));
             match std::fs::create_dir(&dir) {
                 Ok(()) => {
@@ -199,22 +199,22 @@ impl Drop for Scratch {
 /// the run next door is about to execute.
 fn barrer_restos() {
     let base = env::temp_dir();
-    let Ok(entradas) = std::fs::read_dir(&base) else { return };
-    let mut muertos: Vec<PathBuf> = Vec::new();
-    for e in entradas.flatten() {
-        let nombre = e.file_name().to_string_lossy().into_owned();
-        let Some(resto) = nombre.strip_prefix(".sond-") else { continue };
-        let Some((pid, _)) = resto.split_once('-') else { continue };
+    let Ok(entries) = std::fs::read_dir(&base) else { return };
+    let mut dead: Vec<PathBuf> = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(leftover) = name.strip_prefix(".sond-") else { continue };
+        let Some((pid, _)) = leftover.split_once('-') else { continue };
         let Ok(pid) = pid.parse::<u32>() else { continue };
         if !es_un_sond_vivo(pid) {
-            muertos.push(e.path());
+            dead.push(e.path());
         }
     }
-    if muertos.is_empty() {
+    if dead.is_empty() {
         return;
     }
-    matar_lo_que_corre_desde(&muertos);
-    for d in &muertos {
+    kill_what_runs_from(&dead);
+    for d in &dead {
         let _ = std::fs::remove_dir_all(d);
     }
 }
@@ -229,7 +229,7 @@ fn es_un_sond_vivo(pid: u32) -> bool {
 }
 
 /// SIGKILL to every process whose executable lives under one of `dirs`.
-fn matar_lo_que_corre_desde(dirs: &[PathBuf]) {
+fn kill_what_runs_from(dirs: &[PathBuf]) {
     let Ok(procs) = std::fs::read_dir("/proc") else { return };
     for e in procs.flatten() {
         let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
@@ -246,7 +246,7 @@ fn matar_lo_que_corre_desde(dirs: &[PathBuf]) {
 
 /// 64 unpredictable bits, from the kernel when it will give them and from the clock when it will
 /// not. Only the name depends on this; whether the directory is ours is decided by `create_dir`.
-fn azar(intento: u32) -> u64 {
+fn azar(attempt: u32) -> u64 {
     use std::io::Read;
     let mut b = [0u8; 8];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom")
@@ -258,11 +258,11 @@ fn azar(intento: u32) -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    t.wrapping_mul(6364136223846793005).wrapping_add(intento as u64)
+    t.wrapping_mul(6364136223846793005).wrapping_add(attempt as u64)
 }
 
 /// The per-gate deadline from `--timeout=N` seconds (default 600).
-fn plazo(args: &[String]) -> std::time::Duration {
+fn deadline(args: &[String]) -> std::time::Duration {
     std::time::Duration::from_secs(
         args.iter()
             .find_map(|a| a.strip_prefix("--timeout="))
@@ -315,15 +315,15 @@ fn run_gated_tests_deadline(
     sondc: &PathBuf,
     file: &str,
     min_cov: u32,
-    plazo: Option<std::time::Duration>,
+    deadline: Option<std::time::Duration>,
 ) -> Veredicto {
-    let Some(scratch) = Scratch::nuevo() else {
+    let Some(scratch) = Scratch::new() else {
         return Veredicto::NoArranca("cannot create a scratch directory".to_string());
     };
     let testbin = scratch.join("gate");
     let min = format!("--min-coverage={min_cov}");
     let flags = ["--test", "--coverage", min.as_str()];
-    match plazo {
+    match deadline {
         None => {
             if !compile(sondc, file, &testbin, &flags) {
                 return Veredicto::Fallo;
@@ -335,8 +335,8 @@ fn run_gated_tests_deadline(
             }
         }
         Some(p) => {
-            let inicio = std::time::Instant::now();
-            let hijo = match lanzar(
+            let started = std::time::Instant::now();
+            let child = match spawn_in_group(
                 Command::new(sondc)
                     .args(flags)
                     .arg(file)
@@ -349,19 +349,19 @@ fn run_gated_tests_deadline(
                     return Veredicto::NoArranca(format!("cannot run `{}`: {e}", sondc.display()));
                 }
             };
-            match esperar(hijo, p) {
+            match wait_for(child, p) {
                 None => return Veredicto::Colgada,
                 Some(false) => return Veredicto::Fallo,
                 Some(true) => {}
             }
-            let queda = p.saturating_sub(inicio.elapsed());
-            let hijo = match lanzar(&mut Command::new(&testbin)) {
+            let left = p.saturating_sub(started.elapsed());
+            let child = match spawn_in_group(&mut Command::new(&testbin)) {
                 Ok(h) => h,
                 Err(e) => {
                     return Veredicto::NoArranca(format!("cannot run the gate for {file}: {e}"));
                 }
             };
-            match esperar(hijo, queda) {
+            match wait_for(child, left) {
                 None => Veredicto::Colgada,
                 Some(true) => Veredicto::Paso,
                 Some(false) => Veredicto::Fallo,
@@ -419,12 +419,12 @@ fn snd_files(dir: &Path) -> Vec<PathBuf> {
     let mut v = Vec::new();
     let mut pila = vec![dir.to_path_buf()];
     while let Some(d) = pila.pop() {
-        let Ok(entradas) = std::fs::read_dir(&d) else { continue };
-        for e in entradas.flatten() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
             let p = e.path();
-            let nombre = e.file_name();
-            let nombre = nombre.to_string_lossy();
-            if nombre.starts_with('.') {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') {
                 continue;
             }
             if p.is_dir() {
@@ -455,21 +455,21 @@ fn es_suite(f: &Path) -> bool {
     f.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("_test.snd"))
 }
 
-fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, plazo: std::time::Duration) -> ExitCode {
-    let ficheros = snd_files(dir);
-    if ficheros.is_empty() {
+fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, deadline: std::time::Duration) -> ExitCode {
+    let files = snd_files(dir);
+    if files.is_empty() {
         eprintln!("sond test: no .snd files under `{}`", dir.display());
         return ExitCode::from(2);
     }
 
     let mut medidos: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    let mut entradas: Vec<PathBuf> = Vec::new();
-    let mut sin_tests: Vec<PathBuf> = Vec::new();
+    let mut entries: Vec<PathBuf> = Vec::new();
+    let mut without_tests: Vec<PathBuf> = Vec::new();
     let mut ilegibles: Vec<PathBuf> = Vec::new();
-    for f in &ficheros {
+    for f in &files {
         match entry_info(sondc, f) {
             Ok(Some(info)) if info.tests > 0 => {
-                entradas.push(f.clone());
+                entries.push(f.clone());
                 for c in info.covers {
                     medidos.insert(std::fs::canonicalize(&c).unwrap_or(c));
                 }
@@ -480,7 +480,7 @@ fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, plazo: std::time::Durati
             // dead. Whoever read that went looking for a file that already existed. So what such a
             // file covers counts as spoken for: the fault is one, and it is the missing tests.
             Ok(Some(info)) if es_suite(f) => {
-                sin_tests.push(f.clone());
+                without_tests.push(f.clone());
                 medidos.insert(std::fs::canonicalize(f).unwrap_or_else(|_| f.clone()));
                 for c in info.covers {
                     medidos.insert(std::fs::canonicalize(&c).unwrap_or(c));
@@ -503,13 +503,13 @@ fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, plazo: std::time::Durati
 
     let mut fallos: Vec<PathBuf> = Vec::new();
     let mut colgadas: Vec<PathBuf> = Vec::new();
-    for e in &entradas {
+    for e in &entries {
         println!("== {}", e.display());
-        match run_gated_tests_deadline(sondc, &e.to_string_lossy(), min_cov, Some(plazo)) {
+        match run_gated_tests_deadline(sondc, &e.to_string_lossy(), min_cov, Some(deadline)) {
             Veredicto::Paso => {}
             Veredicto::Fallo => fallos.push(e.clone()),
             Veredicto::Colgada => {
-                println!("   did not finish within {}s", plazo.as_secs());
+                println!("   did not finish within {}s", deadline.as_secs());
                 colgadas.push(e.clone());
             }
             Veredicto::NoArranca(msg) => {
@@ -521,11 +521,11 @@ fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, plazo: std::time::Durati
 
     // A file is unmeasured unless some entry answers for it. An entry itself is a gate, not a
     // subject: it is measured by definition.
-    let canon: std::collections::HashSet<PathBuf> = entradas
+    let canon: std::collections::HashSet<PathBuf> = entries
         .iter()
         .map(|e| std::fs::canonicalize(e).unwrap_or_else(|_| e.clone()))
         .collect();
-    let sin_puerta: Vec<&PathBuf> = ficheros
+    let without_gate: Vec<&PathBuf> = files
         .iter()
         .filter(|f| {
             let c = std::fs::canonicalize(f).unwrap_or_else(|_| (*f).clone());
@@ -536,12 +536,12 @@ fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, plazo: std::time::Durati
     println!();
     println!(
         "{} file(s), {} gate(s), {} failed, {} hung, {} unmeasured, {} without tests",
-        ficheros.len(),
-        entradas.len(),
+        files.len(),
+        entries.len(),
         fallos.len(),
         colgadas.len(),
-        sin_puerta.len(),
-        sin_tests.len()
+        without_gate.len(),
+        without_tests.len()
     );
     for f in &fallos {
         println!("  FAILED   {}", f.display());
@@ -549,36 +549,36 @@ fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, plazo: std::time::Durati
     for f in &colgadas {
         println!("  HUNG     {}", f.display());
     }
-    for f in &sin_puerta {
+    for f in &without_gate {
         println!("  NO GATE  {}", f.display());
     }
-    for f in &sin_tests {
+    for f in &without_tests {
         println!("  NO TESTS {}", f.display());
     }
     for f in &ilegibles {
         println!("  UNREAD   {}", f.display());
     }
-    if !sin_puerta.is_empty() {
+    if !without_gate.is_empty() {
         eprintln!(
             "sond: {} file(s) above are in no entry's coverage denominator: nothing measures \
              them. Give each one a `<name>_test.snd` beside it, or include it from an entry that \
              answers for it.",
-            sin_puerta.len()
+            without_gate.len()
         );
     }
-    if !sin_tests.is_empty() {
+    if !without_tests.is_empty() {
         eprintln!(
             "sond: {} file(s) above are named `_test.snd` and declare no `test` block: they run \
              nothing, and their name is what tells the rest of the toolchain that what they \
              include is already measured. Give each one its `test` blocks, or rename it so it \
              stops answering for code it never reads.",
-            sin_tests.len()
+            without_tests.len()
         );
     }
     if fallos.is_empty()
         && colgadas.is_empty()
-        && sin_puerta.is_empty()
-        && sin_tests.is_empty()
+        && without_gate.is_empty()
+        && without_tests.is_empty()
         && ilegibles.is_empty()
     {
         ExitCode::SUCCESS
@@ -606,9 +606,9 @@ fn main() -> ExitCode {
                 eprintln!("sond test: missing <file.snd>");
                 return ExitCode::from(2);
             };
-            let ruta = std::path::Path::new(file);
-            if ruta.is_dir() {
-                return test_tree(&sondc, ruta, min_coverage(&args), plazo(&args));
+            let path = std::path::Path::new(file);
+            if path.is_dir() {
+                return test_tree(&sondc, path, min_coverage(&args), deadline(&args));
             }
             if run_gated_tests(&sondc, file, min_coverage(&args)) {
                 ExitCode::SUCCESS
@@ -659,7 +659,7 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::FAILURE;
             }
-            let Some(scratch) = Scratch::nuevo() else {
+            let Some(scratch) = Scratch::new() else {
                 return ExitCode::FAILURE;
             };
             let out = scratch.join("run");

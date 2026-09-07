@@ -19,7 +19,7 @@ use std::process::{Command, Stdio};
 /// descriptor: until that child execs, `exec` on the new file is refused with ETXTBSY. That is a
 /// fact about the copy, never about what is being tested, so it is waited out rather than
 /// reported. `sond` itself does the same when it launches a gate it has just written.
-fn ejecuta_reintentando(cmd: &mut Command) -> std::process::Output {
+fn run_with_retries(cmd: &mut Command) -> std::process::Output {
     for _ in 0..50 {
         match cmd.output() {
             Err(e) if e.raw_os_error() == Some(26) => {
@@ -31,8 +31,8 @@ fn ejecuta_reintentando(cmd: &mut Command) -> std::process::Output {
     panic!("the copied `sond` was still busy after five seconds");
 }
 
-fn scratch(nombre: &str) -> sondc::scratch::Temporal {
-    sondc::scratch::Temporal::nuevo(&format!("sond-cov-{nombre}"))
+fn scratch(name: &str) -> sondc::scratch::Scratch {
+    sondc::scratch::Scratch::new(&format!("sond-cov-{name}"))
 }
 
 fn write(p: &Path, s: &str) {
@@ -67,25 +67,25 @@ fn entry_info(file: &Path) -> (usize, Vec<String>) {
 #[test]
 fn entry_info_names_the_files_the_gate_will_read() {
     let base = scratch("files");
-    write(&base.join("motor.snd"), "fn arranca() -> i64 { 1 }\n");
+    write(&base.join("engine.snd"), "fn start() -> i64 { 1 }\n");
     write(&base.join("frenos.snd"), "fn frena() -> i64 { 2 }\n");
     write(&base.join("frenos_test.snd"), "include \"frenos.snd\"\ntest \"t\" { }\n");
     write(
         &base.join("main.snd"),
-        "include \"motor.snd\"\ninclude \"frenos.snd\"\nfn mia() -> i64 { arranca() }\ntest \"t\" { }\n",
+        "include \"engine.snd\"\ninclude \"frenos.snd\"\nfn mia() -> i64 { start() }\ntest \"t\" { }\n",
     );
 
     let (tests, nombres) = entry_info(&base.join("main.snd"));
     assert_eq!(tests, 1, "the entry declares one test");
     assert!(nombres.contains(&"main.snd".to_string()), "it answers for itself: {nombres:?}");
-    assert!(nombres.contains(&"motor.snd".to_string()), "and for what nobody else measures");
+    assert!(nombres.contains(&"engine.snd".to_string()), "and for what nobody else measures");
     assert!(
         !nombres.contains(&"frenos.snd".to_string()),
         "not for a module that has its own test file: {nombres:?}"
     );
 
     // A plain module is not an entry, and says so with a count of zero rather than by failing.
-    let (tests, _) = entry_info(&base.join("motor.snd"));
+    let (tests, _) = entry_info(&base.join("engine.snd"));
     assert_eq!(tests, 0, "a module with no test blocks declares none");
 }
 
@@ -103,8 +103,8 @@ fn sond_test_dir(dir: &Path) -> (i32, String) {
 
 /// A tree needs a lib/ of its own so `include "x86_64/linux/testing.snd"` resolves by walking up,
 /// and never depends on what this machine happens to have installed.
-fn arbol(nombre: &str) -> sondc::scratch::Temporal {
-    let base = scratch(nombre);
+fn tree(name: &str) -> sondc::scratch::Scratch {
+    let base = scratch(name);
     let out = Command::new("cp")
         .arg("-R")
         .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("lib"))
@@ -117,7 +117,7 @@ fn arbol(nombre: &str) -> sondc::scratch::Temporal {
 
 #[test]
 fn a_module_no_entry_measures_is_named_instead_of_passing_unnoticed() {
-    let base = arbol("huerfano");
+    let base = tree("orphan");
     // Measured, because its own test file covers it.
     write(&base.join("src/frenos.snd"), "fn frena() -> i64 { 2 }\n");
     write(
@@ -128,15 +128,15 @@ fn a_module_no_entry_measures_is_named_instead_of_passing_unnoticed() {
     // In nobody's denominator: no test file of its own, and no entry includes it.
     write(&base.join("src/olvidado.snd"), "fn nadie_me_mide() -> i64 { 7 }\n");
 
-    let (rc, salida) = sond_test_dir(&base.join("src"));
-    assert_ne!(rc, 0, "a tree with unmeasured code must not pass:\n{salida}");
+    let (rc, output) = sond_test_dir(&base.join("src"));
+    assert_ne!(rc, 0, "a tree with unmeasured code must not pass:\n{output}");
     assert!(
-        salida.contains("olvidado.snd"),
-        "the report has to name the file, not just count it:\n{salida}"
+        output.contains("olvidado.snd"),
+        "the report has to name the file, not just count it:\n{output}"
     );
     assert!(
-        !salida.contains("frenos.snd\n") || salida.contains("frena"),
-        "the measured module must not be accused:\n{salida}"
+        !output.contains("frenos.snd\n") || output.contains("frena"),
+        "the measured module must not be accused:\n{output}"
     );
 
     // Give it a gate and the same tree passes: the check is about coverage, not about file count.
@@ -145,28 +145,28 @@ fn a_module_no_entry_measures_is_named_instead_of_passing_unnoticed() {
         "include \"x86_64/linux/testing.snd\"\ninclude \"olvidado.snd\"\n\
          test \"mide\" { assert_eq(nadie_me_mide(), 7) }\n",
     );
-    let (rc, salida) = sond_test_dir(&base.join("src"));
-    assert_eq!(rc, 0, "once every module is measured the tree passes:\n{salida}");
+    let (rc, output) = sond_test_dir(&base.join("src"));
+    assert_eq!(rc, 0, "once every module is measured the tree passes:\n{output}");
 }
 
 #[test]
 fn a_failing_test_anywhere_in_the_tree_fails_the_run() {
-    let base = arbol("rojo");
+    let base = tree("red");
     write(&base.join("src/bien.snd"), "fn bien() -> i64 { 1 }\n");
     write(
         &base.join("src/bien_test.snd"),
         "include \"x86_64/linux/testing.snd\"\ninclude \"bien.snd\"\n\
-         test \"pasa\" { assert_eq(bien(), 1) }\n",
+         test \"passes\" { assert_eq(bien(), 1) }\n",
     );
     write(&base.join("src/mal.snd"), "fn mal() -> i64 { 1 }\n");
     write(
         &base.join("src/mal_test.snd"),
         "include \"x86_64/linux/testing.snd\"\ninclude \"mal.snd\"\n\
-         test \"falla\" { assert_eq(mal(), 999) }\n",
+         test \"fails\" { assert_eq(mal(), 999) }\n",
     );
-    let (rc, salida) = sond_test_dir(&base.join("src"));
-    assert_ne!(rc, 0, "one red gate is a red tree:\n{salida}");
-    assert!(salida.contains("mal_test.snd"), "and it names which one:\n{salida}");
+    let (rc, output) = sond_test_dir(&base.join("src"));
+    assert_ne!(rc, 0, "one red gate is a red tree:\n{output}");
+    assert!(output.contains("mal_test.snd"), "and it names which one:\n{output}");
 }
 
 #[test]
@@ -175,42 +175,42 @@ fn a_gate_that_never_finishes_is_a_named_failure_and_not_a_stalled_run() {
     // run reads as "slow today" until somebody gets tired of waiting. The first real tree this
     // was pointed at sat on one gate until the deadline outside it fired, and the report said
     // nothing at all -- the same silence a green run has.
-    let base = arbol("colgado");
+    let base = tree("hung");
     write(&base.join("src/rapido.snd"), "fn rapido() -> i64 { 1 }\n");
     write(
         &base.join("src/rapido_test.snd"),
         "include \"x86_64/linux/testing.snd\"\ninclude \"rapido.snd\"\n\
-         test \"pasa\" { assert_eq(rapido(), 1) }\n",
+         test \"passes\" { assert_eq(rapido(), 1) }\n",
     );
-    write(&base.join("src/lento.snd"), "fn lento() -> i64 { 1 }\n");
+    write(&base.join("src/slow.snd"), "fn slow() -> i64 { 1 }\n");
     write(
         &base.join("src/lento_test.snd"),
-        "include \"x86_64/linux/testing.snd\"\ninclude \"lento.snd\"\n\
-         test \"gira\" { let mut i = 0\n for i >= 0 { i = i + 1 }\n assert_eq(lento(), 1) }\n",
+        "include \"x86_64/linux/testing.snd\"\ninclude \"slow.snd\"\n\
+         test \"spins\" { let mut i = 0\n for i >= 0 { i = i + 1 }\n assert_eq(slow(), 1) }\n",
     );
 
-    let inicio = std::time::Instant::now();
+    let started = std::time::Instant::now();
     let out = Command::new(env!("CARGO_BIN_EXE_sond"))
         .arg("test")
         .arg("--timeout=20")
         .arg(base.join("src"))
         .output()
         .expect("sond runs");
-    let mut salida = String::from_utf8_lossy(&out.stdout).into_owned();
-    salida.push_str(&String::from_utf8_lossy(&out.stderr));
+    let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
+    output.push_str(&String::from_utf8_lossy(&out.stderr));
 
     assert!(
-        inicio.elapsed() < std::time::Duration::from_secs(300),
+        started.elapsed() < std::time::Duration::from_secs(300),
         "the run has to end on its own, not wait to be killed"
     );
-    assert_ne!(out.status.code().unwrap_or(-1), 0, "a hung gate is a red tree:\n{salida}");
+    assert_ne!(out.status.code().unwrap_or(-1), 0, "a hung gate is a red tree:\n{output}");
     assert!(
-        salida.contains("lento_test.snd"),
-        "and the report names the gate that hung:\n{salida}"
+        output.contains("lento_test.snd"),
+        "and the report names the gate that hung:\n{output}"
     );
     assert!(
-        salida.contains("rapido_test.snd") || salida.contains("1 gate"),
-        "the gates that did finish are still reported:\n{salida}"
+        output.contains("rapido_test.snd") || output.contains("1 gate"),
+        "the gates that did finish are still reported:\n{output}"
     );
 }
 
@@ -243,25 +243,25 @@ fn supervivientes(pid: u32) -> Vec<u32> {
 /// returned after 200s through a pipe.
 #[test]
 fn a_hung_gate_leaves_no_descendant_spinning() {
-    let base = arbol("descendientes");
-    write(&base.join("src/lento.snd"), "fn lento() -> i64 { 1 }\n");
+    let base = tree("descendants");
+    write(&base.join("src/slow.snd"), "fn slow() -> i64 { 1 }\n");
     write(
         &base.join("src/lento_test.snd"),
-        "include \"x86_64/linux/testing.snd\"\ninclude \"lento.snd\"\n\
-         test \"gira\" { let mut i = 0\n for i >= 0 { i = i + 1 }\n assert_eq(lento(), 1) }\n",
+        "include \"x86_64/linux/testing.snd\"\ninclude \"slow.snd\"\n\
+         test \"spins\" { let mut i = 0\n for i >= 0 { i = i + 1 }\n assert_eq(slow(), 1) }\n",
     );
 
-    let registro = base.join("salida.txt");
-    let mut hijo = Command::new(env!("CARGO_BIN_EXE_sond"))
+    let log = base.join("output.txt");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sond"))
         .arg("test")
         .arg("--timeout=20")
         .arg(base.join("src"))
-        .stdout(std::fs::File::create(&registro).unwrap())
+        .stdout(std::fs::File::create(&log).unwrap())
         .stderr(Stdio::null())
         .spawn()
         .expect("sond runs");
-    let pid = hijo.id();
-    hijo.wait().expect("the run ends on its own");
+    let pid = child.id();
+    child.wait().expect("the run ends on its own");
 
     // The grandchild is killed by its own path, not by ours: give the kernel a moment to reap it.
     let mut vivos = Vec::new();
@@ -292,21 +292,21 @@ fn a_hung_gate_leaves_no_descendant_spinning() {
 /// gets filed as hung.
 #[test]
 fn a_gate_that_could_not_be_started_says_so_instead_of_reading_as_a_hang() {
-    let base = arbol("sin-compilador");
-    write(&base.join("src/algo.snd"), "fn algo() -> i64 { 1 }\n");
+    let base = tree("no-compiler");
+    write(&base.join("src/thing.snd"), "fn thing() -> i64 { 1 }\n");
     write(
         &base.join("src/algo_test.snd"),
-        "include \"x86_64/linux/testing.snd\"\ninclude \"algo.snd\"\n\
-         test \"t\" { assert_eq(algo(), 1) }\n",
+        "include \"x86_64/linux/testing.snd\"\ninclude \"thing.snd\"\n\
+         test \"t\" { assert_eq(thing(), 1) }\n",
     );
 
     // A `sond` with no `sondc` beside it, and nothing on PATH either.
-    let solo = base.join("bin");
-    std::fs::create_dir_all(&solo).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_sond"), solo.join("sond")).unwrap();
+    let alone = base.join("bin");
+    std::fs::create_dir_all(&alone).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_sond"), alone.join("sond")).unwrap();
 
-    let out = ejecuta_reintentando(
-        Command::new(solo.join("sond"))
+    let out = run_with_retries(
+        Command::new(alone.join("sond"))
             .arg("test")
             .arg("--timeout=20")
             .arg(base.join("src"))
@@ -334,7 +334,7 @@ fn a_gate_that_could_not_be_started_says_so_instead_of_reading_as_a_hang() {
 /// Found on `x509/realcert_test.snd`, whose includes are all measured by gates of their own.
 #[test]
 fn a_gate_that_measures_nothing_fails_instead_of_passing_at_full_marks() {
-    let base = arbol("sin-denominador");
+    let base = tree("no-denominator");
     // Includes only the test harness, which is never instrumented: nothing to measure.
     write(
         &base.join("src/vacio_test.snd"),
@@ -363,10 +363,10 @@ fn a_gate_that_measures_nothing_fails_instead_of_passing_at_full_marks() {
 /// never ran. The report has to say WHERE.
 #[test]
 fn a_partly_covered_function_names_the_lines_that_never_ran() {
-    let base = arbol("lineas");
+    let base = tree("lines");
     // `si_es_par` runs; the `else` arm of `clasifica` and the whole of `nunca` do not.
     write(
-        &base.join("src/motor.snd"),
+        &base.join("src/engine.snd"),
         "fn clasifica(n: i64) -> i64 {\n\
          \x20   if n == 0 {\n\
          \x20       return 10\n\
@@ -377,7 +377,7 @@ fn a_partly_covered_function_names_the_lines_that_never_ran() {
     );
     write(
         &base.join("src/motor_test.snd"),
-        "include \"x86_64/linux/testing.snd\"\ninclude \"motor.snd\"\n\
+        "include \"x86_64/linux/testing.snd\"\ninclude \"engine.snd\"\n\
          test \"cero\" { assert_eq(clasifica(0), 10) }\n",
     );
 
@@ -390,9 +390,9 @@ fn a_partly_covered_function_names_the_lines_that_never_ran() {
     texto.push_str(&String::from_utf8_lossy(&out.stderr));
 
     assert!(texto.contains("clasifica"), "the function is named:\n{texto}");
-    // Line 5 of motor.snd is `return 20`, the only statement the test never reaches.
+    // Line 5 of engine.snd is `return 20`, the only statement the test never reaches.
     assert!(
-        texto.contains("motor.snd:5"),
+        texto.contains("engine.snd:5"),
         "and the line that never ran is named, file and all:\n{texto}"
     );
 }
@@ -405,7 +405,7 @@ fn a_partly_covered_function_names_the_lines_that_never_ran() {
 /// is the system working, not a hole. It must not be read as the failure above.
 #[test]
 fn a_gate_whose_modules_are_all_measured_next_door_is_not_a_hole() {
-    let base = arbol("delegado");
+    let base = tree("delegated");
     write(&base.join("src/bytes.snd"), "fn empuja() -> i64 { 2 }\n");
     write(
         &base.join("src/bytes_test.snd"),
@@ -444,83 +444,82 @@ fn a_gate_whose_modules_are_all_measured_next_door_is_not_a_hole() {
 /// it as unmeasured asks for a gate that could not exist. Same for a file of pure constants.
 #[test]
 fn a_file_with_nothing_to_measure_is_not_reported_as_unmeasured() {
-    let base = arbol("nada-que-medir");
+    let base = tree("nothing-to-measure");
     write(&base.join("src/puertos.snd"), "let PUERTO_HTTP = 80\nlet PUERTO_HTTPS = 443\n");
     // The harness itself, in the swept directory: every function in it is one the coverage
     // build skips by name, so no entry can ever answer for it.
     std::fs::copy(base.join("lib/x86_64/linux/testing.snd"), base.join("src/testing.snd")).unwrap();
-    write(&base.join("src/motor.snd"), "fn arranca() -> i64 { 1 }\n");
+    write(&base.join("src/engine.snd"), "fn start() -> i64 { 1 }\n");
     write(
         &base.join("src/motor_test.snd"),
-        "include \"x86_64/linux/testing.snd\"\ninclude \"motor.snd\"\n\
-         test \"arranca\" { assert_eq(arranca(), 1) }\n",
+        "include \"x86_64/linux/testing.snd\"\ninclude \"engine.snd\"\n\
+         test \"start\" { assert_eq(start(), 1) }\n",
     );
 
-    let (_, salida) = sond_test_dir(&base.join("src"));
+    let (_, output) = sond_test_dir(&base.join("src"));
     assert!(
-        !salida.contains("puertos.snd"),
-        "a file of constants has no gate to give it:\n{salida}"
+        !output.contains("puertos.snd"),
+        "a file of constants has no gate to give it:\n{output}"
     );
     assert!(
-        !salida.contains("testing.snd"),
-        "and neither has the test harness itself:\n{salida}"
+        !output.contains("testing.snd"),
+        "and neither has the test harness itself:\n{output}"
     );
 }
 
-/// Preguntar por un fichero no produce un artefacto, sea cual sea la pregunta.
+/// Asking about a file produces no artefact, whatever the question is.
 ///
-/// El acierto de cache copia un binario a `output` -- que, sin `-o`, es el nombre base del fuente
-/// en el directorio de trabajo de QUIEN LLAMA -- y devuelve antes de que nadie lea la pregunta.
-/// Se arreglo una vez para `--entry-info` porque `sond test <dir>` dejaba un ELF al lado de cada
-/// fuente. `--emit-header` se quedo fuera, y ahi el daño es peor: `tools/install.sh` redirige su
-/// salida al fichero que PUBLICA, asi que con la cache caliente la cabecera que se entrega es la
-/// linea «sondc: wrote native x86-64 binary ...».
+/// A cache hit copies a binary to `output` -- which, without `-o`, is the source's base name in
+/// the CALLER's working directory -- and returns before anyone reads the question. It was fixed
+/// once for `--entry-info`, because `sond test <dir>` left an ELF beside every source.
+/// `--emit-header` was left out, and there the damage is worse: `tools/install.sh` redirects its
+/// output into the file it PUBLISHES, so with a warm cache the header that ships is the line
+/// "sondc: wrote native x86-64 binary ...".
 ///
-/// Por eso el caso recorre `sondc::CONSULTAS` en vez de nombrar una bandera: arreglar la de hoy y
-/// dejar la lista sin cerrar es lo que hizo falta dos veces.
+/// That is why the case walks `sondc::QUERIES` instead of naming one flag: fixing today's and
+/// leaving the list open is what had to be done twice.
 #[test]
 fn asking_what_a_file_is_never_writes_a_binary() {
-    let base = scratch("consulta-sin-artefacto");
-    let fuente = base.join("motor.snd");
-    write(&fuente, "fn arranca() -> i64 { 1 }\nfn main() -> i64 { arranca() - 1 }\n");
+    let base = scratch("query-no-artefact");
+    let source = base.join("engine.snd");
+    write(&source, "fn start() -> i64 { 1 }\nfn main() -> i64 { start() - 1 }\n");
 
     // Build it once, so the query below meets a warm cache: that is the path that wrote the file.
-    let salida = Command::new(env!("CARGO_BIN_EXE_sondc"))
-        .arg(&fuente)
+    let output = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        .arg(&source)
         .arg("-o")
-        .arg(base.join("motor-build"))
+        .arg(base.join("engine-build"))
         .output()
         .expect("sondc runs");
-    assert!(salida.status.success(), "{}", String::from_utf8_lossy(&salida.stderr));
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
-    assert!(!sondc::CONSULTAS.is_empty(), "la lista de consultas no puede estar vacia");
-    for consulta in sondc::CONSULTAS {
-        let cwd = base.join(format!("cwd{}", consulta.trim_start_matches('-')));
+    assert!(!sondc::QUERIES.is_empty(), "the query list must not be empty");
+    for query in sondc::QUERIES {
+        let cwd = base.join(format!("cwd{}", query.trim_start_matches('-')));
         std::fs::create_dir_all(&cwd).unwrap();
-        let salida = Command::new(env!("CARGO_BIN_EXE_sondc"))
+        let output = Command::new(env!("CARGO_BIN_EXE_sondc"))
             .current_dir(&cwd)
-            .arg(consulta)
-            .arg(&fuente)
+            .arg(query)
+            .arg(&source)
             .output()
             .expect("sondc runs");
         assert!(
-            salida.status.success(),
-            "`{consulta}`: {}",
-            String::from_utf8_lossy(&salida.stderr)
+            output.status.success(),
+            "`{query}`: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
-        let respuesta = String::from_utf8_lossy(&salida.stdout);
+        let answer = String::from_utf8_lossy(&output.stdout);
         assert!(
-            !respuesta.contains("wrote native"),
-            "`{consulta}` contesto con el parte de una compilacion, no con la respuesta: \
-             {respuesta}"
+            !answer.contains("wrote native"),
+            "`{query}` replied with a build report instead of the answer: {answer}"
         );
-        assert!(!respuesta.trim().is_empty(), "`{consulta}` no contesto nada");
+        assert!(!answer.trim().is_empty(), "`{query}` answered nothing");
 
-        let dejado: Vec<String> = std::fs::read_dir(&cwd)
+        let left_behind: Vec<String> = std::fs::read_dir(&cwd)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert!(dejado.is_empty(), "`{consulta}` dejo {dejado:?} en el directorio de trabajo");
+        assert!(left_behind.is_empty(), "`{query}` left {left_behind:?} in the working directory");
     }
 }
 
@@ -537,14 +536,14 @@ fn asking_what_a_file_is_never_writes_a_binary() {
 /// entirely: a file whose whole purpose is to test something, running nothing, reported as fine.
 #[test]
 fn a_file_named_like_a_suite_that_declares_no_tests_is_named_as_one() {
-    let base = arbol("suite-muerta");
-    write(&base.join("src/motor.snd"), "fn arranca() -> i64 { 1 }\n");
+    let base = tree("dead-suite");
+    write(&base.join("src/engine.snd"), "fn start() -> i64 { 1 }\n");
     // Named `_test.snd`, and not a suite: it checks by returning 1, the way these files were
     // written before `test` blocks existed.
     write(
         &base.join("src/motor_test.snd"),
-        "include \"x86_64/linux/testing.snd\"\ninclude \"motor.snd\"\n\
-         fn main() -> i64 { if arranca() != 1 { return 1 } 0 }\n",
+        "include \"x86_64/linux/testing.snd\"\ninclude \"engine.snd\"\n\
+         fn main() -> i64 { if start() != 1 { return 1 } 0 }\n",
     );
     // Measured by a gate of its own, so the dead suite next to it answers for nothing new: this
     // is the shape that used to disappear without a word.
@@ -560,37 +559,37 @@ fn a_file_named_like_a_suite_that_declares_no_tests_is_named_as_one() {
          fn comprueba() -> i64 { frena() }\n",
     );
 
-    let (rc, salida) = sond_test_dir(&base.join("src"));
-    assert_ne!(rc, 0, "a tree with a suite that runs nothing must not pass:\n{salida}");
+    let (rc, output) = sond_test_dir(&base.join("src"));
+    assert_ne!(rc, 0, "a tree with a suite that runs nothing must not pass:\n{output}");
     assert!(
-        salida.contains("NO TESTS"),
+        output.contains("NO TESTS"),
         "a dead suite needs a category of its own: it is not a module missing a gate, it is a \
-         gate missing its tests:\n{salida}"
+         gate missing its tests:\n{output}"
     );
     for f in ["motor_test.snd", "integra_test.snd"] {
         assert!(
-            salida.lines().any(|l| l.contains("NO TESTS") && l.ends_with(f)),
-            "{f} declares no tests and has to be named as such:\n{salida}"
+            output.lines().any(|l| l.contains("NO TESTS") && l.ends_with(f)),
+            "{f} declares no tests and has to be named as such:\n{output}"
         );
     }
     assert!(
-        !salida.lines().any(|l| l.contains("NO GATE") && l.ends_with("/motor.snd")),
+        !output.lines().any(|l| l.contains("NO GATE") && l.ends_with("/engine.snd")),
         "the module has a test file, written and dead: accusing IT sends the reader looking for \
-         a file that already exists:\n{salida}"
+         a file that already exists:\n{output}"
     );
 
     // Give each one a real test block and the same tree passes: the check is about tests that
     // run, not about file names.
     write(
         &base.join("src/motor_test.snd"),
-        "include \"x86_64/linux/testing.snd\"\ninclude \"motor.snd\"\n\
-         test \"arranca\" { assert_eq(arranca(), 1) }\n",
+        "include \"x86_64/linux/testing.snd\"\ninclude \"engine.snd\"\n\
+         test \"start\" { assert_eq(start(), 1) }\n",
     );
     write(
         &base.join("src/integra_test.snd"),
         "include \"x86_64/linux/testing.snd\"\ninclude \"frenos.snd\"\n\
          test \"integra\" { assert_eq(frena(), 2) }\n",
     );
-    let (rc, salida) = sond_test_dir(&base.join("src"));
-    assert_eq!(rc, 0, "with every suite declaring tests the tree passes:\n{salida}");
+    let (rc, output) = sond_test_dir(&base.join("src"));
+    assert_eq!(rc, 0, "with every suite declaring tests the tree passes:\n{output}");
 }

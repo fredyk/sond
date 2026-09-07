@@ -1303,7 +1303,7 @@ mod tests {
     // than the reason. Same compilation must resolve the same way however the path is written.
     #[test]
     fn a_relative_entry_finds_the_project_lib_like_an_absolute_one_does() {
-        let dir = crate::scratch::Temporal::nuevo("sond_rel");
+        let dir = crate::scratch::Scratch::new("sond_rel");
         std::fs::create_dir_all(dir.join("lib/mylib")).unwrap();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(
@@ -1354,14 +1354,14 @@ mod tests {
     /// A project whose `lib/` holds one file, and whose entry includes it. The returned value IS
     /// the entry path (it derefs to it) and owns the tree: it has to be held for the length of the
     /// test, which is what stops the fixture from deleting itself before it is read.
-    fn lib_fixture(subpath: &str, body: &str, include_line: &str) -> crate::scratch::Temporal {
-        let root = crate::scratch::Temporal::nuevo("sond_res");
+    fn lib_fixture(subpath: &str, body: &str, include_line: &str) -> crate::scratch::Scratch {
+        let root = crate::scratch::Scratch::new("sond_res");
         let lib_file = root.join("lib").join(subpath);
         std::fs::create_dir_all(lib_file.parent().unwrap()).unwrap();
         std::fs::write(&lib_file, body).unwrap();
         std::fs::write(root.join("main.snd"), format!("{include_line}\nfn main() -> i64 {{ 0 }}"))
             .unwrap();
-        root.exponiendo("main.snd")
+        root.exposing("main.snd")
     }
 
     #[test]
@@ -1411,7 +1411,7 @@ mod tests {
     fn a_bare_and_a_full_include_of_the_same_file_are_deduped() {
         // `include "serial"` and `include "any/serial.snd"` name the same file; it must appear
         // once, not twice (which would be duplicate definitions).
-        let root = crate::scratch::Temporal::nuevo("sond_resd");
+        let root = crate::scratch::Scratch::new("sond_resd");
         let lib_file = root.join("lib").join("any").join("serial.snd");
         std::fs::create_dir_all(lib_file.parent().unwrap()).unwrap();
         std::fs::write(&lib_file, "fn serial_putc(b: i64) { }").unwrap();
@@ -1434,7 +1434,7 @@ mod tests {
         // When an include cannot be resolved on any root, the error must name the file that was
         // not found, NOT the entry file. Before this, every read failure was blamed on the entry,
         // so a missing `any/json.snd` read as "cannot read main.snd", which is deeply misleading.
-        let dir = crate::scratch::Temporal::nuevo("sond_res");
+        let dir = crate::scratch::Scratch::new("sond_res");
         let main = tmp(
             &dir,
             "sond_missinginc.snd",
@@ -1454,7 +1454,7 @@ mod tests {
     #[test]
     fn a_colliding_private_helper_is_file_scoped_a_unique_one_is_left_alone() {
         let root =
-            crate::scratch::Temporal::nuevo("sond_fscope");
+            crate::scratch::Scratch::new("sond_fscope");
         std::fs::create_dir_all(&root).unwrap();
         // Two included libs each define a PRIVATE `secret` (a collision); libb also has a unique
         // private `only_b`. The entry includes both.
@@ -1502,7 +1502,7 @@ mod tests {
         // call resolved to nothing. A caller must bind to the definition visible in ITS include
         // closure.
         let root =
-            crate::scratch::Temporal::nuevo("sond_xfile");
+            crate::scratch::Scratch::new("sond_xfile");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.snd"), "fn shared() -> i64 { 1 }").unwrap();
         std::fs::write(root.join("b.snd"), "fn shared() -> i64 { 2 }").unwrap();
@@ -1560,7 +1560,7 @@ mod tests {
         // The same file-scoping must cover module-level `let` globals, not only functions: two
         // bignum libraries each define a private `let MASK = ...` and use it internally, and a
         // program that pulls in both would otherwise fail with "declared more than once".
-        let root = crate::scratch::Temporal::nuevo("sond_glob");
+        let root = crate::scratch::Scratch::new("sond_glob");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("a.snd"),
@@ -1597,7 +1597,7 @@ mod tests {
         // A global defined in ONE file and used in another (a shared constant) must NOT be
         // mangled: it does not collide, so cross-file use keeps working.
         let root =
-            crate::scratch::Temporal::nuevo("sond_globshare");
+            crate::scratch::Scratch::new("sond_globshare");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("k.snd"), "let SHARED = 42").unwrap();
         std::fs::write(
@@ -1620,7 +1620,7 @@ mod tests {
 
     #[test]
     fn inlines_an_included_file_once() {
-        let dir = crate::scratch::Temporal::nuevo("sond_inline");
+        let dir = crate::scratch::Scratch::new("sond_inline");
         let lib = tmp(&dir, "sond_lib.snd", "fn helper() -> i64 { 42 }");
         let libname = lib.file_name().unwrap().to_str().unwrap();
         // main includes the lib TWICE; it must appear only once.
@@ -1642,7 +1642,7 @@ mod tests {
         // worth anything if it measures the code under test. A `_test.snd` file that happens
         // to define a helper of its own must not shrink the denominator to that helper: that
         // turns "1 of 5 library functions covered" into a green "1 of 1".
-        let dir = crate::scratch::Temporal::nuevo("sond_covscope");
+        let dir = crate::scratch::Scratch::new("sond_covscope");
         let lib = tmp(
             &dir,
             "sond_covlib.snd",
@@ -1668,8 +1668,8 @@ mod tests {
     // `<root>/lib/` is a library root. Returns the root. `tmp()` puts everything in the shared
     // temp dir, where every fixture is a sibling of every other, so it cannot tell a project's
     // own module from a dependency.
-    fn project_fixture() -> crate::scratch::Temporal {
-        let root = crate::scratch::Temporal::nuevo("sond_proj");
+    fn project_fixture() -> crate::scratch::Scratch {
+        let root = crate::scratch::Scratch::new("sond_proj");
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::create_dir_all(root.join("lib")).unwrap();
         root
@@ -1870,7 +1870,7 @@ mod tests {
         // and `module::name` says which one you mean. Resolved here, at include time, into the
         // symbol that module actually defines -- so the lexer, the parser and the code generator
         // never see a `::` and nothing downstream changes.
-        let root = crate::scratch::Temporal::nuevo("sond_ns1");
+        let root = crate::scratch::Scratch::new("sond_ns1");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("dns.snd"), "pub fn resolve() -> i64 { 7 }").unwrap();
         let entry = root.join("main.snd");
@@ -1894,7 +1894,7 @@ mod tests {
     fn two_modules_may_export_the_same_name_when_each_use_says_which() {
         // The point of the whole exercise. Today two libraries that both export `read` cannot be
         // used by one program at all: it is a hard "defined more than once". Qualified, they can.
-        let root = crate::scratch::Temporal::nuevo("sond_ns2");
+        let root = crate::scratch::Scratch::new("sond_ns2");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("disk.snd"), "pub fn read() -> i64 { 1 }").unwrap();
         std::fs::write(root.join("net.snd"), "pub fn read() -> i64 { 2 }").unwrap();
@@ -1921,7 +1921,7 @@ mod tests {
         // The diagnostic is the feature. Left alone, the ambiguous name would compile to
         // something undefined and the error would land in the code generator, naming a mangled
         // symbol nobody wrote.
-        let root = crate::scratch::Temporal::nuevo("sond_ns3");
+        let root = crate::scratch::Scratch::new("sond_ns3");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("disk.snd"), "pub fn read() -> i64 { 1 }").unwrap();
         std::fs::write(root.join("net.snd"), "pub fn read() -> i64 { 2 }").unwrap();
@@ -1944,7 +1944,7 @@ mod tests {
 
     #[test]
     fn a_qualified_name_cannot_reach_a_module_that_is_not_included() {
-        let root = crate::scratch::Temporal::nuevo("sond_ns4");
+        let root = crate::scratch::Scratch::new("sond_ns4");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("dns.snd"), "pub fn resolve() -> i64 { 7 }").unwrap();
         let entry = root.join("main.snd");
@@ -1957,7 +1957,7 @@ mod tests {
     fn a_qualified_name_cannot_reach_a_private_helper() {
         // `pub` is what a module offers; qualifying must not be a way around it, or the
         // visibility that already exists would stop meaning anything the moment `::` landed.
-        let root = crate::scratch::Temporal::nuevo("sond_ns5");
+        let root = crate::scratch::Scratch::new("sond_ns5");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("dns.snd"),
@@ -1984,7 +1984,7 @@ mod tests {
         // survives is the include's -- and the old code renamed BOTH definitions to
         // `name__f<id>`, i.e. a `global `O_RDWR__f1` is declared more than once` duplicate. The
         // entry's own definition must stay bare; only the include's is file-scoped.
-        let root = crate::scratch::Temporal::nuevo("sond_entglob");
+        let root = crate::scratch::Scratch::new("sond_entglob");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.snd"), "let O_RDWR = 2\npub fn a() -> i64 { O_RDWR }").unwrap();
         let entry = root.join("main.snd");
@@ -2024,7 +2024,7 @@ mod tests {
         // private module-level global of the same name (both depth >= 1, both with ids). Each
         // must be file-scoped to its own definition and its own uses -- no duplicate, no
         // rebinding where one file starts reading the other's value.
-        let root = crate::scratch::Temporal::nuevo("sond_nestglob");
+        let root = crate::scratch::Scratch::new("sond_nestglob");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("io.snd"), "let O_ROLE = 1\npub fn io_role() -> i64 { O_ROLE }").unwrap();
         std::fs::write(
@@ -2077,7 +2077,7 @@ mod tests {
     #[test]
     fn a_qualified_name_for_a_module_without_exports_fails_resolution() {
         // A module that exports nothing cannot be queried for any name via `::`.
-        let root = crate::scratch::Temporal::nuevo("sond_ns6");
+        let root = crate::scratch::Scratch::new("sond_ns6");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("empty.snd"), "// no functions, no exports").unwrap();
         let entry = root.join("main.snd");
@@ -2092,10 +2092,10 @@ mod tests {
 
     // ── import directive tests ────────────────────────────────────────────
 
-    // CP1: `import strings` empalma el módulo y `strings::itoa(7)` resuelve.
+    // CP1: `import strings` splices the module in and `strings::itoa(7)` resolves.
     #[test]
     fn an_import_empalmes_the_module_and_qualified_name_resolves() {
-        let root = crate::scratch::Temporal::nuevo("sond_imp1");
+        let root = crate::scratch::Scratch::new("sond_imp1");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/strings.snd"),
@@ -2119,10 +2119,10 @@ mod tests {
         );
     }
 
-    // CP2: `import strings as str` alias renombra el módulo en ese fichero.
+    // CP2: `import strings as str` renames the module inside that file.
     #[test]
     fn an_import_as_alias_renames_the_module_and_original_name_is_gone() {
-        let root = crate::scratch::Temporal::nuevo("sond_imp2");
+        let root = crate::scratch::Scratch::new("sond_imp2");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/strings.snd"),
@@ -2161,7 +2161,7 @@ mod tests {
     // CP3: A private function of the imported module is NOT reachable via `::`.
     #[test]
     fn a_private_fn_of_an_imported_module_is_not_reachable() {
-        let root = crate::scratch::Temporal::nuevo("sond_imp3");
+        let root = crate::scratch::Scratch::new("sond_imp3");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/math.snd"),
@@ -2185,7 +2185,7 @@ mod tests {
     // saying it must be declared.
     #[test]
     fn an_import_of_an_unknown_name_is_a_hard_error_with_line() {
-        let root = crate::scratch::Temporal::nuevo("sond_imp4");
+        let root = crate::scratch::Scratch::new("sond_imp4");
         std::fs::create_dir_all(&root).unwrap();
         let entry = root.join("main.snd");
         std::fs::write(
@@ -2211,7 +2211,7 @@ mod tests {
     // CP5: Importing the same module twice does not duplicate definitions.
     #[test]
     fn importing_the_same_module_twice_does_not_duplicate() {
-        let root = crate::scratch::Temporal::nuevo("sond_imp5");
+        let root = crate::scratch::Scratch::new("sond_imp5");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/strings.snd"),
@@ -2235,7 +2235,7 @@ mod tests {
     // CP6: An `import` and an `include` of the same file do not define twice.
     #[test]
     fn import_and_include_of_the_same_file_dedup() {
-        let root = crate::scratch::Temporal::nuevo("sond_imp6");
+        let root = crate::scratch::Scratch::new("sond_imp6");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/strings.snd"),
@@ -2259,7 +2259,7 @@ mod tests {
     // CP7: `import` only valid at top level; inside a function is an error with line.
     #[test]
     fn an_import_inside_a_function_is_an_error_with_line() {
-        let root = crate::scratch::Temporal::nuevo("sond_imp7");
+        let root = crate::scratch::Scratch::new("sond_imp7");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/strings.snd"),
@@ -2286,7 +2286,7 @@ mod tests {
     // CP8: An alias that clashes with an already-visible module name is an error.
     #[test]
     fn an_alias_that_clashes_with_a_visible_module_name_is_an_error() {
-        let root = crate::scratch::Temporal::nuevo("sond_imp8");
+        let root = crate::scratch::Scratch::new("sond_imp8");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/strings.snd"),
@@ -2320,7 +2320,7 @@ mod tests {
     /// entry path + combined text + a handle to the map.
     fn three_include_fixture() -> (PathBuf, ResolvedProgram) {
         let root =
-            crate::scratch::Temporal::nuevo("sond_spans");
+            crate::scratch::Scratch::new("sond_spans");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.snd"), "fn a_ok() -> i64 { 1 }\n").unwrap();
         std::fs::write(
@@ -2389,7 +2389,7 @@ mod tests {
         // `shared__f<id>`, and every column after it shifts. The map has to undo that, so a
         // position landing anywhere inside the mangled name points at the name the author wrote.
         let root =
-            crate::scratch::Temporal::nuevo("sond_spancol");
+            crate::scratch::Scratch::new("sond_spancol");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.snd"), "fn shared() -> i64 { 1 }\n").unwrap();
         std::fs::write(root.join("b.snd"), "fn shared() -> i64 { 2 }\n").unwrap();
@@ -2435,7 +2435,7 @@ mod tests {
         // The graph pass tokenizes every file to learn the names it defines; the refusal used to
         // escape with a line number in a nameless file, which the driver then blamed on the entry.
         let root =
-            crate::scratch::Temporal::nuevo("sond_spanlex");
+            crate::scratch::Scratch::new("sond_spanlex");
         std::fs::create_dir_all(&root).unwrap();
         let bad = root.join("bad.snd");
         std::fs::write(&bad, "fn ok() -> i64 { 1 }\nfn bad() -> i64 { 1 ? 2 }\n").unwrap();

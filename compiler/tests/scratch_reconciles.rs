@@ -9,10 +9,10 @@
 //! clears what dead ones left. The pid is in the name, and a pid with no process behind it says
 //! the run is over.
 
-use sondc::scratch::Temporal;
+use sondc::scratch::Scratch;
 
 /// A pid with no process behind it.
-fn pid_muerto() -> u32 {
+fn dead_pid() -> u32 {
     for p in (40000u32..4_000_000).step_by(7919) {
         if !std::path::Path::new(&format!("/proc/{p}")).exists() {
             return p;
@@ -23,19 +23,19 @@ fn pid_muerto() -> u32 {
 
 #[test]
 fn the_next_run_clears_the_scratch_of_runs_that_are_gone() {
-    // Shaped exactly like the real thing, and named after a run that is over. `con_nombre` does
-    // not sweep, so what gets measured below is what `nuevo` does.
-    let muerto = Temporal::con_nombre(&format!("sondtmp-restos-{}-1a2b3c", pid_muerto()));
-    std::fs::write(muerto.join("relleno"), vec![0u8; 4096]).unwrap();
-    let vivo = Temporal::con_nombre(&format!("sondtmp-restos-{}-4d5e6f", std::process::id()));
+    // Shaped exactly like the real thing, and named after a run that is over. `with_name` does
+    // not sweep, so what gets measured below is what `new` does.
+    let dead = Scratch::with_name(&format!("sondtmp-leftovers-{}-1a2b3c", dead_pid()));
+    std::fs::write(dead.join("filler"), vec![0u8; 4096]).unwrap();
+    let alive = Scratch::with_name(&format!("sondtmp-leftovers-{}-4d5e6f", std::process::id()));
 
-    let ruta_muerta = muerto.to_path_buf();
-    let ruta_viva = vivo.to_path_buf();
-    let _ = Temporal::nuevo("sondtmp-disparo");
+    let dead_path = dead.to_path_buf();
+    let live_path = alive.to_path_buf();
+    let _ = Scratch::new("sondtmp-trigger");
 
-    assert!(!ruta_muerta.exists(), "the scratch of a dead run is still there: {ruta_muerta:?}");
+    assert!(!dead_path.exists(), "the scratch of a dead run is still there: {dead_path:?}");
     assert!(
-        ruta_viva.exists(),
-        "and the scratch of a run still going was taken with it: {ruta_viva:?}"
+        live_path.exists(),
+        "and the scratch of a run still going was taken with it: {live_path:?}"
     );
 }

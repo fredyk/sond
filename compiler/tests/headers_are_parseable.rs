@@ -1,32 +1,32 @@
-//! Cada cabecera que se publica la lee el compilador que la escribio.
+//! Every published header is read by the compiler that wrote it.
 //!
-//! `tools/install.sh` genera una cabecera por cada `.snd` de `lib/` y la publica en dos sitios:
-//! `dist/include/` (dentro del repo, versionado) y `~/.local/include/sond/`, la ruta FHS que
-//! RFC-0006 senala como la interfaz del paquete. Es EL artefacto contra el que compila quien
-//! consume la libreria.
+//! `tools/install.sh` generates one header per `.snd` under `lib/` and publishes it in two
+//! places: `dist/include/` (inside the repo, versioned) and `~/.local/include/sond/`, the FHS
+//! path RFC-0006 names as the package interface. It is THE artefact whoever consumes the library
+//! compiles against.
 //!
-//! El 05/09/2026, 132 de esas 193 cabeceras no las parseaba `sondc`. Todas por lo mismo: una
-//! firma `pub fn` sin cuerpo, que el parser leia como una definicion a la que le falta el `{`.
-//! Nada lo veia porque los tests de `header.rs` buscan SUBCADENAS en el texto, y un texto que se
-//! lee bien puede ser imposible de compilar.
+//! On 2026-09-05, 132 of those 193 headers did not parse under `sondc`. All for the same reason:
+//! a `pub fn` signature with no body, which the parser read as a definition missing its `{`.
+//! Nothing saw it because the `header.rs` tests look for SUBSTRINGS in the text, and a text that
+//! reads well can still be impossible to compile.
 //!
-//! Aqui no se congela ningun literal: se emite la cabecera de verdad, con el emisor de verdad, y
-//! se le da al front-end de verdad. Quien cambie una de las dos orillas sin la otra lo ve aqui.
+//! No literal is frozen here: the real header is emitted, with the real emitter, and handed to
+//! the real front end. Change one bank without the other and it shows up here.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// La raiz del repo: este fichero vive en `compiler/tests/`.
+/// The repo root: this file lives in `compiler/tests/`.
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .expect("compiler/ siempre tiene padre")
+        .expect("compiler/ always has a parent")
         .to_path_buf()
 }
 
 fn snd_files(dir: &Path, v: &mut Vec<PathBuf>) {
-    let Ok(entradas) = std::fs::read_dir(dir) else { return };
-    for e in entradas.flatten() {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
             snd_files(&p, v);
@@ -37,63 +37,62 @@ fn snd_files(dir: &Path, v: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn toda_cabecera_publicada_la_parsea_el_compilador_que_la_escribio() {
-    let raiz = repo_root();
-    let lib = raiz.join("lib");
-    let mut ficheros = Vec::new();
-    snd_files(&lib, &mut ficheros);
-    ficheros.sort();
+fn every_published_header_parses_under_the_compiler_that_wrote_it() {
+    let root = repo_root();
+    let lib = root.join("lib");
+    let mut files = Vec::new();
+    snd_files(&lib, &mut files);
+    files.sort();
     assert!(
-        ficheros.len() > 100,
-        "se esperaba la libreria entera bajo {}, y salieron {}",
+        files.len() > 100,
+        "the whole library was expected under {}, and {} turned up",
         lib.display(),
-        ficheros.len()
+        files.len()
     );
 
-    // Se emite y se lee con EL binario, el mismo comando que corre `tools/install.sh`. Una
-    // reconstruccion de la tuberia aqui dentro se saltaria la resolucion de includes, que es
-    // parte de lo que la cabecera acaba diciendo, y daria verde sobre algo que install.sh no
-    // produce.
+    // Emitted and read with THE binary, the same command `tools/install.sh` runs. Rebuilding the
+    // pipeline inside this test would skip include resolution, which is part of what the header
+    // ends up saying, and would go green over something install.sh does not produce.
     let sondc = env!("CARGO_BIN_EXE_sondc");
-    let temporal = sondc::scratch::Temporal::nuevo("sond_hdrs");
-    let tmp = temporal.ruta();
+    let scratch = sondc::scratch::Scratch::new("sond_hdrs");
+    let tmp = scratch.path();
 
-    let mut rotas: Vec<String> = Vec::new();
-    for (n, f) in ficheros.iter().enumerate() {
-        let emitida = Command::new(sondc)
+    let mut broken: Vec<String> = Vec::new();
+    for (n, f) in files.iter().enumerate() {
+        let emitted = Command::new(sondc)
             .arg(f)
             .arg("--emit-header")
             .output()
-            .expect("sondc arranca");
-        if !emitida.status.success() {
-            rotas.push(format!(
-                "{}: no se pudo emitir su cabecera: {}",
+            .expect("sondc starts");
+        if !emitted.status.success() {
+            broken.push(format!(
+                "{}: its header could not be emitted: {}",
                 f.display(),
-                String::from_utf8_lossy(&emitida.stderr).trim()
+                String::from_utf8_lossy(&emitted.stderr).trim()
             ));
             continue;
         }
-        // La cabecera se guarda con su extension real: es el fichero que se publica.
+        // The header is saved with its real extension: it is the file that gets published.
         let dst = tmp.join(format!("h{n}.snd"));
-        std::fs::write(&dst, &emitida.stdout).expect("la cabecera se escribe");
-        // `--entry-info` parsea el fichero y no escribe ningun binario.
-        let leida = Command::new(sondc)
+        std::fs::write(&dst, &emitted.stdout).expect("the header is written");
+        // `--entry-info` parses the file and writes no binary.
+        let read = Command::new(sondc)
             .arg("--entry-info")
             .arg(&dst)
             .output()
-            .expect("sondc arranca");
-        if !leida.status.success() {
-            let e = String::from_utf8_lossy(&leida.stderr);
-            let e = e.trim().replace(&dst.display().to_string(), "<cabecera>");
-            rotas.push(format!("{}: {e}", f.display()));
+            .expect("sondc starts");
+        if !read.status.success() {
+            let e = String::from_utf8_lossy(&read.stderr);
+            let e = e.trim().replace(&dst.display().to_string(), "<header>");
+            broken.push(format!("{}: {e}", f.display()));
         }
     }
     assert!(
-        rotas.is_empty(),
-        "{} de {} cabeceras no las parsea el compilador que las escribe. Se publican en \
-         dist/include/ y en ~/.local/include/sond/, o sea que se entregan rotas:\n{}",
-        rotas.len(),
-        ficheros.len(),
-        rotas.join("\n")
+        broken.is_empty(),
+        "{} of {} headers do not parse under the compiler that writes them. They are published in \
+         dist/include/ and in ~/.local/include/sond/, which means they ship broken:\n{}",
+        broken.len(),
+        files.len(),
+        broken.join("\n")
     );
 }

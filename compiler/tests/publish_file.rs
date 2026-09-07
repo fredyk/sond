@@ -15,8 +15,8 @@ fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
 }
 
-fn scratch(name: &str) -> sondc::scratch::Temporal {
-    sondc::scratch::Temporal::nuevo(&format!("sond_pubf_{name}"))
+fn scratch(name: &str) -> sondc::scratch::Scratch {
+    sondc::scratch::Scratch::new(&format!("sond_pubf_{name}"))
 }
 
 fn publish(src: &Path, dst: &Path) -> std::process::Output {
@@ -37,7 +37,7 @@ fn the_installed_path_never_names_a_half_written_file() {
     // the path for its size, over and over, while the publish runs.
     let base = scratch("halfwritten");
     let dst = base.join("sondc");
-    let src = base.join("nuevo");
+    let src = base.join("new");
     // Big enough that writing it is not instantaneous.
     let bytes = vec![b'x'; 48 * 1024 * 1024];
     std::fs::write(&src, &bytes).unwrap();
@@ -80,7 +80,7 @@ fn the_installed_path_never_names_a_half_written_file() {
 #[test]
 fn a_published_binary_is_executable_and_is_the_file_that_was_asked_for() {
     let base = scratch("mode");
-    let src = base.join("nuevo.sh");
+    let src = base.join("new.sh");
     std::fs::write(&src, "#!/bin/sh\nexit 7\n").unwrap();
     let dst = base.join("bin/thing");
 

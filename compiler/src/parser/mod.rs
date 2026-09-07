@@ -1028,11 +1028,11 @@ impl Parser {
                 }
             }
         }
-        // `let y: T where P = value` refina el enlace: `P` es un predicado que el valor tiene que
-        // demostrar, y solo entonces se lleva como hecho sobre `y`. Una cadena de `&&` aporta cada
-        // conjuncion por separado (una comparacion suelta, que es lo que el probador sabe usar).
-        // Se consume AQUI, entre el tipo y el `=`, que es donde se escribe: asi el resto de
-        // parse_let sigue viendo un `=` justo delante del valor.
+        // `let y: T where P = value` refines the binding: `P` is a predicate the value has to
+        // prove, and only then is it carried as a fact about `y`. A chain of `&&` contributes each
+        // conjunct separately (a bare comparison, which is what the prover knows how to use).
+        // It is consumed HERE, between the type and the `=`, which is where it is written: that
+        // way the rest of parse_let still sees an `=` right in front of the value.
         let mut refinement = Vec::new();
         if self.eat(Token::Where) {
             split_conjuncts(self.parse_expr(), &mut refinement);

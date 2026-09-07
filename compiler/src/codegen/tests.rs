@@ -656,61 +656,61 @@ fn the_uefi_entry_zeroes_bss_before_it_stashes_anything_of_its_own() {
     );
 }
 
-/// La seccion vigente en cada linea, y lo que escribe un valor distinto de cero.
+/// The section in force on each line, and what writes a value other than zero.
 ///
-/// El ensamblador lleva UNA seccion abierta y todo lo que sigue cae dentro, asi que un emisor que
-/// no declara la suya hereda la del anterior. `as` rechaza con «attempt to store non-zero value in
-/// section `.bss'» y nombra la linea, no a quien abrio la seccion.
-fn lineas_no_cero_en_bss(asm: &str) -> Vec<String> {
-    let datos = [".quad", ".long", ".short", ".byte", ".asciz", ".ascii", ".double"];
-    let mut seccion = ".text";
-    let mut malas = Vec::new();
-    for linea in asm.lines() {
-        let t = linea.trim();
+/// The assembler keeps ONE section open and everything after it falls inside, so an emitter that
+/// does not declare its own inherits the previous one's. `as` rejects with "attempt to store
+/// non-zero value in section `.bss'" and names the line, not whoever opened the section.
+fn non_zero_lines_in_bss(asm: &str) -> Vec<String> {
+    let data_directives = [".quad", ".long", ".short", ".byte", ".asciz", ".ascii", ".double"];
+    let mut section = ".text";
+    let mut bad = Vec::new();
+    for line in asm.lines() {
+        let t = line.trim();
         if t == ".bss" || t.starts_with(".section .bss") {
-            seccion = ".bss";
+            section = ".bss";
             continue;
         }
         if t == ".data" || t == ".text" || t.starts_with(".section ") {
-            seccion = ".data";
+            section = ".data";
             continue;
         }
-        if seccion != ".bss" {
+        if section != ".bss" {
             continue;
         }
-        // `.zero N` es lo unico que `.bss` admite: reserva sin escribir.
-        let cuerpo = t.split_once(':').map(|(_, r)| r.trim()).unwrap_or(t);
-        let Some(d) = datos.iter().find(|d| cuerpo.starts_with(**d)) else {
+        // `.zero N` is the only thing `.bss` takes: reserve without writing.
+        let body = t.split_once(':').map(|(_, r)| r.trim()).unwrap_or(t);
+        let Some(d) = data_directives.iter().find(|d| body.starts_with(**d)) else {
             continue;
         };
-        let valores = cuerpo[d.len()..].trim();
-        if !valores.split(',').all(|v| v.trim() == "0") {
-            malas.push(t.chars().take(90).collect());
+        let values = body[d.len()..].trim();
+        if !values.split(',').all(|v| v.trim() == "0") {
+            bad.push(t.chars().take(90).collect());
         }
     }
-    malas
+    bad
 }
 
 #[test]
 fn a_uefi_string_declares_its_own_section_instead_of_inheriting_whatever_is_open() {
-    // Las cadenas UEFI se emitian SIN declarar seccion, apoyandose en un `.data` que abria
-    // `efi_main` mucho antes para `sond_systab`. En cuanto el programa tiene un array a ceros a
-    // nivel de modulo, entre medias se abre `.bss` -- y las cadenas caen ahi. `as` lo rechaza:
-    // `lib/any/crypto/kdf/hkdf-sha256_test.snd --uefi` no compilaba por esto, y el error senala la
-    // linea de la cadena, que es la unica que no tiene la culpa.
+    // UEFI strings used to be emitted WITHOUT declaring a section, leaning on a `.data` that
+    // `efi_main` had opened much earlier for `sond_systab`. The moment the program has a
+    // module-level zeroed array, a `.bss` opens in between -- and the strings land there. `as`
+    // refuses it: `lib/any/crypto/kdf/hkdf-sha256_test.snd --uefi` would not compile because of
+    // this, and the error points at the string's line, the one line that is not at fault.
     //
-    // No se comprueba que ponga `.data`: se comprueba lo que el ensamblador comprueba, que en
-    // `.bss` no se escriba nada distinto de cero. Asi el caso cubre tambien al proximo emisor que
-    // herede una seccion sin saberlo.
+    // What is checked is not that it says `.data`: it is what the assembler itself checks, that
+    // nothing other than zero is written in `.bss`. That way the case also covers the next
+    // emitter that inherits a section without knowing it.
     let asm = emit_uefi_with_globals(
-        "let mut px[8]\nfn efi_main() -> i64 { print(\"hola\")\n px[0] }",
+        "let mut px[8]\nfn efi_main() -> i64 { print(\"hi\")\n px[0] }",
     );
-    assert!(asm.contains(".Lstr0"), "el programa tiene una cadena, got:\n{asm}");
-    let malas = lineas_no_cero_en_bss(&asm);
+    assert!(asm.contains(".Lstr0"), "the program has a string, got:\n{asm}");
+    let bad = non_zero_lines_in_bss(&asm);
     assert!(
-        malas.is_empty(),
-        "estas lineas escriben en `.bss`, que solo admite reservas, y `as` rechaza el fichero \
-         entero: {malas:?}\n{asm}"
+        bad.is_empty(),
+        "these lines write into `.bss`, which only takes reservations, and `as` rejects the whole \
+         file: {bad:?}\n{asm}"
     );
 }
 
@@ -944,7 +944,7 @@ fn compile_and_status(src: &str) -> std::process::ExitStatus {
     let _ = COUNTER.fetch_add(1, Ordering::Relaxed);
     // The scratch dir goes on drop, even when an assert below panics: the `remove_file` calls on
     // the happy path left every FAILING run's files behind for good, and this temp dir is RAM.
-    let dir = crate::scratch::Temporal::nuevo("sondc_st");
+    let dir = crate::scratch::Scratch::new("sondc_st");
     let asm_path = dir.join("prog.s");
     let bin_path = dir.join("prog");
     std::fs::write(&asm_path, asm).unwrap();
@@ -1011,7 +1011,7 @@ fn compile_and_run_with_globals(src: &str) -> i32 {
     let _ = COUNTER.fetch_add(1, Ordering::Relaxed);
     // The scratch dir goes on drop, even when an assert below panics: the `remove_file` calls on
     // the happy path left every FAILING run's files behind for good, and this temp dir is RAM.
-    let dir = crate::scratch::Temporal::nuevo("sondc_g");
+    let dir = crate::scratch::Scratch::new("sondc_g");
     let asm_path = dir.join("prog.s");
     let bin_path = dir.join("prog");
     std::fs::write(&asm_path, asm).unwrap();
@@ -1038,7 +1038,7 @@ fn compile_and_run_with_globals_lowered(src: &str) -> i32 {
     let _ = COUNTER.fetch_add(1, Ordering::Relaxed);
     // The scratch dir goes on drop, even when an assert below panics: the `remove_file` calls on
     // the happy path left every FAILING run's files behind for good, and this temp dir is RAM.
-    let dir = crate::scratch::Temporal::nuevo("sondc_g_l");
+    let dir = crate::scratch::Scratch::new("sondc_g_l");
     let asm_path = dir.join("prog.s");
     let bin_path = dir.join("prog");
     std::fs::write(&asm_path, asm).unwrap();
@@ -1799,7 +1799,7 @@ fn shared_abi_code_assembles_into_a_relocatable_object_and_links_statically() {
     let structs = p.take_structs();
     let asm = emit_shared_g(&globals, &structs, &funcs);
 
-    let dir = crate::scratch::Temporal::nuevo("sondc_obj");
+    let dir = crate::scratch::Scratch::new("sondc_obj");
     let asm_path = dir.join("prog.s");
     let obj_path = dir.join("prog.o");
     let c_path = dir.join("prog.c");
@@ -2083,11 +2083,11 @@ fn reserving_a_view_on_uefi_is_refused_rather_than_emitted_as_a_syscall() {
 
 #[test]
 fn a_dotted_call_says_that_a_qualified_name_uses_the_double_colon() {
-    // `m.helper()` es lo que escribe cualquiera que venga de otro lenguaje. Antes llegaba hasta
-    // el codegen y salia como «not yet implemented: x64 codegen for call of Field(Var("m"),
-    // "helper")»: un nodo del AST, que no le dice a nadie que lo que falta son dos puntos.
+    // `m.helper()` is what anyone coming from another language writes. It used to reach codegen
+    // and come out as "not yet implemented: x64 codegen for call of Field(Var(\"m\"), \"helper\")":
+    // an AST node, which tells nobody that what is missing is a pair of colons.
     let err = std::panic::catch_unwind(|| compile_and_run("fn main() -> i64 { m.helper() }"))
-        .expect_err("una llamada con punto tiene que rechazarse");
+        .expect_err("a dotted call has to be rejected");
     let msg = err
         .downcast_ref::<String>()
         .cloned()
@@ -2095,7 +2095,7 @@ fn a_dotted_call_says_that_a_qualified_name_uses_the_double_colon() {
         .unwrap_or_default();
     assert!(
         msg.contains("m::helper"),
-        "el error tiene que ensenar como se escribe, salio: {msg}"
+        "the error has to show how it is written, got: {msg}"
     );
 }
 
@@ -2768,7 +2768,7 @@ fn a_redefined_colliding_global_binds_each_file_to_its_own_value() {
     // own definition -- `a()` the library's 20, `main` the entry's 7 -- so the program's exit
     // code is 20 + 7 = 27. The bug was both definitions being mangled to the same id (a
     // "declared more than once" panic in codegen), because the depth-0 entry has no mangling id.
-    let root = crate::scratch::Temporal::nuevo("sond_kodup");
+    let root = crate::scratch::Scratch::new("sond_kodup");
     std::fs::write(root.join("a.snd"), "let O_DUP = 20\npub fn a() -> i64 { O_DUP }").unwrap();
     let entry = root.join("main.snd");
     std::fs::write(

@@ -25,15 +25,15 @@ pub mod token;
 pub mod typeck;
 pub mod verify;
 
-/// Las banderas de `sondc` que PREGUNTAN por un fichero en vez de compilarlo: contestan por
-/// stdout y no producen ningun artefacto.
+/// The `sondc` flags that ASK about a file instead of compiling it: they answer on stdout and
+/// produce no artefact.
 ///
-/// Vive aqui, en un solo sitio, porque el acierto de cache del driver copia un binario a `output`
-/// -- sin `-o`, el nombre base del fuente en el directorio de quien llama -- y devuelve ANTES de
-/// que se lea la pregunta. Eso se arreglo una vez nombrando `--entry-info` a mano, y `--emit-header`
-/// se quedo fuera: con la cache caliente, `tools/install.sh` publicaba como cabecera la linea
-/// «sondc: wrote native x86-64 binary ...». Una lista es lo unico que cubre tambien a la siguiente.
-pub const CONSULTAS: &[&str] = &["--entry-info", "--emit-header"];
+/// It lives here, in one place, because the driver's cache hit copies a binary to `output` --
+/// without `-o`, the source's base name in the caller's directory -- and returns BEFORE the
+/// question is read. That was fixed once by naming `--entry-info` by hand, and `--emit-header`
+/// was left out: with a warm cache, `tools/install.sh` published the line "sondc: wrote native
+/// x86-64 binary ..." as a header. A list is the only thing that also covers the next one.
+pub const QUERIES: &[&str] = &["--entry-info", "--emit-header"];
 
 use ast::{EnumDef, Function, Global, Signature, StructDef};
 use std::collections::HashSet;

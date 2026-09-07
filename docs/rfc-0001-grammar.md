@@ -490,7 +490,7 @@ Style content is valid CSS. The compiler does not analyze its semantics; that is
 
 **Example** (from RFC-0000 section 8.2):
 ```sond
-query buscar_usuarios_activos: List<Usuario> = """
+query buscar_usuarios_activos: List<User> = """
 SELECT * FROM users
     WHERE active = true
     ORDER BY name
@@ -611,7 +611,7 @@ The `?` operator applies to an expression returning `Result<T, E>`. If the value
 
 **Example** (from RFC-0000 section 9.3):
 ```sond
-let mut tarea = buscar_por_id(id)?    -- if it fails, returns Err(error)
+let mut task = buscar_por_id(id)?    -- if it fails, returns Err(error)
 ```
 
 ### 4.18 `old()` in postconditions
@@ -672,9 +672,9 @@ The full Turing-complete language level, with loops, recursion, effects, contrac
 | 5 | Lambdas | `fn(x) => expr` | `fn(x) => expr` and `fn() => { block }` | 9.3 uses lambdas with blocks; both forms formalized. |
 | 6 | `implies` | Not defined | Binary logical operator | Used in 3.1.1, 9.1; formalizes implication as `implies`. |
 | 7 | `?` propagation | Not defined | Suffix operator | Used in 9.3 (`buscar_por_id(id)?`); formalizes error propagation. |
-| 8 | Method calls | Not defined | `expr.ident(args)` | `.len()`, `.to_string()`, `.map()`, `.contiene()` used in examples. |
+| 8 | Method calls | Not defined | `expr.ident(args)` | `.len()`, `.to_string()`, `.map()`, `.contains()` used in examples. |
 | 9 | `enum` and variants | Not defined | `enum Ident { ... }` and `Tipo::Variante` | `EstadoAccount::Active` used in 9.2; formalizes enumerations. |
-| 10 | Record literals | Not defined | `Tipo { campo: valor }` | Used in 9.3 (`Task { id: ..., title: ..., completed: false }`). |
+| 10 | Record literals | Not defined | `Tipo { field: value }` | Used in 9.3 (`Task { id: ..., title: ..., completed: false }`). |
 | 11 | `phantom type` | Defined as `<phantom_type>` | Top-level declaration | Consolidates existing definition. |
 | 12 | `lemma` | Defined as `<decl_lemma>` | Declaration with `= impl:` | Adds missing implementation block. |
 | 13 | Sub-languages | Not defined | Templates, styles, queries | Formalizes the tower from section 8 of RFC-0000. |
@@ -723,7 +723,7 @@ This table lists each construction from the RFC-0000 examples and the RFC-0001 p
 | 27 | `items.len()` method call | 3.1.1, 5.4 | 4.15 `<expr> "." <ident> "(" ")"` |
 | 28 | `.to_string()` method | 9.3 | 4.15 |
 | 29 | `.map(fn(t) => ...)` method with lambda | 9.3 | 4.15, 4.15 lambda |
-| 30 | `.contiene("@")` method | 7.4 | 4.15 |
+| 30 | `.contains("@")` method | 7.4 | 4.15 |
 | 31 | `buscar_por_id(id)?` error propagation | 9.3 | 4.15, 4.17 |
 | 32 | `fn(x) => expr` expression lambda | 3.1.1, 9.3 | 4.15 |
 | 33 | `fn() => { block }` block lambda | 9.3 | 4.15 |

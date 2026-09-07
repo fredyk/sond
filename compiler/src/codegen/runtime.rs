@@ -452,15 +452,15 @@ impl Codegen {
         }
         let strings = std::mem::take(&mut self.strings);
         if self.uefi {
-            // Declarada, no heredada. Esto se apoyaba en el `.data` que `efi_main` abre para
-            // `sond_systab`, y entre medias se emiten los arrays a ceros del modulo, que abren
-            // `.bss`: las cadenas caian dentro y `as` rechazaba el fichero entero con «attempt to
-            // store non-zero value in section `.bss'», senalando la linea de la cadena y no a
-            // quien dejo abierta la seccion. Una seccion vigente es estado global del fichero:
-            // quien escribe dice en cual escribe.
+            // Declared, not inherited. This used to lean on the `.data` that `efi_main` opens
+            // for `sond_systab`, and in between the module's zeroed arrays are emitted, which
+            // open `.bss`: the strings fell inside it and `as` refused the whole file with
+            // "attempt to store non-zero value in section `.bss'", pointing at the string's line
+            // rather than at whoever left the section open. The section in force is global state
+            // of the file: whoever writes says where it writes.
             self.line(".data");
-            // Los punteros a estas etiquetas se guardan como `.quad`, y una seccion que no
-            // declara alineacion registra AddrAlign 1 y puede empezar donde sea.
+            // Pointers to these labels are stored as `.quad`, and a section that declares no
+            // alignment records AddrAlign 1 and may begin anywhere.
             self.line(".p2align 3");
             for (label, bytes) in &strings {
                 let mut units: Vec<String> = bytes

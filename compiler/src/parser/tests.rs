@@ -234,14 +234,14 @@ fn parses_the_fiscal_function_signature_and_requires() {
 
 #[test]
 fn parses_a_where_refinement_on_a_local_into_its_conjuncts() {
-    // `let y: T where a && b = v` guarda cada comparacion por separado: el probador trabaja con
-    // comparaciones sueltas, no con la conjuncion entera.
+    // `let y: T where a && b = v` keeps each comparison separately: the prover works with one
+    // comparison at a time, not with the whole conjunction.
     let mut p = Parser::new(tokenize("fn f() -> i64 { let y: i64 where 0 <= y && y < 4 = 2\ny }"));
     let funcs = p.parse_program();
     let Stmt::Let { refinement, .. } = &funcs[0].body.stmts[0] else {
-        panic!("el primer statement tiene que ser un let");
+        panic!("the first statement has to be a let");
     };
-    assert_eq!(refinement.len(), 2, "la cadena de && aporta dos conjunciones: {refinement:?}");
+    assert_eq!(refinement.len(), 2, "the && chain contributes two conjuncts: {refinement:?}");
 }
 
 #[test]
@@ -1011,9 +1011,9 @@ fn nothing_outside_ast_touches_a_block_s_statements_directly() {
             }
         }
     }
-    let raiz = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut culpables = Vec::new();
-    recorrer(&raiz, &mut culpables, &empujar, &meter);
+    recorrer(&root, &mut culpables, &empujar, &meter);
     assert!(
         culpables.is_empty(),
         "these push or insert into a Block's `stmts` without its line, which desynchronises \
