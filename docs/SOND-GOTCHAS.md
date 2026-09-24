@@ -26,8 +26,8 @@ yourself rather than assuming.
   exact and must not carry money; keep money in cents, in `i64`.
 - **String values exist**: `let s: string = "abc"` is a value and `s.utf8` is the address of its
   bytes. A bare `"..."` literal is already a pointer to NUL-terminated bytes, so it goes straight
-  into anything wanting an address (`open`, `execve`, `peek8`). Build one at runtime with
-  `poke8(buf+i, code)` and a trailing NUL. `lib/any/webdav/server.snd` is the worked example.
+  into anything wanting an address (`open`, `execve`). Build one at runtime in a `u8[]` view
+  (`let b: u8[n]`, `b[i] = code`) with a trailing NUL.
 - **`pub` exists**: `pub fn` marks what a module exports (and what `--shared` puts in the `.so`).
   Plain `fn` is fine too; `include` gives one flat namespace either way.
 - `struct` with `impl` and methods, built-in `Slice` (`{ptr, len}`), typed views `T[]`, and
@@ -37,7 +37,11 @@ yourself rather than assuming.
   and returns 2 for 1. The caller's value is untouched, since everything is passed by value.
 - `let a[N]` stack array; `a[i]` reads/writes word i; `a` (no index) is the base ADDRESS. It takes
   `let mut` without complaint, and does not need it: the name is already an address.
-  For bytes: `poke8(a+i, v)` / `peek8(a+i)`. For dwords: `peek32`. For words: `peek64/poke64`.
+  For bytes, a `u8[]` view (`let b: u8[n]`, `b[i] = v`); for dwords, `u32[]`; for records, a `struct`.
+- **⛔ `peek*`/`poke*` only for real low-level pointer access** (device memory, a syscall
+  out-param, an ABI layout, FFI). Never for your own buffers, strings or records: the bounds
+  prover cannot see through them, so the error they allow is silent memory corruption.
+  Use `Slice`, typed views `T[]` and `struct`s, which the compiler proves index by index.
 - Module-level globals: `let NAME = <const>` (constant integer). E.g. `let SYS_read = 0`.
 - Control: `if/else` (also an expression), `for cond { }` (while), `for i in 0..n`, the three-part
   `for`, `for { break/continue }`, `return`.

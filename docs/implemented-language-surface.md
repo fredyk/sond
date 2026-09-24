@@ -169,6 +169,13 @@ else (crypto, strings, drivers) is a `.snd` library you `include`.
 - `print_int(n)`: print the integer `n` in decimal (no newline).
 - `peek64/32/16/8(ptr) -> i64`: load a 64/32/16/8-bit value from `ptr` (zero-extended).
 - `poke64/32/16/8(ptr, val)`: store the low 64/32/16/8 bits of `val` at `ptr`.
+  **⛔ Raw memory is the LAST resort, never the default.** `peek*`/`poke*` are for genuine
+  low-level access to an address the program does not own as data: memory-mapped device
+  registers, a syscall's out-parameter, an ABI/kernel structure layout, an FFI buffer.
+  Everything else (buffers, strings being built, records, tables) goes through `Slice`,
+  typed views `T[]` and `struct`s, whose every index the compiler PROVES. A peek/poke is
+  invisible to the bounds prover: a mistake there is silent memory corruption, the exact
+  class of bug Sond exists to make impossible. Bytes: `let b: u8[n]`, `b[i] = v`.
 - `let a[N]`: fixed-size array of N words on the stack (no allocator, every target);
   index with `a[i]`; `a.len` is the size N (`for i < a.len`). A constant index outside
   `[0, N)` is a compile error. Tables: `K[64]`.
@@ -197,7 +204,7 @@ else (crypto, strings, drivers) is a `.snd` library you `include`.
 - `let a[N] = [e0, e1, ...]` INITIALIZES the words in order. At MODULE level it is the shared
   crypto table (`K[64]`, S-boxes) in `.data`, readable everywhere.
 - `a[i]` reads / `a[i] = v` writes the 8-byte WORD at `a + i*8` (sugar over peek64/poke64);
-  for BYTE buffers keep peek8/poke8. `a` is any address.
+  for BYTE buffers use a `u8[]` view, not peek8/poke8. `a` is any address.
 - `write(fd, "literal") -> i64`: raw `write` syscall (hosted/freestanding only).
 
 ### Platform builtins: port I/O, UEFI, kernel interrupts
