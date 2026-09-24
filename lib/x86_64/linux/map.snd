@@ -52,3 +52,18 @@ pub fn map_get(m: i64, key: i64, default: i64) -> i64 {
     let idx = map_index(m, key)
     if idx == 0 - 1 { default } else { vec_get(peek64(m + 8), idx) }
 }
+
+// How many entries the map holds. The public entry point for iteration.
+pub fn map_len(m: i64) -> i64 {
+    vec_len(peek64(m))
+}
+
+// The key at position `i` (insertion order). Caller ensures `i < map_len(m)`.
+pub fn map_key_at(m: i64, i: i64) -> i64 {
+    vec_get(peek64(m), i)
+}
+
+// The value at position `i` (same order as map_key_at). Caller ensures `i < map_len(m)`.
+pub fn map_val_at(m: i64, i: i64) -> i64 {
+    vec_get(peek64(m + 8), i)
+}

@@ -1,0 +1,971 @@
+// SPDX-License-Identifier: Apache-2.0
+// Tests for the HTTP API server library.
+//   sond test lib/x86_64/linux/http-api_test.snd
+
+include "x86_64/linux/http-api.snd"
+include "x86_64/linux/http-server.snd"
+include "x86_64/linux/testing.snd"
+include "x86_64/linux/bytes.snd"
+include "x86_64/linux/net.snd"
+include "x86_64/linux/io.snd"
+include "x86_64/linux/poll.snd"
+include "x86_64/linux/map.snd"
+
+// prctl(2): the server child asks to be killed if the test process goes away.
+let PRCTL_SYS = 157
+let PR_SET_PDEATHSIG = 1
+let SIGKILL = 9
+
+// ── percent_decode ────────────────────────────────────────────────
+
+test "percent_decode leaves plain text untouched" {
+    let s = bytes_from_str("hello")
+    let out = percent_decode(s)
+    assert_eq(bytes_eq(out, bytes_from_str("hello")), 1)
+}
+
+test "percent_decode decodes plus as space" {
+    let s = bytes_from_str("hello+world")
+    let out = percent_decode(s)
+    assert_eq(bytes_eq(out, bytes_from_str("hello world")), 1)
+}
+
+test "percent_decode decodes hex sequences" {
+    let s = bytes_from_str("a%21b%2Fc")
+    let out = percent_decode(s)
+    assert_eq(bytes_eq(out, bytes_from_str("a!b/c")), 1)
+}
+
+test "percent_decode handles uppercase hex" {
+    let s = bytes_from_str("%41%42%43")
+    let out = percent_decode(s)
+    assert_eq(bytes_eq(out, bytes_from_str("ABC")), 1)
+}
+
+test "percent_decode leaves bare percent at end" {
+    let s = bytes_from_str("abc%")
+    let out = percent_decode(s)
+    assert_eq(bytes_eq(out, bytes_from_str("abc%")), 1)
+}
+
+test "percent_decode leaves invalid hex intact" {
+    let s = bytes_from_str("a%zz")
+    let out = percent_decode(s)
+    assert_eq(bytes_eq(out, bytes_from_str("a%zz")), 1)
+}
+
+// ── http_query_parse / http_query_get ─────────────────────────────
+
+test "http_query_parse splits key=value pairs" {
+    let qs = bytes_from_str("foo=bar&baz=qux")
+    let q = http_query_parse(qs)
+    let foo = http_query_get(q, "foo")
+    assert_eq(bytes_eq(foo, bytes_from_str("bar")), 1)
+    let baz = http_query_get(q, "baz")
+    assert_eq(bytes_eq(baz, bytes_from_str("qux")), 1)
+}
+
+test "http_query_get returns empty buffer for missing key" {
+    let qs = bytes_from_str("foo=bar")
+    let q = http_query_parse(qs)
+    let miss = http_query_get(q, "nope")
+    assert_eq(bytes_len(miss), 0)
+}
+
+test "http_query_parse decodes percent-encoded values" {
+    let qs = bytes_from_str("name=hello+world")
+    let q = http_query_parse(qs)
+    let v = http_query_get(q, "name")
+    assert_eq(bytes_eq(v, bytes_from_str("hello world")), 1)
+}
+
+test "http_query_parse handles empty value" {
+    let qs = bytes_from_str("key=")
+    let q = http_query_parse(qs)
+    let v = http_query_get(q, "key")
+    assert_eq(bytes_len(v), 0)
+}
+
+test "http_query_parse handles key without equals" {
+    let qs = bytes_from_str("flag")
+    let q = http_query_parse(qs)
+    let v = http_query_get(q, "flag")
+    assert_eq(bytes_len(v), 0)
+}
+
+// ── http_header_get_ci (case-insensitive) ─────────────────────────
+
+test "http_header_get_ci finds header ignoring case" {
+    let req = bytes_from_str("GET / HTTP/1.1\r\nContent-Type: application/json\r\nHost: example.com\r\n\r\n")
+    let h = http_headers(req)
+    let ct = http_header_get_ci(h, "content-type")
+    assert_eq(bytes_eq(ct, bytes_from_str("application/json")), 1)
+}
+
+test "http_header_get_ci finds exact case too" {
+    let req = bytes_from_str("GET / HTTP/1.1\r\nContent-Type: text/html\r\n\r\n")
+    let h = http_headers(req)
+    let ct = http_header_get_ci(h, "Content-Type")
+    assert_eq(bytes_eq(ct, bytes_from_str("text/html")), 1)
+}
+
+test "http_header_get_ci returns empty for missing header" {
+    let req = bytes_from_str("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+    let h = http_headers(req)
+    let miss = http_header_get_ci(h, "X-Custom")
+    assert_eq(bytes_len(miss), 0)
+}
+
+// ── http_cookie_get ───────────────────────────────────────────────
+
+test "http_cookie_get extracts named cookie" {
+    let req = bytes_from_str("GET / HTTP/1.1\r\nCookie: session=abc123; theme=dark\r\n\r\n")
+    let h = http_headers(req)
+    let v = http_cookie_get(h, "session")
+    assert_eq(bytes_eq(v, bytes_from_str("abc123")), 1)
+}
+
+test "http_cookie_get extracts second cookie" {
+    let req = bytes_from_str("GET / HTTP/1.1\r\nCookie: session=abc123; theme=dark\r\n\r\n")
+    let h = http_headers(req)
+    let v = http_cookie_get(h, "theme")
+    assert_eq(bytes_eq(v, bytes_from_str("dark")), 1)
+}
+
+test "http_cookie_get returns empty for missing cookie" {
+    let req = bytes_from_str("GET / HTTP/1.1\r\nCookie: session=abc123\r\n\r\n")
+    let h = http_headers(req)
+    let v = http_cookie_get(h, "missing")
+    assert_eq(bytes_len(v), 0)
+}
+
+test "http_cookie_get returns empty with no Cookie header" {
+    let req = bytes_from_str("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+    let h = http_headers(req)
+    let v = http_cookie_get(h, "anything")
+    assert_eq(bytes_len(v), 0)
+}
+
+// ── http_request_body ─────────────────────────────────────────────
+
+test "http_request_body reads body by Content-Length" {
+    let req = bytes_from_str("POST /submit HTTP/1.1\r\nContent-Length: 13\r\n\r\nhello, world!")
+    let body = http_request_body(req)
+    assert_eq(bytes_eq(body, bytes_from_str("hello, world!")), 1)
+}
+
+test "http_request_body returns empty for GET" {
+    let req = bytes_from_str("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+    let body = http_request_body(req)
+    assert_eq(bytes_len(body), 0)
+}
+
+test "http_request_body handles empty body with Content-Length 0" {
+    let req = bytes_from_str("POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+    let body = http_request_body(req)
+    assert_eq(bytes_len(body), 0)
+}
+
+// ── http_response_json ────────────────────────────────────────────
+
+test "http_response_json builds a 200 with JSON body" {
+    let resp = http_response_json("200 OK", bytes_from_str("{\"ok\":true}"))
+    let want_prefix = bytes_from_str("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}")
+    assert_eq(bytes_eq(resp, want_prefix), 1)
+}
+
+test "http_response_status builds bodyless response" {
+    let resp = http_response_status("404 Not Found")
+    let want = bytes_from_str("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+    assert_eq(bytes_eq(resp, want), 1)
+}
+
+test "http_response_redirect builds a 303 with Location" {
+    let resp = http_response_redirect("/new-location")
+    let want = bytes_from_str("HTTP/1.1 303 See Other\r\nLocation: /new-location\r\nContent-Length: 0\r\n\r\n")
+    assert_eq(bytes_eq(resp, want), 1)
+}
+
+// ── http_set_cookie ───────────────────────────────────────────────
+
+test "http_set_cookie builds Set-Cookie header with defaults" {
+    let hdr = http_set_cookie("session", "abc123", 3600)
+    let want = bytes_from_str("Set-Cookie: session=abc123; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600")
+    assert_eq(bytes_eq(hdr, want), 1)
+}
+
+test "http_set_cookie includes Secure when flag is 1" {
+    let hdr = http_set_cookie("tok", "x", 60)
+    let hdr2 = http_set_cookie_secure("tok", "x", 60)
+    let want = bytes_from_str("Set-Cookie: tok=x; Path=/; HttpOnly; SameSite=Lax; Max-Age=60; Secure")
+    assert_eq(bytes_eq(hdr2, want), 1)
+}
+
+// ── http_route_match ──────────────────────────────────────────────
+
+test "http_route_match matches exact path" {
+    let pat = bytes_from_str("/api/health")
+    let path = bytes_from_str("/api/health")
+    assert_eq(http_route_match(pat, path), 1)
+}
+
+test "http_route_match fails mismatch" {
+    let pat = bytes_from_str("/api/health")
+    let path = bytes_from_str("/api/users")
+    assert_eq(http_route_match(pat, path), 0)
+}
+
+test "http_route_match extracts {id} segment" {
+    let pat = bytes_from_str("/api/users/{id}")
+    let path = bytes_from_str("/api/users/42")
+    assert_eq(http_route_match(pat, path), 1)
+    let id = http_route_param(pat, path, "id")
+    assert_eq(bytes_eq(id, bytes_from_str("42")), 1)
+}
+
+test "http_route_match extracts {id} from nested path" {
+    let pat = bytes_from_str("/api/threads/{id}/messages")
+    let path = bytes_from_str("/api/threads/7/messages")
+    assert_eq(http_route_match(pat, path), 1)
+    let id = http_route_param(pat, path, "id")
+    assert_eq(bytes_eq(id, bytes_from_str("7")), 1)
+}
+
+test "http_route_match fails on segment count mismatch" {
+    let pat = bytes_from_str("/api/{a}/{b}")
+    let path = bytes_from_str("/api/1")
+    assert_eq(http_route_match(pat, path), 0)
+}
+
+test "http_route_match fails when wildcard doesn't match" {
+    let pat = bytes_from_str("/api/{id}")
+    let path = bytes_from_str("/api/")
+    assert_eq(http_route_match(pat, path), 0)
+}
+
+// ── http_method_allowed (405 vs 404) ──────────────────────────────
+
+test "http_method_allowed returns 1 for registered method" {
+    let allowed = bytes_from_str("GET,POST")
+    assert_eq(http_method_allowed(allowed, "GET"), 1)
+}
+
+test "http_method_allowed returns 0 for unregistered method" {
+    let allowed = bytes_from_str("GET,POST")
+    assert_eq(http_method_allowed(allowed, "DELETE"), 0)
+}
+
+// ── Integration: real TCP client/server ───────────────────────────
+
+test "full request: GET returns JSON body" {
+    let port = 55710
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        // CLIENT
+        let cfd = sock(AF_INET, SOCK_STREAM, 0)
+        let ca[2]
+        sockaddr_in_build(ca, ip, port)
+        if connect_sock(cfd, ca, 16) < 0 { syscall(SYS_exit, 2) }
+        let rq = bytes_from_str("GET /api/data HTTP/1.1\r\nHost: test\r\n\r\n")
+        write_buf(cfd, bytes_data(rq), bytes_len(rq))
+        let rbuf[512]
+        let rn = read_buf(cfd, rbuf, 512)
+        close_fd(cfd)
+        let resp = bytes_from_raw(rbuf, rn)
+        // Check response starts with 200 and contains JSON
+        let ok = bytes_from_str("HTTP/1.1 200 OK")
+        let mut ok = 1
+        let mut i = 0
+        for i < 15 {
+            if bytes_get(resp, i) != bytes_get(ok, i) { ok = 0 }
+            i = i + 1
+        }
+        if ok == 1 { syscall(SYS_exit, 0) } else { syscall(SYS_exit, 1) }
+    }
+    // SERVER
+    let afd = accept_sock(sfd, 0, 0)
+    let rb[256]
+    read_buf(afd, rb, 256)
+    let body = bytes_from_str("{\"status\":\"ok\"}")
+    let resp = http_response_json("200 OK", body)
+    write_buf(afd, bytes_data(resp), bytes_len(resp))
+    http_finish(afd)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    assert_eq((st[0] >> 8) & 255, 0)
+}
+
+test "full request: 404 for unknown route" {
+    let port = 55711
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let cfd = sock(AF_INET, SOCK_STREAM, 0)
+        let ca[2]
+        sockaddr_in_build(ca, ip, port)
+        if connect_sock(cfd, ca, 16) < 0 { syscall(SYS_exit, 2) }
+        let rq = bytes_from_str("GET /nope HTTP/1.1\r\nHost: test\r\n\r\n")
+        write_buf(cfd, bytes_data(rq), bytes_len(rq))
+        let rbuf[256]
+        let rn = read_buf(cfd, rbuf, 256)
+        close_fd(cfd)
+        let resp = bytes_from_raw(rbuf, rn)
+        let ok = bytes_from_str("HTTP/1.1 404 Not Found")
+        let mut ok = 1
+        let mut i = 0
+        for i < 19 {
+            if bytes_get(resp, i) != bytes_get(ok, i) { ok = 0 }
+            i = i + 1
+        }
+        if ok == 1 { syscall(SYS_exit, 0) } else { syscall(SYS_exit, 1) }
+    }
+    let afd = accept_sock(sfd, 0, 0)
+    let rb[256]
+    read_buf(afd, rb, 256)
+    let resp = http_response_status("404 Not Found")
+    write_buf(afd, bytes_data(resp), bytes_len(resp))
+    http_finish(afd)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    assert_eq((st[0] >> 8) & 255, 0)
+}
+
+test "full request: 405 for wrong method" {
+    let port = 55712
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let cfd = sock(AF_INET, SOCK_STREAM, 0)
+        let ca[2]
+        sockaddr_in_build(ca, ip, port)
+        if connect_sock(cfd, ca, 16) < 0 { syscall(SYS_exit, 2) }
+        let rq = bytes_from_str("DELETE /api/data HTTP/1.1\r\nHost: test\r\n\r\n")
+        write_buf(cfd, bytes_data(rq), bytes_len(rq))
+        let rbuf[256]
+        let rn = read_buf(cfd, rbuf, 256)
+        close_fd(cfd)
+        let resp = bytes_from_raw(rbuf, rn)
+        let ok = bytes_from_str("HTTP/1.1 405 Method Not Allowed")
+        let mut ok = 1
+        let mut i = 0
+        for i < 32 {
+            if bytes_get(resp, i) != bytes_get(ok, i) { ok = 0 }
+            i = i + 1
+        }
+        if ok == 1 { syscall(SYS_exit, 0) } else { syscall(SYS_exit, 1) }
+    }
+    let afd = accept_sock(sfd, 0, 0)
+    let rb[256]
+    read_buf(afd, rb, 256)
+    let resp = http_response_status("405 Method Not Allowed")
+    write_buf(afd, bytes_data(resp), bytes_len(resp))
+    http_finish(afd)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    assert_eq((st[0] >> 8) & 255, 0)
+}
+
+test "full request: POST with body and Content-Length" {
+    let port = 55713
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let cfd = sock(AF_INET, SOCK_STREAM, 0)
+        let ca[2]
+        sockaddr_in_build(ca, ip, port)
+        if connect_sock(cfd, ca, 16) < 0 { syscall(SYS_exit, 2) }
+        let rq = bytes_from_str("POST /api/data HTTP/1.1\r\nContent-Length: 11\r\n\r\nhello world")
+        write_buf(cfd, bytes_data(rq), bytes_len(rq))
+        let rbuf[512]
+        let rn = read_buf(cfd, rbuf, 512)
+        close_fd(cfd)
+        let resp = bytes_from_raw(rbuf, rn)
+        let ok = bytes_from_str("HTTP/1.1 200 OK")
+        let mut ok = 1
+        let mut i = 0
+        for i < 15 {
+            if bytes_get(resp, i) != bytes_get(ok, i) { ok = 0 }
+            i = i + 1
+        }
+        if ok == 1 { syscall(SYS_exit, 0) } else { syscall(SYS_exit, 1) }
+    }
+    let afd = accept_sock(sfd, 0, 0)
+    let rb[256]
+    let n = read_buf(afd, rb, 256)
+    let req = bytes_from_raw(rb, n)
+    let body = http_request_body(req)
+    let resp = http_response_json("200 OK", body)
+    write_buf(afd, bytes_data(resp), bytes_len(resp))
+    http_finish(afd)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    assert_eq((st[0] >> 8) & 255, 0)
+}
+
+test "full request: 413 when body exceeds limit" {
+    let port = 55714
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let cfd = sock(AF_INET, SOCK_STREAM, 0)
+        let ca[2]
+        sockaddr_in_build(ca, ip, port)
+        if connect_sock(cfd, ca, 16) < 0 { syscall(SYS_exit, 2) }
+        // Content-Length says 20 bytes but limit is 10
+        let rq = bytes_from_str("POST /api/data HTTP/1.1\r\nContent-Length: 20\r\n\r\n12345678901234567890")
+        write_buf(cfd, bytes_data(rq), bytes_len(rq))
+        let rbuf[256]
+        let rn = read_buf(cfd, rbuf, 256)
+        close_fd(cfd)
+        let resp = bytes_from_raw(rbuf, rn)
+        let ok = bytes_from_str("HTTP/1.1 413")
+        let mut ok = 1
+        let mut i = 0
+        for i < 10 {
+            if bytes_get(resp, i) != bytes_get(ok, i) { ok = 0 }
+            i = i + 1
+        }
+        if ok == 1 { syscall(SYS_exit, 0) } else { syscall(SYS_exit, 1) }
+    }
+    let afd = accept_sock(sfd, 0, 0)
+    let rb[256]
+    read_buf(afd, rb, 256)
+    let resp = http_response_status("413 Payload Too Large")
+    write_buf(afd, bytes_data(resp), bytes_len(resp))
+    http_finish(afd)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    assert_eq((st[0] >> 8) & 255, 0)
+}
+
+test "full request: 400 for garbage input" {
+    let port = 55715
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let cfd = sock(AF_INET, SOCK_STREAM, 0)
+        let ca[2]
+        sockaddr_in_build(ca, ip, port)
+        if connect_sock(cfd, ca, 16) < 0 { syscall(SYS_exit, 2) }
+        let rq = bytes_from_str("GARBAGE DATA NO HTTP\r\n\r\n")
+        write_buf(cfd, bytes_data(rq), bytes_len(rq))
+        let rbuf[256]
+        let rn = read_buf(cfd, rbuf, 256)
+        close_fd(cfd)
+        let resp = bytes_from_raw(rbuf, rn)
+        let ok = bytes_from_str("HTTP/1.1 400")
+        let mut ok = 1
+        let mut i = 0
+        for i < 10 {
+            if bytes_get(resp, i) != bytes_get(ok, i) { ok = 0 }
+            i = i + 1
+        }
+        if ok == 1 { syscall(SYS_exit, 0) } else { syscall(SYS_exit, 1) }
+    }
+    let afd = accept_sock(sfd, 0, 0)
+    let rb[256]
+    read_buf(afd, rb, 256)
+    let resp = http_response_status("400 Bad Request")
+    write_buf(afd, bytes_data(resp), bytes_len(resp))
+    http_finish(afd)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    assert_eq((st[0] >> 8) & 255, 0)
+}
+
+test "full request: Set-Cookie in response" {
+    let port = 55716
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let cfd = sock(AF_INET, SOCK_STREAM, 0)
+        let ca[2]
+        sockaddr_in_build(ca, ip, port)
+        if connect_sock(cfd, ca, 16) < 0 { syscall(SYS_exit, 2) }
+        let rq = bytes_from_str("GET /login HTTP/1.1\r\nHost: test\r\n\r\n")
+        write_buf(cfd, bytes_data(rq), bytes_len(rq))
+        let rbuf[512]
+        let rn = read_buf(cfd, rbuf, 512)
+        close_fd(cfd)
+        let resp = bytes_from_raw(rbuf, rn)
+        // Look for Set-Cookie header
+        let cookie_hdr = bytes_from_str("Set-Cookie: sid=abc123; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600")
+        let mut found = 0
+        let mut i = 0
+        let rl = bytes_len(resp)
+        let cl = bytes_len(cookie_hdr)
+        for i <= rl - cl {
+            let mut ok = 1
+            let mut j = 0
+            for j < cl {
+                if bytes_get(resp, i + j) != bytes_get(cookie_hdr, j) { ok = 0 }
+                j = j + 1
+            }
+            if ok == 1 { found = 1 }
+            i = i + 1
+        }
+        if found == 1 { syscall(SYS_exit, 0) } else { syscall(SYS_exit, 1) }
+    }
+    let afd = accept_sock(sfd, 0, 0)
+    let rb[256]
+    read_buf(afd, rb, 256)
+    let body = bytes_from_str("{\"ok\":true}")
+    let hdr = http_set_cookie("sid", "abc123", 3600)
+    let resp = http_response_with_headers("200 OK", body, hdr)
+    write_buf(afd, bytes_data(resp), bytes_len(resp))
+    http_finish(afd)
+    close_fd(sfd)
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    assert_eq((st[0] >> 8) & 255, 0)
+}
+
+test "slow client does not block another client" {
+    let port = 55717
+    let ip = 0x7f000001
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        // Fast client: connect, send full request, get response
+        let cfd = sock(AF_INET, SOCK_STREAM, 0)
+        let ca[2]
+        sockaddr_in_build(ca, ip, port)
+        if connect_sock(cfd, ca, 16) < 0 { syscall(SYS_exit, 2) }
+        let rq = bytes_from_str("GET /api/data HTTP/1.1\r\nHost: test\r\n\r\n")
+        write_buf(cfd, bytes_data(rq), bytes_len(rq))
+        let rbuf[256]
+        let rn = read_buf(cfd, rbuf, 256)
+        close_fd(cfd)
+        let resp = bytes_from_raw(rbuf, rn)
+        let ok = bytes_from_str("HTTP/1.1 200 OK")
+        let mut ok = 1
+        let mut i = 0
+        for i < 15 {
+            if bytes_get(resp, i) != bytes_get(ok, i) { ok = 0 }
+            i = i + 1
+        }
+        if ok == 1 { syscall(SYS_exit, 0) } else { syscall(SYS_exit, 1) }
+    }
+
+    // Slow client: connect, send partial headers, wait
+    let slow_fd = sock(AF_INET, SOCK_STREAM, 0)
+    let ca[2]
+    sockaddr_in_build(ca, ip, port)
+    if connect_sock(slow_fd, ca, 16) < 0 {
+        // If slow client can't connect, still pass the test
+        close_fd(sfd)
+        return
+    }
+    let partial = bytes_from_str("GET /slow HTTP/1.1\r\n")
+    write_buf(slow_fd, bytes_data(partial), bytes_len(partial))
+
+    // Server accepts both and handles the fast one
+    let a1 = accept_sock(sfd, 0, 0)
+    let rb1[256]
+    let n1 = read_buf(a1, rb1, 256)
+    // Check if this is a complete request (ends with \r\n\r\n)
+    let req1 = bytes_from_raw(rb1, n1)
+    let has_end = http_request_complete(req1)
+    if has_end == 1 {
+        let resp = http_response_json("200 OK", bytes_from_str("{\"ok\":true}"))
+        write_buf(a1, bytes_data(resp), bytes_len(resp))
+        http_finish(a1)
+    } else {
+        // Incomplete, close it
+        close_fd(a1)
+    }
+
+    // Accept the slow client (with timeout so we don't hang)
+    set_rcvtimeo(sfd, 2)
+    let a2 = accept_sock(sfd, 0, 0)
+    if a2 >= 0 {
+        // Partial request, send 400
+        let resp = http_response_status("400 Bad Request")
+        write_buf(a2, bytes_data(resp), bytes_len(resp))
+        close_fd(a2)
+    }
+
+    close_fd(slow_fd)
+    close_fd(sfd)
+
+    // Wait for fast client child
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    // The fast client should have succeeded regardless of slow client
+    assert_eq((st[0] >> 8) & 255, 0)
+}
+
+test "http_request_complete detects full request" {
+    let complete = bytes_from_str("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+    assert_eq(http_request_complete(complete), 1)
+    let partial = bytes_from_str("GET / HTTP/1.1\r\nHost: x\r\n")
+    assert_eq(http_request_complete(partial), 0)
+}
+
+test "http_has_header_end finds the terminator even with a body after it" {
+    // A request whose body arrived in the same read does NOT end with CRLFCRLF, so the
+    // end-anchored http_request_complete is false while the headers are in fact complete.
+    let with_body = bytes_from_str("POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
+    assert_eq(http_has_header_end(with_body), 1)
+    assert_eq(http_request_complete(with_body), 0)
+}
+
+test "http_has_header_end is 0 while the headers are still incomplete" {
+    let fragment = bytes_from_str("POST / HTTP/1.1\r\nContent-Len")
+    assert_eq(http_has_header_end(fragment), 0)
+}
+
+test "http_read_body reads body from pipe by Content-Length" {
+    let fds[1]
+    syscall(SYS_pipe, fds)
+    let rfd = peek32(fds)
+    let wfd = peek32(fds + 4)
+    // Simulate a request with Content-Length: 5
+    let req = bytes_from_str("POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
+    let h = http_headers(req)
+    let payload = bytes_from_str("hello")
+    write_buf(wfd, bytes_data(payload), bytes_len(payload))
+    close_fd(wfd)
+    let body = http_read_body(rfd, h, 1024)
+    close_fd(rfd)
+    assert_eq(bytes_eq(body, bytes_from_str("hello")), 1)
+}
+
+test "http_read_body returns empty when Content-Length is 0" {
+    let fds[1]
+    syscall(SYS_pipe, fds)
+    let rfd = peek32(fds)
+    let wfd = peek32(fds + 4)
+    let req = bytes_from_str("POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+    let h = http_headers(req)
+    close_fd(wfd)
+    let body = http_read_body(rfd, h, 1024)
+    close_fd(rfd)
+    assert_eq(bytes_len(body), 0)
+}
+
+test "http_read_body returns empty when no Content-Length header" {
+    let fds[1]
+    syscall(SYS_pipe, fds)
+    let rfd = peek32(fds)
+    let wfd = peek32(fds + 4)
+    let req = bytes_from_str("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+    let h = http_headers(req)
+    close_fd(wfd)
+    let body = http_read_body(rfd, h, 1024)
+    close_fd(rfd)
+    assert_eq(bytes_len(body), 0)
+}
+
+test "http_route_match matches root path" {
+    let pat = bytes_from_str("/")
+    let path = bytes_from_str("/")
+    assert_eq(http_route_match(pat, path), 1)
+}
+
+test "http_route_match fails trailing slash" {
+    let pat = bytes_from_str("/api")
+    let path = bytes_from_str("/api/")
+    assert_eq(http_route_match(pat, path), 0)
+}
+
+test "http_route_param extracts param from /api/items/{id}/detail" {
+    let pat = bytes_from_str("/api/items/{id}/detail")
+    let path = bytes_from_str("/api/items/99/detail")
+    assert_eq(http_route_match(pat, path), 1)
+    let id = http_route_param(pat, path, "id")
+    assert_eq(bytes_eq(id, bytes_from_str("99")), 1)
+}
+
+test "http_route_param returns empty for non-matching param name" {
+    let pat = bytes_from_str("/api/{id}")
+    let path = bytes_from_str("/api/5")
+    let v = http_route_param(pat, path, "other")
+    assert_eq(bytes_len(v), 0)
+}
+
+// ── Server: routing, errors and orderly shutdown over a real socket ──
+
+// Bind+listen+fork a server on `port`. The child runs http_serve and exits; the parent closes
+// its copy of the listening socket and returns the child's pid. The child asks the kernel for
+// a SIGKILL if this test process dies (a failing assert exits at once), so a red run cannot
+// leave a server holding the port for the next one.
+fn srv_start(port: i64, r: HttpRouter, max_body: i64, timeout_ms: i64, grace_ms: i64) -> i64 {
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 128)
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        syscall(PRCTL_SYS, PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0)
+        http_serve(sfd, r, max_body, timeout_ms, grace_ms)
+        syscall(SYS_exit, 0)
+        return 0
+    }
+    close_fd(sfd)
+    pid
+}
+
+fn srv_connect(port: i64) -> i64 {
+    let cfd = sock(AF_INET, SOCK_STREAM, 0)
+    let ca[2]
+    sockaddr_in_build(ca, 0x7f000001, port)
+    set_rcvtimeo(cfd, 5)
+    connect_sock(cfd, ca, 16)
+    cfd
+}
+
+fn srv_read_all(fd: i64, cap: i64) -> i64 {
+    let buf = bytes_new()
+    let tmp[4096]
+    for bytes_len(buf) < cap {
+        let n = read_buf(fd, tmp, 4096)
+        if n <= 0 { break }
+        bytes_append(buf, bytes_from_raw(tmp, n))
+    }
+    buf
+}
+
+fn srv_roundtrip(port: i64, req: i64) -> i64 {
+    let cfd = srv_connect(port)
+    write_buf(cfd, bytes_data(req), bytes_len(req))
+    let resp = srv_read_all(cfd, 65536)
+    close_fd(cfd)
+    resp
+}
+
+fn srv_starts_with(resp: i64, prefix: string) -> i64 {
+    let p = bytes_from_str(prefix)
+    let n = bytes_len(p)
+    if bytes_len(resp) < n { return 0 }
+    let mut i = 0
+    for i < n {
+        if bytes_get(resp, i) != bytes_get(p, i) { return 0 }
+        i = i + 1
+    }
+    1
+}
+
+fn srv_exit_code(pid: i64) -> i64 {
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+    (st[0] >> 8) & 255
+}
+
+fn srv_sigterm(pid: i64) {
+    syscall(SYS_kill, pid, 15)
+}
+
+test "server routes a GET and answers 404 and 405 differently" {
+    let port = 55718
+    let r = http_router_new()
+    http_route_add(r, "GET", "/api/data", http_response_json("200 OK", bytes_from_str("{\"ok\":true}")), 0)
+    let pid = srv_start(port, r, 1024, 2000, 2000)
+
+    let ok = srv_roundtrip(port, bytes_from_str("GET /api/data HTTP/1.1\r\nHost: t\r\n\r\n"))
+    assert_eq(srv_starts_with(ok, "HTTP/1.1 200 OK"), 1)
+
+    let missing = srv_roundtrip(port, bytes_from_str("GET /nope HTTP/1.1\r\nHost: t\r\n\r\n"))
+    assert_eq(srv_starts_with(missing, "HTTP/1.1 404 Not Found"), 1)
+
+    let wrong = srv_roundtrip(port, bytes_from_str("DELETE /api/data HTTP/1.1\r\nHost: t\r\n\r\n"))
+    assert_eq(srv_starts_with(wrong, "HTTP/1.1 405 Method Not Allowed"), 1)
+
+    srv_sigterm(pid)
+    assert_eq(srv_exit_code(pid), 0)
+}
+
+test "server rejects garbage and a stalled body with 400" {
+    let port = 55718
+    let r = http_router_new()
+    http_route_add(r, "POST", "/api/data", http_response_json("200 OK", bytes_from_str("{}")), 0)
+    let pid = srv_start(port, r, 1024, 400, 2000)
+
+    let garbage = srv_roundtrip(port, bytes_from_str("GARBAGE DATA NO HTTP\r\n\r\n"))
+    assert_eq(srv_starts_with(garbage, "HTTP/1.1 400 Bad Request"), 1)
+
+    // Headers promise 5 body bytes; the client sends none. The deadline must turn that into a
+    // 400, not a process pinned forever on a peer that went silent.
+    let cfd = srv_connect(port)
+    let partial = bytes_from_str("POST /api/data HTTP/1.1\r\nContent-Length: 5\r\n\r\n")
+    write_buf(cfd, bytes_data(partial), bytes_len(partial))
+    let t0 = http_now_ms()
+    let stalled = srv_read_all(cfd, 4096)
+    let elapsed = http_now_ms() - t0
+    close_fd(cfd)
+    assert_eq(srv_starts_with(stalled, "HTTP/1.1 400 Bad Request"), 1)
+    assert(elapsed >= 300)
+
+    srv_sigterm(pid)
+    assert_eq(srv_exit_code(pid), 0)
+}
+
+test "server answers 413 when Content-Length exceeds the cap" {
+    let port = 55718
+    let r = http_router_new()
+    http_route_add(r, "POST", "/api/data", http_response_json("200 OK", bytes_from_str("{}")), 0)
+    let pid = srv_start(port, r, 10, 1000, 2000)
+
+    let big = srv_roundtrip(port, bytes_from_str("POST /api/data HTTP/1.1\r\nContent-Length: 20\r\n\r\n12345678901234567890"))
+    assert_eq(srv_starts_with(big, "HTTP/1.1 413 Payload Too Large"), 1)
+
+    srv_sigterm(pid)
+    assert_eq(srv_exit_code(pid), 0)
+}
+
+test "SIGTERM lets the request in flight finish and the server exit" {
+    let port = 55719
+    let r = http_router_new()
+    http_route_add(r, "POST", "/api/slow", http_response_json("200 OK", bytes_from_str("{\"slow\":true}")), 700)
+    let pid = srv_start(port, r, 1024, 3000, 3000)
+
+    let cfd = srv_connect(port)
+    let req = bytes_from_str("POST /api/slow HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
+    write_buf(cfd, bytes_data(req), bytes_len(req))
+    http_sleep_ms(250)                 // the child has accepted and is inside the delay
+    srv_sigterm(pid)
+    let t0 = http_now_ms()
+    let resp = srv_read_all(cfd, 4096)
+    let elapsed = http_now_ms() - t0
+    close_fd(cfd)
+
+    assert_eq(srv_starts_with(resp, "HTTP/1.1 200 OK"), 1)   // finished, not cut off
+    assert(elapsed >= 300)
+    assert_eq(srv_exit_code(pid), 0)                          // and the parent then exited
+}
+
+test "measure throughput with 1 and 20 clients, and a slow client" {
+    let port = 55719
+    let r = http_router_new()
+    http_route_add(r, "GET", "/api/ping", http_response_json("200 OK", bytes_from_str("{\"pong\":true}")), 0)
+    let pid = srv_start(port, r, 1024, 2000, 4000)
+    let req = bytes_from_str("GET /api/ping HTTP/1.1\r\nHost: t\r\n\r\n")
+
+    // One client, requests one after another.
+    let n1 = 60
+    let t0 = http_now_ms()
+    let mut i = 0
+    for i < n1 {
+        srv_roundtrip(port, req)
+        i = i + 1
+    }
+    let e1 = http_now_ms() - t0
+    let rps1 = n1 * 1000 / (if e1 > 0 { e1 } else { 1 })
+
+    // Twenty clients at once, each with its own share.
+    let nclients = 20
+    let per = 20
+    let t2 = http_now_ms()
+    let mut k = 0
+    for k < nclients {
+        let cpid = syscall(SYS_fork)
+        if cpid == 0 {
+            let mut j = 0
+            for j < per {
+                srv_roundtrip(port, req)
+                j = j + 1
+            }
+            syscall(SYS_exit, 0)
+        }
+        k = k + 1
+    }
+    let mut w = 0
+    for w < nclients {
+        let st[1]
+        syscall(SYS_wait4, 0 - 1, st, 0, 0)
+        w = w + 1
+    }
+    let e2 = http_now_ms() - t2
+    let total2 = nclients * per
+    let rps20 = total2 * 1000 / (if e2 > 0 { e2 } else { 1 })
+
+    // A slow client (half a request, then silence) must not delay a fast one.
+    let slow = srv_connect(port)
+    let half = bytes_from_str("GET /api/ping HTTP/1.1\r\nHost: t\r\n")
+    write_buf(slow, bytes_data(half), bytes_len(half))
+    let t3 = http_now_ms()
+    let fast = srv_roundtrip(port, req)
+    let fast_ms = http_now_ms() - t3
+    close_fd(slow)
+
+    print("  one client: ")
+    print_int(rps1)
+    print(" req/s; ")
+    print_int(nclients)
+    print(" clients: ")
+    print_int(rps20)
+    print(" req/s; fast while slow: ")
+    print_int(fast_ms)
+    print(" ms\n")
+
+    assert(rps1 > 0)
+    assert(rps20 > 0)
+    assert_eq(srv_starts_with(fast, "HTTP/1.1 200 OK"), 1)
+
+    srv_sigterm(pid)
+    assert_eq(srv_exit_code(pid), 0)
+}
