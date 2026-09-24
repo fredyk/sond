@@ -1,0 +1,119 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/encoding/base64url.snd: base64url (RFC 4648 section 5), encode and decode.
+//
+// This is the URL- and filename-safe alphabet (index 62 is '-' and 63 is '_') WITHOUT
+// padding, which is the form tokens and query parameters use: the length is implied by
+// the transport, so the trailing '=' is dropped instead of escaped. The decoder accepts
+// only unpadded base64url and rejects anything else (including '=' and non-alphabet
+// bytes) with -1, so a corrupted token fails closed instead of decoding to garbage.
+//
+// Buffers are caller-provided and addressed by `i64` pointers in the no-allocator style.
+// The encoded text is NUL-terminated for convenience; the NUL is not counted in the
+// returned length. Output writes go through `u8[]` views so every index is proven.
+//
+//   b64url_encode(src, n, out) -> i64   encoded length; `out` needs 4*(n/3)+4 bytes
+//   b64url_decode(src, n, out) -> i64   decoded length, or -1; `out` needs n bytes
+
+let B64URL_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+// Encodes `n` bytes from `src` into `out` as unpadded base64url. Returns the number of
+// characters written; the output is also NUL-terminated.
+pub fn b64url_encode(src: i64, n: i64, out: i64) -> i64 {
+    let alpha: u8[64] = B64URL_ALPHA
+    let blocks = n / 3
+    let rem = n % 3
+    let sb = blocks * 3
+    let m = blocks * 4 + 3
+    let s: u8[sb] = src
+    let o: u8[m] = out
+    // Full 3-byte groups -> 4 characters, each index proven against the view length.
+    for i in 0..blocks {
+        let b0 = s[i * 3]
+        let b1 = s[i * 3 + 1]
+        let b2 = s[i * 3 + 2]
+        o[i * 4] = alpha[(b0 >> 2) & 63]
+        o[i * 4 + 1] = alpha[(((b0 & 3) << 4) | (b1 >> 4)) & 63]
+        o[i * 4 + 2] = alpha[(((b1 & 15) << 2) | (b2 >> 6)) & 63]
+        o[i * 4 + 3] = alpha[b2 & 63]
+    }
+    // The tail: one byte -> two characters, two bytes -> three, zero -> nothing.
+    let base = blocks * 4
+    let tail: u8[rem] = src + sb
+    let ot: u8[3] = out + base
+    let mut w = base
+    if rem == 1 {
+        let b0 = tail[0]
+        ot[0] = alpha[(b0 >> 2) & 63]
+        ot[1] = alpha[((b0 & 3) << 4) & 63]
+        w = base + 2
+    } else {
+        if rem == 2 {
+            let b0 = tail[0]
+            let b1 = tail[1]
+            ot[0] = alpha[(b0 >> 2) & 63]
+            ot[1] = alpha[(((b0 & 3) << 4) | (b1 >> 4)) & 63]
+            ot[2] = alpha[((b1 & 15) << 2) & 63]
+            w = base + 3
+        }
+    }
+    let z: u8[1] = out + w
+    z[0] = 0
+    w
+}
+
+// The 6-bit value of a base64url character, or -1 if it is not in the alphabet. The
+// alphabet is small and fixed, so the mapping is a few ranges rather than a table.
+fn b64url_val(c: i64) -> i64 {
+    if c >= 65 && c <= 90 { return c - 65 }          // A-Z -> 0..25
+    if c >= 97 && c <= 122 { return c - 71 }         // a-z -> 26..51
+    if c >= 48 && c <= 57 { return c + 4 }           // 0-9 -> 52..61
+    if c == 45 { return 62 }                          // '-'
+    if c == 95 { return 63 }                          // '_'
+    0 - 1
+}
+
+// Decodes `n` unpadded base64url characters from `src` into `out`; returns the number of
+// bytes, or -1 on malformed input (a length of 1 mod 4, a non-alphabet character, or a
+// '=' that this unpadded variant does not accept). `out` needs `n` bytes.
+pub fn b64url_decode(src: i64, n: i64, out: i64) -> i64 {
+    let q = n / 4
+    let r = n % 4
+    let sb = q * 4
+    let ob = q * 3
+    let m = ob + 2
+    let s: u8[sb] = src
+    let o: u8[m] = out
+    let mut bad = 0
+    for g in 0..q {
+        let c0 = b64url_val(s[g * 4])
+        let c1 = b64url_val(s[g * 4 + 1])
+        let c2 = b64url_val(s[g * 4 + 2])
+        let c3 = b64url_val(s[g * 4 + 3])
+        if c0 < 0 || c1 < 0 || c2 < 0 || c3 < 0 { bad = 1 }
+        o[g * 3] = ((c0 << 2) | (c1 >> 4)) & 255
+        o[g * 3 + 1] = (((c1 & 15) << 4) | (c2 >> 2)) & 255
+        o[g * 3 + 2] = (((c2 & 3) << 6) | c3) & 255
+    }
+    // The tail holds one byte (two characters) or two bytes (three characters).
+    let tail: u8[r] = src + sb
+    let ot: u8[2] = out + ob
+    if r == 2 {
+        let c0 = b64url_val(tail[0])
+        let c1 = b64url_val(tail[1])
+        if c0 < 0 || c1 < 0 { bad = 1 }
+        ot[0] = ((c0 << 2) | (c1 >> 4)) & 255
+    }
+    if r == 3 {
+        let c0 = b64url_val(tail[0])
+        let c1 = b64url_val(tail[1])
+        let c2 = b64url_val(tail[2])
+        if c0 < 0 || c1 < 0 || c2 < 0 { bad = 1 }
+        ot[0] = ((c0 << 2) | (c1 >> 4)) & 255
+        ot[1] = (((c1 & 15) << 4) | (c2 >> 2)) & 255
+    }
+    if r == 1 { bad = 1 }
+    if bad == 1 { return 0 - 1 }
+    ob + r / 2 + r / 3
+}

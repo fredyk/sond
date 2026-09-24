@@ -1,0 +1,149 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/encoding/percent.snd.
+//
+// The two flavours are pinned side by side because the whole point of the split is that
+// '+' means a literal plus in a query string but a space in a form body. The rejection
+// cases are the ones that matter most: a truncated '%' or a '%' followed by a non-hex
+// digit must fail rather than pass the bad byte through.
+//
+// Buffers are byte-addressed, so every write goes through a `u8[]` view.
+
+include "any/encoding/percent.snd"
+include "x86_64/linux/testing.snd"
+
+let mut in_buf[64]
+let mut out_buf[256]
+
+// Copies the `n` bytes at `p` into the byte buffer at `dst`.
+fn load(dst: i64, p: i64, n: i64) {
+    let d: u8[n] = dst
+    let s: u8[n] = p
+    for i in 0..n {
+        d[i] = s[i]
+    }
+}
+
+// 1 if the first `n` bytes at `out` equal the `n` bytes at `want`.
+fn same(out: i64, want: i64, n: i64) -> i64 {
+    let o: u8[n] = out
+    let w: u8[n] = want
+    for i in 0..n {
+        if o[i] != w[i] {
+            return 0
+        }
+    }
+    1
+}
+
+test "percent: query decoding leaves '+' alone" {
+    let t: string = "a+b"
+    load(in_buf, t.utf8, 3)
+    assert_eq(pct_decode(in_buf, 3, out_buf), 3)
+    let want: string = "a+b"
+    assert_eq(same(out_buf, want.utf8, 3), 1)
+}
+
+test "percent: form decoding turns '+' into a space" {
+    let t: string = "a+b"
+    load(in_buf, t.utf8, 3)
+    assert_eq(pct_decode_form(in_buf, 3, out_buf), 3)
+    let want: string = "a b"
+    assert_eq(same(out_buf, want.utf8, 3), 1)
+}
+
+test "percent: a %XX triplet decodes, upper and lower case hex alike" {
+    let t: string = "a%20b"
+    load(in_buf, t.utf8, 5)
+    assert_eq(pct_decode(in_buf, 5, out_buf), 3)
+    let want: string = "a b"
+    assert_eq(same(out_buf, want.utf8, 3), 1)
+
+    let lower: string = "%2f"
+    load(in_buf, lower.utf8, 3)
+    assert_eq(pct_decode(in_buf, 3, out_buf), 1)
+    let slash: string = "/"
+    assert_eq(same(out_buf, slash.utf8, 1), 1)
+
+    let upper: string = "%2F"
+    load(in_buf, upper.utf8, 3)
+    assert_eq(pct_decode(in_buf, 3, out_buf), 1)
+    assert_eq(same(out_buf, slash.utf8, 1), 1)
+}
+
+test "percent: a form body decodes %2B to a literal plus" {
+    let t: string = "%2B"
+    load(in_buf, t.utf8, 3)
+    assert_eq(pct_decode_form(in_buf, 3, out_buf), 1)
+    let plus: string = "+"
+    assert_eq(same(out_buf, plus.utf8, 1), 1)
+}
+
+test "percent: decode rejects %G1, a bare %, and a truncated %2" {
+    let g: string = "%G1"
+    load(in_buf, g.utf8, 3)
+    assert_eq(pct_decode(in_buf, 3, out_buf), 0 - 1)
+
+    let bare: string = "abc%"
+    load(in_buf, bare.utf8, 4)
+    assert_eq(pct_decode(in_buf, 4, out_buf), 0 - 1)
+
+    let short: string = "%2"
+    load(in_buf, short.utf8, 2)
+    assert_eq(pct_decode(in_buf, 2, out_buf), 0 - 1)
+
+    let low: string = "%2G"
+    load(in_buf, low.utf8, 3)
+    assert_eq(pct_decode(in_buf, 3, out_buf), 0 - 1)
+}
+
+test "percent: decode of an empty input is empty" {
+    assert_eq(pct_decode(in_buf, 0, out_buf), 0)
+    assert_eq(pct_decode_form(in_buf, 0, out_buf), 0)
+}
+
+test "percent: query encoding escapes a space and the reserved characters" {
+    let t: string = "a b&c=d"
+    load(in_buf, t.utf8, 7)
+    let enc = pct_encode(in_buf, 7, out_buf)
+    let want: string = "a%20b%26c%3Dd"
+    assert_eq(enc, 13)
+    assert_eq(same(out_buf, want.utf8, 13), 1)
+}
+
+test "percent: form encoding sends a space as '+' and escapes a literal '+'" {
+    let t: string = "a b+c"
+    load(in_buf, t.utf8, 5)
+    let enc = pct_encode_form(in_buf, 5, out_buf)
+    let want: string = "a+b%2Bc"
+    assert_eq(enc, 7)
+    assert_eq(same(out_buf, want.utf8, 7), 1)
+}
+
+test "percent: the unreserved set - . _ ~ and alphanumerics are left as-is" {
+    let t: string = "aZ09-._~"
+    load(in_buf, t.utf8, 8)
+    assert_eq(pct_encode(in_buf, 8, out_buf), 8)
+    let want: string = "aZ09-._~"
+    assert_eq(same(out_buf, want.utf8, 8), 1)
+}
+
+test "percent: encoding an empty input is empty" {
+    assert_eq(pct_encode(in_buf, 0, out_buf), 0)
+    assert_eq(pct_encode_form(in_buf, 0, out_buf), 0)
+}
+
+test "percent: a query round trip is lossless for an arbitrary byte string" {
+    let src: u8[64] = in_buf
+    for i in 0..64 {
+        src[i] = i
+    }
+    let enc = pct_encode(in_buf, 64, out_buf)
+    let dec = pct_decode(out_buf, enc, out_buf + 192)
+    assert_eq(dec, 64)
+    let back: u8[64] = out_buf + 192
+    for i in 0..64 {
+        assert_eq(back[i], i)
+    }
+}

@@ -1,0 +1,211 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/rfc3339.snd: format an epoch as RFC 3339 UTC and parse one back.
+//
+// The formatted shapes are the ones the JSON API and tokens use:
+//   rfc3339_format(epoch, out)      -> "2026-09-24T12:30:05Z"        (20 chars)
+//   rfc3339_format_ms(epoch_ms, out)-> "2026-09-24T12:30:05.123Z"    (24 chars)
+// Both NUL-terminate and return the number of characters written.
+//
+// Parsing accepts the same shapes plus a numeric offset, with optional fractional
+// seconds of any length (only the first three digits are kept, the rest ignored):
+//   "2026-09-24T12:30:05.123+02:00"  -> epoch milliseconds
+// A malformed document (bad separator, month/day outside the calendar, bad offset,
+// missing or doubled zone, trailing bytes) returns -1 and leaves the out-buffer alone,
+// so a caller can tell a parse failure from a real epoch of 0 or -1.
+//
+// The calendar arithmetic is Howard Hinnant's civil_from_days inverse, the same one
+// any/civil.snd uses in the other direction; it is exact over the whole i64 range.
+//
+//   rfc3339_parse(text, n, out)     -> 0 on success, -1 on error; out[0] = epoch seconds
+//   rfc3339_parse_ms(text, n, out)  -> 0 on success, -1 on error; out[0] = epoch millis
+// `out` is a one-word buffer (`let v[1]`).
+
+include "any/civil.snd"
+
+// The decimal value of an ASCII digit, or -1 if the character is not one.
+fn rfc3339_dval(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    0 - 1
+}
+
+fn rfc3339_is_leap(y: i64) -> i64 {
+    if y % 4 != 0 { return 0 }
+    if y % 100 != 0 { return 1 }
+    if y % 400 == 0 { return 1 }
+    0
+}
+
+fn rfc3339_days_in_month(y: i64, m: i64) -> i64 {
+    if m == 2 {
+        if rfc3339_is_leap(y) == 1 { return 29 }
+        return 28
+    }
+    if m == 4 || m == 6 || m == 9 || m == 11 { return 30 }
+    31
+}
+
+// Days since 1970-01-01 for a civil date (proleptic Gregorian), the exact inverse of
+// epoch_days in any/civil.snd.
+fn rfc3339_days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let yy = if m <= 2 { y - 1 } else { y }
+    let era = if yy >= 0 { yy / 400 } else { (yy - 399) / 400 }
+    let yoe = yy - era * 400
+    let mp = if m > 2 { m - 3 } else { m + 9 }
+    let doy = (153 * mp + 2) / 5 + d - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146097 + doe - 719468
+}
+
+// Writes "YYYY-MM-DDTHH:MM:SSZ" + NUL into `out` (>= 21 bytes) and returns 20.
+pub fn rfc3339_format(epoch: i64, out: i64) -> i64 {
+    let z = epoch_days(epoch)
+    let s = epoch_secs_of_day(epoch)
+    civil_put_pad(out, 0, civil_year(z), 4)
+    civil_put_pad(out, 5, civil_month(z), 2)
+    civil_put_pad(out, 8, civil_day(z), 2)
+    civil_put_pad(out, 11, s / 3600, 2)
+    civil_put_pad(out, 14, s / 60 % 60, 2)
+    civil_put_pad(out, 17, s % 60, 2)
+    // The separators sit at fixed, checked offsets, so the whole layout is proven.
+    let b: u8[21] = out
+    b[4] = 45           // -
+    b[7] = 45           // -
+    b[10] = 84          // T
+    b[13] = 58          // :
+    b[16] = 58          // :
+    b[19] = 90          // Z
+    b[20] = 0
+    20
+}
+
+// Writes "YYYY-MM-DDTHH:MM:SS.mmmZ" + NUL into `out` (>= 25 bytes) and returns 24.
+// The millisecond field comes from the floor second, so a negative epoch keeps a
+// non-negative fraction ("1969-12-31T23:59:59.500Z" rather than "...58.-500Z").
+pub fn rfc3339_format_ms(epoch_ms: i64, out: i64) -> i64 {
+    let secs = if epoch_ms >= 0 { epoch_ms / 1000 } else { (epoch_ms - 999) / 1000 }
+    let frac = epoch_ms - secs * 1000
+    let z = epoch_days(secs)
+    let s = epoch_secs_of_day(secs)
+    civil_put_pad(out, 0, civil_year(z), 4)
+    civil_put_pad(out, 5, civil_month(z), 2)
+    civil_put_pad(out, 8, civil_day(z), 2)
+    civil_put_pad(out, 11, s / 3600, 2)
+    civil_put_pad(out, 14, s / 60 % 60, 2)
+    civil_put_pad(out, 17, s % 60, 2)
+    civil_put_pad(out, 20, frac, 3)
+    let b: u8[25] = out
+    b[4] = 45           // -
+    b[7] = 45           // -
+    b[10] = 84          // T
+    b[13] = 58          // :
+    b[16] = 58          // :
+    b[19] = 46          // .
+    b[23] = 90          // Z
+    b[24] = 0
+    24
+}
+
+// The parse core: 0 on success with epoch milliseconds in `out[0]`, -1 on error.
+pub fn rfc3339_parse_ms(text: i64, n: i64, out: i64) -> i64 {
+    if n < 20 { return 0 - 1 }
+    let b: u8[20] = text
+    let sb: u8[n] = text
+    let d0 = rfc3339_dval(b[0])
+    let d1 = rfc3339_dval(b[1])
+    let d2 = rfc3339_dval(b[2])
+    let d3 = rfc3339_dval(b[3])
+    let d5 = rfc3339_dval(b[5])
+    let d6 = rfc3339_dval(b[6])
+    let d8 = rfc3339_dval(b[8])
+    let d9 = rfc3339_dval(b[9])
+    let d11 = rfc3339_dval(b[11])
+    let d12 = rfc3339_dval(b[12])
+    let d14 = rfc3339_dval(b[14])
+    let d15 = rfc3339_dval(b[15])
+    let d17 = rfc3339_dval(b[17])
+    let d18 = rfc3339_dval(b[18])
+    if d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0 { return 0 - 1 }
+    if d5 < 0 || d6 < 0 || d8 < 0 || d9 < 0 { return 0 - 1 }
+    if d11 < 0 || d12 < 0 || d14 < 0 || d15 < 0 || d17 < 0 || d18 < 0 { return 0 - 1 }
+    if b[4] != 45 || b[7] != 45 || b[13] != 58 || b[16] != 58 { return 0 - 1 }
+    if b[10] != 84 && b[10] != 116 { return 0 - 1 }
+    let y = d0 * 1000 + d1 * 100 + d2 * 10 + d3
+    let mo = d5 * 10 + d6
+    let da = d8 * 10 + d9
+    let hh = d11 * 10 + d12
+    let mi = d14 * 10 + d15
+    let ss = d17 * 10 + d18
+    if mo < 1 || mo > 12 { return 0 - 1 }
+    if da < 1 || da > rfc3339_days_in_month(y, mo) { return 0 - 1 }
+    if hh > 23 || mi > 59 || ss > 60 { return 0 - 1 }
+    let mut p = 19
+    let mut frac = 0
+    let mut offs = 0
+    let mut zoned = 0
+    // Optional fractional seconds: '.' then digits, of which the first three are kept.
+    if b[19] == 46 {
+        p = 20
+        let mut k = 0
+        let mut v = 0
+        for p < n {
+            let d = rfc3339_dval(sb[p])
+            if d < 0 { break }
+            if k < 3 { v = v * 10 + d }
+            k = k + 1
+            p = p + 1
+        }
+        if k < 1 { return 0 - 1 }
+        if k == 1 { v = v * 100 }
+        if k == 2 { v = v * 10 }
+        frac = v
+    }
+    // The zone: 'Z'/'z', or a numeric +HH:MM / -HH:MM. It is required and must be last.
+    if p < n {
+        let cb: u8[1] = text + p
+        let c = cb[0]
+        if c == 90 || c == 122 {
+            zoned = 1
+            p = p + 1
+        } else {
+            if c == 43 || c == 45 {
+                if p + 6 > n { return 0 - 1 }
+                let ov: u8[6] = text + p
+                if rfc3339_dval(ov[1]) < 0 || rfc3339_dval(ov[2]) < 0 { return 0 - 1 }
+                if ov[3] != 58 { return 0 - 1 }
+                if rfc3339_dval(ov[4]) < 0 || rfc3339_dval(ov[5]) < 0 { return 0 - 1 }
+                let oh = rfc3339_dval(ov[1]) * 10 + rfc3339_dval(ov[2])
+                let om = rfc3339_dval(ov[4]) * 10 + rfc3339_dval(ov[5])
+                if oh > 23 || om > 59 { return 0 - 1 }
+                let sign = if c == 45 { 0 - 1 } else { 1 }
+                offs = sign * (oh * 3600 + om * 60)
+                zoned = 1
+                p = p + 6
+            } else {
+                return 0 - 1
+            }
+        }
+    }
+    if zoned == 0 { return 0 - 1 }
+    if p != n { return 0 - 1 }
+    let days = rfc3339_days_from_civil(y, mo, da)
+    let secs = days * 86400 + hh * 3600 + mi * 60 + ss - offs
+    let ms = secs * 1000 + frac
+    let o: i64[1] = out
+    o[0] = ms
+    0
+}
+
+// Parses into whole seconds (floor), so a fractional part is dropped downward, matching
+// the way epoch_days floors a negative second. Returns 0 on success, -1 on error.
+pub fn rfc3339_parse(text: i64, n: i64, out: i64) -> i64 {
+    let tmp[1]
+    let st = rfc3339_parse_ms(text, n, tmp)
+    if st != 0 { return st }
+    let ms = tmp[0]
+    let secs = if ms >= 0 { ms / 1000 } else { (ms - 999) / 1000 }
+    let o: i64[1] = out
+    o[0] = secs
+    0
+}
