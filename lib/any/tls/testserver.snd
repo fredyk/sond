@@ -99,10 +99,12 @@ fn tlssrv_build_sh(random: i64, spub: i64, dst: i64) -> i64 {
 
 // The whole server side of one TLS 1.3 exchange on `afd`: ServerHello, the signed flight
 // (EncryptedExtensions / Certificate / CertificateVerify / Finished), then it reads the client
-// Finished and GET and serves an HTTP response. Guards every client read so it exits cleanly if
-// the client aborts (e.g. after rejecting the certificate chain) rather than writing to a dead
-// socket. Meant to run in a forked child, with the client under test in the parent.
-fn tlssrv_serve(afd: i64, certlen: i64) {
+// Finished and GET and serves the HTTP response `resp` (`resplen` bytes). When `split` falls
+// inside that response it goes out as TWO application records, so a client can be driven with a
+// body that arrives in pieces. Guards every client read so it exits cleanly if the client aborts
+// (e.g. after rejecting the certificate chain) rather than writing to a dead socket. Meant to run
+// in a forked child, with the client under test in the parent.
+fn tlssrv_serve_http(afd: i64, certlen: i64, resp: i64, resplen: i64, split: i64) {
     let crec[2048]
     let crl = tls_read_record(afd, crec, 2048)
     if crl <= 0 { return }
@@ -260,30 +262,44 @@ fn tlssrv_serve(afd: i64, certlen: i64) {
     if rr <= 0 { return }
     let gdec[2048]
     tls_open(cakey, caiv, 0, rb, rr, gdec)
-    // serve an HTTP response (application_data, server app seq 1, after a NewSessionTicket)
-    let http_text: string = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
-    let http = http_text.utf8
-    let hbuf[64]
-    // The length is COUNTED, never written down: this used to say 39 for a 40-byte response, so
-    // the server sent "h" while its own Content-Length promised "hi". Both client tests were
-    // written against that, one of them pinning the wrong number as the expected answer.
-    let hlen = http_text.len
-    z = 0
-    for z < hlen { poke8(hbuf + z, http[z]); z = z + 1 }
+    // serve the caller's HTTP response (application_data, server app seq 1, after a
+    // NewSessionTicket). `resp` is sealed straight from the caller's buffer, so the response
+    // length is whatever was passed and never a hand-counted constant -- that mismatch already
+    // shipped once, sending "h" while the header promised "hi".
     let nst[6]
     poke8(nst + 0, 4); poke8(nst + 1, 0); poke8(nst + 2, 0); poke8(nst + 3, 2); poke8(nst + 4, 0); poke8(nst + 5, 0)
     let ns[128]
     let nsl = tls_seal(sakey, saiv, 0, 22, nst, 6, ns)
     write_buf(afd, ns, nsl)
-    let hs2[128]
-    let hsl = tls_seal(sakey, saiv, 1, 23, hbuf, hlen, hs2)
-    write_buf(afd, hs2, hsl)
+    let hs2[4096]
+    let mut seq = 1
+    if resplen > 0 {
+        if split > 0 && split < resplen {
+            let hsl = tls_seal(sakey, saiv, seq, 23, resp, split, hs2)
+            write_buf(afd, hs2, hsl)
+            seq = seq + 1
+            let hs3[4096]
+            let hsl2 = tls_seal(sakey, saiv, seq, 23, resp + split, resplen - split, hs3)
+            write_buf(afd, hs3, hsl2)
+            seq = seq + 1
+        } else {
+            let hsl = tls_seal(sakey, saiv, seq, 23, resp, resplen, hs2)
+            write_buf(afd, hs2, hsl)
+            seq = seq + 1
+        }
+    }
     // a close_notify alert (inner type 21) at the next server sequence, as a real server sends
     let alert[2]
     poke8(alert + 0, 1); poke8(alert + 1, 0)         // warning, close_notify
     let an[64]
-    let anl = tls_seal(sakey, saiv, 2, 21, alert, 2, an)
+    let anl = tls_seal(sakey, saiv, seq, 21, alert, 2, an)
     write_buf(afd, an, anl)
+}
+
+// Serve the default Content-Length response over `afd`. The entry point the existing suites call.
+fn tlssrv_serve(afd: i64, certlen: i64) {
+    let resp: string = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+    tlssrv_serve_http(afd, certlen, resp.utf8, resp.len, 0)
 }
 
 // Load the certificate, its private scalar and the per-signature nonce into this module's

@@ -1,0 +1,364 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/x86_64/linux/https-client.snd: a whole HTTPS request-response with a JSON body, on top of
+// the TLS session in any/tls/session.snd and the HTTP framing in any/tls/https.snd.
+//
+// Public API:
+//   https_post_json(url, headers, body, timeout_ms, res) -> status | negative error
+//   https_post_json_ex(ep, headers, body, timeout_ms, res) -> same, over an explicit endpoint
+//   https_ok(status) -> 1 when the status is 2xx
+//
+// Why this exists: the backend has to call an LLM (and any other JSON API) over HTTPS. Every
+// piece already existed in pieces -- dns.snd resolves a name, tls-host.snd opens the socket and
+// the TLS session, https.snd frames a request and parses a response -- but nothing put them in
+// the one call a program actually makes, so each caller wrote the orchestration itself and each
+// copy forgot a different piece (the Host header, the timeout, the response cap). This is that
+// call.
+//
+// A response is returned as `status + body`, and a non-2xx is NOT an error: the caller gets the
+// status and the body the server sent with it, because error bodies carry the reason. The
+// negative returns are transport failures only, and each case has its own value so the caller
+// can tell "the name did not resolve" from "the peer refused our certificate".
+//
+// Error values (all negative; a status is always >= 100):
+//   HCLI_ERR_DNS      the host name did not resolve
+//   HCLI_ERR_CONNECT  the TCP connection failed, or the request could not be sent
+//   HCLI_ERR_TLS      the handshake failed, or the certificate was not trusted for this host
+//   HCLI_ERR_TIMEOUT  the deadline passed (during the handshake or while reading the response;
+//                     a resolver timeout comes back as HCLI_ERR_DNS, its own failure)
+//   HCLI_ERR_USAGE    a bad argument: a URL that is not https, zero timeout, no output buffer
+//   HCLI_ERR_TOOBIG   the response body did not fit in the caller's buffer
+//   HCLI_ERR_READ     a response that arrived but is not a complete HTTP message
+
+include "x86_64/linux/tls-host.snd"
+include "any/tls/https.snd"
+include "x86_64/linux/time.snd"
+include "x86_64/linux/poll.snd"
+include "x86_64/linux/heap.snd"
+include "any/x509/roots.snd"
+include "any/strings.snd"
+
+let HCLI_ERR_DNS = 0 - 1
+let HCLI_ERR_CONNECT = 0 - 2
+let HCLI_ERR_TLS = 0 - 3
+let HCLI_ERR_TIMEOUT = 0 - 4
+let HCLI_ERR_USAGE = 0 - 5
+let HCLI_ERR_TOOBIG = 0 - 6
+let HCLI_ERR_READ = 0 - 7
+
+// The largest URL accepted; host, port and path are parsed out of it, so one bound on the URL
+// bounds all three. A URL longer than this is a caller error, not something to truncate: a
+// silently cut path is a request to a different resource.
+let HCLI_MAX_URL = 4096
+let HCLI_MAX_HOST = 256
+
+// Where a request is sent, and what it is validated against. `ip` is the address already
+// resolved (dns_resolve returns it in host order, the same order sockaddr_in_build wants);
+// `sni`/`sni_len` are the name the certificate must carry, which for a URL is the host itself.
+// Splitting these apart is what lets a test drive a certificate for "sond.test" over a loopback
+// address without the client being told a lie about which host it reached.
+struct HttpsEndpoint {
+    ip: i64,
+    port: i64,
+    sni: i64,
+    sni_len: i64,
+    path: i64,
+    roots: i64,
+    nroots: i64,
+    now14: i64,
+}
+
+// The caller's output buffer (`out`, `cap` bytes) and how many bytes of body were written to it.
+// One struct keeps the output together with its extent: the body length is meaningless without
+// the buffer it was measured in.
+struct HttpsResult {
+    out: i64,
+    cap: i64,
+    len: i64,
+}
+
+// Monotonic milliseconds. Wall-clock time would be wrong here: a deadline computed from
+// `now_epoch` must not be moved by an NTP step in the middle of a request.
+let mut hcli_ts[2]
+fn hcli_now_ms() -> i64 {
+    syscall(SYS_clock_gettime, 1, hcli_ts)       // CLOCK_MONOTONIC
+    hcli_ts[0] * 1000 + hcli_ts[1] / 1000000
+}
+
+// Bound the next blocking recv on `fd` to `ms` milliseconds. SO_RCVTIMEO is what actually cuts a
+// peer that accepts and then says nothing forever: tls_read's recv returns EAGAIN, the session
+// reports end-of-data, and the deadline check turns that into a timeout rather than a success.
+// The timeval is two words and supports sub-second waits; a zero timeval would mean "no timeout
+// at all", which is the opposite of what a caller asking for a deadline wants.
+fn hcli_set_rcvtimeo(fd: i64, ms: i64) -> i64 {
+    let tv[2]
+    tv[0] = ms / 1000
+    tv[1] = (ms % 1000) * 1000
+    setsockopt_sock(fd, SOL_SOCKET, SO_RCVTIMEO, tv, 16)
+}
+
+// 1 if `host` is a dotted-quad IPv4 literal. An address URL has no DNS question to ask, and
+// asking the resolver to resolve "127.0.0.1" makes a hermetic test depend on the machine's
+// resolver -- which is exactly the kind of test that goes red on a train.
+fn hcli_host_is_ipv4(host: i64) -> i64 {
+    let n = strlen(host)
+    if n < 7 || n > 15 { return 0 }
+    let h: u8[n] = host
+    let mut dots = 0
+    let mut digits = 0
+    for i in 0..n {
+        let c = h[i]
+        if c == 46 { dots = dots + 1 }
+        else if c >= 48 && c <= 57 { digits = digits + 1 }
+        else { return 0 }
+    }
+    if dots == 3 && digits == n - 3 { return 1 }
+    0
+}
+
+// Parses "https://host[:port]/path" into caller-owned NUL-terminated buffers, writing the port
+// as one word at `portp`. Returns 0, or HCLI_ERR_USAGE. The buffers are the caller's because
+// returning the address of a local would leave a dead pointer behind.
+fn hcli_parse_url(url: i64, hostbuf: i64, hostcap: i64, pathbuf: i64, pathcap: i64, portp: i64) -> i64 {
+    if url == 0 { return HCLI_ERR_USAGE }
+    let n = strlen(url)
+    if n > HCLI_MAX_URL { return HCLI_ERR_USAGE }
+    let scheme: string = "https://"
+    if starts_with(url, scheme.utf8) != 1 { return HCLI_ERR_USAGE }
+    let u: u8[n] = url
+
+    // The authority ends at the first '/' after the scheme; with no '/', it runs to the end and
+    // the path is "/".
+    let mut path_start = n
+    for i in 0..n {
+        if i >= 8 {
+            if u[i] == 47 { path_start = i  break }
+        }
+    }
+
+    // A ':' inside the authority introduces the port. The first one wins: a host cannot contain
+    // ':' and an IPv6 literal is not accepted here.
+    let mut colon = 0 - 1
+    for i in 0..n {
+        if i >= 8 && i < path_start {
+            if u[i] == 58 { colon = i  break }
+        }
+    }
+    let host_end = if colon >= 0 { colon } else { path_start }
+    let hostlen = host_end - 8
+    if hostlen <= 0 { return HCLI_ERR_USAGE }
+    if hostlen >= hostcap { return HCLI_ERR_USAGE }
+
+    let hb: u8[hostcap] = hostbuf
+    for i in 0..hostcap { hb[i] = 0 }
+    memcpy(hostbuf, url + 8, hostlen)
+
+    let mut port = 443
+    if colon >= 0 {
+        port = 0
+        let mut digits = 0
+        for i in 0..n {
+            if i > colon && i < path_start {
+                let c = u[i]
+                if c < 48 || c > 57 { return HCLI_ERR_USAGE }
+                port = port * 10 + (c - 48)
+                digits = digits + 1
+            }
+        }
+        if digits == 0 || port <= 0 || port > 65535 { return HCLI_ERR_USAGE }
+    }
+
+    let pb: u8[pathcap] = pathbuf
+    for i in 0..pathcap { pb[i] = 0 }
+    if path_start < n {
+        let plen = n - path_start
+        if plen >= pathcap { return HCLI_ERR_USAGE }
+        memcpy(pathbuf, url + path_start, plen)
+    } else {
+        let slash: string = "/"
+        memcpy(pathbuf, slash.utf8, 1)
+    }
+
+    let pv: i64[1] = portp
+    pv[0] = port
+    0
+}
+
+// Builds the request into `buf`: request line, Host, the caller's header block, then the body
+// with its computed Content-Length and Connection: close. `headers` is a raw block of complete
+// header lines, each ending in CRLF, or 0 for none. `buf` is sized by the caller for the whole
+// request. Returns the total length, or HCLI_ERR_USAGE if the path or host carries a CR or LF.
+fn hcli_build_request(buf: i64, path: i64, host: i64, headers: i64, body: i64, bodylen: i64) -> i64 {
+    let method: string = "POST"
+    // tls_req_start refuses a path or host carrying a CR or LF, which is what stops a value
+    // computed at run time from becoming extra header lines. Nothing is written on refusal.
+    let mut o = tls_req_start(buf, method.utf8, path, host)
+    if o < 0 { return HCLI_ERR_USAGE }
+    if headers != 0 {
+        let hn = strlen(headers)
+        memcpy(buf + o, headers, hn)
+        o = o + hn
+    }
+    tls_req_end(buf, o, body, bodylen)
+}
+
+// 1 when `status` is a 2xx. A free function, not a magic comparison at every call site: the
+// backend has to branch on it, and "status >= 200 && status < 300" copied around is where a
+// 3xx redirect ends up treated as a body.
+fn https_ok(status: i64) -> i64 {
+    if status >= 200 && status < 300 { return 1 }
+    0
+}
+
+// The built-in trust store, decoded ONCE per process. The arena has no free, so decoding five
+// roots on every call would hand a long-running server a few kilobytes of garbage per request.
+let mut hcli_roots = 0
+let mut hcli_nroots = 0
+fn hcli_default_roots() -> i64 {
+    if hcli_roots == 0 {
+        let n = x509_root_count()
+        let stride = x509_root_max_len()
+        let store = heap_alloc(n * stride)
+        let ptrs = heap_alloc(n * 8)
+        x509_load_default_roots(store, stride, ptrs)
+        hcli_nroots = n
+        hcli_roots = ptrs
+    }
+    hcli_roots
+}
+
+// The whole request-response over an explicit endpoint. Returns the HTTP status (>= 100) with
+// the body in `res`, or a negative HCLI_ERR_* on a transport failure. `res.out`/`res.cap` are
+// the caller's buffer; `res.len` gets the body length. A non-2xx status is returned, not turned
+// into an error: the body that came with it is the reason, and the caller decides.
+fn https_post_json_ex(ep: *HttpsEndpoint, headers: i64, body: i64, timeout_ms: i64, res: *HttpsResult) -> i64 {
+    if ep == 0 || res == 0 { return HCLI_ERR_USAGE }
+    if timeout_ms <= 0 { return HCLI_ERR_USAGE }
+    if res.out == 0 || res.cap <= 0 { return HCLI_ERR_USAGE }
+
+    let deadline = hcli_now_ms() + timeout_ms
+    let bodylen = if body == 0 { 0 } else { strlen(body) }
+    let hlen = if headers == 0 { 0 } else { strlen(headers) }
+    // Room for the request line, Host, the caller's headers and the body. The path is bounded by
+    // HCLI_MAX_URL, the host by HCLI_MAX_HOST, so the constant slack covers both.
+    let reqcap = hlen + bodylen + HCLI_MAX_URL + HCLI_MAX_HOST + 128
+    let req = heap_alloc(reqcap)
+    // `reqcap` bounds the whole request: the longest path and host the parser can produce, the
+    // caller's headers, the Content-Length line and the body, plus slack.
+    let reqlen = hcli_build_request(req, ep.path, ep.sni, headers, body, bodylen)
+    if reqlen < 0 { return HCLI_ERR_USAGE }
+
+    if hcli_now_ms() >= deadline { return HCLI_ERR_TIMEOUT }
+    let fd = tcp_connect_ip(ep.ip, ep.port)
+    if fd < 0 { return HCLI_ERR_CONNECT }
+
+    // The handshake runs under the same deadline as everything else. A peer that accepts the
+    // connection and then never answers blocks on the ServerHello read; SO_RCVTIMEO turns that
+    // into EAGAIN, and "the deadline passed" is what tells a timeout apart from a real TLS error
+    // -- both arrive here as tls_connect_fd returning 0.
+    let rem = deadline - hcli_now_ms()
+    if rem <= 0 { close_fd(fd)  return HCLI_ERR_TIMEOUT }
+    hcli_set_rcvtimeo(fd, rem)
+    let alpn: string = "http/1.1"
+    let sess = tls_connect_fd(fd, ep.sni, ep.sni_len, alpn.utf8, 8, ep.roots, ep.nroots, ep.now14)
+    if sess == 0 {
+        if hcli_now_ms() >= deadline { return HCLI_ERR_TIMEOUT }
+        return HCLI_ERR_TLS
+    }
+
+    if tls_write(sess, req, reqlen) < 0 {
+        tls_close(sess)
+        return HCLI_ERR_CONNECT
+    }
+
+    // Read the response until the peer closes, the deadline passes, or the buffer runs out. The
+    // request said Connection: close, so an EOF is the normal end of the body.
+    let out = res.out
+    let cap = res.cap
+    let mut n = 0
+    let mut why = 0
+    let probe[1]
+    for {
+        let rem2 = deadline - hcli_now_ms()
+        if rem2 <= 0 { why = 2  break }
+        hcli_set_rcvtimeo(tls_sess_fd(sess), rem2)
+        let room = cap - n
+        // With no room left, read one byte into a scratch: a body that exactly fills `cap` must
+        // NOT be reported as too big, and only reading one more byte can tell the two apart.
+        let r = if room > 0 { tls_read(sess, out + n, room) } else { tls_read(sess, probe, 1) }
+        if r < 0 { why = 3  break }
+        if r == 0 {
+            if hcli_now_ms() >= deadline { why = 2 }
+            break
+        }
+        if room <= 0 { why = 1  break }
+        n = n + r
+    }
+    tls_close(sess)
+    if why == 2 { res.len = 0  return HCLI_ERR_TIMEOUT }
+    if why == 1 { res.len = 0  return HCLI_ERR_TOOBIG }
+    if why == 3 { res.len = 0  return HCLI_ERR_READ }
+    if n == 0 { res.len = 0  return HCLI_ERR_READ }
+
+    if http_headers_end(out, n) < 0 { res.len = 0  return HCLI_ERR_READ }
+    let status = http_status(out, n)
+    if status < 0 { res.len = 0  return HCLI_ERR_READ }
+
+    // http_body writes the body length as a u32 at the pointer it is given. A zeroed word read
+    // back whole is the length: the upper half stays zero, so no separate width is involved.
+    let lp[1]
+    lp[0] = 0
+    // Headers are known complete here, which is the only condition under which http_body has a
+    // body to point at, so it cannot answer 0.
+    let bod = http_body(out, n, lp)
+    let blen = lp[0]
+    // The body sits after the headers, and a chunked one was decoded in place; moving it to the
+    // front is what lets the caller read `res.out` without also being handed an offset. The copy
+    // is forward and the source is never below the destination, so it is overlap-safe.
+    if bod != out { memcpy(out, bod, blen) }
+    res.len = blen
+    status
+}
+
+// HTTPS POST of `body` (NUL-terminated JSON) to `url` ("https://host[:port]/path"), resolved
+// with dns_resolve and validated against the built-in trust store with SNI = host. `headers` is
+// a raw block of CRLF-terminated header lines or 0. `timeout_ms` bounds the whole call.
+// Returns the status with the body in `res`, or a negative HCLI_ERR_*.
+fn https_post_json(url: i64, headers: i64, body: i64, timeout_ms: i64, res: *HttpsResult) -> i64 {
+    if url == 0 || res == 0 { return HCLI_ERR_USAGE }
+    if timeout_ms <= 0 { return HCLI_ERR_USAGE }
+
+    let hb: u8[HCLI_MAX_HOST]
+    let pb: u8[HCLI_MAX_URL]
+    let pp[1]
+    let pr = hcli_parse_url(url, hb, HCLI_MAX_HOST, pb, HCLI_MAX_URL, pp)
+    if pr < 0 { return pr }
+
+    let host = hb
+    let mut ip = 0
+    if hcli_host_is_ipv4(host) == 1 {
+        ip = tls_ipv4(host)
+    } else {
+        ip = dns_resolve(host)
+        if ip < 0 { return HCLI_ERR_DNS }
+    }
+
+    // The built-in trust store (decoded once) and the current time, so an expired certificate is
+    // actually expired rather than "valid in 2026".
+    let ptrs = hcli_default_roots()
+    let nroots = hcli_nroots
+    let tbuf[16]
+    format_now14(tbuf)
+
+    let ep: HttpsEndpoint
+    ep.ip = ip
+    ep.port = pp[0]
+    ep.sni = host
+    ep.sni_len = strlen(host)
+    ep.path = pb
+    ep.roots = ptrs
+    ep.nroots = nroots
+    ep.now14 = tbuf
+    https_post_json_ex(ep, headers, body, timeout_ms, res)
+}

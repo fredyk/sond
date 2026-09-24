@@ -1,0 +1,462 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/x86_64/linux/https-client.snd, hermetic: every exchange runs against
+// `any/tls/testserver.snd` on loopback, and no test asks the machine's DNS, network or clock a
+// question. The loopback ports live in the 55720-55729 band this worker owns.
+
+include "x86_64/linux/https-client.snd"
+include "any/tls/testserver.snd"
+include "x86_64/linux/testing.snd"
+
+let mut hc_roots[4]
+let mut hc_out[20000]
+
+// A monotonic millisecond clock, to show that a timeout actually CUT rather than merely being
+// reported.
+let mut hc_ts[2]
+fn hc_mono() -> i64 {
+    syscall(SYS_clock_gettime, 1, hc_ts)
+    hc_ts[0] * 1000 + hc_ts[1] / 1000000
+}
+
+// Listen on `port` and fork: the child serves one TLS exchange with the response `resp`
+// (`resplen` bytes, split into two records at `split` when that falls inside it). Returns
+// (pid << 32) | sfd so the parent can both reap the child and close the listener.
+fn hc_spawn_tls(port: i64, certlen: i64, resp: i64, resplen: i64, split: i64) -> i64 {
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        tlssrv_serve_http(afd, certlen, resp, resplen, split)
+        close_fd(afd)
+        syscall(SYS_exit, 0)
+    }
+    (pid << 32) | sfd
+}
+
+// Listen on `port` and fork a child that accepts one connection and then says nothing at all
+// until `ms` have passed. This is the peer a timeout exists for.
+fn hc_spawn_silent(port: i64, ms: i64) -> i64 {
+    let sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(sfd)
+    let sa[2]
+    sockaddr_in_build(sa, 0x7f000001, port)
+    bind_sock(sfd, sa, 16)
+    listen_sock(sfd, 4)
+    let pid = syscall(SYS_fork)
+    if pid == 0 {
+        let afd = accept_sock(sfd, 0, 0)
+        if afd < 0 { syscall(SYS_exit, 2) }
+        let slp[2]
+        slp[0] = ms / 1000
+        slp[1] = (ms % 1000) * 1000000
+        syscall(SYS_nanosleep, slp, 0)
+        close_fd(afd)
+        syscall(SYS_exit, 0)
+    }
+    (pid << 32) | sfd
+}
+
+fn hc_reap(pid: i64) {
+    let st[1]
+    syscall(SYS_wait4, pid, st, 0, 0)
+}
+
+// The endpoint pointing at the loopback test server, with the "sond.test" certificate the test
+// server presents as its SNI.
+fn hc_endpoint(ep: *HttpsEndpoint, port: i64, sni: i64, snilen: i64, path: i64, now: i64) {
+    ep.ip = 0x7f000001
+    ep.port = port
+    ep.sni = sni
+    ep.sni_len = snilen
+    ep.path = path
+    ep.roots = hc_roots
+    ep.nroots = 1
+    ep.now14 = now
+}
+
+fn hc_result(res: *HttpsResult) {
+    res.out = hc_out
+    res.cap = 20000
+    res.len = 0
+}
+
+test "https client: a Content-Length response comes back as status plus body" {
+    let certlen = tlssrv_setup()
+    hc_roots[0] = tlssrv_cert()
+    let cl: string = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+    let both = hc_spawn_tls(55720, certlen, cl.utf8, cl.len, 0)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let sni: string = "sond.test"
+    let path: string = "/"
+    let now: string = "20270101000000"
+    let ep: HttpsEndpoint
+    hc_endpoint(ep, 55720, sni.utf8, 9, path.utf8, now.utf8)
+    let res: HttpsResult
+    hc_result(res)
+    // One caller-supplied header exercises the header block being copied into the request.
+    let headers: string = "Content-Type: application/json\r\nAuthorization: Bearer test\r\n"
+    let body: string = "{\"a\":1}"
+    let status = https_post_json_ex(ep, headers.utf8, body.utf8, 2000, res)
+    assert_eq(status, 200)
+    assert_eq(res.len, 2)
+    let ob: u8[2] = res.out
+    assert_eq(ob[0], 104)                             // 'h'
+    assert_eq(ob[1], 105)                             // 'i'
+
+    close_fd(sfd)
+    hc_reap(pid)
+}
+
+test "https client: a non-2xx status carries its body instead of becoming an error" {
+    let certlen = tlssrv_setup()
+    hc_roots[0] = tlssrv_cert()
+    let notfound: string = "HTTP/1.1 404 Not Found\r\nContent-Length: 5\r\n\r\nnope!"
+    let both = hc_spawn_tls(55721, certlen, notfound.utf8, notfound.len, 0)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let sni: string = "sond.test"
+    let path: string = "/"
+    let now: string = "20270101000000"
+    let ep: HttpsEndpoint
+    hc_endpoint(ep, 55721, sni.utf8, 9, path.utf8, now.utf8)
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    let status = https_post_json_ex(ep, 0, body.utf8, 2000, res)
+    assert_eq(status, 404)
+    assert_eq(https_ok(status), 0)
+    assert_eq(res.len, 5)
+    let ob: u8[5] = res.out
+    assert_eq(ob[0], 110)                             // 'n'
+    assert_eq(ob[4], 33)                              // '!'
+
+    close_fd(sfd)
+    hc_reap(pid)
+}
+
+test "https client: a chunked body split across two records is decoded" {
+    let certlen = tlssrv_setup()
+    hc_roots[0] = tlssrv_cert()
+    // "hello" and " world" in two chunks; split at 52 falls INSIDE the first chunk's data, so
+    // the bytes of one chunk arrive across two TLS records.
+    let chunked: string = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
+    let both = hc_spawn_tls(55722, certlen, chunked.utf8, chunked.len, 52)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let sni: string = "sond.test"
+    let path: string = "/"
+    let now: string = "20270101000000"
+    let ep: HttpsEndpoint
+    hc_endpoint(ep, 55722, sni.utf8, 9, path.utf8, now.utf8)
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    let status = https_post_json_ex(ep, 0, body.utf8, 2000, res)
+    assert_eq(status, 200)
+    assert_eq(res.len, 11)
+    let ob: u8[11] = res.out
+    assert_eq(ob[0], 104)                             // 'h'
+    assert_eq(ob[4], 111)                             // 'o'
+    assert_eq(ob[5], 32)                              // ' '
+    assert_eq(ob[10], 100)                            // 'd'
+
+    close_fd(sfd)
+    hc_reap(pid)
+}
+
+test "https client: a silent server is cut by the deadline, not waited on forever" {
+    let both = hc_spawn_silent(55723, 1500)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let sni: string = "sond.test"
+    let path: string = "/"
+    let now: string = "20270101000000"
+    let ep: HttpsEndpoint
+    hc_endpoint(ep, 55723, sni.utf8, 9, path.utf8, now.utf8)
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    let t0 = hc_mono()
+    let status = https_post_json_ex(ep, 0, body.utf8, 300, res)
+    let dt = hc_mono() - t0
+    assert_eq(status, HCLI_ERR_TIMEOUT)
+    assert(dt >= 200)
+    assert(dt < 1200)
+
+    close_fd(sfd)
+    hc_reap(pid)
+}
+
+test "https client: a response larger than the buffer is an error, not a prefix" {
+    let certlen = tlssrv_setup()
+    hc_roots[0] = tlssrv_cert()
+    let cl: string = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+    let both = hc_spawn_tls(55724, certlen, cl.utf8, cl.len, 0)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let sni: string = "sond.test"
+    let path: string = "/"
+    let now: string = "20270101000000"
+    let ep: HttpsEndpoint
+    hc_endpoint(ep, 55724, sni.utf8, 9, path.utf8, now.utf8)
+    let res: HttpsResult
+    res.out = hc_out
+    res.cap = 1                                        // the two-byte body cannot fit
+    res.len = 0
+    let body: string = "{}"
+    let status = https_post_json_ex(ep, 0, body.utf8, 2000, res)
+    assert_eq(status, HCLI_ERR_TOOBIG)
+
+    close_fd(sfd)
+    hc_reap(pid)
+}
+
+test "https client: a refused connection is a connect error" {
+    let sni: string = "sond.test"
+    let path: string = "/"
+    let now: string = "20270101000000"
+    let ep: HttpsEndpoint
+    hc_endpoint(ep, 1, sni.utf8, 9, path.utf8, now.utf8)   // port 1: nobody listens
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    assert_eq(https_post_json_ex(ep, 0, body.utf8, 2000, res), HCLI_ERR_CONNECT)
+}
+
+test "https client: a certificate that does not name the URL host is a TLS error" {
+    let certlen = tlssrv_setup()
+    // The client uses the built-in roots here, so the self-signed "sond.test" leaf cannot chain
+    // to them anyway; this test is about the URL path resolving "127.0.0.1" as a literal and the
+    // handshake refusing, not about a DNS lookup.
+    let cl: string = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+    let both = hc_spawn_tls(55725, certlen, cl.utf8, cl.len, 0)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let res: HttpsResult
+    hc_result(res)
+    let url: string = "https://127.0.0.1:55725/path"
+    let body: string = "{}"
+    let status = https_post_json(url.utf8, 0, body.utf8, 2000, res)
+    assert_eq(status, HCLI_ERR_TLS)
+
+    close_fd(sfd)
+    hc_reap(pid)
+}
+
+test "https client: a name the resolver rejects is a DNS error, with no network involved" {
+    let res: HttpsResult
+    hc_result(res)
+    // "a..b" carries an empty label; the query builder refuses it before any packet is sent, so
+    // this test never touches a real resolver.
+    let url: string = "https://a..b/"
+    let body: string = "{}"
+    assert_eq(https_post_json(url.utf8, 0, body.utf8, 1000, res), HCLI_ERR_DNS)
+}
+
+test "https client: bad arguments are refused before the network is touched" {
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    assert_eq(https_post_json("http://127.0.0.1/".utf8, 0, body.utf8, 1000, res), HCLI_ERR_USAGE)
+    assert_eq(https_post_json("https://".utf8, 0, body.utf8, 1000, res), HCLI_ERR_USAGE)
+    assert_eq(https_post_json(0, 0, body.utf8, 1000, res), HCLI_ERR_USAGE)
+    assert_eq(https_post_json("https://127.0.0.1/".utf8, 0, body.utf8, 0, res), HCLI_ERR_USAGE)
+    assert_eq(https_post_json("https://127.0.0.1/".utf8, 0, body.utf8, 1000, 0), HCLI_ERR_USAGE)
+}
+
+test "https client: a host longer than the parser's buffer is refused" {
+    let big: u8[400]
+    for i in 0..400 { big[i] = 97 }                    // 'a'
+    big[399] = 0
+    let sch1: string = "https://"
+    memcpy(big, sch1.utf8, 8)
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    assert_eq(https_post_json(big, 0, body.utf8, 1000, res), HCLI_ERR_USAGE)
+}
+
+test "https client: a URL longer than the parser's bound is refused" {
+    let huge: u8[4200]
+    for i in 0..4200 { huge[i] = 97 }                  // 'a'
+    huge[4199] = 0
+    let sch2: string = "https://"
+    memcpy(huge, sch2.utf8, 8)
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    assert_eq(https_post_json(huge, 0, body.utf8, 1000, res), HCLI_ERR_USAGE)
+}
+
+test "https client: a request with no body and no headers is allowed" {
+    let certlen = tlssrv_setup()
+    hc_roots[0] = tlssrv_cert()
+    let cl: string = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"
+    let both = hc_spawn_tls(55729, certlen, cl.utf8, cl.len, 0)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let sni: string = "sond.test"
+    let path: string = "/"
+    let now: string = "20270101000000"
+    let ep: HttpsEndpoint
+    hc_endpoint(ep, 55729, sni.utf8, 9, path.utf8, now.utf8)
+    let res: HttpsResult
+    hc_result(res)
+    let status = https_post_json_ex(ep, 0, 0, 2000, res)
+    assert_eq(status, 200)
+    assert_eq(res.len, 2)
+
+    close_fd(sfd)
+    hc_reap(pid)
+}
+
+test "https client: an empty response is read as no HTTP message" {
+    let certlen = tlssrv_setup()
+    hc_roots[0] = tlssrv_cert()
+    let nothing: string = ""
+    let both = hc_spawn_tls(55726, certlen, nothing.utf8, 0, 0)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let sni: string = "sond.test"
+    let path: string = "/"
+    let now: string = "20270101000000"
+    let ep: HttpsEndpoint
+    hc_endpoint(ep, 55726, sni.utf8, 9, path.utf8, now.utf8)
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    assert_eq(https_post_json_ex(ep, 0, body.utf8, 2000, res), HCLI_ERR_READ)
+
+    close_fd(sfd)
+    hc_reap(pid)
+}
+
+test "https client: headers that never end are not a response" {
+    let certlen = tlssrv_setup()
+    hc_roots[0] = tlssrv_cert()
+    let partial: string = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+    let both = hc_spawn_tls(55727, certlen, partial.utf8, partial.len, 0)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let sni: string = "sond.test"
+    let path: string = "/"
+    let now: string = "20270101000000"
+    let ep: HttpsEndpoint
+    hc_endpoint(ep, 55727, sni.utf8, 9, path.utf8, now.utf8)
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    assert_eq(https_post_json_ex(ep, 0, body.utf8, 2000, res), HCLI_ERR_READ)
+
+    close_fd(sfd)
+    hc_reap(pid)
+}
+
+test "https client: a body that is not an HTTP status line is not a response" {
+    let certlen = tlssrv_setup()
+    hc_roots[0] = tlssrv_cert()
+    let garbage: string = "not-http at all\r\n\r\n"
+    let both = hc_spawn_tls(55728, certlen, garbage.utf8, garbage.len, 0)
+    let pid = both >> 32
+    let sfd = both & 0xffffffff
+
+    let sni: string = "sond.test"
+    let path: string = "/"
+    let now: string = "20270101000000"
+    let ep: HttpsEndpoint
+    hc_endpoint(ep, 55728, sni.utf8, 9, path.utf8, now.utf8)
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    assert_eq(https_post_json_ex(ep, 0, body.utf8, 2000, res), HCLI_ERR_READ)
+
+    close_fd(sfd)
+    hc_reap(pid)
+}
+
+test "https client: a non-digit, an empty and an out-of-range port are refused" {
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    assert_eq(https_post_json("https://127.0.0.1:12x/".utf8, 0, body.utf8, 1000, res), HCLI_ERR_USAGE)
+    assert_eq(https_post_json("https://127.0.0.1:/".utf8, 0, body.utf8, 1000, res), HCLI_ERR_USAGE)
+    assert_eq(https_post_json("https://127.0.0.1:70000/".utf8, 0, body.utf8, 1000, res), HCLI_ERR_USAGE)
+}
+
+test "https client: a URL with no path means / and a CRLF in the path is refused" {
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    // No '/' after the authority: the path defaults to "/", and the connection to port 1 is
+    // refused before anything is sent.
+    assert_eq(https_post_json("https://127.0.0.1:1".utf8, 0, body.utf8, 2000, res), HCLI_ERR_CONNECT)
+    // A CR/LF that reached the path would become extra header lines; the request builder
+    // refuses it instead of smuggling it through.
+    let injected: string = "https://127.0.0.1:1/\r\nX-Evil: yes"
+    assert_eq(https_post_json(injected.utf8, 0, body.utf8, 2000, res), HCLI_ERR_USAGE)
+}
+
+test "https client: a host that is neither an IPv4 literal nor DNS-encodable is a DNS error" {
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    // 8 characters, so the length gate does not short-circuit; the letters are not an IPv4
+    // literal, and the empty label makes the DNS query builder refuse before any packet is sent.
+    assert_eq(https_post_json("https://ab..cdef/".utf8, 0, body.utf8, 1000, res), HCLI_ERR_DNS)
+}
+
+test "https client: the URL parser refuses a null URL and a path that will not fit" {
+    let hb: u8[256]
+    let pb: u8[8]
+    let pp[1]
+    assert_eq(hcli_parse_url(0, hb, 256, pb, 8, pp), HCLI_ERR_USAGE)
+    let url: string = "https://h/abcdef"
+    assert_eq(hcli_parse_url(url.utf8, hb, 256, pb, 4, pp), HCLI_ERR_USAGE)
+}
+
+test "https client: the explicit entry point guards its own arguments" {
+    let sni: string = "sond.test"
+    let path: string = "/"
+    let now: string = "20270101000000"
+    let ep: HttpsEndpoint
+    hc_endpoint(ep, 1, sni.utf8, 9, path.utf8, now.utf8)
+    let res: HttpsResult
+    hc_result(res)
+    let body: string = "{}"
+    assert_eq(https_post_json_ex(0, 0, body.utf8, 1000, res), HCLI_ERR_USAGE)
+    assert_eq(https_post_json_ex(ep, 0, body.utf8, 0, res), HCLI_ERR_USAGE)
+    assert_eq(https_post_json_ex(ep, 0, body.utf8, 1000, 0), HCLI_ERR_USAGE)
+    res.cap = 0
+    assert_eq(https_post_json_ex(ep, 0, body.utf8, 1000, res), HCLI_ERR_USAGE)
+    res.cap = 20000
+    res.out = 0
+    assert_eq(https_post_json_ex(ep, 0, body.utf8, 1000, res), HCLI_ERR_USAGE)
+}
+
+test "https client: https_ok is true only for 2xx" {
+    assert_eq(https_ok(200), 1)
+    assert_eq(https_ok(204), 1)
+    assert_eq(https_ok(299), 1)
+    assert_eq(https_ok(199), 0)
+    assert_eq(https_ok(300), 0)
+    assert_eq(https_ok(404), 0)
+    assert_eq(https_ok(0), 0)
+}
