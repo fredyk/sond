@@ -151,6 +151,15 @@ impl Codegen {
                         let label = self.string_rodata_cur[var_name].clone();
                         self.line(&format!("    leaq {label}(%rip), %rax"));
                     }
+                    // A string that was given a literal, but whose literal HERE depends on the
+                    // path taken (a branch, an earlier iteration): its slot holds code points,
+                    // not bytes, and no single literal is right. The same refusal as passing it.
+                    Expr::Var(var_name)
+                        if self.string_vars.contains(var_name)
+                            && self.string_assignments.contains_key(var_name) =>
+                    {
+                        panic!("{}", self.string_unknown_error(var_name));
+                    }
                     _ => {
                         // Untracked string param or other source: load from the stack slot.
                         // After d58a0ad this is already the bytes pointer.

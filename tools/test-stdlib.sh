@@ -5,7 +5,7 @@
 # Uses the `sond` driver from $SOND (default: the repo's release build, else PATH).
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-SOND="${SOND:-$REPO/compiler/target/release/sond}"
+SOND="${SOND:-$("$REPO/tools/release-dir.sh")/sond}"
 [ -x "$SOND" ] || SOND=sond
 
 fail=0

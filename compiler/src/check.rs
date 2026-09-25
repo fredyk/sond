@@ -163,7 +163,7 @@ pub fn check_struct_mutability(funcs: &[Function], structs: &[StructDef]) -> Res
 /// the moment the author writes `if c { .. }` around the thing being guarded, and the clean
 /// compile then reads as permission. That is worse than having no check at all, and it lands on
 /// the shape every accept loop has: `for { let c = accept(); if c >= 0 { spawn handle(c) } }`.
-fn nested_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
+pub(crate) fn nested_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
     match e {
         Expr::If {
             cond,
@@ -232,7 +232,7 @@ fn nested_blocks_of_block<'a>(b: &'a Block, out: &mut Vec<&'a Block>) {
 
 /// Every block reachable from a statement's own expressions (its `for` body is separate: a caller
 /// that tracks loop nesting needs to treat that one differently).
-fn nested_blocks_of_stmt<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
+pub(crate) fn nested_blocks_of_stmt<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
     match s {
         Stmt::Let { value, .. }
         | Stmt::Expr(value)
@@ -7338,6 +7338,9 @@ pub fn check_no_raw_access_to_declared_buffers(
     fn names_in(e: &Expr, out: &mut Vec<String>) {
         match e {
             Expr::Var(n) => out.push(n.clone()),
+            // `s.utf8` is not `s`: it is the address of the literal's BYTES, a buffer with no
+            // declared length, which is exactly what raw access is for.
+            Expr::Field(_, f) if f == "utf8" => {}
             Expr::Field(b, _) | Expr::Unary(_, b) | Expr::Cast(b, _) => names_in(b, out),
             Expr::Binary(_, a, b) | Expr::Index(a, b) => {
                 names_in(a, out);

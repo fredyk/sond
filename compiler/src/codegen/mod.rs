@@ -2750,6 +2750,17 @@ fn emit_lock(&mut self, name: &str, body: &Block) {
                      * the value at the end of one iteration might differ from what it
                      * was before entering the loop). */
                     let before_loop = self.save_string_state();
+                    // A string assigned anywhere in the body already differs at the TOP of the
+                    // second iteration, so every use inside the loop, even one written before the
+                    // assignment, must treat its text as unknown.
+                    let mut assigned = HashSet::new();
+                    assigned_vars(body, &mut assigned);
+                    if let Some(c) = cond {
+                        assigned_vars_in_expr(c, &mut assigned);
+                    }
+                    for var in &assigned {
+                        self.string_rodata_cur.remove(var);
+                    }
                     let start = self.fresh_label("for");
                     let end = self.fresh_label("endfor");
                     self.scopes.push(Scope::Loop {
@@ -2916,3 +2927,36 @@ mod runtime;
 mod tests;
 #[cfg(test)]
 mod testutil;
+
+/// Every variable a block assigns (`name = ..`), at any depth: nested blocks, loops, branches.
+fn assigned_vars(b: &Block, out: &mut HashSet<String>) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Assign {
+                target: Expr::Var(n),
+                ..
+            } => {
+                out.insert(n.clone());
+            }
+            Stmt::For { body, .. } | Stmt::Lock { body, .. } => assigned_vars(body, out),
+            _ => {}
+        }
+        let mut inner = Vec::new();
+        crate::check::nested_blocks_of_stmt(s, &mut inner);
+        for blk in inner {
+            assigned_vars(blk, out);
+        }
+    }
+    if let Some(t) = &b.tail {
+        assigned_vars_in_expr(t, out);
+    }
+}
+
+/// `assigned_vars` for the blocks an expression contains (an `if`, a `match`).
+fn assigned_vars_in_expr(e: &Expr, out: &mut HashSet<String>) {
+    let mut inner = Vec::new();
+    crate::check::nested_blocks(e, &mut inner);
+    for blk in inner {
+        assigned_vars(blk, out);
+    }
+}

@@ -348,6 +348,7 @@ pub fn dav_handle(afd: i64, req: i64) {
     let __lit13: string = "MKCOL"
     let __lit14: string = "DELETE"
     let __lit15: string = "PUT"
+    let __lit17: string = "GET"
     if method_starts_with(method_buf, __lit11.utf8) {
         server_options(afd)
     } else if method_starts_with(method_buf, __lit12.utf8) {
@@ -361,7 +362,6 @@ pub fn dav_handle(afd: i64, req: i64) {
         let buf[2048]
         let mut remaining = content_length
         for {
-    let __lit17: string = "GET"
             if remaining <= 0 { break }
             let chunk = if remaining > 2048 { 2048 } else { remaining }
             // read_buf(afd, buf, chunk) would drain here

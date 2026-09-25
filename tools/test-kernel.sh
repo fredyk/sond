@@ -19,7 +19,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 KERNEL="$REPO/lib/x86_64/linux/kernel/6.18"
 SONDC="${SONDC:-$HOME/.local/bin/sondc}"
-[ -x "$SONDC" ] || SONDC="$REPO/compiler/target/release/sondc"
+[ -x "$SONDC" ] || SONDC="$("$REPO/tools/release-dir.sh")/sondc"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 

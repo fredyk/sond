@@ -965,3 +965,162 @@ fn walking_a_slice_from_a_call_needs_no_annotation() {
     );
     assert_eq!(printed.trim(), "10", "the four words must add up to 10");
 }
+
+// `s.utf8` hands over the bytes of the literal `s` holds AT THAT POINT, in THAT function. The
+// parser used to remember every `let NAME: string = ".."` of the whole program by NAME alone and
+// splice that text into any later `NAME.utf8`: a `string` parameter called `ruta` received the
+// bytes of a `let ruta` written in another function of another file, whichever came first in the
+// include order. Each case below reads the first byte of `.utf8` as the exit code ('A' = 65,
+// 'B' = 66), so the wrong literal shows up as the wrong number.
+
+#[test]
+fn a_string_parameter_does_not_take_the_bytes_of_a_local_with_its_name_in_another_function() {
+    assert_eq!(
+        compile_and_run(
+            "utf8-param",
+            "fn otra() -> i64 {\n\
+             \x20let ruta: string = \"A\"\n\
+             \x20peek8(ruta.utf8)\n\
+             }\n\
+             fn usa(ruta: string) -> i64 { peek8(ruta.utf8) }\n\
+             fn main() -> i64 { usa(\"B\") }\n",
+        ),
+        66
+    );
+}
+
+#[test]
+fn a_local_non_literal_string_does_not_take_the_bytes_of_a_local_with_its_name_elsewhere() {
+    assert_eq!(
+        compile_and_run(
+            "utf8-copy-other-fn",
+            "fn otra() -> i64 {\n\
+             \x20let ruta: string = \"A\"\n\
+             \x20peek8(ruta.utf8)\n\
+             }\n\
+             fn usa(x: string) -> i64 {\n\
+             \x20let ruta: string = x\n\
+             \x20peek8(ruta.utf8)\n\
+             }\n\
+             fn main() -> i64 { usa(\"B\") }\n",
+        ),
+        66
+    );
+}
+
+#[test]
+fn utf8_after_reassigning_a_string_is_the_new_literal() {
+    assert_eq!(
+        compile_and_run(
+            "utf8-reassign",
+            "fn main() -> i64 {\n\
+             \x20let mut s: string = \"A\"\n\
+             \x20s = \"B\"\n\
+             \x20peek8(s.utf8)\n\
+             }\n",
+        ),
+        66
+    );
+}
+
+#[test]
+fn utf8_of_a_copy_is_the_bytes_of_the_string_it_copies() {
+    assert_eq!(
+        compile_and_run(
+            "utf8-copy",
+            "fn main() -> i64 {\n\
+             \x20let a: string = \"B\"\n\
+             \x20let mut s: string = \"A\"\n\
+             \x20s = a\n\
+             \x20peek8(s.utf8)\n\
+             }\n",
+        ),
+        66
+    );
+}
+
+#[test]
+fn utf8_after_an_inner_shadow_is_the_outer_string() {
+    assert_eq!(
+        compile_and_run(
+            "utf8-shadow",
+            "fn main() -> i64 {\n\
+             \x20let s: string = \"A\"\n\
+             \x20if 1 == 1 { let s: string = \"B\" }\n\
+             \x20peek8(s.utf8)\n\
+             }\n",
+        ),
+        65
+    );
+}
+
+#[test]
+fn utf8_after_an_if_that_assigned_the_same_literal_on_both_paths() {
+    assert_eq!(
+        compile_and_run(
+            "utf8-merge",
+            "fn main() -> i64 {\n\
+             \x20let mut s: string = \"A\"\n\
+             \x20if 1 == 1 { s = \"B\" } else { s = \"B\" }\n\
+             \x20peek8(s.utf8)\n\
+             }\n",
+        ),
+        66
+    );
+}
+
+#[test]
+fn utf8_of_a_string_that_differs_by_path_is_refused() {
+    // After the `if`, `s` is "A" or "B" depending on a runtime value: no single literal's bytes
+    // are right, so handing over either one would be a guess.
+    let dicho = compile_error(
+        "utf8-merge-differs",
+        "fn f(c: i64) -> i64 {\n\
+         \x20let mut s: string = \"A\"\n\
+         \x20if c == 1 { s = \"B\" }\n\
+         \x20peek8(s.utf8)\n\
+         }\n\
+         fn main() -> i64 { f(1) }\n",
+    );
+    assert!(
+        dicho.contains("`s`"),
+        "the error must name the variable: {dicho}"
+    );
+}
+
+#[test]
+fn utf8_inside_a_loop_that_reassigns_later_in_the_body_is_refused() {
+    // The first iteration reads "A", the second "B": the use comes BEFORE the assignment in the
+    // text, so a compiler that only looks at what it has emitted so far would hand over "A" twice.
+    let dicho = compile_error(
+        "utf8-loop",
+        "fn main() -> i64 {\n\
+         \x20let mut s: string = \"A\"\n\
+         \x20let mut r = 0\n\
+         \x20for i in 0..2 {\n\
+         \x20 r = peek8(s.utf8)\n\
+         \x20 s = \"B\"\n\
+         \x20}\n\
+         \x20r\n\
+         }\n",
+    );
+    assert!(dicho.contains("`s`"), "the error must name the variable: {dicho}");
+}
+
+#[test]
+fn a_string_passed_inside_a_loop_that_reassigns_later_in_the_body_is_refused() {
+    let dicho = compile_error(
+        "utf8-loop-arg",
+        "fn b(x: string) -> i64 { peek8(x.utf8) }\n\
+         fn main() -> i64 {\n\
+         \x20let mut s: string = \"A\"\n\
+         \x20let mut r = 0\n\
+         \x20for i in 0..2 {\n\
+         \x20 r = b(s)\n\
+         \x20 s = \"B\"\n\
+         \x20}\n\
+         \x20r\n\
+         }\n",
+    );
+    assert!(dicho.contains("`s`"), "the error must name the variable: {dicho}");
+}

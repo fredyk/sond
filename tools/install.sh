@@ -18,10 +18,13 @@ fi
 PUBFILE="$REPO/tools/publish-file.sh"
 PUBTREE="$REPO/tools/publish-tree.sh"
 
+# Where that build went: cargo decides (a `build.target-dir` or CARGO_TARGET_DIR moves it).
+RELEASE="$("$REPO/tools/release-dir.sh")"
+
 mkdir -p "$HOME/.local/bin"
-"$PUBFILE" "$REPO/compiler/target/release/sondc" "$HOME/.local/bin/sondc" 755
+"$PUBFILE" "$RELEASE/sondc" "$HOME/.local/bin/sondc" 755
 # The `sond` toolchain driver (sond test / build / run) alongside the compiler.
-"$PUBFILE" "$REPO/compiler/target/release/sond" "$HOME/.local/bin/sond" 755
+"$PUBFILE" "$RELEASE/sond" "$HOME/.local/bin/sond" 755
 # Publish the .snd libraries at a stable system path so isolated programs can
 # `include "any/..."` them without seeing the compiler source.
 # COPY (not symlink to the repo) the .snd libraries so an isolated worker can include them
