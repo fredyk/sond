@@ -974,10 +974,14 @@ pub const BUILTIN_NAMES: &[&str] = &[
     "peek32",
     "peek64",
     "peek8",
+    "peekf32",
+    "peekf64",
     "poke16",
     "poke32",
     "poke64",
     "poke8",
+    "pokef32",
+    "pokef64",
     "poweroff",
     "print",
     "print_char",
@@ -3246,8 +3250,8 @@ fn raw_access_bytes(name: &str) -> Option<i64> {
     Some(match name {
         "peek8" | "poke8" => 1,
         "peek16" | "poke16" => 2,
-        "peek32" | "poke32" => 4,
-        "peek64" | "poke64" => 8,
+        "peek32" | "poke32" | "peekf32" | "pokef32" => 4,
+        "peek64" | "poke64" | "peekf64" | "pokef64" => 8,
         _ => return None,
     })
 }
@@ -7332,6 +7336,7 @@ pub fn check_no_raw_access_to_declared_buffers(
         matches!(
             name,
             "peek8" | "peek16" | "peek32" | "peek64" | "poke8" | "poke16" | "poke32" | "poke64"
+                | "peekf32" | "peekf64" | "pokef32" | "pokef64"
         )
     }
     // Every variable named anywhere in an expression.

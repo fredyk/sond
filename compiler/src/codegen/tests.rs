@@ -3218,3 +3218,192 @@ fn lock_continue_releases_the_lock() {
         "200000 lock-with-continue iterations completed and control reached the code after the loop"
     );
 }
+
+// ---- Scalar f64 module globals (read/write must take the SSE path) ----
+//
+// A `f64` global holds IEEE double bits. The store must be `movsd` (not `movq %rax`,
+// which writes the integer register and leaves the double untouched) and a read must
+// load it with `movsd` (not `movq` + `cvtsi2sd`, which reinterprets the bit pattern as
+// an integer). Both halves are silent when wrong: the value comes back as some other
+// double (a read of an untouched slot reads 0.0; a read down the integer path read the
+// stored-at-address constant as 1.0), so nothing crashes and only a value assertion sees it.
+
+/// The repro: `let mut G: f64` with NO initializer, written in one function and read back
+/// in the same program. The read is of the declared f64 type through `global_scalar_types`;
+/// without it the global fell back to i64 and both the store and the read went integer.
+#[test]
+fn a_mutable_f64_global_without_initializer_round_trips() {
+    let src = "let mut G: f64\n\
+               fn set_g() { G = 3.25 }\n\
+               fn main() -> i64 {\n\
+                   set_g()\n\
+                   let n = (G * 1000.0) as i64\n\
+                   if n == 3250 { 42 } else { 0 }\n\
+               }";
+    assert_eq!(compile_and_run(src), 42, "G must read back as 3.25, not 0.0 or 1.0");
+}
+
+/// A global WITH an integer initializer (`let G: f64 = 5`) must read back as the DOUBLE
+/// 5.0, not as the integer 5 reinterpreted. The `.data` word for an `f64` global has to be
+/// the IEEE bit pattern, so the emitter converts the constant before writing it; a `movsd`
+/// read of a word holding the integer 5 would be a denormal, silently not 5.0.
+#[test]
+fn an_f64_global_with_an_integer_initializer_reads_as_a_double() {
+    let src = "let G: f64 = 5\n\
+               fn main() -> i64 {\n\
+                   let n = (G * 1000.0) as i64\n\
+                   if n == 5000 { 42 } else { 0 }\n\
+               }";
+    assert_eq!(compile_and_run(src), 42, "an f64 global initialized to 5 must read as 5.0");
+}
+
+/// A mutable global WITH an integer initializer, then assigned a float in main: both the
+/// initial `.data` slot and the later store must be doubles.
+#[test]
+fn a_mutable_f64_global_with_an_integer_initializer_stores_a_double() {
+    let src = "let mut G: f64 = 0\n\
+               fn main() -> i64 {\n\
+                   G = 2.5\n\
+                   let n = (G * 1000.0) as i64\n\
+                   if n == 2500 { 42 } else { 0 }\n\
+               }";
+    assert_eq!(compile_and_run(src), 42, "G must read back as 2.5, not 0.0 or 1.0");
+}
+
+/// One function writes the global, another reads it. The writer stores `movsd`; the reader
+/// (a different function, a fresh `var_types`) must still resolve the global to f64.
+#[test]
+fn an_f64_global_written_in_one_function_reads_in_another() {
+    let src = "let mut G: f64\n\
+               fn set_g(v: f64) { G = v }\n\
+               fn get_g() -> f64 { G }\n\
+               fn main() -> i64 {\n\
+                   set_g(2.5)\n\
+                   let n = (get_g() * 1000.0) as i64\n\
+                   if n == 2500 { 42 } else { 0 }\n\
+               }";
+    assert_eq!(compile_and_run(src), 42);
+}
+
+/// The global appears on either side of a multiplication (`G * x` and `x * G`): `ty_of`
+/// must report the global as a float so the enclosing product combines to F64 both ways.
+#[test]
+fn an_f64_global_times_a_local_on_either_side() {
+    let src = "let mut G: f64\n\
+               fn set_g() { G = 3.25 }\n\
+               fn main() -> i64 {\n\
+                   set_g()\n\
+                   let x = 2.0\n\
+                   let a = (G * x * 1000.0) as i64\n\
+                   let b = (x * G * 1000.0) as i64\n\
+                   if a == 6500 && b == 6500 { 42 } else { 0 }\n\
+               }";
+    assert_eq!(compile_and_run(src), 42);
+}
+
+/// A module global: a global declared in an INCLUDED module, written by an included
+/// function and read through an included f64-returning function. `include` splices source, so
+/// the global's declared type must survive the module boundary into one `set_globals`.
+#[test]
+fn an_f64_global_survives_the_include_boundary() {
+    let root = crate::scratch::Scratch::new("sond_f64mod");
+    std::fs::write(
+        root.join("mathlib.snd"),
+        "let mut PI: f64\npub fn init() { PI = 3.25 }\npub fn get_pi() -> f64 { PI }",
+    )
+    .unwrap();
+    let entry = root.join("main.snd");
+    std::fs::write(
+        &entry,
+        "include \"mathlib.snd\"\n\
+         fn main() -> i64 {\n\
+             init()\n\
+             let n = (get_pi() * 1000.0) as i64\n\
+             if n == 3250 { 42 } else { 0 }\n\
+         }",
+    )
+    .unwrap();
+    let (src, _) = crate::resolve::resolve_includes_scoped(&entry).unwrap();
+    assert_eq!(compile_and_run(&src), 42);
+}
+
+// ---- SSE memory I/O and SysV float argument passing (ported with the f64-global fix) ----
+
+#[test]
+fn float_memory_roundtrip_f64_and_f32() {
+    // peekf64/pokef64 store and load an IEEE double; peekf32/pokef32 store and load
+    // a single, widening to f64 on read. Without real SSE memory I/O the host cannot
+    // move float samples in or out of a buffer (LADSPA audio ports are `float*`).
+    // a[0] = 2.5 (f64), a[1..] holds a 1.25 single; (2.5 + 1.25) * 4 = 15.
+    let src = "fn main() -> i64 {\n\
+               let a[4]\n\
+               pokef64(a, 2.5)\n\
+               pokef32(a + 8, 1.25)\n\
+               let x = peekf64(a)\n\
+               let y = peekf32(a + 8)\n\
+               let s = (x + y) * 4.0\n\
+               let n = (s + 0.5) as i64\n\
+               if n == 15 { 42 } else { 0 }\n\
+               }";
+    assert_eq!(compile_and_run(src), 42);
+}
+
+#[test]
+fn float_memory_f32_is_four_bytes_wide() {
+    // Two adjacent f32 slots must be independent: writing a[+4] must not disturb a[+0].
+    let src = "fn main() -> i64 {\n\
+               let a[4]\n\
+               pokef32(a, 1.5)\n\
+               pokef32(a + 4, 2.5)\n\
+               let x = peekf32(a)\n\
+               let y = peekf32(a + 4)\n\
+               let n = ((x + y) * 2.0 + 0.5) as i64\n\
+               if n == 8 { 42 } else { 0 }\n\
+               }";
+    assert_eq!(compile_and_run(src), 42);
+}
+
+#[test]
+fn call_passes_multiple_float_args() {
+    // The caller must place each f64 argument in its own SSE register (xmm0, xmm1, ...),
+    // not evaluate them all into xmm0 and lose every one but the last.
+    let src = "fn add3(a: f64, b: f64, c: f64) -> f64 { a + b + c }\n\
+               fn main() -> i64 { let s = add3(1.5, 2.25, 3.0)\n (s * 2.0 + 0.5) as i64 }";
+    assert_eq!(compile_and_run(src), 14); // 6.75*2 + 0.5 = 14.0 -> 14
+}
+
+#[test]
+fn call_passes_mixed_int_and_float_args() {
+    // System V classifies each argument independently: ints fill %rdi.., floats fill %xmm0..
+    // `mix(a:f64, b:i64, c:f64, d:i64)` -> b + d + round(a) + round(c).
+    let src = "fn mix(a: f64, b: i64, c: f64, d: i64) -> i64 {\n\
+               let ra = (a + 0.5) as i64\n let rc = (c + 0.5) as i64\n b + d + ra + rc }\n\
+               fn main() -> i64 { mix(2.0, 10, 3.0, 100) }";
+    assert_eq!(compile_and_run(src), 115);
+}
+
+#[test]
+fn call_reads_trailing_int_after_floats() {
+    // A single integer argument after several floats must arrive in %rdi (the first INTEGER
+    // register), not in a position shifted by the float count.
+    let src = "fn fff(a: f64, b: f64, c: f64, t: i64) -> i64 { t }\n\
+               fn main() -> i64 { fff(1.0, 2.0, 3.0, 42) }";
+    assert_eq!(compile_and_run(src), 42);
+}
+
+#[test]
+fn reads_mutable_f64_global_as_float_not_integer() {
+    // A scalar `f64` global holds IEEE double bits. Reading it in a float expression must
+    // load it with `movsd` (the value IS a double), not `movq` + `cvtsi2sd` (which treats
+    // the raw bit pattern as an integer and converts). The store side must also be `movsd`;
+    // without recording the global's scalar type, `ty_of` defaulted the global to i64.
+    let src = "let mut A: f64\n\
+               let mut B: f64\n\
+               fn setab() { A = 3.5  B = 7.25 }\n\
+               fn main() -> i64 {\n\
+               setab()\n\
+               let ra = (A * 10.0 + 0.5) as i64\n\
+               let rb = (B * 10.0 + 0.5) as i64\n\
+               ra + rb }"; // round(35.0) + round(73.0) = 35 + 73 = 108 (fits an 8-bit exit code)
+    assert_eq!(compile_and_run(src), 108);
+}
