@@ -1075,6 +1075,11 @@ struct Codegen {
     global_names: HashSet<String>,
     /// The scalar globals to emit in `.data`, as `(label, constant value)`.
     global_data: Vec<(String, i64)>,
+    /// The value kind of each SCALAR global (`let NAME: f64`, `let mut X: i64`, ...), so
+    /// `ty_of` resolves a module-level `Var` to its float/int path. A scalar `f64` global
+    /// holds IEEE double bits; without this it defaulted to i64 and reads took the integer
+    /// path (`movq` + `cvtsi2sd`), corrupting the value.
+    global_scalar_types: HashMap<String, Ty>,
     /// String-valued globals: `(global name, interned .rodata label)`. `let MSG = "hi"` stores the
     /// ADDRESS of the NUL-terminated bytes, a valid compile-time constant, so a `Var` load yields a
     /// cstr pointer (what strlen/json/etc. expect).
@@ -1564,7 +1569,23 @@ impl Codegen {
                     g.name
                 )
             });
-            self.global_data.push((g.name.clone(), value));
+            // Record the scalar global's declared value kind so `ty_of` sends its reads
+            // and writes down the correct path (an `f64` global uses `movsd`, not `movq`).
+            let kind = g.ty.as_ref().map_or(Ty::I64, kind_of_type);
+            if let Some(ty) = &g.ty {
+                self.global_scalar_types
+                    .insert(g.name.clone(), kind_of_type(ty));
+            }
+            // An `f64` global's `.data` word must be the IEEE double BIT PATTERN, so the SSE
+            // read (`movsd`) sees the number. A written integer initializer (`let G: f64 = 5`)
+            // is converted here; writing the integer 5 and loading the word as a double would
+            // give a denormal, silently not 5.0.
+            let word = if kind.is_float() {
+                (value as f64).to_bits() as i64
+            } else {
+                value
+            };
+            self.global_data.push((g.name.clone(), word));
         }
     }
 
@@ -2673,7 +2694,20 @@ fn emit_lock(&mut self, name: &str, body: &Block) {
                             self.line(&format!("    movq %rax, {off}(%rbp)"));
                         }
                     } else if self.global_names.contains(name) {
-                        self.line(&format!("    movq %rax, {name}(%rip)"));
+                        // The TARGET's declared kind decides the store, not the value's:
+                        // assigning an integer constant to an `f64` global must write a double,
+                        // or the SSE read (`movsd`) would see the integer's bit pattern as a
+                        // denormal instead of the number.
+                        let target_kind =
+                            self.global_scalar_types.get(name).copied().unwrap_or(kind);
+                        if target_kind.is_float() {
+                            if !kind.is_float() {
+                                self.line("    cvtsi2sdq %rax, %xmm0");
+                            }
+                            self.line(&format!("    movsd %xmm0, {name}(%rip)"));
+                        } else {
+                            self.line(&format!("    movq %rax, {name}(%rip)"));
+                        }
                     } else {
                         panic!("codegen: assignment to unknown variable `{name}`");
                     }
