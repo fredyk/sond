@@ -8,11 +8,14 @@ include "any/crypto/dh/x25519.snd"
 include "x86_64/linux/testing.snd"
 
 let SYS_clock_gettime_x25 = 228
-let CLOCK_MONOTONIC_x25 = 1
+// The budget test measures the CPU time this thread spent, not wall time: on a loaded host the
+// wall clock also counts the time the scheduler gave to other processes, and the budget failed
+// for that reason alone with five busy loops sharing the CPU.
+let CLOCK_THREAD_CPUTIME_ID_x25 = 3
 
 fn x25_now_us() -> i64 {
     let ts[2]
-    syscall(SYS_clock_gettime_x25, CLOCK_MONOTONIC_x25, ts)
+    syscall(SYS_clock_gettime_x25, CLOCK_THREAD_CPUTIME_ID_x25, ts)
     peek64(ts) * 1000000 + peek64(ts + 8) / 1000
 }
 
