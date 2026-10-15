@@ -12,6 +12,13 @@ include "x86_64/linux/testing.snd"
 let mut hc_roots[4]
 let mut hc_out[20000]
 
+// Deadline for every exchange that is expected to COMPLETE. These tests check what comes back,
+// not how fast, so the budget must not be what decides them: a TLS handshake against the forked
+// test server took over 2 s on a loaded host (load average above 40), and a 2000 ms budget turned
+// eight correctness tests into a benchmark that failed with HCLI_ERR_TIMEOUT. The deadline itself
+// is tested on its own, against a silent server and a short budget.
+let HC_EXCHANGE_MS = 30000
+
 // A monotonic millisecond clock, to show that a timeout actually CUT rather than merely being
 // reported.
 let mut hc_ts[2]
@@ -106,7 +113,7 @@ test "https client: a Content-Length response comes back as status plus body" {
     // One caller-supplied header exercises the header block being copied into the request.
     let headers: string = "Content-Type: application/json\r\nAuthorization: Bearer test\r\n"
     let body: string = "{\"a\":1}"
-    let status = https_post_json_ex(ep, headers.utf8, body.utf8, 2000, res)
+    let status = https_post_json_ex(ep, headers.utf8, body.utf8, HC_EXCHANGE_MS, res)
     assert_eq(status, 200)
     assert_eq(res.len, 2)
     let ob: u8[2] = res.out
@@ -133,7 +140,7 @@ test "https client: a non-2xx status carries its body instead of becoming an err
     let res: HttpsResult
     hc_result(res)
     let body: string = "{}"
-    let status = https_post_json_ex(ep, 0, body.utf8, 2000, res)
+    let status = https_post_json_ex(ep, 0, body.utf8, HC_EXCHANGE_MS, res)
     assert_eq(status, 404)
     assert_eq(https_ok(status), 0)
     assert_eq(res.len, 5)
@@ -163,7 +170,7 @@ test "https client: a chunked body split across two records is decoded" {
     let res: HttpsResult
     hc_result(res)
     let body: string = "{}"
-    let status = https_post_json_ex(ep, 0, body.utf8, 2000, res)
+    let status = https_post_json_ex(ep, 0, body.utf8, HC_EXCHANGE_MS, res)
     assert_eq(status, 200)
     assert_eq(res.len, 11)
     let ob: u8[11] = res.out
@@ -218,7 +225,7 @@ test "https client: a response larger than the buffer is an error, not a prefix"
     res.cap = 1                                        // the two-byte body cannot fit
     res.len = 0
     let body: string = "{}"
-    let status = https_post_json_ex(ep, 0, body.utf8, 2000, res)
+    let status = https_post_json_ex(ep, 0, body.utf8, HC_EXCHANGE_MS, res)
     assert_eq(status, HCLI_ERR_TOOBIG)
 
     close_fd(sfd)
@@ -234,7 +241,7 @@ test "https client: a refused connection is a connect error" {
     let res: HttpsResult
     hc_result(res)
     let body: string = "{}"
-    assert_eq(https_post_json_ex(ep, 0, body.utf8, 2000, res), HCLI_ERR_CONNECT)
+    assert_eq(https_post_json_ex(ep, 0, body.utf8, HC_EXCHANGE_MS, res), HCLI_ERR_CONNECT)
 }
 
 test "https client: a certificate that does not name the URL host is a TLS error" {
@@ -251,7 +258,7 @@ test "https client: a certificate that does not name the URL host is a TLS error
     hc_result(res)
     let url: string = "https://127.0.0.1:55725/path"
     let body: string = "{}"
-    let status = https_post_json(url.utf8, 0, body.utf8, 2000, res)
+    let status = https_post_json(url.utf8, 0, body.utf8, HC_EXCHANGE_MS, res)
     assert_eq(status, HCLI_ERR_TLS)
 
     close_fd(sfd)
@@ -318,7 +325,7 @@ test "https client: a request with no body and no headers is allowed" {
     hc_endpoint(ep, 55729, sni.utf8, 9, path.utf8, now.utf8)
     let res: HttpsResult
     hc_result(res)
-    let status = https_post_json_ex(ep, 0, 0, 2000, res)
+    let status = https_post_json_ex(ep, 0, 0, HC_EXCHANGE_MS, res)
     assert_eq(status, 200)
     assert_eq(res.len, 2)
 
@@ -342,7 +349,7 @@ test "https client: an empty response is read as no HTTP message" {
     let res: HttpsResult
     hc_result(res)
     let body: string = "{}"
-    assert_eq(https_post_json_ex(ep, 0, body.utf8, 2000, res), HCLI_ERR_READ)
+    assert_eq(https_post_json_ex(ep, 0, body.utf8, HC_EXCHANGE_MS, res), HCLI_ERR_READ)
 
     close_fd(sfd)
     hc_reap(pid)
@@ -364,7 +371,7 @@ test "https client: headers that never end are not a response" {
     let res: HttpsResult
     hc_result(res)
     let body: string = "{}"
-    assert_eq(https_post_json_ex(ep, 0, body.utf8, 2000, res), HCLI_ERR_READ)
+    assert_eq(https_post_json_ex(ep, 0, body.utf8, HC_EXCHANGE_MS, res), HCLI_ERR_READ)
 
     close_fd(sfd)
     hc_reap(pid)
@@ -386,7 +393,7 @@ test "https client: a body that is not an HTTP status line is not a response" {
     let res: HttpsResult
     hc_result(res)
     let body: string = "{}"
-    assert_eq(https_post_json_ex(ep, 0, body.utf8, 2000, res), HCLI_ERR_READ)
+    assert_eq(https_post_json_ex(ep, 0, body.utf8, HC_EXCHANGE_MS, res), HCLI_ERR_READ)
 
     close_fd(sfd)
     hc_reap(pid)
@@ -407,11 +414,11 @@ test "https client: a URL with no path means / and a CRLF in the path is refused
     let body: string = "{}"
     // No '/' after the authority: the path defaults to "/", and the connection to port 1 is
     // refused before anything is sent.
-    assert_eq(https_post_json("https://127.0.0.1:1".utf8, 0, body.utf8, 2000, res), HCLI_ERR_CONNECT)
+    assert_eq(https_post_json("https://127.0.0.1:1".utf8, 0, body.utf8, HC_EXCHANGE_MS, res), HCLI_ERR_CONNECT)
     // A CR/LF that reached the path would become extra header lines; the request builder
     // refuses it instead of smuggling it through.
     let injected: string = "https://127.0.0.1:1/\r\nX-Evil: yes"
-    assert_eq(https_post_json(injected.utf8, 0, body.utf8, 2000, res), HCLI_ERR_USAGE)
+    assert_eq(https_post_json(injected.utf8, 0, body.utf8, HC_EXCHANGE_MS, res), HCLI_ERR_USAGE)
 }
 
 test "https client: a host that is neither an IPv4 literal nor DNS-encodable is a DNS error" {
