@@ -1,0 +1,148 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+// Ed25519 signature verification (RFC 8032 §5.1.7) over a message of any length.
+//
+// Strict where RFC 8032 is strict: S must be canonical (S < L), the public key must be a
+// canonical encoding (y < p) of a point on the curve, and x = 0 with the sign bit set is
+// rejected. The check is the cofactorless one, [S]B == R + [k]A, done as
+// encode([S]B + [k](-A)) == R, which is what the RFC's test vectors and every mainstream
+// implementation (Go crypto/ed25519, libsodium) agree on for valid signatures.
+
+include "any/crypto/sign/ed25519-sign.snd"
+
+// sqrt(-1) mod p = 2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478c4ee1b274a0ea0b0, 16 limbs LE.
+let SQRTM1[16] = [0xa0b0, 0x4a0e, 0x1b27, 0xc4ee, 0xe478, 0xad2f, 0x1806, 0x2f43, 0xd7a7, 0x3dfb, 0x0099, 0x2b4d, 0xdf0b, 0x4fc1, 0x2480, 0x2b83]
+
+// r = a^((p-5)/8) = a^(2^252 - 3): 250 ones and then 0, 1 from the top bit down.
+fn fe_pow2523(r, a) {
+    let c[16]
+    fe_copy(c, a)
+    let mut i = 250
+    for i >= 0 {
+        fe_sq(c, c)
+        if i != 1 {
+            fe_mul(c, c, a)
+        }
+        i = i - 1
+    }
+    fe_copy(r, c)
+}
+
+// Is the 32-byte little-endian scalar at s strictly below the group order L? A signature
+// whose S is not reduced is malleable (S and S + L verify the same), so it is refused.
+fn scalar_is_canonical(s) -> i64 {
+    let mut i = 31
+    for i >= 0 {
+        let b = peek8(s + i)
+        if b < L[i] {
+            return 1
+        }
+        if b > L[i] {
+            return 0
+        }
+        i = i - 1
+    }
+    0
+}
+
+// Decode the 32-byte point encoding at enc into extended coordinates of its NEGATION
+// (-A is what verification needs). Returns 1 on success, 0 for an encoding that is not
+// canonical or not on the curve.
+fn point_decode_neg(rx, ry, rz, rt, enc) -> i64 {
+    fe_frombytes(ry, enc)
+    // y has to be the canonical encoding: re-encoding it gives the same 255 bits back.
+    let again: u8[32]
+    fe_tobytes(again, ry)
+    // (The sign bit is not part of y.)
+    for i in 0..32 {
+        let e = if i == 31 { peek8(enc + i) & 0x7F } else { peek8(enc + i) }
+        if again[i] != e {
+            return 0
+        }
+    }
+    let sign = peek8(enc + 31) >> 7
+
+    let num[16]; let den[16]; let one[16]
+    let den2[16]; let den4[16]; let den6[16]; let t[16]; let chk[16]
+    fe_one(one)
+    fe_one(rz)
+    fe_sq(num, ry)           // y^2
+    fe_mul(den, num, D)      // d y^2
+    fe_sub(num, num, one)    // u = y^2 - 1
+    fe_add(den, den, one)    // v = d y^2 + 1
+
+    fe_sq(den2, den)
+    fe_sq(den4, den2)
+    fe_mul(den6, den4, den2)
+    fe_mul(t, den6, num)
+    fe_mul(t, t, den)        // u v^7
+    fe_pow2523(t, t)         // (u v^7)^((p-5)/8)
+    fe_mul(t, t, num)
+    fe_mul(t, t, den)
+    fe_mul(t, t, den)
+    fe_mul(rx, t, den)       // x = u v^3 (u v^7)^((p-5)/8)
+
+    fe_sq(chk, rx)
+    fe_mul(chk, chk, den)
+    if fe_eq(chk, num) == 0 {
+        fe_mul(rx, rx, SQRTM1)
+    }
+    fe_sq(chk, rx)
+    fe_mul(chk, chk, den)
+    if fe_eq(chk, num) == 0 {
+        return 0
+    }
+
+    if fe_iszero(rx) == 1 && sign == 1 {
+        return 0
+    }
+    let xf[16]
+    fe_frozen(xf, rx)
+    // Decoding picks the root whose parity is the sign bit; the negation is the other one.
+    if (xf[0] & 1) == sign {
+        fe_neg(rx, rx)
+    }
+    fe_mul(rt, rx, ry)
+    1
+}
+
+// Verify the 64-byte signature sig over msg[0..len) with the 32-byte public key pk.
+// scratch is a buffer of at least len + 64 bytes the caller owns (R || A || M is hashed
+// in one piece). Returns 1 when the signature is valid, 0 otherwise.
+fn ed25519_verify(pk, msg, len, sig, scratch) -> i64 {
+    if len < 0 {
+        return 0
+    }
+    if scalar_is_canonical(sig + 32) == 0 {
+        return 0
+    }
+    let ax[16]; let ay[16]; let az[16]; let at[16]
+    if point_decode_neg(ax, ay, az, at, pk) == 0 {
+        return 0
+    }
+
+    copy_bytes(scratch, sig, 32)
+    copy_bytes(scratch + 32, pk, 32)
+    copy_bytes(scratch + 64, msg, len)
+    let k_hash: u8[64]
+    sha512_hash(scratch, len + 64, k_hash)
+    let k_bytes: u8[32]
+    sc_reduce(k_bytes, k_hash)
+    let k_limbs[16]
+    bytes32_to_limbs16(k_limbs, k_bytes)
+    let s_limbs[16]
+    bytes32_to_limbs16(s_limbs, sig + 32)
+
+    let BZ[16]; fe_one(BZ)
+    let BT[16]; fe_mul(BT, BX, BY)
+    let sx[16]; let sy[16]; let sz[16]; let st[16]
+    point_scalar_mul(sx, sy, sz, st, s_limbs, BX, BY, BZ, BT)
+    let kx[16]; let ky[16]; let kz[16]; let kt[16]
+    point_scalar_mul(kx, ky, kz, kt, k_limbs, ax, ay, az, at)
+    let px[16]; let py[16]; let pz[16]; let pt[16]
+    point_add(px, py, pz, pt, sx, sy, sz, st, kx, ky, kz, kt)
+
+    let check: u8[32]
+    point_encode(check, px, py, pz)
+    bytes_cmp(check, sig, 32)
+}
