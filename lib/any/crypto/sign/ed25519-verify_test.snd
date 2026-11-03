@@ -1,0 +1,196 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/crypto/sign/ed25519-verify.snd.
+//
+// T1, T2, T3 and TABC are RFC 8032 §7.1 TEST 1, TEST 2, TEST 3 and TEST SHA(abc): the public
+// keys and signatures are the RFC's own bytes. TLONG (1023 bytes, byte i = 7*i mod 256, signed
+// with the TEST 1 key) was produced by Go crypto/ed25519 and exercises a message that spans
+// many SHA-512 blocks.
+
+include "any/crypto/sign/ed25519-verify.snd"
+include "x86_64/linux/testing.snd"
+
+let T1_PK[4] = [
+    0xb70ab18201985ad7, 0x3a0764c9d3fe4bd5, 0x2523a6daf372e10e, 0x1a5107f7681a02af
+]
+let T1_SIG[8] = [
+    0x72ac60c3004356e5, 0x8a826e80cce28690, 0x74d9e5b81e7f8784, 0x5501492265e073d8,
+    0xac3ba3901582b85f, 0x6bb4f91c70391ec6, 0x24be5b59f0f55bd2, 0x0b107a8e43415165
+]
+let T2_PK[4] = [
+    0x5a8943e8c317403d, 0xbc7e1b4da70ab792, 0x8c96c42ecf2c989c, 0x0c66f42af155cdc0
+]
+let T2_SIG[8] = [
+    0xb8cad4f0a909a092, 0x4025645f0b820e72, 0x8f3f5016547bb2a2, 0xda69dbeb232276b3,
+    0x6e99153ee4c15a08, 0x8c1df1d013368f45, 0xee2a30b4ae2e7b38, 0x000cbb1216290db0
+]
+let T2_MSG[1] = [
+    0x0000000000000072
+]
+let T3_PK[4] = [
+    0xa3a118628ecd51fc, 0x58f03002d07ea48d, 0xac0333ba13ed1608, 0x258090481591eb5d
+]
+let T3_SIG[8] = [
+    0x0224ecde57d69162, 0xa301be3a9ce62748, 0x443a7484a248e50c, 0xacc35adbd780365e,
+    0x90f2168d539bff18, 0x59c64d9860f767ae, 0x8dd26e71e9157c4a, 0x0ac41eeacebe27c0
+]
+let T3_MSG[1] = [
+    0x00000000000082af
+]
+let TABC_PK[4] = [
+    0x3b565ead932b17ec, 0x345024e1702c93f4, 0x644dfd2eef6754c3, 0xbfe267346819f8eb
+]
+let TABC_SIG[8] = [
+    0x339636e759442adc, 0x009a8377f21b2ba5, 0xcb3ebfefa3091020, 0x89b5266c18a2be69,
+    0xecb390acc91f3509, 0x30e03164c6c7fbfd, 0x7ac18a139c17ca3d, 0x04a7317317f1bed9
+]
+let TABC_MSG[8] = [
+    0xba7a6193a135afdd, 0x314120ae497341cc, 0xa27ea9894efae612, 0x9ad3554be6ee9e0a,
+    0xa8c14f272a999221, 0xbdebfea3233cba36, 0x0ee83c6423444d45, 0x9fa44ca54fc99a2a
+]
+let TLONG_SIG[8] = [
+    0xa04c526511bd929e, 0xb49ea6408542ca77, 0x74efb7b0ed8dbe02, 0x6ba26ad7d6bcae6a,
+    0x3c90a239dd3c3dc5, 0xc9d864ab980153e6, 0x43832f28698e094e, 0x01e8a2a2c0c0de9e
+]
+
+let mut scratch[160]    // 1280 bytes: room for the 1023-byte message plus R || A
+let mut sig[8]          // a signature the test may tamper with
+let mut pk[4]           // a public key the test may tamper with
+
+fn load_sig(src) { copy_bytes(sig, src, 64) }
+fn load_pk(src) { copy_bytes(pk, src, 32) }
+
+fn long_message(buf: u8[n], n: i64) {
+    for i in 0..n { buf[i] = (i * 7) & 0xFF }
+}
+
+test "RFC 8032 TEST 1 (empty message) verifies" {
+    assert_eq(ed25519_verify(T1_PK, scratch, 0, T1_SIG, scratch), 1)
+}
+
+test "RFC 8032 TEST 2 (one byte) verifies" {
+    assert_eq(ed25519_verify(T2_PK, T2_MSG, 1, T2_SIG, scratch), 1)
+}
+
+test "RFC 8032 TEST 3 (two bytes) verifies" {
+    assert_eq(ed25519_verify(T3_PK, T3_MSG, 2, T3_SIG, scratch), 1)
+}
+
+test "RFC 8032 TEST SHA(abc) (64 bytes) verifies" {
+    assert_eq(ed25519_verify(TABC_PK, TABC_MSG, 64, TABC_SIG, scratch), 1)
+}
+
+test "a 1023-byte message spanning many SHA-512 blocks verifies" {
+    let msg: u8[1023]
+    long_message(msg, 1023)
+    assert_eq(ed25519_verify(T1_PK, msg, 1023, TLONG_SIG, scratch), 1)
+}
+
+test "a signature over another message is refused" {
+    assert_eq(ed25519_verify(T2_PK, T3_MSG, 1, T2_SIG, scratch), 0)
+    assert_eq(ed25519_verify(T2_PK, T2_MSG, 0, T2_SIG, scratch), 0)
+}
+
+test "the right signature under another public key is refused" {
+    assert_eq(ed25519_verify(T3_PK, T2_MSG, 1, T2_SIG, scratch), 0)
+}
+
+test "one flipped bit in R is refused" {
+    load_sig(T2_SIG)
+    let v: u8[64] = sig
+    v[3] = v[3] ^ 0x10
+    assert_eq(ed25519_verify(T2_PK, T2_MSG, 1, sig, scratch), 0)
+}
+
+test "one flipped bit in S is refused" {
+    load_sig(T2_SIG)
+    let v: u8[64] = sig
+    v[40] = v[40] ^ 0x01
+    assert_eq(ed25519_verify(T2_PK, T2_MSG, 1, sig, scratch), 0)
+}
+
+test "S + L, the same signature written unreduced, is refused" {
+    // S + L verifies the same equation; RFC 8032 requires S < L to rule that malleability out.
+    load_sig(T1_SIG)
+    let v: u8[64] = sig
+    let mut carry = 0
+    for i in 0..32 {
+        let s = v[32 + i] + L[i] + carry
+        v[32 + i] = s & 0xFF
+        carry = s >> 8
+    }
+    assert_eq(carry, 0)
+    assert_eq(ed25519_verify(T1_PK, scratch, 0, sig, scratch), 0)
+}
+
+test "S equal to L is refused and S = L - 1 is not refused for being too large" {
+    let s: u8[32]
+    for i in 0..32 { s[i] = L[i] }
+    assert_eq(scalar_is_canonical(s), 0)
+    s[0] = L[0] - 1
+    assert_eq(scalar_is_canonical(s), 1)
+    s[31] = 0x11
+    assert_eq(scalar_is_canonical(s), 0)
+}
+
+test "a public key whose y is not reduced (y = p) is refused" {
+    let v: u8[32] = pk
+    v[0] = 0xED
+    for i in 1..31 { v[i] = 0xFF }
+    v[31] = 0x7F
+    assert_eq(ed25519_verify(pk, T2_MSG, 1, T2_SIG, scratch), 0)
+}
+
+test "a public key that is not a point on the curve is refused" {
+    let v: u8[32] = pk
+    for i in 0..32 { v[i] = 0 }
+    v[0] = 2     // y = 2: (y^2 - 1) / (d y^2 + 1) has no square root
+    assert_eq(ed25519_verify(pk, T2_MSG, 1, T2_SIG, scratch), 0)
+}
+
+test "x = 0 with the sign bit set is not an encoding" {
+    // y = 1 is the identity (x = 0); its only encoding has the sign bit clear.
+    let v: u8[32] = pk
+    for i in 0..32 { v[i] = 0 }
+    v[0] = 1
+    v[31] = 0x80
+    let x[16]; let y[16]; let z[16]; let t[16]
+    assert_eq(point_decode_neg(x, y, z, t, pk), 0)
+    v[31] = 0
+    assert_eq(point_decode_neg(x, y, z, t, pk), 1)
+}
+
+test "the negated public key is refused: the sign bit is part of the key" {
+    load_pk(T2_PK)
+    let v: u8[32] = pk
+    v[31] = v[31] ^ 0x80
+    assert_eq(ed25519_verify(pk, T2_MSG, 1, T2_SIG, scratch), 0)
+}
+
+test "a negative length is refused before anything is read" {
+    assert_eq(ed25519_verify(T2_PK, T2_MSG, -1, T2_SIG, scratch), 0)
+}
+
+test "a signature made by ed25519_sign_h verifies, and only over its own message" {
+    let sk: u8[32]
+    let h: u8[32]
+    for i in 0..32 { sk[i] = i + 1 }
+    for i in 0..32 { h[i] = 255 - i }
+    let mine: u8[64]
+    ed25519_sign_h(sk, h, mine)
+    // The public key is [s]B for the clamped hash of sk, computed exactly as the signer does.
+    let hash: u8[64]
+    sha512_hash(sk, 32, hash)
+    let s_limbs[16]
+    get_clamped_scalar(hash, s_limbs)
+    let BZ[16]; fe_one(BZ)
+    let BT[16]; fe_mul(BT, BX, BY)
+    let ax[16]; let ay[16]; let az[16]; let at[16]
+    point_scalar_mul(ax, ay, az, at, s_limbs, BX, BY, BZ, BT)
+    let a: u8[32]
+    point_encode(a, ax, ay, az)
+    assert_eq(ed25519_verify(a, h, 32, mine, scratch), 1)
+    h[0] = h[0] ^ 1
+    assert_eq(ed25519_verify(a, h, 32, mine, scratch), 0)
+}

@@ -24,7 +24,7 @@ fn main() -> i64 { square(6) }
 
 Libraries in `lib/` (include by relative path):
 - crypto `any/crypto/`: cipher/chacha20, aead/chacha20poly1305, hash/{sha256,sha512},
-  mac/poly1305, dh/x25519, sign/ed25519-sign, kdf/hkdf-sha256, noise/noise-ik, ssh-kex.
+  mac/poly1305, dh/x25519, sign/ed25519-sign, sign/ed25519-verify, kdf/hkdf-sha256, noise/noise-ik, ssh-kex.
 - data `x86_64/linux/`: heap (arena alloc), bytes, vec, map, lexer, calc; testing (see below).
 - os/net `x86_64/linux/`: io, proc, net, poll, http, capture; `x86_64/net/{tcp-server,dhcp}`,
   drivers/net/virtio-net; `any/strings.snd` (strlen/memcpy/streq/itoa/atoi).
