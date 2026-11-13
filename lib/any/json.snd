@@ -48,6 +48,7 @@ include "x86_64/linux/heap.snd"
 include "x86_64/linux/vec.snd"
 include "x86_64/linux/bytes.snd"
 include "any/bufwriter.snd"
+include "any/span.snd"
 
 let JSON_NULL = 0
 let JSON_BOOL = 1
@@ -375,20 +376,6 @@ pub fn json_write_str_ascii(w: *BufWriter, p: i64, n: i64) {
     bw_byte(w, 34)
 }
 
-// Bytewise order of two byte strings: -1, 0 or 1 (a proper prefix sorts first).
-priv fn json_key_cmp(a: i64, an: i64, b: i64, bn: i64) -> i64 {
-    let n = if an < bn { an } else { bn }
-    for i in 0..n {
-        let x = peek8(a + i)
-        let y = peek8(b + i)
-        if x < y { return 0 - 1 }
-        if x > y { return 1 }
-    }
-    if an < bn { return 0 - 1 }
-    if an > bn { return 1 }
-    0
-}
-
 // The entries of an object in the order they are written: as inserted, or (canonical) sorted
 // by key with an insertion sort into a fresh array. Returns that array, or 0 for a repeated key.
 priv fn json_entry_order(entries: i64, m: i64, canonical: i64) -> i64 {
@@ -399,7 +386,7 @@ priv fn json_entry_order(entries: i64, m: i64, canonical: i64) -> i64 {
         if canonical == 1 {
             for k > 0 {
                 let prev = peek64(order + (k - 1) * 8)
-                let c = json_key_cmp(prev[0], prev[1], e[0], e[1])
+                let c = span_cmp(prev[0], prev[1], e[0], e[1])
                 if c == 0 { return 0 }
                 if c < 0 { break }
                 poke64(order + k * 8, prev)
