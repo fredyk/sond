@@ -16,6 +16,8 @@ let BIG_PATH: string    = "__io_test_big.txt"
 let EMPTY_PATH: string  = "__io_test_empty.txt"
 let ABSENT_PATH: string = "__io_test_definitely_absent_4b1c.txt"
 let DOT_PATH: string    = "."
+// fcntl(2): set a pipe's buffer capacity, returning the size actually granted.
+let F_SETPIPE_SZ = 1031
 let CONTENT: string     = "hola\nmundo\n"
 
 let mut buf[64]
@@ -129,8 +131,17 @@ test "a stalled output gives up instead of hanging forever" {
     let s1r = peek32(s1)
     let s1w = peek32(s1 + 4)
     let s3w = peek32(s3 + 4)
+    // A pipe's capacity is NOT a constant. Once the user is over `fs.pipe-user-pages-soft`
+    // the kernel hands out smaller pipes -- measured here, the twelfth live pipe of this
+    // user already came back at 8 KiB -- and writing a fixed 64 KiB into one of those blocks
+    // forever. That is how the test that exists to prove nothing hangs became the hang, in
+    // the full tree run and never on its own. So: ask for a size, and fill exactly what the
+    // kernel says it gave.
+    let cap = syscall(SYS_fcntl, s3w, F_SETPIPE_SZ, 4096)
+    assert(cap > 0)
+    assert(cap <= 65536)
     let big[8192]
-    write_buf(s3w, big, 65536) // 64 KiB: the pipe's whole capacity, and nobody is reading
+    write_buf(s3w, big, cap) // the pipe's whole capacity, and nobody is reading
     write_buf(s1w, CONTENT.utf8, 11)
     io_splice_idle_ms = 100
     assert(splice_pump(s1r, s3w, s2, 11) < 0)
