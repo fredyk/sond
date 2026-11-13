@@ -1,0 +1,645 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/json_strict.snd: a strict JSON parser (RFC 8259) that allocates nothing, and a
+// canonical writer.
+//
+// The caller hands over the document and two work buffers: a word buffer t for the node tape
+// and a byte buffer d for the decoded strings. Nothing is read or written outside them (every
+// access goes through a bounds-checked accessor), so the parser needs no heap arena and can
+// run inside a shared object called from another runtime.
+//
+// Unlike lib/any/json.snd (heap nodes, lenient), it is strict, so that one document has one
+// meaning and one canonical spelling, which is what a hash over a document needs:
+//   - numbers are plain integers only (no fraction, no exponent, no leading zero, at most 18
+//     digits);
+//   - a key twice in one object is refused (two readers could keep different values);
+//   - a raw control byte inside a string is refused; escapes, \uXXXX and surrogate pairs
+//     included, are decoded to UTF-8;
+//   - nesting deeper than MAX_DEPTH is refused; trailing data is refused.
+//
+// The canonical form: objects with their keys sorted by their UTF-8 bytes, no whitespace,
+// integers in decimal, strings with only '"', '\' and the control bytes escaped (\b \t \n
+// \f \r short, the rest \u00xx), everything else as its raw UTF-8 bytes. A key marked with
+// j_omit is left out of the canonical form (with its value), and stays readable otherwise.
+//
+// API: j_init(j, src, n, t, tcap, d, dcap); j_parse(j) -> root node or a J_ERR_* code.
+// j_type/j_int/j_count/j_first/j_next/j_value/j_off/j_len; j_get(j, obj, "key") -> value
+// node or -1; j_str_is; j_key_at; j_key_cmp; j_omit; j_canon(j, out, node) into a JOut.
+include "any/strings.snd"
+
+// The bounded writer the canonical form is written through: it never writes past cap and
+// records that it had to (bad = 1), so a short buffer is an error and never a cut payload.
+struct JOut { buf: i64, cap: i64, len: i64, bad: i64 }
+
+// The byte at p[i], or -1 when i is outside 0..n.
+fn js_byte_at(p: u8[n], n: i64, i: i64) -> i64 {
+    if i >= 0 && i < n {
+        return p[i]
+    }
+    -1
+}
+
+fn js_put8(buf: u8[cap], cap: i64, i: i64, v: i64) -> i64 {
+    if i >= 0 && i < cap {
+        buf[i] = v
+        return 1
+    }
+    0
+}
+
+pub fn jo_byte(w: *JOut, c: i64) {
+    if js_put8(w.buf, w.cap, w.len, c) == 1 {
+        w.len = w.len + 1
+    } else {
+        w.bad = 1
+    }
+}
+
+pub fn jo_lit(w: *JOut, t: string) {
+    let s = t.utf8
+    for i in 0..strlen(s) {
+        jo_byte(w, peek8(s + i))
+    }
+}
+
+// v in decimal; v is within the 18 digits the parser accepts.
+pub fn jo_dec(w: *JOut, v: i64) {
+    if v < 0 {
+        jo_byte(w, '-')
+        jo_dec(w, 0 - v)
+        return 0
+    }
+    if v >= 10 {
+        jo_dec(w, v / 10)
+    }
+    jo_byte(w, '0' + (v % 10))
+}
+
+fn js_hex_digit(d: i64) -> i64 {
+    if d < 10 { '0' + d } else { 'a' + d - 10 }
+}
+
+// Node types.
+let JT_NULL = 1
+let JT_BOOL = 2
+let JT_INT = 3
+let JT_STR = 4
+let JT_ARR = 5
+let JT_OBJ = 6
+let JT_KEY = 7
+
+// A node is NODE_WORDS words of t: type, a, b, next, value, flags.
+//   BOOL/INT: a = value.  STR/KEY: a = offset in d, b = length.  KEY: value = its value node.
+//   ARR/OBJ: a = first child (an element, or a KEY), b = number of children.
+//   next = the following sibling, or -1.  KEY: flags = JF_OMIT when j_omit marked it.
+let NODE_WORDS = 6
+let JF_OMIT = 1
+let MAX_DEPTH = 32
+
+let J_ERR_SYNTAX = -1
+let J_ERR_DEPTH = -2
+let J_ERR_NUMBER = -3
+let J_ERR_DUPKEY = -4
+let J_ERR_CAP = -5
+let J_ERR_TRAILING = -6
+let J_ERR_ESCAPE = -7
+let J_ERR_CONTROL = -8
+
+struct JDoc {
+    src: i64, n: i64, pos: i64,
+    t: i64, tcap: i64, nt: i64,
+    d: i64, dcap: i64, nd: i64,
+    depth: i64, err: i64,
+    sp: i64,
+}
+
+fn js_word_at(t: i64[cap], cap: i64, i: i64) -> i64 {
+    if i >= 0 && i < cap {
+        return t[i]
+    }
+    -1
+}
+
+fn js_put_word(t: i64[cap], cap: i64, i: i64, v: i64) -> i64 {
+    if i >= 0 && i < cap {
+        t[i] = v
+        return 1
+    }
+    0
+}
+
+fn js_lit_len(s: string) -> i64 { strlen(s.utf8) }
+
+pub fn j_init(j: *JDoc, src: i64, n: i64, t: i64, tcap: i64, d: i64, dcap: i64) {
+    j.src = src
+    j.n = n
+    j.pos = 0
+    j.t = t
+    j.tcap = tcap
+    j.nt = 0
+    j.d = d
+    j.dcap = dcap
+    j.nd = 0
+    j.depth = 0
+    j.err = 0
+    j.sp = 0
+}
+
+fn js_fail(j: *JDoc, code: i64) -> i64 {
+    if j.err == 0 {
+        j.err = code
+    }
+    -1
+}
+
+fn js_peekc(j: *JDoc) -> i64 { js_byte_at(j.src, j.n, j.pos) }
+
+fn js_skip_ws(j: *JDoc) {
+    for {
+        let c = js_peekc(j)
+        if c == ' ' || c == 9 || c == 10 || c == 13 {
+            j.pos = j.pos + 1
+        } else {
+            break
+        }
+    }
+}
+
+fn js_node_word(j: *JDoc, i: i64, k: i64) -> i64 {
+    if i < 0 { return -1 }
+    js_word_at(j.t, j.tcap, i * NODE_WORDS + k)
+}
+
+fn js_set_node_word(j: *JDoc, i: i64, k: i64, v: i64) { js_put_word(j.t, j.tcap, i * NODE_WORDS + k, v) }
+
+fn js_new_node(j: *JDoc, typ: i64, a: i64, b: i64) -> i64 {
+    if (j.nt + 1) * NODE_WORDS > j.tcap {
+        return js_fail(j, J_ERR_CAP)
+    }
+    let i = j.nt
+    j.nt = j.nt + 1
+    js_set_node_word(j, i, 0, typ)
+    js_set_node_word(j, i, 1, a)
+    js_set_node_word(j, i, 2, b)
+    js_set_node_word(j, i, 3, -1)
+    js_set_node_word(j, i, 4, -1)
+    js_set_node_word(j, i, 5, 0)
+    i
+}
+
+fn js_put_d(j: *JDoc, c: i64) -> i64 {
+    if js_put8(j.d, j.dcap, j.nd, c) == 0 {
+        return js_fail(j, J_ERR_CAP)
+    }
+    j.nd = j.nd + 1
+    0
+}
+
+fn js_put_utf8(j: *JDoc, cp: i64) {
+    if cp < 0x80 {
+        js_put_d(j, cp)
+    } else if cp < 0x800 {
+        js_put_d(j, 0xC0 | (cp >> 6))
+        js_put_d(j, 0x80 | (cp & 0x3F))
+    } else if cp < 0x10000 {
+        js_put_d(j, 0xE0 | (cp >> 12))
+        js_put_d(j, 0x80 | ((cp >> 6) & 0x3F))
+        js_put_d(j, 0x80 | (cp & 0x3F))
+    } else {
+        js_put_d(j, 0xF0 | (cp >> 18))
+        js_put_d(j, 0x80 | ((cp >> 12) & 0x3F))
+        js_put_d(j, 0x80 | ((cp >> 6) & 0x3F))
+        js_put_d(j, 0x80 | (cp & 0x3F))
+    }
+}
+
+fn js_hex4_digit(c: i64) -> i64 {
+    if c >= '0' && c <= '9' { return c - '0' }
+    if c >= 'a' && c <= 'f' { return c - 'a' + 10 }
+    if c >= 'A' && c <= 'F' { return c - 'A' + 10 }
+    -1
+}
+
+// The 4 hex digits after "\u" (cursor on the 'u'); moves past them. -1 when malformed.
+fn js_read_u4(j: *JDoc) -> i64 {
+    if js_peekc(j) != 'u' { return -1 }
+    let mut v = 0
+    for k in 1..5 {
+        let h = js_hex4_digit(js_byte_at(j.src, j.n, j.pos + k))
+        if h < 0 { return -1 }
+        v = v * 16 + h
+    }
+    j.pos = j.pos + 5
+    v
+}
+
+fn js_short_escape(e: i64) -> i64 {
+    if e == '"' || e == '\\' || e == '/' { return e }
+    if e == 'b' { return 8 }
+    if e == 'f' { return 12 }
+    if e == 'n' { return 10 }
+    if e == 'r' { return 13 }
+    if e == 't' { return 9 }
+    -1
+}
+
+// One js_escape (cursor after the backslash).
+fn js_escape(j: *JDoc) -> i64 {
+    let e = js_peekc(j)
+    let s = js_short_escape(e)
+    if s >= 0 {
+        j.pos = j.pos + 1
+        js_put_d(j, s)
+        return 0
+    }
+    let cp = js_read_u4(j)
+    if cp < 0 { return js_fail(j, J_ERR_ESCAPE) }
+    if cp >= 0xDC00 && cp <= 0xDFFF { return js_fail(j, J_ERR_ESCAPE) }
+    if cp >= 0xD800 && cp <= 0xDBFF {
+        if js_peekc(j) != '\\' { return js_fail(j, J_ERR_ESCAPE) }
+        j.pos = j.pos + 1
+        let lo = js_read_u4(j)
+        if lo < 0xDC00 || lo > 0xDFFF { return js_fail(j, J_ERR_ESCAPE) }
+        js_put_utf8(j, 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00))
+        return 0
+    }
+    js_put_utf8(j, cp)
+    0
+}
+
+// A string (cursor on the opening quote) as a node of type typ.
+fn js_parse_string(j: *JDoc, typ: i64) -> i64 {
+    j.pos = j.pos + 1
+    let start = j.nd
+    for {
+        let c = js_peekc(j)
+        if c < 0 { return js_fail(j, J_ERR_SYNTAX) }
+        j.pos = j.pos + 1
+        if c == '"' { break }
+        if c < 0x20 { return js_fail(j, J_ERR_CONTROL) }
+        if c == '\\' {
+            if js_escape(j) < 0 { return -1 }
+        } else {
+            if js_put_d(j, c) < 0 { return -1 }
+        }
+        if j.err != 0 { return -1 }
+    }
+    if j.err != 0 { return -1 }
+    js_new_node(j, typ, start, j.nd - start)
+}
+
+fn js_parse_number(j: *JDoc) -> i64 {
+    let mut neg = 0
+    if js_peekc(j) == '-' {
+        neg = 1
+        j.pos = j.pos + 1
+    }
+    let first = js_peekc(j)
+    if first < '0' || first > '9' { return js_fail(j, J_ERR_NUMBER) }
+    let mut v = 0
+    let mut digits = 0
+    for {
+        let c = js_peekc(j)
+        if c < '0' || c > '9' { break }
+        v = v * 10 + (c - '0')
+        digits = digits + 1
+        j.pos = j.pos + 1
+        if digits > 18 { return js_fail(j, J_ERR_NUMBER) }
+    }
+    if first == '0' && digits > 1 { return js_fail(j, J_ERR_NUMBER) }
+    let c = js_peekc(j)
+    if c == '.' || c == 'e' || c == 'E' { return js_fail(j, J_ERR_NUMBER) }
+    if neg == 1 { v = 0 - v }
+    js_new_node(j, JT_INT, v, 0)
+}
+
+fn js_match_word(j: *JDoc, s: string) -> i64 {
+    let p = s.utf8
+    let n = js_lit_len(s)
+    for i in 0..n {
+        if js_byte_at(j.src, j.n, j.pos + i) != peek8(p + i) { return 0 }
+    }
+    j.pos = j.pos + n
+    1
+}
+
+fn js_parse_word(j: *JDoc, c: i64) -> i64 {
+    if c == 't' && js_match_word(j, "true") == 1 { return js_new_node(j, JT_BOOL, 1, 0) }
+    if c == 'f' && js_match_word(j, "false") == 1 { return js_new_node(j, JT_BOOL, 0, 0) }
+    if c == 'n' && js_match_word(j, "null") == 1 { return js_new_node(j, JT_NULL, 0, 0) }
+    js_fail(j, J_ERR_SYNTAX)
+}
+
+fn js_link_child(j: *JDoc, parent: i64, last: i64, child: i64) {
+    if last < 0 {
+        js_set_node_word(j, parent, 1, child)
+    } else {
+        js_set_node_word(j, last, 3, child)
+    }
+    js_set_node_word(j, parent, 2, js_node_word(j, parent, 2) + 1)
+}
+
+fn js_parse_array(j: *JDoc) -> i64 {
+    j.pos = j.pos + 1
+    let arr = js_new_node(j, JT_ARR, -1, 0)
+    if arr < 0 { return -1 }
+    js_skip_ws(j)
+    if js_peekc(j) == ']' {
+        j.pos = j.pos + 1
+        return arr
+    }
+    let mut last = -1
+    for {
+        let v = js_parse_value(j)
+        if v < 0 { return -1 }
+        js_link_child(j, arr, last, v)
+        last = v
+        js_skip_ws(j)
+        let c = js_peekc(j)
+        j.pos = j.pos + 1
+        if c == ']' { break }
+        if c != ',' { return js_fail(j, J_ERR_SYNTAX) }
+    }
+    arr
+}
+
+// 1 when the n bytes at offset a of d equal those at offset b.
+fn js_d_eq(j: *JDoc, a: i64, an: i64, b: i64, bn: i64) -> i64 {
+    if an != bn { return 0 }
+    for i in 0..an {
+        if js_byte_at(j.d, j.dcap, a + i) != js_byte_at(j.d, j.dcap, b + i) { return 0 }
+    }
+    1
+}
+
+fn js_key_seen(j: *JDoc, obj: i64, key: i64) -> i64 {
+    let mut k = js_node_word(j, obj, 1)
+    for k >= 0 {
+        if k != key && js_d_eq(j, js_node_word(j, k, 1), js_node_word(j, k, 2), js_node_word(j, key, 1), js_node_word(j, key, 2)) == 1 {
+            return 1
+        }
+        k = js_node_word(j, k, 3)
+    }
+    0
+}
+
+fn js_parse_object(j: *JDoc) -> i64 {
+    j.pos = j.pos + 1
+    let obj = js_new_node(j, JT_OBJ, -1, 0)
+    if obj < 0 { return -1 }
+    js_skip_ws(j)
+    if js_peekc(j) == '}' {
+        j.pos = j.pos + 1
+        return obj
+    }
+    let mut last = -1
+    for {
+        js_skip_ws(j)
+        if js_peekc(j) != '"' { return js_fail(j, J_ERR_SYNTAX) }
+        let key = js_parse_string(j, JT_KEY)
+        if key < 0 { return -1 }
+        js_skip_ws(j)
+        if js_peekc(j) != ':' { return js_fail(j, J_ERR_SYNTAX) }
+        j.pos = j.pos + 1
+        let v = js_parse_value(j)
+        if v < 0 { return -1 }
+        js_set_node_word(j, key, 4, v)
+        js_link_child(j, obj, last, key)
+        last = key
+        if js_key_seen(j, obj, key) == 1 { return js_fail(j, J_ERR_DUPKEY) }
+        js_skip_ws(j)
+        let c = js_peekc(j)
+        j.pos = j.pos + 1
+        if c == '}' { break }
+        if c != ',' { return js_fail(j, J_ERR_SYNTAX) }
+    }
+    obj
+}
+
+fn js_parse_value(j: *JDoc) -> i64 {
+    js_skip_ws(j)
+    let c = js_peekc(j)
+    if c == '{' || c == '[' {
+        j.depth = j.depth + 1
+        if j.depth > MAX_DEPTH { return js_fail(j, J_ERR_DEPTH) }
+        let r = if c == '{' { js_parse_object(j) } else { js_parse_array(j) }
+        j.depth = j.depth - 1
+        return r
+    }
+    if c == '"' { return js_parse_string(j, JT_STR) }
+    if c == '-' || (c >= '0' && c <= '9') { return js_parse_number(j) }
+    js_parse_word(j, c)
+}
+
+// Parse the whole document: the root node, or a negative code.
+pub fn j_parse(j: *JDoc) -> i64 {
+    let root = js_parse_value(j)
+    if j.err != 0 { return j.err }
+    js_skip_ws(j)
+    if j.pos != j.n { return J_ERR_TRAILING }
+    j.sp = j.nt * NODE_WORDS
+    root
+}
+
+// Accessors; a node index < 0 (a missing key) answers -1 everywhere.
+pub fn j_type(j: *JDoc, i: i64) -> i64 { js_node_word(j, i, 0) }
+pub fn j_int(j: *JDoc, i: i64) -> i64 { js_node_word(j, i, 1) }
+pub fn j_count(j: *JDoc, i: i64) -> i64 { js_node_word(j, i, 2) }
+pub fn j_first(j: *JDoc, i: i64) -> i64 { js_node_word(j, i, 1) }
+pub fn j_next(j: *JDoc, i: i64) -> i64 { js_node_word(j, i, 3) }
+pub fn j_value(j: *JDoc, key: i64) -> i64 { js_node_word(j, key, 4) }
+pub fn j_off(j: *JDoc, i: i64) -> i64 { js_node_word(j, i, 1) }
+pub fn j_len(j: *JDoc, i: i64) -> i64 { js_node_word(j, i, 2) }
+
+fn j_str_is_bytes(j: *JDoc, i: i64, p: i64, n: i64) -> i64 {
+    if j_len(j, i) != n { return 0 }
+    let off = j_off(j, i)
+    for k in 0..n {
+        if js_byte_at(j.d, j.dcap, off + k) != js_byte_at(p, n, k) { return 0 }
+    }
+    1
+}
+
+// 1 when string (or key) node i holds exactly the literal s.
+pub fn j_str_is(j: *JDoc, i: i64, s: string) -> i64 {
+    let t = j_type(j, i)
+    if t != JT_STR && t != JT_KEY { return 0 }
+    j_str_is_bytes(j, i, s.utf8, js_lit_len(s))
+}
+
+fn js_get_key(j: *JDoc, obj: i64, s: string) -> i64 {
+    if j_type(j, obj) != JT_OBJ { return -1 }
+    let mut k = j_first(j, obj)
+    for k >= 0 {
+        if j_str_is(j, k, s) == 1 { return k }
+        k = j_next(j, k)
+    }
+    -1
+}
+
+// The value of key s in object obj, or -1.
+pub fn j_get(j: *JDoc, obj: i64, s: string) -> i64 {
+    let k = js_get_key(j, obj, s)
+    if k < 0 { return -1 }
+    j_value(j, k)
+}
+
+// The value of the key whose bytes are those of string node name, or -1.
+fn j_get_node(j: *JDoc, obj: i64, name: i64) -> i64 {
+    if j_type(j, obj) != JT_OBJ { return -1 }
+    let mut k = j_first(j, obj)
+    for k >= 0 {
+        if js_d_eq(j, j_off(j, k), j_len(j, k), j_off(j, name), j_len(j, name)) == 1 { return j_value(j, k) }
+        k = j_next(j, k)
+    }
+    -1
+}
+
+// The idx-th key of object obj in document order, or -1.
+pub fn j_key_at(j: *JDoc, obj: i64, idx: i64) -> i64 {
+    let mut k = j_first(j, obj)
+    let mut n = 0
+    for k >= 0 {
+        if n == idx { return k }
+        n = n + 1
+        k = j_next(j, k)
+    }
+    -1
+}
+
+// -1, 0 or 1 comparing two key (or string) nodes by their bytes.
+fn j_key_cmp(j: *JDoc, a: i64, b: i64) -> i64 {
+    let an = j_len(j, a)
+    let bn = j_len(j, b)
+    let ao = j_off(j, a)
+    let bo = j_off(j, b)
+    let n = if an < bn { an } else { bn }
+    for i in 0..n {
+        let x = js_byte_at(j.d, j.dcap, ao + i)
+        let y = js_byte_at(j.d, j.dcap, bo + i)
+        if x < y { return -1 }
+        if x > y { return 1 }
+    }
+    if an < bn { return -1 }
+    if an > bn { return 1 }
+    0
+}
+
+fn js_w_canon_byte(w: *JOut, c: i64) {
+    if c == '"' || c == '\\' {
+        jo_byte(w, '\\')
+        jo_byte(w, c)
+    } else if c == 8 {
+        jo_lit(w, "\\b")
+    } else if c == 9 {
+        jo_lit(w, "\\t")
+    } else if c == 10 {
+        jo_lit(w, "\\n")
+    } else if c == 12 {
+        jo_lit(w, "\\f")
+    } else if c == 13 {
+        jo_lit(w, "\\r")
+    } else if c < 0x20 {
+        jo_lit(w, "\\u00")
+        jo_byte(w, js_hex_digit((c >> 4) & 15))
+        jo_byte(w, js_hex_digit(c & 15))
+    } else {
+        jo_byte(w, c)
+    }
+}
+
+// A string node (or key) in canonical form.
+fn js_w_canon_str(w: *JOut, j: *JDoc, i: i64) {
+    jo_byte(w, '"')
+    let off = j_off(j, i)
+    for k in 0..j_len(j, i) {
+        js_w_canon_byte(w, js_byte_at(j.d, j.dcap, off + k))
+    }
+    jo_byte(w, '"')
+}
+
+// Marks key name of object obj: the canonical form leaves it (and its value) out. Returns 1
+// when obj has that key, 0 otherwise. j_get still finds it.
+pub fn j_omit(j: *JDoc, obj: i64, name: string) -> i64 {
+    let k = js_get_key(j, obj, name)
+    if k < 0 { return 0 }
+    js_set_node_word(j, k, 5, JF_OMIT)
+    1
+}
+
+fn js_w_canon_array(w: *JOut, j: *JDoc, i: i64) {
+    jo_byte(w, '[')
+    let mut c = j_first(j, i)
+    let mut first = 1
+    for c >= 0 {
+        if first == 0 { jo_byte(w, ',') }
+        first = 0
+        j_canon(j, w, c)
+        c = j_next(j, c)
+    }
+    jo_byte(w, ']')
+}
+
+// The canonical form of an object. Its keys are sorted in the free tail of the tape (from
+// j.sp); a nested object sorts above them.
+fn js_w_canon_obj(w: *JOut, j: *JDoc, obj: i64) {
+    let m = j_count(j, obj)
+    let base = j.sp
+    if base + m > j.tcap {
+        w.bad = 1
+        return 0
+    }
+    j.sp = j.sp + m
+    let mut k = j_first(j, obj)
+    let mut n = 0
+    for k >= 0 {
+        js_put_word(j.t, j.tcap, base + n, k)
+        n = n + 1
+        k = j_next(j, k)
+    }
+    // insertion sort
+    for i in 1..n {
+        let cur = js_word_at(j.t, j.tcap, base + i)
+        let mut p = i - 1
+        for p >= 0 && j_key_cmp(j, js_word_at(j.t, j.tcap, base + p), cur) > 0 {
+            js_put_word(j.t, j.tcap, base + p + 1, js_word_at(j.t, j.tcap, base + p))
+            p = p - 1
+        }
+        js_put_word(j.t, j.tcap, base + p + 1, cur)
+    }
+    jo_byte(w, '{')
+    let mut first = 1
+    for i in 0..n {
+        let key = js_word_at(j.t, j.tcap, base + i)
+        if js_node_word(j, key, 5) != JF_OMIT {
+            if first == 0 { jo_byte(w, ',') }
+            first = 0
+            js_w_canon_str(w, j, key)
+            jo_byte(w, ':')
+            j_canon(j, w, j_value(j, key))
+        }
+    }
+    jo_byte(w, '}')
+    j.sp = base
+}
+
+// The canonical form of node i (and everything under it) into w.
+pub fn j_canon(j: *JDoc, w: *JOut, i: i64) {
+    let t = j_type(j, i)
+    if t == JT_NULL {
+        jo_lit(w, "null")
+    } else if t == JT_BOOL {
+        if j_int(j, i) == 1 { jo_lit(w, "true") } else { jo_lit(w, "false") }
+    } else if t == JT_INT {
+        jo_dec(w, j_int(j, i))
+    } else if t == JT_STR {
+        js_w_canon_str(w, j, i)
+    } else if t == JT_ARR {
+        js_w_canon_array(w, j, i)
+    } else if t == JT_OBJ {
+        js_w_canon_obj(w, j, i)
+    } else {
+        w.bad = 1
+    }
+}
