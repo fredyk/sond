@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/crypto/hash/sha256_stream.snd: the digest of a message fed in pieces of any
+// size is the one-shot digest of the whole message (FIPS 180-4 vectors for "" and "abc").
+
+include "any/crypto/hash/sha256_stream.snd"
+include "x86_64/linux/testing.snd"
+
+fn same(a: i64, b: i64, n: i64) -> i64 {
+    let x: u8[n] = a
+    let y: u8[n] = b
+    let mut d = 0
+    for i in 0..n {
+        if x[i] != y[i] { d = 1 }
+    }
+    1 - d
+}
+
+// The digest of msg[0..n) fed in pieces of `step` bytes.
+fn streamed(msg: i64, n: i64, step: i64, out: i64) -> i64 {
+    let st: i64[18]
+    sha256_stream_init(st)
+    let mut i = 0
+    for i < n {
+        let k = if n - i < step { n - i } else { step }
+        assert_eq(sha256_stream_update(st, msg + i, k), 1)
+        i = i + k
+    }
+    sha256_stream_final(st, out, 32)
+}
+
+test "sha256 stream: the empty message and abc give the FIPS 180-4 digests" {
+    let out: u8[32]
+    let st: i64[18]
+    sha256_stream_init(st)
+    assert_eq(sha256_stream_final(st, out, 32), 32)
+    assert_eq(out[0], 0xe3)
+    assert_eq(out[31], 0x55)
+    let abc: string = "abc"
+    assert_eq(streamed(abc.utf8, 3, 1, out), 32)
+    assert_eq(out[0], 0xba)
+    assert_eq(out[1], 0x78)
+    assert_eq(out[31], 0xad)
+}
+
+test "sha256 stream: any piece size gives the one-shot digest, across block edges" {
+    let msg: u8[300]
+    for i in 0..300 {
+        msg[i] = (i * 7 + 3) & 255
+    }
+    let want: u8[32]
+    let got: u8[32]
+    let sizes[7] = [1, 55, 56, 63, 64, 65, 300]
+    for s in 0..7 {
+        for k in 0..7 {
+            let n = sizes[k]
+            sha256_hash(msg, n, want)
+            assert_eq(streamed(msg, n, sizes[s], got), 32)
+            assert_eq(same(want, got, 32), 1)
+        }
+    }
+}
+
+test "sha256 stream: a negative length and a short digest buffer are refused" {
+    let st: i64[18]
+    let out: u8[32]
+    sha256_stream_init(st)
+    assert_eq(sha256_stream_update(st, out, -1), 0)
+    assert_eq(sha256_stream_final(st, out, 31), 0)
+    assert_eq(SHA256_STREAM_WORDS, 18)
+}
