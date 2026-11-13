@@ -137,3 +137,62 @@ test "a datagram sent to a bound socket comes back with its sender" {
     syscall(SYS_close, cli)
     syscall(SYS_close, srv)
 }
+
+// ── listening on loopback and accepting with a deadline ──────────────────────────────────────
+// A test server that binds a fixed port and does not check the bind is two bugs at once: when
+// the port is taken, listen() silently auto-binds a random port, the client under test talks
+// to whoever owns the fixed one, and the server child blocks in accept() forever.
+
+test "listen_loopback on port 0 reports the port the kernel chose" {
+    let pout[1]
+    let fd = listen_loopback(0, 4, pout)
+    assert(fd >= 0)
+    assert(peek64(pout) > 0)
+    poke32(salen, 16)
+    assert(syscall(SYS_getsockname, fd, sa, salen) >= 0)
+    assert_eq(sockaddr_in_port(sa), peek64(pout))
+    assert_eq(sockaddr_in_ip(sa), 0x7f000001)
+    syscall(SYS_close, fd)
+}
+
+test "listen_loopback on a port that is already taken fails instead of picking another" {
+    let pout[1]
+    let first = listen_loopback(0, 4, pout)
+    assert(first >= 0)
+    let taken = peek64(pout)
+    let pout2[1]
+    poke64(pout2, 0 - 7)
+    let second = listen_loopback(taken, 4, pout2)
+    assert_eq(second, 0 - 98)                 // -EADDRINUSE, and no socket left behind
+    assert_eq(peek64(pout2), 0 - 7)           // nothing written on failure
+    syscall(SYS_close, first)
+}
+
+test "accept_within gives up at its deadline when nobody connects" {
+    let pout[1]
+    let fd = listen_loopback(0, 4, pout)
+    assert(fd >= 0)
+    assert_eq(accept_within(fd, 50), 0 - 110) // -ETIMEDOUT
+    syscall(SYS_close, fd)
+}
+
+test "accept_within returns the connection that arrives in time" {
+    let pout[1]
+    let fd = listen_loopback(0, 4, pout)
+    assert(fd >= 0)
+    let cfd = sock(AF_INET, SOCK_STREAM, 0)
+    sockaddr_in_build(sa, 0x7f000001, peek64(pout))
+    assert_eq(connect_sock(cfd, sa, 16), 0)   // the backlog completes the handshake
+    let afd = accept_within(fd, 5000)
+    assert(afd >= 0)
+    assert_eq(syscall(SYS_write, cfd, PAYLOAD.utf8, 22), 22)
+    assert_eq(syscall(SYS_read, afd, buf, 64), 22)
+    assert_eq(bytes_eq(buf, PAYLOAD.utf8, 22), 1)
+    syscall(SYS_close, afd)
+    syscall(SYS_close, cfd)
+    syscall(SYS_close, fd)
+}
+
+test "accept_within on a descriptor that is not open reports the kernel's error at once" {
+    assert_eq(accept_within(9999, 5000), 0 - 9)  // -EBADF, not a five-second wait
+}
