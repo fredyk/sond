@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+include "words.snd"
+include "../x86_64/linux/testing.snd"
+
+test "a word is found by its position, from 1" {
+    let list: string = "GET POST PUT"
+    let w: string = "POST"
+    assert_eq(word_index(list, w.utf8, 4), 2)
+    assert_eq(word_index(list, w.utf8, 3), 0)
+    let g: string = "GET"
+    assert_eq(word_index(list, g.utf8, 3), 1)
+    let p: string = "PUT"
+    assert_eq(word_index(list, p.utf8, 3), 3)
+}
+
+test "a prefix, a longer word or the empty word is not a word of the list" {
+    let list: string = "no always"
+    let a: string = "alwaysx"
+    assert_eq(word_index(list, a.utf8, 7), 0)
+    assert_eq(word_index(list, a.utf8, 0), 0)
+    let n: string = "n"
+    assert_eq(word_index(list, n.utf8, 1), 0)
+    let empty: string = ""
+    assert_eq(word_index(empty, n.utf8, 1), 0)
+    assert_eq(word_index(empty, n.utf8, 0), 0)
+}
