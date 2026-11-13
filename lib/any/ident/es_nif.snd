@@ -5,7 +5,7 @@
 // on its nine characters already without separators and in upper case.
 //
 // Public API:
-//   es_nif_valid(p, n) -> i64   1 when the n bytes at p are a NIF whose control character matches
+//   es_nif_valid(p, n) -> i64   1 when the n bytes of p are a NIF whose control character matches
 //
 // What is accepted:
 //   - a DNI: eight digits and the letter TRWAGMYFPDXBNJZSQVHLCKE[number mod 23];
@@ -16,95 +16,91 @@
 //     the last digit of the sum). A, B, E and H end in that digit; P, Q, S, N and W in the letter
 //     JABCDEFGHI[digit]; the others in either.
 //
-// It never allocates and reads only the n bytes it is given.
+// It never allocates (the digits go to a struct on the caller's stack) and reads only the n bytes
+// of its view, every index proven against n.
 
-let ES_NIF_DNI_LETTERS = "TRWAGMYFPDXBNJZSQVHLCKE"
-let ES_NIF_ENTITY_LETTERS = "JABCDEFGHI"
-let ES_NIF_PERSON = "KLM"
-let ES_NIF_ENTITY = "ABCDEFGHJNPQRSUVW"
-let ES_NIF_ENTITY_DIGIT = "ABEH"
-let ES_NIF_ENTITY_LETTER = "PQSNW"
+// What the first character makes of the identifier, and so how its control character is computed.
+enum EsNifKind { Dni, Nie, Person, EntityDigit, EntityLetter, EntityEither, Malformed }
 
-// The byte at p[i], or -1 when i is outside 0..n.
-fn es_nif_at(p: u8[n], n: i64, i: i64) -> i64 {
-    if i >= 0 && i < n {
-        return p[i]
-    }
-    -1
+let ES_NIF_DNI_LETTERS[23] = ['T', 'R', 'W', 'A', 'G', 'M', 'Y', 'F', 'P', 'D', 'X', 'B', 'N', 'J', 'Z', 'S', 'Q', 'V', 'H', 'L', 'C', 'K', 'E']
+let ES_NIF_ENTITY_LETTERS[10] = ['J', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
+
+// The seven digits p[1..8]: ok is 0 when one of them is not a digit; value is their number and
+// luhn the entity sum (odd positions doubled, digits of every product added).
+struct EsNifDigits { ok: i64, value: i64, luhn: i64 }
+
+// The digit the byte c stands for, or -1 when it is not one.
+priv fn es_nif_digit(c: i64) -> (d: i64) ensures { d >= -1; d <= 9 } effects [] {
+    if c >= '0' && c <= '9' { c - '0' } else { -1 }
 }
 
-fn es_nif_is_digit(c: i64) -> i64 {
-    if c >= '0' && c <= '9' { return 1 }
-    0
+// a modulo m in 0..m, for any sign of a.
+priv fn es_nif_mod(a: i64, m: i64 where m > 0) -> (r: i64) ensures { r >= 0; r < m } effects [] {
+    let q = a % m
+    let r = if q < 0 { q + m } else { q }
+    // r is always in 0..m; the prover does not model `%`, so the range is stated for it to see.
+    if r >= 0 && r < m { r } else { 0 }
 }
 
-// The value of the seven digits p[1..8], or -1 when one of them is not a digit.
-fn es_nif_seven(p: u8[n], n: i64) -> i64 {
-    let mut v = 0
-    for i in 1..8 {
-        let c = es_nif_at(p, n, i)
-        if es_nif_is_digit(c) == 0 { return -1 }
-        v = v * 10 + (c - '0')
-    }
-    v
+priv fn es_nif_same(a: i64, b: i64) -> (r: i64) ensures { r >= 0; r <= 1 } effects [] {
+    if a == b { 1 } else { 0 }
 }
 
-// 1 when the byte c is one of the NUL-terminated bytes at set (a table of this file).
-fn es_nif_in(set: i64, c: i64) -> i64 {
-    let mut i = 0
-    for peek8(set + i) != 0 {
-        if peek8(set + i) == c { return 1 }
+priv fn es_nif_kind(c: i64) -> EsNifKind effects [] {
+    if es_nif_digit(c) >= 0 { Dni }
+    else if c == 'X' || c == 'Y' || c == 'Z' { Nie }
+    else if c == 'K' || c == 'L' || c == 'M' { Person }
+    else if c == 'A' || c == 'B' || c == 'E' || c == 'H' { EntityDigit }
+    else if c == 'P' || c == 'Q' || c == 'S' || c == 'N' || c == 'W' { EntityLetter }
+    else if c == 'C' || c == 'D' || c == 'F' || c == 'G' || c == 'J' || c == 'R' || c == 'U' || c == 'V' { EntityEither }
+    else { Malformed }
+}
+
+// Reads p[1..8] into dg, which starts as { ok: 1, value: 0, luhn: 0 }. It writes the caller's
+// struct, so it declares no `effects []`.
+priv fn es_nif_read_digits(p: u8[n], n: i64 where n == 9, dg: *EsNifDigits) {
+    let mut i = 1
+    for i < 8 invariant { i >= 1; i <= 8 } {
+        let d = es_nif_digit(p[i])
+        if d < 0 {
+            dg.ok = 0
+        } else {
+            let twice = if i % 2 == 1 { d * 2 } else { d }
+            dg.value = dg.value * 10 + d
+            dg.luhn = dg.luhn + twice / 10 + twice % 10
+        }
         i = i + 1
     }
-    0
 }
 
-fn es_nif_dni_letter(v: i64) -> i64 {
-    peek8(ES_NIF_DNI_LETTERS + (v % 23))
+priv fn es_nif_dni_letter(v: i64) -> i64 effects [] {
+    let i = es_nif_mod(v, 23)
+    ES_NIF_DNI_LETTERS[i]
 }
 
-fn es_nif_valid(p: u8[n], n: i64) -> i64 {
-    if n != 9 { return 0 }
-    let first = es_nif_at(p, n, 0)
-    let last = es_nif_at(p, n, 8)
-    let rest = es_nif_seven(p, n)
-    // A DNI, or a NIE whose X, Y or Z stands for its first digit.
-    let mut lead = -1
-    if es_nif_is_digit(first) == 1 { lead = first - '0' }
-    if first == 'X' { lead = 0 }
-    if first == 'Y' { lead = 1 }
-    if first == 'Z' { lead = 2 }
-    if lead >= 0 && rest >= 0 {
-        if last == es_nif_dni_letter(lead * 10000000 + rest) { return 1 }
-        return 0
-    }
-    if rest < 0 { return 0 }
-    if lead >= 0 { return 0 }
-    if es_nif_in(ES_NIF_PERSON, first) == 1 {
-        if last == es_nif_dni_letter(rest) { return 1 }
-        return 0
-    }
-    if es_nif_in(ES_NIF_ENTITY, first) == 0 { return 0 }
-    let mut sum = 0
-    for i in 1..8 {
-        let mut d = es_nif_at(p, n, i) - '0'
-        if i % 2 == 1 {
-            d = d * 2
-            d = d / 10 + d % 10
-        }
-        sum = sum + d
-    }
-    let control = (10 - sum % 10) % 10
+// 1 when last is the control character of a person or an entity whose seven digits read well.
+// No contract: the verifier does not take a `match` yet, so es_nif_valid9 bounds its result.
+priv fn es_nif_control(kind: EsNifKind, first: i64, last: i64, value: i64, luhn: i64) -> i64 effects [] {
+    let control = es_nif_mod(10 - es_nif_mod(luhn, 10), 10)
     let digit = '0' + control
-    let letter = peek8(ES_NIF_ENTITY_LETTERS + control)
-    if es_nif_in(ES_NIF_ENTITY_DIGIT, first) == 1 {
-        if last == digit { return 1 }
-        return 0
+    let letter = ES_NIF_ENTITY_LETTERS[control]
+    match kind {
+        Dni => es_nif_same(last, es_nif_dni_letter((first - '0') * 10000000 + value)),
+        Nie => es_nif_same(last, es_nif_dni_letter((first - 'X') * 10000000 + value)),
+        Person => es_nif_same(last, es_nif_dni_letter(value)),
+        EntityDigit => es_nif_same(last, digit),
+        EntityLetter => es_nif_same(last, letter),
+        EntityEither => if last == digit || last == letter { 1 } else { 0 },
+        Malformed => 0,
     }
-    if es_nif_in(ES_NIF_ENTITY_LETTER, first) == 1 {
-        if last == letter { return 1 }
-        return 0
-    }
-    if last == digit || last == letter { return 1 }
-    0
+}
+
+priv fn es_nif_valid9(p: u8[n], n: i64 where n == 9) -> (r: i64) ensures { r >= 0; r <= 1 } {
+    let dg = EsNifDigits { ok: 1, value: 0, luhn: 0 }
+    es_nif_read_digits(p, n, dg)
+    if dg.ok == 1 { es_nif_same(es_nif_control(es_nif_kind(p[0]), p[0], p[8], dg.value, dg.luhn), 1) } else { 0 }
+}
+
+fn es_nif_valid(p: u8[n], n: i64 where n >= 0) -> (r: i64) ensures { r >= 0; r <= 1 } {
+    if n == 9 { es_nif_valid9(p, n) } else { 0 }
 }

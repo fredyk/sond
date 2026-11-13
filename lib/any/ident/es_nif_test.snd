@@ -5,9 +5,10 @@
 // person (DNI, NIE, and the K, L and M numbers of RD 1065/2007 art. 19.2 and 20.2) and for an entity.
 
 include "any/ident/es_nif.snd"
+include "x86_64/linux/heap.snd"
 include "x86_64/linux/testing.snd"
 
-fn ok(s: string, n: i64) -> i64 {
+priv fn ok(s: string, n: i64 where n >= 0) -> i64 {
     es_nif_valid(s.utf8, n)
 }
 
@@ -94,4 +95,25 @@ test "a byte that is not ASCII is refused wherever it is" {
     b[3] = '4'
     b[8] = 0xDA
     assert_eq(es_nif_valid(b, 9), 0)
+}
+
+test "the first character names the kind of identifier" {
+    assert_eq(es_nif_kind('0'), Dni)
+    assert_eq(es_nif_kind('9'), Dni)
+    assert_eq(es_nif_kind('Y'), Nie)
+    assert_eq(es_nif_kind('L'), Person)
+    assert_eq(es_nif_kind('H'), EntityDigit)
+    assert_eq(es_nif_kind('W'), EntityLetter)
+    assert_eq(es_nif_kind('V'), EntityEither)
+    assert_eq(es_nif_kind('I'), Malformed)
+    assert_eq(es_nif_kind('a'), Malformed)
+}
+
+test "a check allocates nothing, however many times it runs" {
+    let before = heap_used()
+    for i in 0..1000 {
+        assert_eq(ok("B23456783", 9), 1)
+        assert_eq(ok("12345678A", 9), 0)
+    }
+    assert_eq(heap_used(), before)
 }
