@@ -25,12 +25,11 @@ include "any/encoding/hex.snd"
 
 struct BufWriter { buf: i64, cap: i64, len: i64, overflow: i64 }
 
-priv fn bw_put(buf: u8[cap], cap: i64, i: i64, v: i64) -> i64 {
+priv fn bw_put(buf: u8[cap], cap: i64, i: i64, v: i64) -> (r: i64) ensures { r >= 0; r <= 1 } {
     if i >= 0 && i < cap {
         buf[i] = v
-        return 1
-    }
-    0
+        1
+    } else { 0 }
 }
 
 pub fn bw_byte(w: *BufWriter, c: i64) {
