@@ -196,3 +196,12 @@ test "accept_within returns the connection that arrives in time" {
 test "accept_within on a descriptor that is not open reports the kernel's error at once" {
     assert_eq(accept_within(9999, 5000), 0 - 9)  // -EBADF, not a five-second wait
 }
+
+test "unused_loopback_port names a port where a connection is refused" {
+    let port = unused_loopback_port()
+    assert(port > 0)
+    let cfd = sock(AF_INET, SOCK_STREAM, 0)
+    sockaddr_in_build(sa, 0x7f000001, port)
+    assert_eq(connect_sock(cfd, sa, 16), 0 - 111) // -ECONNREFUSED
+    syscall(SYS_close, cfd)
+}

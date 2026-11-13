@@ -12,6 +12,7 @@
 //   setsockopt_sock(fd, level, opt, val, len) -> 0|-errno
 //   listen_loopback(port, backlog, port_out) -> fd|-errno   (port 0: kernel-chosen)
 //   accept_within(fd, ms) -> fd|-ETIMEDOUT|-errno
+//   unused_loopback_port() -> port|-errno
 // close_fd is available via io.snd.
 //
 // Note: The caller must build sockaddr structs (with poke8) and provide
@@ -177,6 +178,18 @@ fn accept_within(fd: i64, ms: i64) -> i64 {
     if n < 0 { return n }
     if n == 0 { return 0 - 110 }
     accept_sock(fd, 0, 0)
+}
+
+// A loopback port that nothing listens on: the kernel picks a free one, it is released, and
+// its number is returned (or -errno). For exercising a refused connection without guessing a
+// fixed number that some other process may own. Another process could still take it
+// afterwards, so the window between this call and the connect should be short.
+fn unused_loopback_port() -> i64 {
+    let p[1]
+    let fd = listen_loopback(0, 1, p)
+    if fd < 0 { return fd }
+    syscall(SYS_close, fd)
+    peek64(p)
 }
 
 fn sockaddr_in_ip(sa: i64) -> i64 {
