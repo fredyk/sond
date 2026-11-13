@@ -10,6 +10,9 @@
 //   sendto_sock(fd, buf, len, flags, addr, addrlen) -> nbytes|-errno
 //   recvfrom_sock(fd, buf, len, flags, addr, alenptr) -> nbytes|-errno
 //   setsockopt_sock(fd, level, opt, val, len) -> 0|-errno
+//   listen_loopback(port, backlog, port_out) -> fd|-errno   (port 0: kernel-chosen)
+//   accept_within(fd, ms) -> fd|-ETIMEDOUT|-errno
+//   unused_loopback_port() -> port|-errno
 // close_fd is available via io.snd.
 //
 // Note: The caller must build sockaddr structs (with poke8) and provide
@@ -137,6 +140,56 @@ fn sockaddr_in_build(sa: i64, ip_u32: i64, port: i64) {
         poke8(sa + i, 0)
         i = i + 1
     }
+}
+
+// Listens on 127.0.0.1:`port` (0 lets the kernel choose a free port) and writes the port it
+// actually got, in host order, to the word at `port_out`. Returns the listening fd, or -errno
+// from socket, bind, listen or getsockname, with the socket closed and nothing written. A port
+// that is already taken is an error (-EADDRINUSE): never a silent fallback to another port.
+fn listen_loopback(port: i64, backlog: i64, port_out: i64) -> i64 {
+    let fd = sock(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { return fd }
+    set_reuseaddr(fd)
+    let a[2]
+    sockaddr_in_build(a, 0x7f000001, port)
+    let mut r = bind_sock(fd, a, 16)
+    if r >= 0 { r = listen_sock(fd, backlog) }
+    if r >= 0 {
+        let alen[1]
+        poke32(alen, 16)
+        r = syscall(SYS_getsockname, fd, a, alen)
+    }
+    if r < 0 {
+        syscall(SYS_close, fd)
+        return r
+    }
+    poke64(port_out, sockaddr_in_port(a))
+    fd
+}
+
+// Accepts one connection on the listening `fd`, waiting at most `ms` milliseconds for it.
+// Returns the connected fd, -ETIMEDOUT (-110) when nothing arrived in time, or -errno.
+fn accept_within(fd: i64, ms: i64) -> i64 {
+    let pfd[1]
+    poke32(pfd, fd)
+    poke16(pfd + 4, 1)                    // POLLIN
+    poke16(pfd + 6, 0)
+    let n = syscall(SYS_poll, pfd, 1, ms)
+    if n < 0 { return n }
+    if n == 0 { return 0 - 110 }
+    accept_sock(fd, 0, 0)
+}
+
+// A loopback port that nothing listens on: the kernel picks a free one, it is released, and
+// its number is returned (or -errno). For exercising a refused connection without guessing a
+// fixed number that some other process may own. Another process could still take it
+// afterwards, so the window between this call and the connect should be short.
+fn unused_loopback_port() -> i64 {
+    let p[1]
+    let fd = listen_loopback(0, 1, p)
+    if fd < 0 { return fd }
+    syscall(SYS_close, fd)
+    peek64(p)
 }
 
 fn sockaddr_in_ip(sa: i64) -> i64 {

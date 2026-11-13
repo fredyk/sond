@@ -55,13 +55,21 @@ test "ip options are applied to a udp socket" {
 }
 
 test "udp sendmsg/recvmsg round-trip over loopback" {
-    let port = 47311
+    // Port 0, read back with getsockname: a fixed port another process owns would make the
+    // bind fail and the datagram go to that process. The receive deadline keeps a datagram
+    // that never arrives from hanging the test.
     let ip = 0x7f000001
     let rfd = udp_socket()
+    assert(rfd >= 0)
     set_reuseaddr(rfd)
     let ra[2]
-    sockaddr_in_build(ra, ip, port)
-    bind_sock(rfd, ra, 16)
+    sockaddr_in_build(ra, ip, 0)
+    assert_eq(bind_sock(rfd, ra, 16), 0)
+    let alen[1]
+    poke32(alen, 16)
+    assert(syscall(SYS_getsockname, rfd, ra, alen) >= 0)
+    let port = sockaddr_in_port(ra)
+    assert_eq(set_rcvtimeo(rfd, 5), 0)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {

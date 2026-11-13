@@ -52,7 +52,7 @@ fn t_build_sh(random: i64, spub: i64, grp: i64, out: i64) -> i64 {
 // hang up immediately; 1 = send a non-handshake (alert) record; 2 = send a ServerHello with
 // a non-x25519 group; 3 = send a valid ServerHello then hang up (no encrypted flight).
 fn t_bad_server(sfd: i64, mode: i64) {
-    let afd = accept_sock(sfd, 0, 0)
+    let afd = accept_within(sfd, 10000)
     if afd < 0 { syscall(SYS_exit, 2) }
     if mode == 0 { close_fd(afd); syscall(SYS_exit, 0) }
     let crec[1024]
@@ -86,30 +86,24 @@ fn t_bad_server(sfd: i64, mode: i64) {
     syscall(SYS_exit, 0)
 }
 
-fn t_listen(port: i64) -> i64 {
-    let fd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(fd)
-    let sa[2]
-    sockaddr_in_build(sa, 0x7f000001, port)
-    bind_sock(fd, sa, 16)
-    listen_sock(fd, 4)
+// Listens on a kernel-chosen loopback port, written to port_out; a failure fails the test.
+fn t_listen(port_out: i64) -> i64 {
+    let fd = listen_loopback(0, 4, port_out)
+    assert(fd >= 0)
     fd
 }
 
 test "tls client: a full handshake probe against a matching Sond server" {
-    let port = 55443
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let ip = 0x7f000001
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, ip, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
         // CHILD: the minimal server.
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         // read the ClientHello record; its fragment is the ClientHello message.
         let crec[1024]
@@ -183,52 +177,57 @@ let mut ebuf[4096]
 test "tls client: a refused connection fails" {
     let __s2_183: string = "127.0.0.1"
     let __s3_183: string = "h"
-    assert_eq(tls_handshake_probe(__s2_183.utf8, 55450, __s3_183.utf8, 1, ebuf), 0 - 1)
+    assert_eq(tls_handshake_probe(__s2_183.utf8, unused_loopback_port(), __s3_183.utf8, 1, ebuf), 0 - 1)
 }
 test "tls client: a server that hangs up before ServerHello fails" {
-    let sfd = t_listen(55451)
+    let sport[1]
+    let sfd = t_listen(sport)
     let pid = syscall(SYS_fork)
     if pid == 0 { t_bad_server(sfd, 0) }
     let __s4_191: string = "127.0.0.1"
     let __s5_191: string = "h"
-    assert_eq(tls_handshake_probe(__s4_191.utf8, 55451, __s5_191.utf8, 1, ebuf), 0 - 1)
+    assert_eq(tls_handshake_probe(__s4_191.utf8, peek64(sport), __s5_191.utf8, 1, ebuf), 0 - 1)
     close_fd(sfd); let st[1]; syscall(SYS_wait4, pid, st, 0, 0)
 }
 test "tls client: a non-handshake first record fails" {
-    let sfd = t_listen(55452)
+    let sport[1]
+    let sfd = t_listen(sport)
     let pid = syscall(SYS_fork)
     if pid == 0 { t_bad_server(sfd, 1) }
     let __s6_200: string = "127.0.0.1"
     let __s7_200: string = "h"
-    assert_eq(tls_handshake_probe(__s6_200.utf8, 55452, __s7_200.utf8, 1, ebuf), 0 - 1)
+    assert_eq(tls_handshake_probe(__s6_200.utf8, peek64(sport), __s7_200.utf8, 1, ebuf), 0 - 1)
     close_fd(sfd); let st[1]; syscall(SYS_wait4, pid, st, 0, 0)
 }
 test "tls client: a ServerHello with a non-x25519 group fails" {
-    let sfd = t_listen(55453)
+    let sport[1]
+    let sfd = t_listen(sport)
     let pid = syscall(SYS_fork)
     if pid == 0 { t_bad_server(sfd, 2) }
     let __s8_209: string = "127.0.0.1"
     let __s9_209: string = "h"
-    assert_eq(tls_handshake_probe(__s8_209.utf8, 55453, __s9_209.utf8, 1, ebuf), 0 - 1)
+    assert_eq(tls_handshake_probe(__s8_209.utf8, peek64(sport), __s9_209.utf8, 1, ebuf), 0 - 1)
     close_fd(sfd); let st[1]; syscall(SYS_wait4, pid, st, 0, 0)
 }
 test "tls client: a hang-up after a valid ServerHello fails" {
-    let sfd = t_listen(55454)
+    let sport[1]
+    let sfd = t_listen(sport)
     let pid = syscall(SYS_fork)
     if pid == 0 { t_bad_server(sfd, 3) }
     let __s10_218: string = "127.0.0.1"
     let __s11_218: string = "h"
-    assert_eq(tls_handshake_probe(__s10_218.utf8, 55454, __s11_218.utf8, 1, ebuf), 0 - 1)
+    assert_eq(tls_handshake_probe(__s10_218.utf8, peek64(sport), __s11_218.utf8, 1, ebuf), 0 - 1)
     close_fd(sfd); let st[1]; syscall(SYS_wait4, pid, st, 0, 0)
 }
 
 test "tls client: a corrupt encrypted record fails the open" {
-    let sfd = t_listen(55455)
+    let sport[1]
+    let sfd = t_listen(sport)
     let pid = syscall(SYS_fork)
     if pid == 0 { t_bad_server(sfd, 4) }
     let __s12_228: string = "127.0.0.1"
     let __s13_228: string = "h"
-    assert_eq(tls_handshake_probe(__s12_228.utf8, 55455, __s13_228.utf8, 1, ebuf), 0 - 1)
+    assert_eq(tls_handshake_probe(__s12_228.utf8, peek64(sport), __s13_228.utf8, 1, ebuf), 0 - 1)
     close_fd(sfd); let st[1]; syscall(SYS_wait4, pid, st, 0, 0)
 }
 

@@ -70,14 +70,11 @@ test "http_serve_file streams a 200 and 404s a missing file" {
     write_buf(fd, __s0_52.utf8, 11)
     close_fd(fd)
 
-    let port = 48241
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let ip = 0x7f000001
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, ip, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
@@ -112,7 +109,7 @@ test "http_serve_file streams a 200 and 404s a missing file" {
         if passed == 1 { syscall(SYS_exit, 0) } else { syscall(SYS_exit, 3) }
     }
     // SERVER: first request → serve the real file (200); second → a missing path (404).
-    let a1 = accept_sock(sfd, 0, 0)
+    let a1 = accept_within(sfd, 10000)
     let rb1[128]
     read_buf(a1, rb1, 128)
     let __lit1: string = "__httptest.txt"
@@ -121,7 +118,7 @@ test "http_serve_file streams a 200 and 404s a missing file" {
     http_serve_file_cc(a1, bytes_from_cstr(__lit1.utf8), __lit2.utf8, __lit3.utf8)
     http_finish(a1)
 
-    let a2 = accept_sock(sfd, 0, 0)
+    let a2 = accept_within(sfd, 10000)
     let rb2[128]
     read_buf(a2, rb2, 128)
     let __lit4: string = "__no_such_file__"

@@ -130,14 +130,28 @@ fn check_req_at(buf: i64, pos: i64, want: i64) -> i64 {
 // (see resolve_includes_scoped), so these don't inflate the number themselves.
 
 // Bind and listen on 127.0.0.1:port. Returns the listening fd.
-fn mock_listen(port: i64) -> i64 {
-    let fd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(fd)
-    let sa[2]
-    sockaddr_in_build(sa, 0x7f000001, port)
-    bind_sock(fd, sa, 16)
-    listen_sock(fd, 1)
+fn mock_listen(port_out: i64) -> i64 {
+    let fd = listen_loopback(0, 1, port_out)
+    assert(fd >= 0)
     fd
+}
+
+// A fresh bytes buffer holding the cstr `s` with every "{port}" replaced by the decimal
+// `port`: the expected request names the port the kernel chose for the mock server.
+fn with_port(s: i64, port: i64) -> i64 {
+    let b = bytes_new()
+    let mut i = 0
+    for peek8(s + i) != 0 {
+        let head = peek8(s + i) == 123 && peek8(s + i + 1) == 112 && peek8(s + i + 2) == 111
+        if head && peek8(s + i + 3) == 114 && peek8(s + i + 4) == 116 && peek8(s + i + 5) == 125 {
+            bytes_append_int(b, port)
+            i = i + 6
+        } else {
+            bytes_push(b, peek8(s + i))
+            i = i + 1
+        }
+    }
+    b
 }
 
 // Forks a one-shot mock server: accepts exactly one connection on `listen_fd`, copies
@@ -154,7 +168,7 @@ fn mock_listen(port: i64) -> i64 {
 fn mock_serve_once(listen_fd: i64, resp_buf: i64, captured_wfd: i64) -> i64 {
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let conn_fd = accept_sock(listen_fd, 0, 0)
+        let conn_fd = accept_within(listen_fd, 10000)
         let drain[512]
         let n = read_buf(conn_fd, drain, 4096)
         if n > 0 {
@@ -529,8 +543,9 @@ test "check_req_at: out of range" {
 // ── dav_connect: real sockets ─────────────────────────────────────────────
 
 test "dav_connect: succeeds against a real listening socket" {
-    let port = 18401
-    let lfd = mock_listen(port)
+    let lport[1]
+    let lfd = mock_listen(lport)
+    let port = peek64(lport)
     let __s29_528: string = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
     let resp = bytes_from_cstr(__s29_528.utf8)
     let cap[1]
@@ -547,15 +562,16 @@ test "dav_connect: succeeds against a real listening socket" {
 
 test "dav_connect: fails (-1) against a port nobody is listening on" {
     let __s1_548: string = "127.0.0.1"
-    let cfd = dav_connect(__s1_548.utf8, 18402)
+    let cfd = dav_connect(__s1_548.utf8, unused_loopback_port())
     assert_eq(cfd, -1)
 }
 
 // ── dav_get: real round trip ──────────────────────────────────────────────
 
 test "dav_get: real round trip returns 200 and sends a well-formed GET request" {
-    let port = 18404
-    let lfd = mock_listen(port)
+    let lport[1]
+    let lfd = mock_listen(lport)
+    let port = peek64(lport)
     let __s30_551: string = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
     let resp = bytes_from_cstr(__s30_551.utf8)
     let cap[1]
@@ -569,23 +585,24 @@ test "dav_get: real round trip returns 200 and sends a well-formed GET request" 
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(status, 200)
-    let __s31_562: string = "GET /x.txt HTTP/1.1\r\nHost: 127.0.0.1:18404\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\n\r\n"
-    let want = bytes_from_cstr(__s31_562.utf8)
+    let __s31_562: string = "GET /x.txt HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\n\r\n"
+    let want = with_port(__s31_562.utf8, port)
     assert_eq(bytes_eq(captured, want), 1)
 }
 
 test "dav_get: returns -1 when the server is unreachable" {
     let __s2_577: string = "127.0.0.1"
     let __s3_577: string = "/nope"
-    let status = dav_get(__s2_577.utf8, 18405, __s3_577.utf8)
+    let status = dav_get(__s2_577.utf8, unused_loopback_port(), __s3_577.utf8)
     assert_eq(status, -1)
 }
 
 // ── dav_put: real round trip, verifies Content-Length and body ────────────
 
 test "dav_put: real round trip returns 201 and sends body with Content-Length" {
-    let port = 18406
-    let lfd = mock_listen(port)
+    let lport[1]
+    let lfd = mock_listen(lport)
+    let port = peek64(lport)
     let __s32_577: string = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"
     let resp = bytes_from_cstr(__s32_577.utf8)
     let cap[1]
@@ -601,16 +618,17 @@ test "dav_put: real round trip returns 201 and sends body with Content-Length" {
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(status, 201)
-    let __s34_590: string = "PUT /up.txt HTTP/1.1\r\nHost: 127.0.0.1:18406\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nContent-Length: 11\r\n\r\nhello world"
-    let want = bytes_from_cstr(__s34_590.utf8)
+    let __s34_590: string = "PUT /up.txt HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nContent-Length: 11\r\n\r\nhello world"
+    let want = with_port(__s34_590.utf8, port)
     assert_eq(bytes_eq(captured, want), 1)
 }
 
 // ── dav_mkcol / dav_delete: real round trip ────────────────────────────────
 
 test "dav_mkcol: real round trip returns 201 and sends a well-formed MKCOL request" {
-    let port = 18407
-    let lfd = mock_listen(port)
+    let lport[1]
+    let lfd = mock_listen(lport)
+    let port = peek64(lport)
     let __s35_600: string = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"
     let resp = bytes_from_cstr(__s35_600.utf8)
     let cap[1]
@@ -624,14 +642,15 @@ test "dav_mkcol: real round trip returns 201 and sends a well-formed MKCOL reque
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(status, 201)
-    let __s36_611: string = "MKCOL /newdir HTTP/1.1\r\nHost: 127.0.0.1:18407\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\n\r\n"
-    let want = bytes_from_cstr(__s36_611.utf8)
+    let __s36_611: string = "MKCOL /newdir HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\n\r\n"
+    let want = with_port(__s36_611.utf8, port)
     assert_eq(bytes_eq(captured, want), 1)
 }
 
 test "dav_delete: real round trip returns 204 and sends a well-formed DELETE request" {
-    let port = 18408
-    let lfd = mock_listen(port)
+    let lport[1]
+    let lfd = mock_listen(lport)
+    let port = peek64(lport)
     let __s37_619: string = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n"
     let resp = bytes_from_cstr(__s37_619.utf8)
     let cap[1]
@@ -645,16 +664,17 @@ test "dav_delete: real round trip returns 204 and sends a well-formed DELETE req
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(status, 204)
-    let __s38_630: string = "DELETE /old.txt HTTP/1.1\r\nHost: 127.0.0.1:18408\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\n\r\n"
-    let want = bytes_from_cstr(__s38_630.utf8)
+    let __s38_630: string = "DELETE /old.txt HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\n\r\n"
+    let want = with_port(__s38_630.utf8, port)
     assert_eq(bytes_eq(captured, want), 1)
 }
 
 // ── dav_move / dav_copy: real round trip, verifies the Destination header ─
 
 test "dav_move: real round trip returns 201 and sends a Destination header" {
-    let port = 18409
-    let lfd = mock_listen(port)
+    let lport[1]
+    let lfd = mock_listen(lport)
+    let port = peek64(lport)
     let __s39_640: string = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"
     let resp = bytes_from_cstr(__s39_640.utf8)
     let cap[1]
@@ -669,14 +689,15 @@ test "dav_move: real round trip returns 201 and sends a Destination header" {
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(status, 201)
-    let __s40_651: string = "MOVE /src.txt HTTP/1.1\r\nHost: 127.0.0.1:18409\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nDestination: 127.0.0.1:18409/dst.txt\r\n\r\n"
-    let want = bytes_from_cstr(__s40_651.utf8)
+    let __s40_651: string = "MOVE /src.txt HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nDestination: 127.0.0.1:{port}/dst.txt\r\n\r\n"
+    let want = with_port(__s40_651.utf8, port)
     assert_eq(bytes_eq(captured, want), 1)
 }
 
 test "dav_copy: real round trip returns 201 and sends a Destination header" {
-    let port = 18410
-    let lfd = mock_listen(port)
+    let lport[1]
+    let lfd = mock_listen(lport)
+    let port = peek64(lport)
     let __s41_659: string = "HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n"
     let resp = bytes_from_cstr(__s41_659.utf8)
     let cap[1]
@@ -691,16 +712,17 @@ test "dav_copy: real round trip returns 201 and sends a Destination header" {
     reap_child(pid)
     let captured = read_captured(caprfd)
     assert_eq(status, 201)
-    let __s42_670: string = "COPY /src2.txt HTTP/1.1\r\nHost: 127.0.0.1:18410\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nDestination: 127.0.0.1:18410/dst2.txt\r\n\r\n"
-    let want = bytes_from_cstr(__s42_670.utf8)
+    let __s42_670: string = "COPY /src2.txt HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nDestination: 127.0.0.1:{port}/dst2.txt\r\n\r\n"
+    let want = with_port(__s42_670.utf8, port)
     assert_eq(bytes_eq(captured, want), 1)
 }
 
 // ── dav_propfind: real round trip, verifies Depth header + XML body ───────
 
 test "dav_propfind: real round trip returns 207 and sends Depth + XML body" {
-    let port = 18411
-    let lfd = mock_listen(port)
+    let lport[1]
+    let lfd = mock_listen(lport)
+    let port = peek64(lport)
     let __s43_680: string = "HTTP/1.1 207 Multi-Status\r\nContent-Length: 0\r\n\r\n"
     let resp = bytes_from_cstr(__s43_680.utf8)
     let cap[1]
@@ -718,8 +740,8 @@ test "dav_propfind: real round trip returns 207 and sends Depth + XML body" {
     let __s2_647: string = "/"
     let expected_body = xml_build_propfind_body(__s2_647.utf8)
     let want = bytes_new()
-    let __lit32: string = "PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1:18411\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nContent-Length: "
-    bytes_append_cstr(want, __lit32.utf8)
+    let __lit32: string = "PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nContent-Length: "
+    bytes_append(want, with_port(__lit32.utf8, port))
     bytes_append_int(want, bytes_len(expected_body))
     let __lit33: string = "\r\nDepth: 1\r\n\r\n"
     bytes_append_cstr(want, __lit33.utf8)
@@ -728,8 +750,9 @@ test "dav_propfind: real round trip returns 207 and sends Depth + XML body" {
 }
 
 test "dav_propfind: an empty depth cstr defaults the header to 0" {
-    let port = 18412
-    let lfd = mock_listen(port)
+    let lport[1]
+    let lfd = mock_listen(lport)
+    let port = peek64(lport)
     let __s44_706: string = "HTTP/1.1 207 Multi-Status\r\nContent-Length: 0\r\n\r\n"
     let resp = bytes_from_cstr(__s44_706.utf8)
     let cap[1]
@@ -747,8 +770,8 @@ test "dav_propfind: an empty depth cstr defaults the header to 0" {
     let __s3_672: string = "/"
     let expected_body = xml_build_propfind_body(__s3_672.utf8)
     let want = bytes_new()
-    let __lit34: string = "PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1:18412\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nContent-Length: "
-    bytes_append_cstr(want, __lit34.utf8)
+    let __lit34: string = "PROPFIND / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: text/xml; charset=utf-8\r\nConnection: close\r\nContent-Length: "
+    bytes_append(want, with_port(__lit34.utf8, port))
     bytes_append_int(want, bytes_len(expected_body))
     let __lit35: string = "\r\nDepth: 0\r\n\r\n"
     bytes_append_cstr(want, __lit35.utf8)
@@ -881,21 +904,21 @@ test "dav_put: returns -1 when the server is unreachable" {
     let body = bytes_from_cstr(__s57_846.utf8)
     let __s2_861: string = "127.0.0.1"
     let __s3_861: string = "/nope"
-    let status = dav_put(__s2_861.utf8, 18413, __s3_861.utf8, body)
+    let status = dav_put(__s2_861.utf8, unused_loopback_port(), __s3_861.utf8, body)
     assert_eq(status, -1)
 }
 
 test "dav_mkcol: returns -1 when the server is unreachable" {
     let __s2_870: string = "127.0.0.1"
     let __s3_870: string = "/nope"
-    let status = dav_mkcol(__s2_870.utf8, 18414, __s3_870.utf8)
+    let status = dav_mkcol(__s2_870.utf8, unused_loopback_port(), __s3_870.utf8)
     assert_eq(status, -1)
 }
 
 test "dav_delete: returns -1 when the server is unreachable" {
     let __s2_879: string = "127.0.0.1"
     let __s3_879: string = "/nope"
-    let status = dav_delete(__s2_879.utf8, 18415, __s3_879.utf8)
+    let status = dav_delete(__s2_879.utf8, unused_loopback_port(), __s3_879.utf8)
     assert_eq(status, -1)
 }
 
@@ -903,7 +926,7 @@ test "dav_move: returns -1 when the server is unreachable" {
     let __s3_889: string = "127.0.0.1"
     let __s4_889: string = "/src"
     let __s5_889: string = "/dst"
-    let status = dav_move(__s3_889.utf8, 18416, __s4_889.utf8, __s5_889.utf8)
+    let status = dav_move(__s3_889.utf8, unused_loopback_port(), __s4_889.utf8, __s5_889.utf8)
     assert_eq(status, -1)
 }
 
@@ -911,7 +934,7 @@ test "dav_copy: returns -1 when the server is unreachable" {
     let __s3_900: string = "127.0.0.1"
     let __s4_900: string = "/src"
     let __s5_900: string = "/dst"
-    let status = dav_copy(__s3_900.utf8, 18417, __s4_900.utf8, __s5_900.utf8)
+    let status = dav_copy(__s3_900.utf8, unused_loopback_port(), __s4_900.utf8, __s5_900.utf8)
     assert_eq(status, -1)
 }
 
@@ -919,7 +942,7 @@ test "dav_propfind: returns -1 when the server is unreachable" {
     let __s6_914: string = "127.0.0.1"
     let __s7_914: string = "/"
     let __s8_914: string = "1"
-    let resp = dav_propfind(__s6_914.utf8, 18418, __s7_914.utf8, __s8_914.utf8)
+    let resp = dav_propfind(__s6_914.utf8, unused_loopback_port(), __s7_914.utf8, __s8_914.utf8)
     assert_eq(resp, -1)
 }
 

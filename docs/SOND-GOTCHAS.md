@@ -49,6 +49,13 @@ yourself rather than assuming.
   and **`syscall(num, a1..a6) -> i64`** (Linux x86-64 ABI). The numbers live in `lib/x86_64/linux/syscall-nums.snd`.
 - Shifts: `>>` arithmetic (sign), `>>>` logical (zero-fill). Bitwise `& | ^ ~`. Logical `&& || not`.
 - `include "path.snd"` (relative to the including file; recursive; de-duplicated; flat namespace).
+- Visibility: `pub fn` / `pub let` (and `priv`, the default). `include` still splices the file, so
+  everything it defines is callable from the includer, `pub` or not. `pub` marks the module
+  surface: only `pub` names are reachable as `m::name` after `import m`, and only `pub fn` is
+  exported by `sondc --shared`. A non-`pub` name that collides with another file's is renamed per
+  file, so two files may each keep a private helper of the same name. Two `pub fn` of the same
+  name spliced in by `include` are a compile error; through `import` they are told apart by
+  their qualifier.
 
 ## Tests are not optional
 A program whose `test "..."` blocks do not cover 80% of its basic blocks is REJECTED. A file with

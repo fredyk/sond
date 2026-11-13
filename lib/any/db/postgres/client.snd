@@ -264,7 +264,7 @@ fn pgx_connect_ssl(host: i64, port: i64, user: i64, pass: i64, db: i64,
 
 // Opens a DIRECT-TLS connection to `host`:`port` (PostgreSQL sslnegotiation=direct, postgres
 // 17+): the TLS 1.3 handshake runs immediately on connect, with no SSLRequest preamble, as a
-// server behind a TLS gateway on 443 expects. The chain is validated against `roots`/`nroots`
+// server reached through a TLS-terminating proxy expects. The chain is validated against `roots`/`nroots`
 // at `now14` with the leaf required to name `sni`; then startup + SCRAM-SHA-256 run inside TLS.
 // Returns a connection handle with pgx_ok()=1 on success, or 0 on failure.
 fn pgx_connect_direct(host: i64, port: i64, user: i64, pass: i64, db: i64,
