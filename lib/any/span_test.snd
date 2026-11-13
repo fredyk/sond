@@ -1,0 +1,91 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/span.snd: byte ranges given as (pointer, length), never NUL-terminated,
+// so a NUL inside a range is an ordinary byte and nothing reads past the length.
+
+include "any/span.snd"
+include "x86_64/linux/testing.snd"
+
+test "span: a byte inside the range is read, outside it is -1" {
+    let s: string = "ab"
+    assert_eq(span_at(s.utf8, 2, 0), 'a')
+    assert_eq(span_at(s.utf8, 2, 1), 'b')
+    assert_eq(span_at(s.utf8, 2, 2), -1)
+    assert_eq(span_at(s.utf8, 2, -1), -1)
+}
+
+test "span: equality needs the same length and the same bytes" {
+    let a: string = "0000"
+    let b: string = "0001"
+    assert_eq(span_eq(a.utf8, 4, b.utf8, 4), 0)
+    assert_eq(span_eq(a.utf8, 3, b.utf8, 3), 1)
+    assert_eq(span_eq(a.utf8, 3, b.utf8, 4), 0)
+    assert_eq(span_eq(a.utf8, 0, b.utf8, 0), 1)
+}
+
+test "span: comparison is bytewise and a proper prefix sorts first" {
+    let a: string = "abc"
+    let b: string = "abd"
+    assert_eq(span_cmp(a.utf8, 3, b.utf8, 3), -1)
+    assert_eq(span_cmp(b.utf8, 3, a.utf8, 3), 1)
+    assert_eq(span_cmp(a.utf8, 3, a.utf8, 3), 0)
+    assert_eq(span_cmp(a.utf8, 2, a.utf8, 3), -1)
+    assert_eq(span_cmp(a.utf8, 3, a.utf8, 2), 1)
+    let hi: u8[1]
+    hi[0] = 0xC3
+    assert_eq(span_cmp(a.utf8, 1, hi, 1), -1)
+}
+
+test "span: prefixes and suffixes, the empty one included" {
+    let s: string = "inventory-api"
+    let pre: string = "inv"
+    let suf: string = "-api"
+    assert_eq(span_starts_with(s.utf8, 13, pre.utf8, 3), 1)
+    assert_eq(span_starts_with(s.utf8, 13, suf.utf8, 4), 0)
+    assert_eq(span_starts_with(pre.utf8, 3, s.utf8, 13), 0)
+    assert_eq(span_starts_with(s.utf8, 13, pre.utf8, 0), 1)
+    assert_eq(span_ends_with(s.utf8, 13, suf.utf8, 4), 1)
+    assert_eq(span_ends_with(s.utf8, 13, pre.utf8, 3), 0)
+    assert_eq(span_ends_with(suf.utf8, 4, s.utf8, 13), 0)
+    assert_eq(span_ends_with(s.utf8, 13, suf.utf8, 0), 1)
+}
+
+test "span: a signed decimal is read from an offset and says where it ended" {
+    let s: string = "x-120 7 -"
+    let end: i64[1]
+    assert_eq(span_parse_dec(s.utf8, 9, 1, end), -120)
+    assert_eq(end[0], 5)
+    assert_eq(span_parse_dec(s.utf8, 9, 6, end), 7)
+    assert_eq(end[0], 7)
+    assert_eq(span_parse_dec(s.utf8, 9, 0, end), 0)
+    assert_eq(end[0], 0)
+    assert_eq(span_parse_dec(s.utf8, 9, 8, end), 0)
+    assert_eq(end[0], 8)
+    assert_eq(span_parse_dec(s.utf8, 9, 9, end), 0)
+    assert_eq(end[0], 9)
+}
+
+test "span: a decimal that does not fit in i64 is not read" {
+    let max: string = "9223372036854775807"
+    let min: string = "-9223372036854775808"
+    let over: string = "9223372036854775808"
+    let under: string = "-9223372036854775809"
+    let end: i64[1]
+    assert_eq(span_parse_dec(max.utf8, 19, 0, end), 9223372036854775807)
+    assert_eq(end[0], 19)
+    assert_eq(span_parse_dec(min.utf8, 20, 0, end), -9223372036854775807 - 1)
+    assert_eq(end[0], 20)
+    assert_eq(span_parse_dec(over.utf8, 19, 0, end), 0)
+    assert_eq(end[0], 0)
+    assert_eq(span_parse_dec(under.utf8, 20, 0, end), 0)
+    assert_eq(end[0], 0)
+}
+
+test "span: every byte alphanumeric or in an extra set" {
+    let s: string = "inv-api_1.x"
+    assert_eq(span_all_alnum_or(s.utf8, 11, "-_."), 1)
+    assert_eq(span_all_alnum_or(s.utf8, 11, "-_"), 0)
+    assert_eq(span_all_alnum_or(s.utf8, 0, ""), 1)
+    assert_eq(span_all_alnum_or(s.utf8, 3, ""), 1)
+}

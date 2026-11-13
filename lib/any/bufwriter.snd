@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/bufwriter.snd: an append-only writer into a buffer the caller owns.
+//
+// The writer never stores a byte at or past `cap`. A byte that does not fit is dropped and
+// `overflow` is set to 1, and it stays set: the caller checks it once at the end and refuses
+// the output, so a short buffer becomes an error instead of a silently truncated record.
+// Nothing is allocated.
+//
+//   let w = BufWriter { buf: out, cap: cap, len: 0, overflow: 0 }
+//   bw_str(w, "id=")
+//   bw_dec(w, 42)
+//   if w.overflow == 1 { ...refuse... }   // else w.len bytes are at out
+//
+// Public API (stable):
+//   struct BufWriter { buf, cap, len, overflow }
+//   bw_byte(w, c)          one byte
+//   bw_str(w, s)           the bytes of a string constant
+//   bw_bytes(w, p, n)      n raw bytes at p
+//   bw_dec(w, v)           v in decimal, '-' first when negative (all of i64)
+//   bw_hex(w, p, n)        n bytes at p as 2n lowercase hex digits
+
+include "any/encoding/hex.snd"
+
+struct BufWriter { buf: i64, cap: i64, len: i64, overflow: i64 }
+
+priv fn bw_put(buf: u8[cap], cap: i64, i: i64, v: i64) -> (r: i64) ensures { r >= 0; r <= 1 } {
+    if i >= 0 && i < cap {
+        buf[i] = v
+        1
+    } else { 0 }
+}
+
+pub fn bw_byte(w: *BufWriter, c: i64) {
+    if bw_put(w.buf, w.cap, w.len, c) == 1 {
+        w.len = w.len + 1
+    } else {
+        w.overflow = 1
+    }
+}
+
+pub fn bw_str(w: *BufWriter, t: string) {
+    let s = t.utf8
+    let mut i = 0
+    for peek8(s + i) != 0 {
+        bw_byte(w, peek8(s + i))
+        i = i + 1
+    }
+}
+
+pub fn bw_bytes(w: *BufWriter, p: i64, n: i64) {
+    let s: u8[n] = p
+    for i in 0..n {
+        bw_byte(w, s[i])
+    }
+}
+
+// The 19 digits of the magnitude are produced from the right, least significant first, from a
+// value kept negative so that the most negative i64 (whose magnitude does not fit) is written
+// like any other; leading zeros are skipped, except the last digit of zero itself.
+pub fn bw_dec(w: *BufWriter, v: i64) {
+    let d: u8[19]
+    let mut neg = if v > 0 { 0 - v } else { v }
+    let mut start = 18
+    for i in 0..19 {
+        d[18 - i] = '0' - neg % 10
+        if neg != 0 { start = 18 - i }
+        neg = neg / 10
+    }
+    if v < 0 { bw_byte(w, '-') }
+    for j in 0..19 {
+        if j >= start { bw_byte(w, d[j]) }
+    }
+}
+
+pub fn bw_hex(w: *BufWriter, p: i64, n: i64) {
+    let s: u8[n] = p
+    for i in 0..n {
+        let b = s[i]
+        bw_byte(w, hex_digit_lower(b >> 4))
+        bw_byte(w, hex_digit_lower(b))
+    }
+}

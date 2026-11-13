@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/encoding/hex.snd: base16 (RFC 4648 section 8), lowercase on output.
+//
+// Every buffer is the caller's and comes with its capacity; nothing is allocated. Encoding
+// writes two lowercase digits per byte, high nibble first. Decoding takes an even number of
+// digits; `hex_decode` accepts either case, `hex_decode_lower` only 0-9a-f (for a field whose
+// canonical form is lowercase, where "AB" and "ab" must not both be accepted as the same value).
+//
+// Public API (stable):
+//   hex_digit_lower(v)                 the lowercase digit of nibble v & 15
+//   hex_value(c)                       0..15 for 0-9 a-f A-F, -1 otherwise
+//   hex_value_lower(c)                 0..15 for 0-9 a-f, -1 otherwise
+//   hex_encode(src, n, out, cap)       2n, or HEX_ERR_LENGTH / HEX_ERR_SPACE
+//   hex_decode(src, n, out, cap)       n/2, or HEX_ERR_LENGTH / HEX_ERR_SPACE / HEX_ERR_DIGIT
+//   hex_decode_lower(src, n, out, cap) as hex_decode, uppercase is HEX_ERR_DIGIT
+// Contracts the compiler proves: hex_value* return -1..15, hex_digit_lower '0'..'f', hex_encode
+// never below HEX_ERR_SPACE and the decoders never below HEX_ERR_DIGIT. A negative cap holds
+// nothing, so even an empty encode into one is HEX_ERR_SPACE. A refused encode writes nothing; a refused decode may have written the bytes before the
+// first bad digit, which the caller must not read.
+
+let HEX_ERR_LENGTH = -1    // n is negative, or (decoding) odd
+let HEX_ERR_SPACE = -2     // cap cannot hold the result
+let HEX_ERR_DIGIT = -3     // a byte that is not a hex digit (of the accepted case)
+
+pub fn hex_digit_lower(v: i64) -> (r: i64) ensures { r >= '0'; r <= 'f' } effects [] {
+    let d = v & 15
+    if d < 10 { '0' + d } else { 'a' + d - 10 }
+}
+
+pub fn hex_value_lower(c: i64) -> (r: i64) ensures { r >= -1; r <= 15 } effects [] {
+    if c >= '0' && c <= '9' { c - '0' } else if c >= 'a' && c <= 'f' { c - 'a' + 10 } else { -1 }
+}
+
+pub fn hex_value(c: i64) -> (r: i64) ensures { r >= -1; r <= 15 } effects [] {
+    if c >= 'A' && c <= 'F' { c - 'A' + 10 } else { hex_value_lower(c) }
+}
+
+// The 2n digits of n source bytes at out; the caller has checked that they fit.
+priv fn hex_encode_bytes(src: i64, n: i64, out: i64) {
+    let s: u8[n] = src
+    let m = n * 2
+    let o: u8[m] = out
+    for i in 0..n {
+        let b = s[i]
+        o[2 * i] = hex_digit_lower(b >> 4)
+        o[2 * i + 1] = hex_digit_lower(b)
+    }
+}
+
+pub fn hex_encode(src: i64, n: i64, out: i64, cap: i64) -> (r: i64) ensures { r >= -2 } {
+    if n < 0 { HEX_ERR_LENGTH } else if n > cap - n { HEX_ERR_SPACE } else {
+        hex_encode_bytes(src, n, out)
+        n + n
+    }
+}
+
+// The m bytes of 2m digits at out: 1, or 0 at the first byte that is not a digit (lower == 1
+// refuses uppercase ones). The caller has checked the lengths.
+priv fn hex_decode_bytes(src: i64, m: i64, out: i64, lower: i64) -> i64 {
+    let m2 = m * 2
+    let s: u8[m2] = src
+    let o: u8[m] = out
+    for i in 0..m {
+        let mut hi = hex_value_lower(s[2 * i])
+        let mut lo = hex_value_lower(s[2 * i + 1])
+        if lower == 0 {
+            hi = hex_value(s[2 * i])
+            lo = hex_value(s[2 * i + 1])
+        }
+        if hi < 0 || lo < 0 { return 0 }
+        o[i] = hi * 16 + lo
+    }
+    1
+}
+
+// Shared by both decoders.
+priv fn hex_decode_impl(src: i64, n: i64, out: i64, cap: i64, lower: i64) -> (r: i64) ensures { r >= -3 } {
+    let m = n >> 1
+    if n < 0 { HEX_ERR_LENGTH }
+    else if m + m != n { HEX_ERR_LENGTH }
+    else if m > cap { HEX_ERR_SPACE }
+    else if hex_decode_bytes(src, m, out, lower) == 1 { m }
+    else { HEX_ERR_DIGIT }
+}
+
+pub fn hex_decode(src: i64, n: i64, out: i64, cap: i64) -> (r: i64) ensures { r >= -3 } {
+    hex_decode_impl(src, n, out, cap, 0)
+}
+
+pub fn hex_decode_lower(src: i64, n: i64, out: i64, cap: i64) -> (r: i64) ensures { r >= -3 } {
+    hex_decode_impl(src, n, out, cap, 1)
+}

@@ -222,3 +222,221 @@ test "a key that is absent is not the same as a key whose value is null" {
     let __sn5: string = "nope"
     assert_eq(json_type(json_get(o, __sn5.utf8)), JSON_NONE)
 }
+
+// ── Bounded and canonical encoding, full string escaping, \uXXXX decoding ──────────────
+
+// 1 if the n bytes at `out` are exactly the bytes of `want` (and want has n bytes).
+fn is(out: i64, n: i64, want: string) -> i64 {
+    let w = want.utf8
+    if strlen(w) != n { return 0 }
+    for i in 0..n {
+        if peek8(out + i) != peek8(w + i) { return 0 }
+    }
+    1
+}
+
+// Encodes the string of n bytes at p with one of the two escapers into `out`; returns its length.
+fn esc(p: i64, n: i64, out: i64, ascii: i64) -> i64 {
+    let w = BufWriter { buf: out, cap: 256, len: 0, overflow: 0 }
+    if ascii == 1 { json_write_str_ascii(w, p, n) } else { json_write_str(w, p, n) }
+    w.len
+}
+
+test "json: \\u escapes decode to UTF-8, one to four bytes" {
+    let s: string = "\"\\u0041\\u00e9\\u20AC\\ud83d\\ude00\""
+    let v = parse(s.utf8)
+    assert_eq(json_type(v), JSON_STR)
+    assert_eq(json_str_len(v), 10)
+    let b = json_str(v)
+    assert_eq(peek8(b), 0x41)
+    assert_eq(peek8(b + 1), 0xC3)
+    assert_eq(peek8(b + 2), 0xA9)
+    assert_eq(peek8(b + 3), 0xE2)
+    assert_eq(peek8(b + 4), 0x82)
+    assert_eq(peek8(b + 5), 0xAC)
+    assert_eq(peek8(b + 6), 0xF0)
+    assert_eq(peek8(b + 7), 0x9F)
+    assert_eq(peek8(b + 8), 0x98)
+    assert_eq(peek8(b + 9), 0x80)
+}
+
+test "json: \\u0000 is a byte of the string, counted in its length" {
+    let s: string = "\"a\\u0000b\""
+    let v = parse(s.utf8)
+    assert_eq(json_str_len(v), 3)
+    assert_eq(peek8(json_str(v) + 1), 0)
+    assert_eq(peek8(json_str(v) + 2), 'b')
+}
+
+test "json: a lone or broken surrogate and a bad \\u escape are errors" {
+    let hi: string = "\"\\ud83d\""
+    assert_eq(json_type(parse(hi.utf8)), JSON_NONE)
+    let hix: string = "\"\\ud83dx\""
+    assert_eq(json_type(parse(hix.utf8)), JSON_NONE)
+    let hihi: string = "\"\\ud83d\\ud83d\""
+    assert_eq(json_type(parse(hihi.utf8)), JSON_NONE)
+    let lo: string = "\"\\ude00\""
+    assert_eq(json_type(parse(lo.utf8)), JSON_NONE)
+    let bad: string = "\"\\u00g0\""
+    assert_eq(json_type(parse(bad.utf8)), JSON_NONE)
+    let short: string = "\"\\u12"
+    let hin: string = "\"\\ud83d\\n\""
+    assert_eq(json_type(parse(hin.utf8)), JSON_NONE)
+    assert_eq(json_type(parse(short.utf8)), JSON_NONE)
+}
+
+test "json: strings escape the seven short forms and other control bytes as \\u00xx" {
+    let src: u8[10]
+    src[0] = '"'
+    src[1] = '\\'
+    src[2] = 8
+    src[3] = 9
+    src[4] = 10
+    src[5] = 12
+    src[6] = 13
+    src[7] = 1
+    src[8] = 0x1f
+    src[9] = 0
+    let out: u8[256]
+    let n = esc(src, 10, out, 0)
+    assert_eq(is(out, n, "\"\\\"\\\\\\b\\t\\n\\f\\r\\u0001\\u001f\\u0000\""), 1)
+}
+
+test "json: printable ASCII, DEL and UTF-8 are written as they are" {
+    let s: string = "a~ é/"
+    let src: u8[7]
+    for i in 0..6 {
+        src[i] = peek8(s.utf8 + i)
+    }
+    src[6] = 0x7f
+    let out: u8[256]
+    let n = esc(src, 7, out, 0)
+    assert_eq(n, 9)
+    assert_eq(out[0], '"')
+    for i in 0..7 {
+        assert_eq(out[1 + i], src[i])
+    }
+    assert_eq(out[8], '"')
+}
+
+test "json: the 7-bit escaper writes every byte outside printable ASCII as \\u00xx" {
+    let src: u8[7]
+    src[0] = 'a'
+    src[1] = '"'
+    src[2] = '\\'
+    src[3] = 10
+    src[4] = 0xC3
+    src[5] = 0x7f
+    src[6] = 0x7e
+    let out: u8[256]
+    let n = esc(src, 7, out, 1)
+    assert_eq(is(out, n, "\"a\\\"\\\\\\u000a\\u00c3\\u007f~\""), 1)
+}
+
+test "json: RFC 8785 string vector parses and re-encodes to its canonical form" {
+    // RFC 8785 section 3.2.2.2: "\u20ac$\u000F\u000aA'\u0042\u0022\u005c\\\"\/"
+    let s: string = "\"\\u20ac$\\u000F\\u000aA'\\u0042\\u0022\\u005c\\\\\\\"\\/\""
+    let v = parse(s.utf8)
+    let out: u8[256]
+    let n = json_encode_canonical_into(v, out, 256)
+    assert_eq(is(out, n, "\"€$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\""), 1)
+}
+
+test "json: bounded encoding keeps insertion order and writes no whitespace" {
+    let s: string = "{ \"b\": 1, \"a\": [true, null, \"x\", -7], \"c\": {} }"
+    let out: u8[256]
+    let n = json_encode_into(parse(s.utf8), out, 256)
+    assert_eq(is(out, n, "{\"b\":1,\"a\":[true,null,\"x\",-7],\"c\":{}}"), 1)
+}
+
+test "json: bounded encoding into a buffer that is too small is refused" {
+    let s: string = "{\"key\": \"value\"}"
+    let out: u8[256]
+    assert_eq(json_encode_into(parse(s.utf8), out, 14), JSON_ENC_ERR_SPACE)
+    assert_eq(json_encode_into(parse(s.utf8), out, 15), 15)
+    assert_eq(json_encode_canonical_into(parse(s.utf8), out, 14), JSON_ENC_ERR_SPACE)
+}
+
+test "json: a handle that names no node is refused by the encoders" {
+    let out: u8[16]
+    assert_eq(json_encode_into(0 - 1, out, 16), JSON_ENC_ERR_NODE)
+    assert_eq(json_encode_canonical_into(0 - 1, out, 16), JSON_ENC_ERR_NODE)
+    let arr = json_new_arr()
+    json_arr_push(arr, 0 - 1)
+    assert_eq(json_encode_into(arr, out, 16), JSON_ENC_ERR_NODE)
+}
+
+test "json: canonical encoding sorts object keys bytewise, at every depth" {
+    let s: string = "{\"b\": {\"z\": 1, \"y\": [{\"q\": 1, \"p\": 2}]}, \"aa\": 2, \"é\": 3, \"a\": 4, \"A\": 5, \"\": 6}"
+    let out: u8[256]
+    let n = json_encode_canonical_into(parse(s.utf8), out, 256)
+    assert_eq(is(out, n, "{\"\":6,\"A\":5,\"a\":4,\"aa\":2,\"b\":{\"y\":[{\"p\":2,\"q\":1}],\"z\":1},\"é\":3}"), 1)
+}
+
+test "json: canonical encoding orders a key before every key it is a prefix of" {
+    let s: string = "{\"ab\": 1, \"a\\u0000\": 2, \"a\": 3}"
+    let out: u8[256]
+    let n = json_encode_canonical_into(parse(s.utf8), out, 256)
+    assert_eq(is(out, n, "{\"a\":3,\"a\\u0000\":2,\"ab\":1}"), 1)
+    let t: string = "{\"a\": false, \"ab\": 2}"
+    let m = json_encode_canonical_into(parse(t.utf8), out, 256)
+    assert_eq(is(out, m, "{\"a\":false,\"ab\":2}"), 1)
+}
+
+test "json: canonical encoding refuses an object with a repeated key" {
+    let s: string = "{\"a\": 1, \"b\": 2, \"a\": 3}"
+    let out: u8[256]
+    assert_eq(json_encode_canonical_into(parse(s.utf8), out, 256), JSON_ENC_ERR_DUP_KEY)
+    let nested: string = "[{\"x\": {\"k\": 1, \"k\": 1}}]"
+    assert_eq(json_encode_canonical_into(parse(nested.utf8), out, 256), JSON_ENC_ERR_DUP_KEY)
+    assert_eq(json_encode_into(parse(s.utf8), out, 256), 19)
+}
+
+test "json: the growable encoder writes negative integers and the full escapes" {
+    let o = json_new_arr()
+    json_arr_push(o, json_new_int(0 - 5))
+    let s: u8[2]
+    s[0] = 1
+    s[1] = 0
+    json_arr_push(o, json_new_str(s))
+    let buf = json_encode(o)
+    assert_eq(is(peek64(buf), bytes_len(buf), "[-5,\"\\u0001\"]"), 1)
+    assert_eq(bytes_len(json_encode(0 - 1)), 0)
+}
+
+test "json: the growable encoder handles output larger than its first buffer" {
+    let a = json_new_arr()
+    for i in 0..200 {
+        json_arr_push(a, json_new_int(1000000 + i))
+    }
+    let buf = json_encode(a)
+    assert_eq(bytes_len(buf), 200 * 7 + 199 + 2)
+    let p = json_parse(peek64(buf), bytes_len(buf))
+    assert_eq(json_arr_len(p), 200)
+    assert_eq(json_int(json_arr_get(p, 199)), 1000199)
+}
+
+test "json: every byte 1..127 survives encode then parse" {
+    let src: u8[128]
+    for i in 0..127 {
+        src[i] = i + 1
+    }
+    src[127] = 0
+    let v = json_new_str(src)
+    let out: u8[1024]
+    let n = json_encode_into(v, out, 1024)
+    let back = json_parse(out, n)
+    assert_eq(json_str_len(back), 127)
+    for i in 0..127 {
+        assert_eq(peek8(json_str(back) + i), i + 1)
+    }
+}
+
+test "json: an object key that is not a string, or a missing colon, is an error" {
+    let k: string = "{1: 2}"
+    assert_eq(json_type(parse(k.utf8)), JSON_NONE)
+    let c: string = "{\"a\" 1}"
+    assert_eq(json_type(parse(c.utf8)), JSON_NONE)
+    let e: string = "{\"a\": 1 \"b\": 2}"
+    assert_eq(json_type(parse(e.utf8)), JSON_NONE)
+}

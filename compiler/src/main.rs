@@ -475,8 +475,12 @@ fn main() -> ExitCode {
         // A C-ABI shared object: position-independent, no C runtime (Sond is
         // libc-free), exported `pub fn` in the dynamic symbol table. Importable from
         // C/C++/Go/Rust/Python. Name it `libNAME.so` for link-time `-lNAME`.
+        // `-Bsymbolic`: a call inside the object binds to the object's own definition. Every
+        // library a program includes brings its `pub fn`s along, so two Sond objects in one
+        // process export the same names; without it the dynamic linker sends one object's
+        // internal calls to the other's copy (tests/shared_objects_bind_their_own_calls.rs).
         Command::new("cc")
-            .args(["-shared", "-nostdlib"])
+            .args(["-shared", "-nostdlib", "-Wl,-Bsymbolic"])
             .arg(&asm_path)
             .arg("-o")
             .arg(&output)
