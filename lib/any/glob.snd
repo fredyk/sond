@@ -10,15 +10,20 @@
 //   on a mismatch only the last star is retried, one byte further on (the classic
 //   greedy-with-backtrack scan), so no input makes it exponential. Negative lengths match
 //   nothing.
-fn glob_match(pat: i64, plen: i64, s: i64, slen: i64) -> i64 {
-    if plen < 0 || slen < 0 {
-        return 0
-    }
+fn glob_match(pat: i64, plen: i64, s: i64, slen: i64) -> i64
+effects [] {
+    if plen < 0 { 0 } else if slen < 0 { 0 } else { glob_scan(pat, plen, s, slen) }
+}
+
+priv fn glob_scan(pat: i64, plen: i64, s: i64, slen: i64) -> i64
+requires { plen >= 0; slen >= 0 }
+effects [] {
     let mut p = 0
     let mut i = 0
     let mut star = -1
     let mut retry = 0
-    for i < slen {
+    let mut failed = 0
+    while i < slen && failed == 0 invariant { i >= 0; p >= 0 } {
         if p < plen && peek8(pat + p) == '*' {
             star = p
             retry = i
@@ -31,11 +36,11 @@ fn glob_match(pat: i64, plen: i64, s: i64, slen: i64) -> i64 {
             i = retry
             p = star + 1
         } else {
-            return 0
+            failed = 1
         }
     }
-    for p < plen && peek8(pat + p) == '*' {
+    while failed == 0 && p < plen && peek8(pat + p) == '*' invariant { p >= 0 } {
         p = p + 1
     }
-    if p == plen { 1 } else { 0 }
+    if failed == 0 && p == plen { 1 } else { 0 }
 }
