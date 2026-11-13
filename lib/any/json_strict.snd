@@ -20,7 +20,10 @@
 //
 // The canonical form: objects with their keys sorted by their UTF-8 bytes, no whitespace,
 // integers in decimal, strings with only '"', '\' and the control bytes escaped (\b \t \n
-// \f \r short, the rest \u00xx), everything else as its raw UTF-8 bytes. A key marked with
+// \f \r short, the rest \u00xx; U+2028 and U+2029 as   and  ), everything else as
+// its raw UTF-8 bytes: the bytes Go's encoding/json writes with HTML escaping off, so a hash
+// over them agrees with Go code. Raw bytes in a string must be well-formed UTF-8 (RFC 3629),
+// or the document is refused rather than rewritten. A key marked with
 // j_omit is left out of the canonical form (with its value), and stays readable otherwise.
 //
 // API: j_init(j, src, n, t, tcap, d, dcap); j_parse(j) -> root node or a J_ERR_* code.
@@ -105,6 +108,7 @@ let J_ERR_CAP = -5
 let J_ERR_TRAILING = -6
 let J_ERR_ESCAPE = -7
 let J_ERR_CONTROL = -8
+let J_ERR_UTF8 = -9
 
 struct JDoc {
     src: i64, n: i64, pos: i64,
@@ -269,6 +273,37 @@ fn js_escape(j: *JDoc) -> i64 {
 }
 
 // A string (cursor on the opening quote) as a node of type typ.
+// One raw UTF-8 sequence whose lead byte c was just consumed: copied to d when it is
+// well-formed (RFC 3629: shortest form, no surrogate, at most U+10FFFF), J_ERR_UTF8 if not.
+fn js_utf8(j: *JDoc, c: i64) -> i64 {
+    let mut more = 0
+    let mut lo = 0x80
+    let mut hi = 0xBF
+    if c >= 0xC2 && c <= 0xDF {
+        more = 1
+    } else if c >= 0xE0 && c <= 0xEF {
+        more = 2
+        if c == 0xE0 { lo = 0xA0 }
+        if c == 0xED { hi = 0x9F }
+    } else if c >= 0xF0 && c <= 0xF4 {
+        more = 3
+        if c == 0xF0 { lo = 0x90 }
+        if c == 0xF4 { hi = 0x8F }
+    } else {
+        return js_fail(j, J_ERR_UTF8)
+    }
+    if js_put_d(j, c) < 0 { return -1 }
+    for k in 0..more {
+        let b = js_peekc(j)
+        let top = if k == 0 { hi } else { 0xBF }
+        let bottom = if k == 0 { lo } else { 0x80 }
+        if b < bottom || b > top { return js_fail(j, J_ERR_UTF8) }
+        j.pos = j.pos + 1
+        if js_put_d(j, b) < 0 { return -1 }
+    }
+    1
+}
+
 fn js_parse_string(j: *JDoc, typ: i64) -> i64 {
     j.pos = j.pos + 1
     let start = j.nd
@@ -280,6 +315,8 @@ fn js_parse_string(j: *JDoc, typ: i64) -> i64 {
         if c < 0x20 { return js_fail(j, J_ERR_CONTROL) }
         if c == '\\' {
             if js_escape(j) < 0 { return -1 }
+        } else if c >= 0x80 {
+            if js_utf8(j, c) < 0 { return -1 }
         } else {
             if js_put_d(j, c) < 0 { return -1 }
         }
@@ -553,8 +590,21 @@ fn js_w_canon_byte(w: *JOut, c: i64) {
 fn js_w_canon_str(w: *JOut, j: *JDoc, i: i64) {
     jo_byte(w, '"')
     let off = j_off(j, i)
-    for k in 0..j_len(j, i) {
-        js_w_canon_byte(w, js_byte_at(j.d, j.dcap, off + k))
+    let n = j_len(j, i)
+    let mut k = 0
+    for k < n {
+        let c = js_byte_at(j.d, j.dcap, off + k)
+        // U+2028 and U+2029 are written escaped, as encoding/json and JavaScript-safe
+        // encoders do, so the canonical bytes agree with theirs.
+        let sep = js_byte_at(j.d, j.dcap, off + k + 2)
+        if c == 0xE2 && k + 2 < n && js_byte_at(j.d, j.dcap, off + k + 1) == 0x80 && (sep == 0xA8 || sep == 0xA9) {
+            jo_lit(w, "\\u202")
+            jo_byte(w, if sep == 0xA8 { '8' } else { '9' })
+            k = k + 3
+        } else {
+            js_w_canon_byte(w, c)
+            k = k + 1
+        }
     }
     jo_byte(w, '"')
 }
