@@ -1,0 +1,97 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests of ident/es_nif.snd: the control character of Spanish tax identification numbers, for a
+// person (DNI, NIE, and the K, L and M numbers of RD 1065/2007 art. 19.2 and 20.2) and for an entity.
+
+include "any/ident/es_nif.snd"
+include "x86_64/linux/testing.snd"
+
+fn ok(s: string, n: i64) -> i64 {
+    es_nif_valid(s.utf8, n)
+}
+
+test "a DNI takes the letter of its number modulo 23" {
+    assert_eq(ok("12345678Z", 9), 1)
+    assert_eq(ok("00000000T", 9), 1)
+    assert_eq(ok("99999999R", 9), 1)
+    assert_eq(ok("12345678A", 9), 0)
+    // The letter is upper case only.
+    assert_eq(ok("12345678z", 9), 0)
+}
+
+test "a NIE reads its X, Y or Z as 0, 1 or 2" {
+    assert_eq(ok("X0000000T", 9), 1)
+    assert_eq(ok("Y0000000Z", 9), 1)
+    assert_eq(ok("Z0000000M", 9), 1)
+    assert_eq(ok("X0000000A", 9), 0)
+    assert_eq(ok("X000000AT", 9), 0)
+}
+
+test "K, L and M take the DNI letter of their seven digits" {
+    assert_eq(ok("K1234567L", 9), 1)
+    assert_eq(ok("L7654321J", 9), 1)
+    assert_eq(ok("M0000001R", 9), 1)
+    assert_eq(ok("M2345678T", 9), 1)
+    assert_eq(ok("K1234567A", 9), 0)
+    assert_eq(ok("L7654321Z", 9), 0)
+    assert_eq(ok("M000000AR", 9), 0)
+}
+
+test "an entity of A, B, E or H ends in the control digit" {
+    assert_eq(ok("A13579131", 9), 1)
+    assert_eq(ok("B00000000", 9), 1)
+    assert_eq(ok("B23456783", 9), 1)
+    assert_eq(ok("E34567891", 9), 1)
+    assert_eq(ok("H67890129", 9), 1)
+    assert_eq(ok("B00000001", 9), 0)
+    // The letter J stands for 0, but these letters take the digit only.
+    assert_eq(ok("B0000000J", 9), 0)
+}
+
+test "an entity of P, Q, S, N or W ends in the control letter" {
+    assert_eq(ok("Q0000000J", 9), 1)
+    assert_eq(ok("N8901234H", 9), 1)
+    assert_eq(ok("P9012345F", 9), 1)
+    assert_eq(ok("S2468024A", 9), 1)
+    assert_eq(ok("W5791357F", 9), 1)
+    assert_eq(ok("Q00000000", 9), 0)
+}
+
+test "an entity of the other letters takes the digit or the letter" {
+    assert_eq(ok("C12345674", 9), 1)
+    assert_eq(ok("C1234567D", 9), 1)
+    assert_eq(ok("D23456783", 9), 1)
+    assert_eq(ok("F45678901", 9), 1)
+    assert_eq(ok("G56789019", 9), 1)
+    assert_eq(ok("J78901238", 9), 1)
+    assert_eq(ok("R13579131", 9), 1)
+    assert_eq(ok("U35791359", 9), 1)
+    assert_eq(ok("V46802468", 9), 1)
+    assert_eq(ok("C12345675", 9), 0)
+}
+
+test "a first letter that is no legal form, or a wrong length, is refused" {
+    assert_eq(ok("I12345674", 9), 0)
+    assert_eq(ok("O12345674", 9), 0)
+    assert_eq(ok("T12345674", 9), 0)
+    assert_eq(ok("b00000000", 9), 0)
+    assert_eq(ok("ABC", 3), 0)
+    assert_eq(ok("", 0), 0)
+    assert_eq(ok("123456789Z", 10), 0)
+    assert_eq(ok("K12345678", 9), 0)
+}
+
+test "a byte that is not ASCII is refused wherever it is" {
+    let b: u8[9]
+    let s: string = "12345678Z"
+    for i in 0..9 {
+        b[i] = peek8(s.utf8 + i)
+    }
+    assert_eq(es_nif_valid(b, 9), 1)
+    b[3] = 0xC3
+    assert_eq(es_nif_valid(b, 9), 0)
+    b[3] = '4'
+    b[8] = 0xDA
+    assert_eq(es_nif_valid(b, 9), 0)
+}
