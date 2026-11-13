@@ -89,3 +89,30 @@ test "span: every byte alphanumeric or in an extra set" {
     assert_eq(span_all_alnum_or(s.utf8, 0, ""), 1)
     assert_eq(span_all_alnum_or(s.utf8, 3, ""), 1)
 }
+
+test "span: a byte is found from an offset, -1 when it is not there" {
+    let s: string = "a,b,,c"
+    assert_eq(span_find(s.utf8, 6, 0, 44), 1)
+    assert_eq(span_find(s.utf8, 6, 2, 44), 3)
+    assert_eq(span_find(s.utf8, 6, 4, 44), 4)
+    assert_eq(span_find(s.utf8, 6, 5, 44), -1)
+    assert_eq(span_find(s.utf8, 6, -3, 97), 0)
+    assert_eq(span_find(s.utf8, 6, 6, 99), -1)
+    assert_eq(span_find(s.utf8, 3, 0, 99), -1)
+    let z: u8[3]
+    z[0] = 1
+    z[1] = 0
+    assert_eq(span_find(z, 3, 0, 0), 1)
+}
+
+test "span: every byte printable ASCII" {
+    let s: string = "a b~"
+    assert_eq(span_all_print(s.utf8, 4), 1)
+    assert_eq(span_all_print(s.utf8, 0), 1)
+    let t: u8[2]
+    t[0] = 0x61
+    t[1] = 10
+    assert_eq(span_all_print(t, 2), 0)
+    t[1] = 0x7f
+    assert_eq(span_all_print(t, 2), 0)
+}

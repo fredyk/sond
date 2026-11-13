@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/crypto/hash/sha256_stream.snd: SHA-256 (FIPS 180-4) over a message fed in pieces, for
+// a message too large to hold in memory at once. The state is SHA256_STREAM_WORDS words of memory
+// the caller owns; nothing is global, so independent streams can run side by side.
+//
+//   let st: i64[18]
+//   sha256_stream_init(st)
+//   sha256_stream_update(st, p, n)      // as many times as needed: 1, or 0 for n < 0
+//   sha256_stream_final(st, out, cap)   // 32 digest bytes at out, or 0 when cap < 32
+//
+// Layout: words 0..8 the chaining value, word 8 the bytes fed so far, word 9 how many of them
+// wait in the 64-byte block buffer at words 10..18. Final pads the message, so the state is spent
+// once it has been called; init starts it again.
+
+include "any/crypto/hash/sha256.snd"
+
+let SHA256_STREAM_WORDS = 18
+
+pub fn sha256_stream_init(st: i64) effects [] {
+    let s: i64[18] = st
+    s[0] = 0x6a09e667
+    s[1] = 0xbb67ae85
+    s[2] = 0x3c6ef372
+    s[3] = 0xa54ff53a
+    s[4] = 0x510e527f
+    s[5] = 0x9b05688c
+    s[6] = 0x1f83d9ab
+    s[7] = 0x5be0cd19
+    s[8] = 0
+    s[9] = 0
+}
+
+// One byte into the block buffer; a full block is compressed and the buffer emptied.
+priv fn sha256_stream_push(st: i64, c: i64) {
+    let s: i64[18] = st
+    let blk: u8[64] = st + 80
+    let k = s[9] & 63
+    blk[k] = c
+    if k == 63 {
+        sha256_process_block(st, st + 80)
+        s[9] = 0
+    } else {
+        s[9] = k + 1
+    }
+}
+
+// Bytes go through the buffer until it is empty, whole blocks straight from the input, the tail
+// back through the buffer.
+priv fn sha256_stream_feed(st: i64, p: i64, n: i64) {
+    let s: i64[18] = st
+    let m: u8[n] = p
+    let mut i = 0
+    for i < n && s[9] != 0 invariant { i >= 0 } {
+        sha256_stream_push(st, m[i])
+        i = i + 1
+    }
+    for n - i >= 64 invariant { i >= 0 } {
+        sha256_process_block(st, p + i)
+        i = i + 64
+    }
+    for i < n invariant { i >= 0 } {
+        sha256_stream_push(st, m[i])
+        i = i + 1
+    }
+    s[8] = s[8] + n
+}
+
+pub fn sha256_stream_update(st: i64, p: i64, n: i64) -> (r: i64) ensures { r >= 0; r <= 1 } {
+    if n < 0 { 0 } else {
+        sha256_stream_feed(st, p, n)
+        1
+    }
+}
+
+// The padding (0x80, zeros up to 56 mod 64, the bit length big-endian) and the digest bytes.
+priv fn sha256_stream_finish(st: i64, out: i64) {
+    let s: i64[18] = st
+    let bits = s[8] * 8
+    sha256_stream_push(st, 0x80)
+    for s[9] != 56 {
+        sha256_stream_push(st, 0)
+    }
+    for i in 0..8 {
+        sha256_stream_push(st, (bits >> (56 - i * 8)) & 0xFF)
+    }
+    let o: u8[32] = out
+    for i in 0..8 {
+        let hv = s[i]
+        o[i * 4] = (hv >> 24) & 0xFF
+        o[i * 4 + 1] = (hv >> 16) & 0xFF
+        o[i * 4 + 2] = (hv >> 8) & 0xFF
+        o[i * 4 + 3] = hv & 0xFF
+    }
+}
+
+pub fn sha256_stream_final(st: i64, out: i64, cap: i64) -> (r: i64) ensures { r >= 0; r <= 32 } {
+    if cap < 32 { 0 } else {
+        sha256_stream_finish(st, out)
+        32
+    }
+}
