@@ -14,9 +14,6 @@ let BX[16] = [0xd51a, 0x8f25, 0x2d60, 0xc956, 0xa7b2, 0x9525, 0xc760, 0x692c, 0x
 // Base point By (y = 4/5 mod p, 16 limbs LE)
 let BY[16] = [0x6658, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666, 0x6666]
 
-// Expected public key for RFC 8032 Test 1 as 32 bytes (LE memory layout)
-let EXPECTED[4] = [0xb70ab18201985ad7, 0x3a0764c9d3fe4bd5, 0x2523a6daf372e10e, 0x1a5107f7681a02af]
-
 fn point_set_identity(x, y, z, t) {
     x[0] = 0; x[1] = 0; x[2] = 0; x[3] = 0; x[4] = 0
     x[5] = 0; x[6] = 0; x[7] = 0; x[8] = 0; x[9] = 0
@@ -93,6 +90,12 @@ fn point_encode(ptr, x, y, z) {
     fe_mul(y_aff, y, invz)
     fe_mul(x_aff, x, invz)
     fe_tobytes(ptr, y_aff)
+    // The sign bit is x's lowest bit, and it has to be read off the CANONICAL x. `fe_mul` leaves
+    // a value in [0, 2^255), which for anything already at or above p differs from the reduced
+    // form by 19 -- an odd number, so the bit read here comes out inverted. x = 0 arriving as p
+    // is exactly that case, and x = 0 is the identity point: [0]B used to encode with the sign
+    // bit set, which is not a point at all.
+    fe_frozen(x_aff, x_aff)
     let sign = x_aff[0] & 1
     let b31 = peek8(ptr + 31)
     poke8(ptr + 31, b31 | (sign << 7))
