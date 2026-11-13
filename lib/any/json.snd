@@ -11,11 +11,33 @@
 //
 // Numbers are parsed as i64 (a leading fraction/exponent is not decoded yet, so a
 // float truncates; adequate for config and identifiers, extend when needed).
-// String escapes \" \\ \/ \b \f \n \r \t are decoded; \uXXXX is not yet.
+// String escapes \" \\ \/ \b \f \n \r \t are decoded, and \uXXXX to UTF-8 (a surrogate
+// pair to one 4-byte sequence; a lone or mismatched surrogate is an error). A decoded string
+// may hold a NUL byte: json_str_len, not strlen, is its length.
 //
 // API: json_parse(data,len) -> root node, or -1 on error. json_type(node).
 // json_get(obj,key_cstr) -> value node or -1. json_int/json_bool/json_str/
 // json_str_len. json_arr_len/json_arr_get.
+//
+// Encoding (stable API), all without whitespace:
+//   json_encode(node)                         -> a growable Bytes buffer
+//   json_encode_into(node, out, cap)          -> length, keys in insertion order
+//   json_encode_canonical_into(node, out, cap) -> length, object keys sorted bytewise
+//   json_write_str(w, p, n)        a string value into a BufWriter, RFC 8785 escaping
+//   json_write_str_ascii(w, p, n)  the same with 7-bit output (see below)
+// The _into encoders return JSON_ENC_ERR_SPACE when `cap` is too small, JSON_ENC_ERR_NODE for
+// a handle that names no node, and the canonical one JSON_ENC_ERR_DUP_KEY for an object that
+// repeats a key (its canonical form would be ambiguous).
+//
+// String escaping (json_write_str): '"' and '\\' get a backslash, the five controls with a
+// short form are written \b \t \n \f \r, every other byte below 0x20 is \u00xx (lowercase hex),
+// and everything else, DEL and UTF-8 included, is written as it is. That is the string form of
+// RFC 8785, so with integers only and ASCII (or BMP below U+E000) keys the canonical encoding is
+// the RFC 8785 one; RFC 8785 sorts keys by UTF-16 code units, which only differs from the
+// bytewise UTF-8 order used here for keys that mix U+E000..U+FFFF with supplementary characters.
+// json_write_str_ascii instead writes every byte below 0x20 or above 0x7e as \u00xx (only '"' and
+// '\\' keep a short form): the output is 7-bit whatever the input, so bytes that are not UTF-8
+// still give valid JSON, each byte appearing as the code point of the same value.
 //
 // Those two -1s are handles that name no node, and json_type reports them as JSON_NONE
 // instead of reading through them, so `if json_type(x) != JSON_OBJ` is a guard and not a
@@ -25,6 +47,7 @@ include "any/strings.snd"
 include "x86_64/linux/heap.snd"
 include "x86_64/linux/vec.snd"
 include "x86_64/linux/bytes.snd"
+include "any/bufwriter.snd"
 
 let JSON_NULL = 0
 let JSON_BOOL = 1
@@ -38,6 +61,10 @@ let JSON_OBJ  = 5
 // for it without dereferencing anything, and it is distinct from JSON_NULL on purpose --
 // "the field is not there" and "the field is there and holds null" are different answers.
 let JSON_NONE = 0 - 1
+
+let JSON_ENC_ERR_SPACE = -1      // the output buffer is too small
+let JSON_ENC_ERR_DUP_KEY = -2    // canonical encoding of an object with a repeated key
+let JSON_ENC_ERR_NODE = -3       // a handle that names no node
 
 let JSON_EOF = 256           // sentinel returned past the end (no real byte is 256)
 
@@ -79,6 +106,13 @@ fn __string() -> i64 {
         if c == 92 {                                    // backslash
             __j_pos = __j_pos + 1
             let e = __peek()
+            if e == 117 {                               // \uXXXX
+                __j_pos = __j_pos + 1
+                let n = __unicode_escape(out + w)
+                if n < 0 { __j_err = 1; break }
+                w = w + n
+                continue
+            }
             let d = if e == 110 { 10 } else { if e == 116 { 9 } else { if e == 114 { 13 } else { if e == 98 { 8 } else { if e == 102 { 12 } else { e } } } } }
             poke8(out + w, d)
             w = w + 1
@@ -91,6 +125,57 @@ fn __string() -> i64 {
     }
     poke8(out + w, 0)                     // NUL-terminate
     __node(JSON_STR, out, w)
+}
+
+// The value of the 4 hex digits at the cursor (advanced past them), or -1.
+fn __hex4() -> i64 {
+    let mut v = 0
+    for k in 0..4 {
+        let d = hex_value(__peek())
+        if d < 0 { return 0 - 1 }
+        v = v * 16 + d
+        __j_pos = __j_pos + 1
+    }
+    v
+}
+
+// Decodes the code point of a \uXXXX escape (cursor after the 'u'; a high surrogate takes the
+// \uXXXX low one that must follow) and writes its UTF-8 at `dst`. Returns the byte count, or
+// -1 for a bad digit or a surrogate that is not half of a pair. The escape is at least 6
+// source bytes and its UTF-8 at most 4, so the decoded string never outgrows its source.
+fn __unicode_escape(dst: i64) -> i64 {
+    let mut cp = __hex4()
+    if cp < 0 { return 0 - 1 }
+    if cp >= 0xDC00 && cp <= 0xDFFF { return 0 - 1 }
+    if cp >= 0xD800 && cp <= 0xDBFF {
+        if __peek() != 92 { return 0 - 1 }
+        __j_pos = __j_pos + 1
+        if __peek() != 117 { return 0 - 1 }
+        __j_pos = __j_pos + 1
+        let lo = __hex4()
+        if lo < 0xDC00 || lo > 0xDFFF { return 0 - 1 }
+        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+    }
+    if cp < 0x80 {
+        poke8(dst, cp)
+        return 1
+    }
+    if cp < 0x800 {
+        poke8(dst, 0xC0 | (cp >> 6))
+        poke8(dst + 1, 0x80 | (cp & 0x3F))
+        return 2
+    }
+    if cp < 0x10000 {
+        poke8(dst, 0xE0 | (cp >> 12))
+        poke8(dst + 1, 0x80 | ((cp >> 6) & 0x3F))
+        poke8(dst + 2, 0x80 | (cp & 0x3F))
+        return 3
+    }
+    poke8(dst, 0xF0 | (cp >> 18))
+    poke8(dst + 1, 0x80 | ((cp >> 12) & 0x3F))
+    poke8(dst + 2, 0x80 | ((cp >> 6) & 0x3F))
+    poke8(dst + 3, 0x80 | (cp & 0x3F))
+    4
 }
 
 // Reads a JSON number as an integer (optional leading minus). A fraction or
@@ -237,64 +322,161 @@ pub fn json_obj_put(obj: i64, key: i64, val: i64) {
 }
 pub fn json_arr_push(arr: i64, val: i64) { vec_push(arr[1], val) }
 
-// Appends `s` to `b` as a JSON string literal (quoted, escapes applied).
-fn __enc_str(s: i64, b: i64) {
-    bytes_push(b, 34)                     // opening quote
-    let n = strlen(s)
-    let mut i = 0
-    for i < n {
-        let c = peek8(s + i)
-        let esc = if c == 34 { 34 } else { if c == 92 { 92 } else { if c == 10 { 110 } else { if c == 13 { 114 } else { if c == 9 { 116 } else { if c == 8 { 98 } else { if c == 12 { 102 } else { 0 } } } } } } }
-        if esc == 0 { bytes_push(b, c) } else { bytes_push(b, 92); bytes_push(b, esc) }
-        i = i + 1
-    }
-    bytes_push(b, 34)                     // closing quote
+// The short escape of byte c ('"' '\\' b t n f r), or 0 when it has none.
+priv fn json_short_escape(c: i64) -> i64 {
+    if c == 34 { return 34 }
+    if c == 92 { return 92 }
+    if c == 8 { return 98 }
+    if c == 9 { return 116 }
+    if c == 10 { return 110 }
+    if c == 12 { return 102 }
+    if c == 13 { return 114 }
+    0
 }
 
-fn __encode(node: i64, b: i64) {
-    let t = node[0]
-    let __lit3: string = "null"
-    if t == JSON_NULL { bytes_append_cstr(b, __lit3.utf8); return }
-    if t == JSON_BOOL {
-        let __lit4: string = "true"
-        let __lit5: string = "false"
-        if node[1] == 1 { bytes_append_cstr(b, __lit4.utf8) } else { bytes_append_cstr(b, __lit5.utf8) }
-        return
+priv fn json_write_u00(w: *BufWriter, c: i64) {
+    bw_str(w, "\\u00")
+    bw_byte(w, hex_digit_lower(c >> 4))
+    bw_byte(w, hex_digit_lower(c))
+}
+
+pub fn json_write_str(w: *BufWriter, p: i64, n: i64) {
+    let s: u8[n] = p
+    bw_byte(w, 34)
+    for i in 0..n {
+        let c = s[i]
+        let e = json_short_escape(c)
+        if e != 0 {
+            bw_byte(w, 92)
+            bw_byte(w, e)
+        } else if c < 0x20 {
+            json_write_u00(w, c)
+        } else {
+            bw_byte(w, c)
+        }
     }
-    if t == JSON_INT { bytes_append_int(b, node[1]); return }
-    if t == JSON_STR { __enc_str(node[1], b); return }
+    bw_byte(w, 34)
+}
+
+pub fn json_write_str_ascii(w: *BufWriter, p: i64, n: i64) {
+    let s: u8[n] = p
+    bw_byte(w, 34)
+    for i in 0..n {
+        let c = s[i]
+        if c == 34 || c == 92 {
+            bw_byte(w, 92)
+            bw_byte(w, c)
+        } else if c < 0x20 || c > 0x7e {
+            json_write_u00(w, c)
+        } else {
+            bw_byte(w, c)
+        }
+    }
+    bw_byte(w, 34)
+}
+
+// Bytewise order of two byte strings: -1, 0 or 1 (a proper prefix sorts first).
+priv fn json_key_cmp(a: i64, an: i64, b: i64, bn: i64) -> i64 {
+    let n = if an < bn { an } else { bn }
+    for i in 0..n {
+        let x = peek8(a + i)
+        let y = peek8(b + i)
+        if x < y { return 0 - 1 }
+        if x > y { return 1 }
+    }
+    if an < bn { return 0 - 1 }
+    if an > bn { return 1 }
+    0
+}
+
+// The entries of an object in the order they are written: as inserted, or (canonical) sorted
+// by key with an insertion sort into a fresh array. Returns that array, or 0 for a repeated key.
+priv fn json_entry_order(entries: i64, m: i64, canonical: i64) -> i64 {
+    let order = heap_alloc(m * 8 + 8)
+    for j in 0..m {
+        let e = vec_get(entries, j)
+        let mut k = j
+        if canonical == 1 {
+            for k > 0 {
+                let prev = peek64(order + (k - 1) * 8)
+                let c = json_key_cmp(prev[0], prev[1], e[0], e[1])
+                if c == 0 { return 0 }
+                if c < 0 { break }
+                poke64(order + k * 8, prev)
+                k = k - 1
+            }
+        }
+        poke64(order + k * 8, e)
+    }
+    order
+}
+
+// Writes `node` into w. Returns 0, or JSON_ENC_ERR_DUP_KEY / JSON_ENC_ERR_NODE.
+priv fn json_enc(node: i64, w: *BufWriter, canonical: i64) -> i64 {
+    let t = json_type(node)
+    if t == JSON_NONE { return JSON_ENC_ERR_NODE }
+    if t == JSON_NULL { bw_str(w, "null"); return 0 }
+    if t == JSON_BOOL {
+        if node[1] == 1 { bw_str(w, "true") } else { bw_str(w, "false") }
+        return 0
+    }
+    if t == JSON_INT { bw_dec(w, node[1]); return 0 }
+    if t == JSON_STR { json_write_str(w, node[1], node[2]); return 0 }
     if t == JSON_ARR {
-        bytes_push(b, 91)                 // [
+        bw_byte(w, 91)                    // [
         let items = node[1]
         let n = vec_len(items)
-        let mut i = 0
-        for i < n {
-            if i > 0 { bytes_push(b, 44) }
-            __encode(vec_get(items, i), b)
-            i = i + 1
+        for i in 0..n {
+            if i > 0 { bw_byte(w, 44) }
+            let r = json_enc(vec_get(items, i), w, canonical)
+            if r != 0 { return r }
         }
-        bytes_push(b, 93)                 // ]
-        return
+        bw_byte(w, 93)                    // ]
+        return 0
     }
-    // object
-    bytes_push(b, 123)                    // {
+    bw_byte(w, 123)                       // {
     let entries = node[1]
     let m = vec_len(entries)
-    let mut j = 0
-    for j < m {
-        if j > 0 { bytes_push(b, 44) }
-        let e = vec_get(entries, j)
-        __enc_str(e[0], b)
-        bytes_push(b, 58)                 // :
-        __encode(e[2], b)
-        j = j + 1
+    let order = json_entry_order(entries, m, canonical)
+    if order == 0 { return JSON_ENC_ERR_DUP_KEY }
+    for j in 0..m {
+        if j > 0 { bw_byte(w, 44) }
+        let e = peek64(order + j * 8)
+        json_write_str(w, e[0], e[1])
+        bw_byte(w, 58)                    // :
+        let r = json_enc(e[2], w, canonical)
+        if r != 0 { return r }
     }
-    bytes_push(b, 125)                    // }
+    bw_byte(w, 125)                       // }
+    0
 }
 
-// Encodes a value tree to a fresh byte buffer (data at peek64(buf), len bytes_len(buf)).
+priv fn json_enc_into(node: i64, out: i64, cap: i64, canonical: i64) -> i64 {
+    let w = BufWriter { buf: out, cap: cap, len: 0, overflow: 0 }
+    let r = json_enc(node, w, canonical)
+    if r != 0 { return r }
+    if w.overflow == 1 { return JSON_ENC_ERR_SPACE }
+    w.len
+}
+
+pub fn json_encode_into(node: i64, out: i64, cap: i64) -> i64 {
+    json_enc_into(node, out, cap, 0)
+}
+
+pub fn json_encode_canonical_into(node: i64, out: i64, cap: i64) -> i64 {
+    json_enc_into(node, out, cap, 1)
+}
+
+// Encodes a value tree to a fresh byte buffer (data at peek64(buf), len bytes_len(buf)): the
+// bounded encoder into an arena buffer that doubles until the document fits. A handle that
+// names no node encodes to an empty buffer.
 pub fn json_encode(node: i64) -> i64 {
-    let b = bytes_new()
-    __encode(node, b)
-    b
+    let mut cap = 256
+    for {
+        let tmp = heap_alloc(cap)
+        let n = json_encode_into(node, tmp, cap)
+        if n >= 0 { return bytes_from_raw(tmp, n) }
+        if n != JSON_ENC_ERR_SPACE { return bytes_new() }
+        cap = cap * 2
+    }
 }
