@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/crypto/sign/ed25519-sign.snd.
+//
+// `ed25519_sign_h` signs a 32-byte message, so RFC 8032's Test 1 signature -- which is over the
+// EMPTY message -- cannot check it. The two vectors below were produced by an independent
+// RFC 8032 implementation whose output for Test 1 (public key and signature over the empty
+// message) matches the RFC's, which is what says the reference itself is right.
+
+include "any/crypto/sign/ed25519-sign.snd"
+include "x86_64/linux/testing.snd"
+
+// RFC 8032 Test 1 secret key, 32 bytes in LE memory order.
+let SEC1[4] = [0x605afdef9db1619d, 0xc42cec92f44a84ba, 0x1969327b69c54944, 0x607fae1c03ac3b70]
+
+// h = 00 01 02 ... 1f, and the signature over it.
+let H_SEQ[4] = [0x0706050403020100, 0x0f0e0d0c0b0a0908, 0x1716151413121110, 0x1f1e1d1c1b1a1918]
+let SIG_SEQ[8] = [
+    0xd72fb18b98dbc100, 0x90ac3fae54601a35, 0x1c65b156fce4b7fa, 0x666f895ff5f58171,
+    0x05d90506a9d33339, 0x2dee5059c40a9d8e, 0x58157485149b9c3c, 0x095fc3ca0cfe7971
+]
+
+// h = ff ff ... ff, and its signature: a different message has to give a different R and S.
+let H_FF[4] = [0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff]
+let SIG_FF[8] = [
+    0x3c8173b97a1501df, 0x74bb6a1002741f0a, 0x63b84c62e5527aad, 0xc7acc2c3930a131b,
+    0x188ecf3b647f9872, 0xf27aadaf91fdd59f, 0x2e7afe0911fa9b2b, 0x0287b096222df370
+]
+
+let mut sig[8]      // 64 bytes
+
+test "signing a 32-byte message gives the RFC 8032 signature for that message" {
+    ed25519_sign_h(SEC1, H_SEQ, sig)
+    assert_eq(bytes_cmp(sig, SIG_SEQ, 64), 1)
+}
+
+test "a different message gives a different signature, not a different tail" {
+    ed25519_sign_h(SEC1, H_FF, sig)
+    assert_eq(bytes_cmp(sig, SIG_FF, 64), 1)
+    // R, the first half, is [r]B with r derived from the message: it changes too. A signer that
+    // only varied S would still pass a check of the whole 64 bytes against one vector.
+    assert_eq(bytes_cmp(sig, SIG_SEQ, 32), 0)
+}
+
+test "limbs and bytes are the same number read two ways" {
+    let mut bs[4]
+    let mut back[4]
+    let mut limbs[16]
+    for i in 0..32 { poke8(bs + i, i * 7) }
+    bytes32_to_limbs16(limbs, bs)
+    assert_eq(limbs[0], 7 * 1 * 256)         // byte 0 is 0, byte 1 is 7
+    assert_eq(limbs[15], (30 * 7) | ((31 * 7) << 8))
+    limbs16_to_bytes32(back, limbs)
+    for i in 0..32 { assert_eq(peek8(back + i), i * 7) }
+}
+
+test "copy_bytes copies the length it was given and stops there" {
+    let mut src[4]
+    let mut dst[4]
+    for i in 0..32 { poke8(src + i, i) }
+    for i in 0..32 { poke8(dst + i, 0xAA) }
+    copy_bytes(dst, src, 4)
+    for i in 0..4 { assert_eq(peek8(dst + i), i) }
+    assert_eq(peek8(dst + 4), 0xAA)
+    // Zero bytes is a copy that touches nothing, not a copy of everything.
+    for i in 0..32 { poke8(dst + i, 0xAA) }
+    copy_bytes(dst, src, 0)
+    assert_eq(peek8(dst), 0xAA)
+}
