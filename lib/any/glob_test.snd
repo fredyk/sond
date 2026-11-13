@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/glob.snd: '*' wildcard matching over byte ranges.
+
+include "any/glob.snd"
+include "x86_64/linux/testing.snd"
+
+fn m(p: string, plen: i64, s: string, slen: i64) -> i64 { glob_match(p.utf8, plen, s.utf8, slen) }
+
+test "a pattern without a star matches only the same bytes" {
+    assert_eq(m("abc", 3, "abc", 3), 1)
+    assert_eq(m("abc", 3, "abd", 3), 0)
+    assert_eq(m("abc", 3, "abcd", 4), 0)
+    assert_eq(m("abc", 3, "ab", 2), 0)
+    assert_eq(m("", 0, "", 0), 1)
+    assert_eq(m("", 0, "a", 1), 0)
+}
+
+test "a star matches any run of bytes, the empty one too" {
+    assert_eq(m("*", 1, "", 0), 1)
+    assert_eq(m("*", 1, "anything", 8), 1)
+    assert_eq(m("ab*", 3, "ab", 2), 1)
+    assert_eq(m("ab*", 3, "abxyz", 5), 1)
+    assert_eq(m("ab*", 3, "xab", 3), 0)
+    assert_eq(m("*yz", 3, "xyz", 3), 1)
+    assert_eq(m("*yz", 3, "xyzz", 4), 0)
+}
+
+test "a star in the middle keeps both ends anchored" {
+    assert_eq(m("a*-z", 4, "a-z", 3), 1)
+    assert_eq(m("a*-z", 4, "abc-z", 5), 1)
+    assert_eq(m("a*-z", 4, "abc-zz", 6), 0)
+    assert_eq(m("a*-z", 4, "a-z-z", 5), 1)
+    assert_eq(m("a*-z", 4, "b-z", 3), 0)
+}
+
+test "several stars backtrack until the whole input is consumed" {
+    assert_eq(m("*a*b*", 5, "xxaxxbxx", 8), 1)
+    assert_eq(m("*a*b*", 5, "xxbxxaxx", 8), 0)
+    assert_eq(m("a**b", 4, "ab", 2), 1)
+    assert_eq(m("*ab", 3, "aab", 3), 1)
+    assert_eq(m("a*b*c", 5, "abbbc", 5), 1)
+    assert_eq(m("a*b*c", 5, "acb", 3), 0)
+}
+
+test "negative lengths match nothing" {
+    assert_eq(m("*", -1, "a", 1), 0)
+    assert_eq(m("*", 1, "a", -1), 0)
+}
