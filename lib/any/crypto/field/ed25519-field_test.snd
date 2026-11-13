@@ -1,0 +1,216 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/crypto/field/ed25519-field.snd: GF(2^255-19) in 16 limbs of 16 bits.
+//
+// The vectors are the ones that can be checked by hand from the shape of the field: 2^256 folds
+// to 2*19, the inverse of 2 is 2^254 - 9 because 2*(2^254-9) = p+1, and p itself has to read
+// back as zero.
+
+include "any/crypto/field/ed25519-field.snd"
+include "x86_64/linux/testing.snd"
+
+// p, the modulus, written straight into limbs: this is the value every reduction has to send
+// back to zero, and no arithmetic in the module produces it for us.
+fn set_p(r) {
+    r[0] = P0; r[1] = P1; r[2] = P2; r[3] = P3; r[4] = P4; r[5] = P5; r[6] = P6; r[7] = P7
+    r[8] = P8; r[9] = P9; r[10] = P10; r[11] = P11; r[12] = P12; r[13] = P13; r[14] = P14
+    r[15] = P15
+}
+
+fn set_zero(r) {
+    r[0] = 0; r[1] = 0; r[2] = 0; r[3] = 0; r[4] = 0; r[5] = 0; r[6] = 0; r[7] = 0
+    r[8] = 0; r[9] = 0; r[10] = 0; r[11] = 0; r[12] = 0; r[13] = 0; r[14] = 0; r[15] = 0
+}
+
+// The small integer `n` as a field element.
+fn set_small(r, n) {
+    set_zero(r)
+    r[0] = n
+}
+
+// 2^254 - 9, the inverse of 2: 2 * (2^254 - 9) = 2^255 - 18 = p + 1.
+fn set_inv2(r) {
+    r[0] = 0xFFF7; r[1] = 0xFFFF; r[2] = 0xFFFF; r[3] = 0xFFFF; r[4] = 0xFFFF; r[5] = 0xFFFF
+    r[6] = 0xFFFF; r[7] = 0xFFFF; r[8] = 0xFFFF; r[9] = 0xFFFF; r[10] = 0xFFFF; r[11] = 0xFFFF
+    r[12] = 0xFFFF; r[13] = 0xFFFF; r[14] = 0xFFFF; r[15] = 0x3FFF
+}
+
+test "fe_cmov takes b when the condition is zero, and never looks at the other side" {
+    let mut a[16]
+    let mut b[16]
+    let mut r[16]
+    set_small(a, 1)
+    set_small(b, 2)
+    fe_cmov(r, a, b, 0)
+    assert_eq(fe_eq(r, b), 1)
+    fe_cmov(r, a, b, 1)
+    assert_eq(fe_eq(r, a), 1)
+    // Any nonzero condition, not just 1: the mask comes from the sign bit, so the most negative
+    // i64 -- the one value whose negation is itself -- has to select `a` like every other.
+    fe_cmov(r, a, b, 0 - 9223372036854775807 - 1)
+    assert_eq(fe_eq(r, a), 1)
+    fe_cmov(r, a, b, 7)
+    assert_eq(fe_eq(r, a), 1)
+}
+
+test "p is zero, and one below it is not" {
+    let mut t[16]
+    set_p(t)
+    assert_eq(fe_iszero(t), 1)
+    t[0] = P0 - 1
+    assert_eq(fe_iszero(t), 0)
+    set_zero(t)
+    assert_eq(fe_iszero(t), 1)
+    set_small(t, 1)
+    assert_eq(fe_iszero(t), 0)
+}
+
+test "adding one to p-1 carries all the way round to zero" {
+    let mut a[16]
+    let mut one[16]
+    let mut r[16]
+    set_p(a)
+    a[0] = P0 - 1              // p - 1
+    set_small(one, 1)
+    fe_add(r, a, one)
+    assert_eq(fe_iszero(r), 1)
+    // And the step before it is not zero: the carry has to travel the whole way, not stop short.
+    fe_add(r, a, r)
+    assert_eq(fe_eq(r, a), 1)
+}
+
+test "subtracting one from zero borrows p, not a negative number" {
+    let mut z[16]
+    let mut one[16]
+    let mut r[16]
+    let mut pm1[16]
+    set_zero(z)
+    set_small(one, 1)
+    set_p(pm1)
+    pm1[0] = P0 - 1
+    fe_sub(r, z, one)
+    assert_eq(fe_eq(r, pm1), 1)
+}
+
+test "negating one gives p-1, and negating zero stays zero" {
+    let mut one[16]
+    let mut r[16]
+    let mut pm1[16]
+    set_small(one, 1)
+    set_p(pm1)
+    pm1[0] = P0 - 1
+    fe_neg(r, one)
+    assert_eq(fe_eq(r, pm1), 1)
+    set_zero(one)
+    fe_neg(r, one)
+    assert_eq(fe_iszero(r), 1)
+}
+
+test "2^256 folds back to 38, which is what makes this field cheap" {
+    // 2^255 = 19 (mod p), so the bit that falls off limb 15 comes back into limb 0 times 19.
+    // Squaring 2^128 is the shortest way to make it fall off.
+    let mut a[16]
+    let mut r[16]
+    let mut e[16]
+    set_zero(a)
+    a[8] = 1                   // 2^128
+    fe_mul(r, a, a)
+    set_small(e, 38)
+    assert_eq(fe_eq(r, e), 1)
+    // fe_sq has to agree with fe_mul on the same input, and on one that does not overflow.
+    fe_sq(r, a)
+    assert_eq(fe_eq(r, e), 1)
+    set_small(a, 3)
+    fe_sq(r, a)
+    set_small(e, 9)
+    assert_eq(fe_eq(r, e), 1)
+}
+
+test "multiplying by one leaves the value, and by zero leaves nothing" {
+    let mut a[16]
+    let mut one[16]
+    let mut z[16]
+    let mut r[16]
+    set_inv2(a)
+    fe_one(one)
+    fe_mul(r, a, one)
+    assert_eq(fe_eq(r, a), 1)
+    set_zero(z)
+    fe_mul(r, a, z)
+    assert_eq(fe_iszero(r), 1)
+}
+
+test "the inverse of two is 2^254 - 9, and two times it is one" {
+    let mut two[16]
+    let mut inv[16]
+    let mut r[16]
+    let mut e[16]
+    set_small(two, 2)
+    fe_inv(inv, two)
+    set_inv2(e)
+    assert_eq(fe_eq(inv, e), 1)
+    fe_mul(r, two, inv)
+    fe_one(e)
+    assert_eq(fe_eq(r, e), 1)
+    // One is its own inverse: the exponentiation must not drift on the easy input either.
+    fe_one(two)
+    fe_inv(inv, two)
+    assert_eq(fe_eq(inv, two), 1)
+}
+
+test "bytes go in little-endian and the 256th bit is dropped on the way in and out" {
+    let mut bs[4]              // 32 bytes
+    let mut out[4]
+    let mut a[16]
+    for i in 0..31 { poke8(bs + i, i) }
+    poke8(bs + 31, 0xFF)       // top bit set: not part of the field element
+    fe_frombytes(a, bs)
+    assert_eq(a[0], 0x0100)
+    assert_eq(a[8], 0x1110)
+    assert_eq(a[15], 0x7F1E)   // 30 | ((0xFF & 0x7F) << 8)
+    fe_tobytes(out, a)
+    for i in 0..31 { assert_eq(peek8(out + i), i) }
+    assert_eq(peek8(out + 31), 0x7F)
+}
+
+test "writing out p writes out zero" {
+    let mut t[16]
+    let mut out[4]
+    set_p(t)
+    fe_tobytes(out, t)
+    for i in 0..32 { assert_eq(peek8(out + i), 0) }
+    // p + 5 is 5, and it has to come out as 5 rather than as a number above the modulus.
+    set_p(t)
+    t[0] = P0 + 5
+    fe_tobytes(out, t)
+    assert_eq(peek8(out), 5)
+    for i in 1..32 { assert_eq(peek8(out + i), 0) }
+}
+
+test "fe_reduce puts a limb that grew past 16 bits back in range" {
+    let mut a[16]
+    let mut r[16]
+    let mut e[16]
+    set_zero(a)
+    a[0] = 0x1FFFF             // one bit too wide for limb 0
+    fe_reduce(r, a)
+    assert_eq(r[0], 0xFFFF)
+    assert_eq(r[1], 1)
+    set_small(e, 0x1FFFF)
+    assert_eq(fe_eq(r, e), 1)
+    // fe_copy leaves the same value behind, unreduced limbs included.
+    fe_copy(r, a)
+    assert_eq(r[0], 0x1FFFF)
+}
+
+test "fe_eq compares values, not limb patterns" {
+    let mut a[16]
+    let mut b[16]
+    set_small(a, 5)
+    set_p(b)
+    b[0] = P0 + 5              // p + 5: different limbs, same value
+    assert_eq(fe_eq(a, b), 1)
+    b[0] = P0 + 6
+    assert_eq(fe_eq(a, b), 0)
+}
