@@ -5,20 +5,20 @@
 // i64: a -1 "no byte" sentinel or a byte above 0x7f is simply in no class) and returns 1 or 0.
 //
 // Public API (stable): ascii_is_digit, ascii_is_alpha, ascii_is_alnum, ascii_is_print
-// (0x20..0x7e). Hex digits are in encoding/hex.snd (hex_value, hex_value_lower).
+// (0x20..0x7e). Each is proven to return 0 or 1 and declared pure (`effects []`). Hex digits are in encoding/hex.snd (hex_value, hex_value_lower).
 
-pub fn ascii_is_digit(c: i64) -> i64 {
+pub fn ascii_is_digit(c: i64) -> (r: i64) ensures { r >= 0; r <= 1 } effects [] {
     if c >= '0' && c <= '9' { 1 } else { 0 }
 }
 
-pub fn ascii_is_alpha(c: i64) -> i64 {
+pub fn ascii_is_alpha(c: i64) -> (r: i64) ensures { r >= 0; r <= 1 } effects [] {
     if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') { 1 } else { 0 }
 }
 
-pub fn ascii_is_alnum(c: i64) -> i64 {
+pub fn ascii_is_alnum(c: i64) -> (r: i64) ensures { r >= 0; r <= 1 } effects [] {
     if ascii_is_digit(c) == 1 || ascii_is_alpha(c) == 1 { 1 } else { 0 }
 }
 
-pub fn ascii_is_print(c: i64) -> i64 {
+pub fn ascii_is_print(c: i64) -> (r: i64) ensures { r >= 0; r <= 1 } effects [] {
     if c >= 0x20 && c <= 0x7e { 1 } else { 0 }
 }
