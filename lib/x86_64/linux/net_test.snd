@@ -63,7 +63,7 @@ test "bytes sent over TCP loopback arrive unchanged" {
         syscall(SYS_exit, 0)
     }
 
-    let afd = accept_sock(sfd, 0, 0)
+    let afd = accept_within(sfd, 10000)
     assert(afd >= 0)
     assert_eq(syscall(SYS_read, afd, buf, 64), 22)
     let st[1]

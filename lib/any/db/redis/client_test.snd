@@ -422,15 +422,15 @@ test "ip_from_cstr's overflow guard on an over-long host string" {
 }
 
 test "redis_connect returns negative when the peer refuses the connection" {
-    // Nothing binds this port anywhere in the suite: loopback refusal is
-    // immediate (a local RST), so this cannot hang.
+    // A port nothing listens on: loopback refusal is immediate (a local RST), so this
+    // cannot hang.
     let __s0_425: string = "127.0.0.1"
-    let fd = redis_connect(__s0_425.utf8, 18899)
+    let fd = redis_connect(__s0_425.utf8, unused_loopback_port())
     assert(fd < 0)
 }
 
 test "redis_connect_new returns 0 when the peer refuses the connection" {
-    let handle = redis_connect_new(18899)
+    let handle = redis_connect_new(unused_loopback_port())
     assert_eq(handle, 0)
 }
 
@@ -439,21 +439,14 @@ test "redis_connect/redis_send_resp/redis_send/redis_read round trip over a real
     // the low-level primitives, so this exercises the plumbing on its own:
     // connect, send, recv, and the read_response accumulation loop, against a
     // real peer. The higher-level path through redis_command is covered separately.
-    let port = 18863
-    let srv = sock(AF_INET, SOCK_STREAM, 0)
+    let srv_port[1]
+    let srv = listen_loopback(0, 1, srv_port)
     assert(srv >= 0)
-    set_reuseaddr(srv)
-    let sa[2]
-    sockaddr_in_build(sa, 0, port)
-    assert_eq(bind_sock(srv, sa, 16), 0)
-    assert_eq(listen_sock(srv, 1), 0)
+    let port = peek64(srv_port)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let csa[2]
-        let alen[1]
-        poke32(alen, 16)
-        let cfd = accept_sock(srv, csa, alen)
+        let cfd = accept_within(srv, 10000)
         let rbuf1[64]
         recvfrom_sock(cfd, rbuf1, 512, 0, 0, 0)
         let reply1_text: string = "+PONG\r\n"
@@ -529,21 +522,14 @@ test "redis_connect_new/redis_fill/redis_parse/redis_connect_close round trip" {
     // could never be successfully decoded through this handle-based API. Fixed
     // by having redis_parse start decoding from offset 0 with __resp_len set
     // to the number of bytes actually received.
-    let port = 18865
-    let srv = sock(AF_INET, SOCK_STREAM, 0)
+    let srv_port[1]
+    let srv = listen_loopback(0, 1, srv_port)
     assert(srv >= 0)
-    set_reuseaddr(srv)
-    let sa[2]
-    sockaddr_in_build(sa, 0, port)
-    assert_eq(bind_sock(srv, sa, 16), 0)
-    assert_eq(listen_sock(srv, 1), 0)
+    let port = peek64(srv_port)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let csa[2]
-        let alen[1]
-        poke32(alen, 16)
-        let cfd = accept_sock(srv, csa, alen)
+        let cfd = accept_within(srv, 10000)
         let reply_text: string = ":42\r\n"
         let reply = reply_text.utf8
         sendto_sock(cfd, reply, 5, 0, 0, 0)
@@ -595,21 +581,14 @@ test "read_response's accumulation loop stops as soon as the buffer is full" {
     // capacity exactly matches the reply size fills up on the very first
     // recv, so the loop's second iteration must exit via the "no room left"
     // check rather than a failed/short recv.
-    let port = 18867
-    let srv = sock(AF_INET, SOCK_STREAM, 0)
+    let srv_port[1]
+    let srv = listen_loopback(0, 1, srv_port)
     assert(srv >= 0)
-    set_reuseaddr(srv)
-    let sa[2]
-    sockaddr_in_build(sa, 0, port)
-    assert_eq(bind_sock(srv, sa, 16), 0)
-    assert_eq(listen_sock(srv, 1), 0)
+    let port = peek64(srv_port)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let csa[2]
-        let alen[1]
-        poke32(alen, 16)
-        let cfd = accept_sock(srv, csa, alen)
+        let cfd = accept_within(srv, 10000)
         let rbuf[64]
         recvfrom_sock(cfd, rbuf, 512, 0, 0, 0)
         let reply_text: string = "+OK\r\n"
@@ -662,21 +641,14 @@ test "redis_fill's accumulation loop stops as soon as the buffer is full" {
     // the read_response test above): a handle whose cap exactly matches the
     // reply size fills up on the first recv, so the loop must exit via the
     // capacity check rather than a second, failed recv.
-    let port = 18868
-    let srv = sock(AF_INET, SOCK_STREAM, 0)
+    let srv_port[1]
+    let srv = listen_loopback(0, 1, srv_port)
     assert(srv >= 0)
-    set_reuseaddr(srv)
-    let sa[2]
-    sockaddr_in_build(sa, 0, port)
-    assert_eq(bind_sock(srv, sa, 16), 0)
-    assert_eq(listen_sock(srv, 1), 0)
+    let port = peek64(srv_port)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let csa[2]
-        let alen[1]
-        poke32(alen, 16)
-        let cfd = accept_sock(srv, csa, alen)
+        let cfd = accept_within(srv, 10000)
         let reply_text: string = "+OK\r\n"
         let reply = reply_text.utf8
         sendto_sock(cfd, reply, 5, 0, 0, 0)

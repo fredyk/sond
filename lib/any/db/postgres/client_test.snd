@@ -300,18 +300,15 @@ fn srv_scram_bad_serversig(fd: i64) {
 }
 
 test "pg client: SCRAM-SHA-256 authentication over loopback" {
-    let port = 54334
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let ip = 0x7f000001
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, ip, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         srv_drain_startup(afd)
         let ok = srv_scram(afd)
@@ -336,18 +333,15 @@ test "pg client: SCRAM-SHA-256 authentication over loopback" {
 // The server asks for SASL but hangs up before the server-first message: the client's SCRAM
 // exchange must fail the connection, not hang or proceed unauthenticated.
 test "pg client: SASL offered then hung up fails the connection" {
-    let port = 54335
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let ip = 0x7f000001
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, ip, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         srv_drain_startup(afd)
         srv_send_sasl_offer(afd)                     // ask for SASL, then hang up
@@ -368,18 +362,15 @@ test "pg client: SASL offered then hung up fails the connection" {
 // The server completes the exchange but returns a WRONG ServerSignature: the client must not
 // trust it, because the server has not proven it holds the stored key.
 test "pg client: a bad SCRAM ServerSignature fails the connection" {
-    let port = 54336
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let ip = 0x7f000001
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, ip, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         srv_drain_startup(afd)
         srv_scram_bad_serversig(afd)
@@ -400,19 +391,16 @@ test "pg client: a bad SCRAM ServerSignature fails the connection" {
 let __q5_451: string = "bob"
 let __q6_455: string = "SELECT 2"
 test "pg client: connect (cleartext), query, and read rows over loopback" {
-    let port = 54329
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let ip = 0x7f000001
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, ip, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
         // CHILD: scripted PostgreSQL server.
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         srv_drain_startup(afd)
         srv_send_auth(afd, 3)                       // AuthenticationCleartextPassword
@@ -466,18 +454,15 @@ test "pg client: connect (cleartext), query, and read rows over loopback" {
 // A second server that offers an unsupported auth method (MD5): the client must fail
 // the connection cleanly rather than proceed unauthenticated.
 test "pg client: an unsupported auth method fails the connection" {
-    let port = 54330
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let ip = 0x7f000001
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, ip, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         srv_drain_startup(afd)
         srv_send_auth(afd, 5)                       // AuthenticationMD5Password (unsupported)
@@ -503,23 +488,20 @@ test "pg client: a refused connection returns a null handle" {
     let __z21_493: string = "u"
     let __z22_493: string = ""
     let __z23_493: string = "db"
-    assert_eq(pgx_connect(__z20_493.utf8, 54331, __z21_493.utf8, __z22_493.utf8, __z23_493.utf8), 0)
+    assert_eq(pgx_connect(__z20_493.utf8, unused_loopback_port(), __z21_493.utf8, __z22_493.utf8, __z23_493.utf8), 0)
 }
 
 // A server that hangs up mid-startup must surface as a failed connect, not a hang.
 test "pg client: a server that hangs up during startup fails cleanly" {
-    let port = 54332
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let ip = 0x7f000001
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, ip, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         srv_drain_startup(afd)
         close_fd(afd)                               // hang up before any auth message
@@ -538,18 +520,15 @@ test "pg client: a server that hangs up during startup fails cleanly" {
 
 // An ErrorResponse during startup (e.g. bad database) fails the connection.
 test "pg client: an ErrorResponse during startup fails the connection" {
-    let port = 54333
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let ip = 0x7f000001
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, ip, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         srv_drain_startup(afd)
         let __lit16: string = "database \"db\" does not exist"
@@ -844,21 +823,18 @@ fn pt_serve(afd: i64, sslrequest: i64) {
 }
 
 test "pg client: direct-TLS connect + SCRAM-transport (trust auth) + query over loopback" {
-    let port = 54340
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let ip = 0x7f000001
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, ip, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
     let mut i = 0
     for i < 32 { poke8(pt_k + i, 0x33 + i); i = i + 1 }   // fixed ecdsa_sign nonce for the child
     pt_load(PT_D_HEX, pt_d)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         pt_serve(afd, 0)                                 // direct TLS (no SSLRequest)
         close_fd(afd)
@@ -890,21 +866,18 @@ test "pg client: direct-TLS connect + SCRAM-transport (trust auth) + query over 
 }
 
 test "pg client: SSLRequest-negotiated TLS connect authenticates" {
-    let port = 54341
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let ip = 0x7f000001
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, ip, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
     let mut i = 0
     for i < 32 { poke8(pt_k + i, 0x33 + i); i = i + 1 }
     pt_load(PT_D_HEX, pt_d)
 
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         pt_serve(afd, 1)                                 // SSLRequest negotiation, then TLS
         close_fd(afd)
@@ -950,16 +923,13 @@ let __q15_964: string = "db"
 let __q16_964: string = "sond.test"
 let __q17_964: string = "20270101000000"
 test "pg client: SSLRequest refused (server answers 'N') fails the connection" {
-    let port = 54342
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, 0x7f000001, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         let sr[8]
         pg_read_exact_fd(afd, sr, 8)                 // SSLRequest
@@ -979,19 +949,16 @@ test "pg client: SSLRequest refused (server answers 'N') fails the connection" {
 }
 
 test "pg client: direct-TLS with a mismatched host is rejected" {
-    let port = 54343
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, 0x7f000001, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let mut i = 0
     for i < 32 { poke8(pt_k + i, 0x33 + i); i = i + 1 }
     pt_load(PT_D_HEX, pt_d)
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         pt_serve(afd, 0)
         close_fd(afd)
@@ -1014,19 +981,16 @@ test "pg client: direct-TLS with a mismatched host is rejected" {
 }
 
 test "pg client: a TLS server that hangs up after the handshake fails the connection" {
-    let port = 54344
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, 0x7f000001, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let mut i = 0
     for i < 32 { poke8(pt_k + i, 0x33 + i); i = i + 1 }
     pt_load(PT_D_HEX, pt_d)
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         let certlen = pt_load(PT_CERT_HEX, pt_cert)
         pt_handshake(afd, certlen)                   // complete TLS, then hang up (no postgres)
@@ -1056,16 +1020,13 @@ let __q21_1067: string = "db"
 let __q22_1067: string = "sond.test"
 let __q23_1067: string = "20270101000000"
 test "pg client: SSLRequest with no reply (server hangs up) fails the connection" {
-    let port = 54345
-    let sfd = sock(AF_INET, SOCK_STREAM, 0)
-    set_reuseaddr(sfd)
-    let sa[2]
-    sockaddr_in_build(sa, 0x7f000001, port)
-    bind_sock(sfd, sa, 16)
-    listen_sock(sfd, 4)
+    let sfd_port[1]
+    let sfd = listen_loopback(0, 4, sfd_port)
+    assert(sfd >= 0)
+    let port = peek64(sfd_port)
     let pid = syscall(SYS_fork)
     if pid == 0 {
-        let afd = accept_sock(sfd, 0, 0)
+        let afd = accept_within(sfd, 10000)
         if afd < 0 { syscall(SYS_exit, 2) }
         let sr[8]
         pg_read_exact_fd(afd, sr, 8)                 // read SSLRequest, then hang up (no 'S'/'N')
