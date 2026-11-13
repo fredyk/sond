@@ -1,0 +1,105 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/span.snd: byte ranges given as a pointer and an explicit length.
+//
+// Nothing here looks for a NUL: a range is exactly its `n` bytes, so a NUL inside it is an
+// ordinary byte and no function reads at or past p + n. Every read goes through a view of the
+// range's own length, which the compiler bounds-checks.
+//
+// Public API (stable):
+//   span_at(p, n, i)                     the byte at i, or -1 when i is outside 0..n
+//   span_eq(a, an, b, bn)                1 when same length and bytes
+//   span_cmp(a, an, b, bn)               -1, 0, 1 in bytewise order (a proper prefix first)
+//   span_starts_with(p, n, pre, pn)      1 or 0 (the empty prefix always matches)
+//   span_ends_with(p, n, suf, sn)        1 or 0 (the empty suffix always matches)
+//   span_parse_dec(p, n, i, end)         the signed decimal at p[i..]; end[0] <- the index after
+//                                        it, or i itself when there is no number there or it
+//                                        does not fit in i64 (and the result is then 0)
+//   span_all_alnum_or(p, n, extra)       1 when every byte is ASCII alphanumeric or one of the
+//                                        bytes of the string `extra`
+
+include "any/ascii.snd"
+include "any/strings.snd"
+
+pub fn span_at(p: u8[n], n: i64, i: i64) -> i64 {
+    if i >= 0 && i < n {
+        return p[i]
+    }
+    -1
+}
+
+pub fn span_eq(a: i64, an: i64, b: i64, bn: i64) -> i64 {
+    if an != bn { return 0 }
+    for i in 0..an {
+        if span_at(a, an, i) != span_at(b, bn, i) { return 0 }
+    }
+    1
+}
+
+pub fn span_cmp(a: i64, an: i64, b: i64, bn: i64) -> i64 {
+    let n = if an < bn { an } else { bn }
+    for i in 0..n {
+        let x = span_at(a, an, i)
+        let y = span_at(b, bn, i)
+        if x < y { return -1 }
+        if x > y { return 1 }
+    }
+    if an < bn { return -1 }
+    if an > bn { return 1 }
+    0
+}
+
+pub fn span_starts_with(p: i64, n: i64, pre: i64, pn: i64) -> i64 {
+    if pn > n { return 0 }
+    span_eq(p, pn, pre, pn)
+}
+
+pub fn span_ends_with(p: i64, n: i64, suf: i64, sn: i64) -> i64 {
+    if sn > n { return 0 }
+    span_eq(p + n - sn, sn, suf, sn)
+}
+
+// The value is accumulated negative (the most negative i64 has no positive twin) and each step
+// is checked before it is taken, so a long digit string is refused instead of wrapping.
+pub fn span_parse_dec(p: i64, n: i64, i: i64, end: i64) -> i64 {
+    let e: i64[1] = end
+    e[0] = i
+    let mut j = i
+    let mut neg = 0
+    if span_at(p, n, j) == '-' {
+        neg = 1
+        j = j + 1
+    }
+    let lim = 0 - 922337203685477580          // i64::MIN / 10
+    let mut acc = 0
+    let mut digits = 0
+    for ascii_is_digit(span_at(p, n, j)) == 1 {
+        let d = span_at(p, n, j) - '0'
+        if acc < lim || (acc == lim && d > 8) { return 0 }
+        acc = acc * 10 - d
+        digits = digits + 1
+        j = j + 1
+    }
+    if digits == 0 { return 0 }
+    if neg == 0 && acc == 0 - 9223372036854775807 - 1 { return 0 }
+    e[0] = j
+    if neg == 1 { acc } else { 0 - acc }
+}
+
+pub fn span_all_alnum_or(p: i64, n: i64, extra: string) -> i64 {
+    let x = extra.utf8
+    let xn = strlen(x)
+    for i in 0..n {
+        let c = span_at(p, n, i)
+        if ascii_is_alnum(c) == 0 && span_has_byte(x, xn, c) == 0 { return 0 }
+    }
+    1
+}
+
+priv fn span_has_byte(p: i64, n: i64, c: i64) -> i64 {
+    for i in 0..n {
+        if span_at(p, n, i) == c { return 1 }
+    }
+    0
+}
