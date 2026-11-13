@@ -138,7 +138,7 @@ fn pkg_copy_cstr_out(s: i64, sl: i64, out: i64, outcap: i64) -> i64 {
 
 // ── Parsing the ref a user typed ─────────────────────────────────────────────────────────────
 
-// Parses `spec`, a cstr like "github.com/fredyk/sond-strings@v1.4.2" (a leading "https://"
+// Parses `spec`, a cstr like "github.com/example/strings@v1.4.2" (a leading "https://"
 // is accepted) into host, owner, repo, ref and name -- each written NUL-terminated into the
 // caller's buffers (all at least 128 bytes). src (host/owner/repo joined) is built by the
 // caller. Returns 0, or -1 if the spec does not parse.
