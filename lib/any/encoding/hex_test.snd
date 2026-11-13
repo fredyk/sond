@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/encoding/hex.snd.
+//
+// The vectors are the base16 ones of RFC 4648 section 10 ("f" -> "66", "foobar" ->
+// "666f6f626172"), plus the edges a decoder must refuse: an odd length, a byte that is not a
+// hex digit, and an output buffer that cannot hold the result. Each refusal has its own code so
+// a caller can tell a malformed input from a short buffer.
+
+include "any/encoding/hex.snd"
+include "x86_64/linux/testing.snd"
+
+// 1 if the first `n` bytes at `a` equal the `n` bytes at `b`.
+fn same(a: i64, b: i64, n: i64) -> i64 {
+    for i in 0..n {
+        if peek8(a + i) != peek8(b + i) { return 0 }
+    }
+    1
+}
+
+test "hex: a nibble is written as a lowercase digit" {
+    assert_eq(hex_digit_lower(0), '0')
+    assert_eq(hex_digit_lower(9), '9')
+    assert_eq(hex_digit_lower(10), 'a')
+    assert_eq(hex_digit_lower(15), 'f')
+    assert_eq(hex_digit_lower(0x1f), 'f')
+}
+
+test "hex: a digit's value is read in either case, anything else is -1" {
+    assert_eq(hex_value('0'), 0)
+    assert_eq(hex_value('9'), 9)
+    assert_eq(hex_value('a'), 10)
+    assert_eq(hex_value('f'), 15)
+    assert_eq(hex_value('A'), 10)
+    assert_eq(hex_value('F'), 15)
+    assert_eq(hex_value('g'), -1)
+    assert_eq(hex_value('G'), -1)
+    assert_eq(hex_value('/'), -1)
+    assert_eq(hex_value(':'), -1)
+    assert_eq(hex_value('@'), -1)
+    assert_eq(hex_value('`'), -1)
+}
+
+test "hex: the lowercase reader refuses uppercase digits" {
+    assert_eq(hex_value_lower('a'), 10)
+    assert_eq(hex_value_lower('7'), 7)
+    assert_eq(hex_value_lower('A'), -1)
+    assert_eq(hex_value_lower('g'), -1)
+}
+
+test "hex: RFC 4648 base16 vectors encode in lowercase" {
+    let out: u8[16]
+    let f: string = "f"
+    assert_eq(hex_encode(f.utf8, 1, out, 16), 2)
+    let fw: string = "66"
+    assert_eq(same(out, fw.utf8, 2), 1)
+    let foobar: string = "foobar"
+    assert_eq(hex_encode(foobar.utf8, 6, out, 16), 12)
+    let want: string = "666f6f626172"
+    assert_eq(same(out, want.utf8, 12), 1)
+    assert_eq(hex_encode(foobar.utf8, 0, out, 16), 0)
+}
+
+test "hex: every byte value encodes to two digits, high nibble first" {
+    let src: u8[3]
+    src[0] = 0x00
+    src[1] = 0xAB
+    src[2] = 0xff
+    let out: u8[6]
+    assert_eq(hex_encode(src, 3, out, 6), 6)
+    let want: string = "00abff"
+    assert_eq(same(out, want.utf8, 6), 1)
+}
+
+test "hex: encoding into a buffer that is too small writes nothing and says so" {
+    let src: string = "ab"
+    let out: u8[4]
+    out[0] = 'x'
+    assert_eq(hex_encode(src.utf8, 2, out, 3), HEX_ERR_SPACE)
+    assert_eq(out[0], 'x')
+    assert_eq(hex_encode(src.utf8, -1, out, 3), HEX_ERR_LENGTH)
+}
+
+test "hex: decoding reads either case" {
+    let h: string = "666F6f626172"
+    let out: u8[6]
+    assert_eq(hex_decode(h.utf8, 12, out, 6), 6)
+    let want: string = "foobar"
+    assert_eq(same(out, want.utf8, 6), 1)
+}
+
+test "hex: decoding refuses an odd length, a short buffer and a non-hex byte" {
+    let out: u8[4]
+    let odd: string = "abc"
+    assert_eq(hex_decode(odd.utf8, 3, out, 4), HEX_ERR_LENGTH)
+    assert_eq(hex_decode(odd.utf8, -2, out, 4), HEX_ERR_LENGTH)
+    let h: string = "00ff10"
+    assert_eq(hex_decode(h.utf8, 6, out, 2), HEX_ERR_SPACE)
+    let bad: string = "0g"
+    assert_eq(hex_decode(bad.utf8, 2, out, 4), HEX_ERR_DIGIT)
+    let badlo: string = "g0"
+    assert_eq(hex_decode(badlo.utf8, 2, out, 4), HEX_ERR_DIGIT)
+}
+
+test "hex: the lowercase decoder refuses uppercase and keeps the lowercase result" {
+    let out: u8[3]
+    let h: string = "00ff10"
+    assert_eq(hex_decode_lower(h.utf8, 6, out, 3), 3)
+    assert_eq(out[1], 255)
+    assert_eq(out[2], 16)
+    let up: string = "00FF10"
+    assert_eq(hex_decode_lower(up.utf8, 6, out, 3), HEX_ERR_DIGIT)
+    assert_eq(hex_decode_lower(h.utf8, 5, out, 3), HEX_ERR_LENGTH)
+    assert_eq(hex_decode_lower(h.utf8, 6, out, 2), HEX_ERR_SPACE)
+}
+
+test "hex: a decode of an encode returns the original bytes" {
+    let src: u8[256]
+    for i in 0..256 {
+        src[i] = i
+    }
+    let enc: u8[512]
+    let dec: u8[256]
+    assert_eq(hex_encode(src, 256, enc, 512), 512)
+    assert_eq(hex_decode(enc, 512, dec, 256), 256)
+    assert_eq(same(src, dec, 256), 1)
+}
