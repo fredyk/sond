@@ -4,7 +4,6 @@ Sond is a new language; its syntax is NOT Rust/Go/C even where it looks similar.
 mistakes a model makes every time. ALWAYS verify by compiling: `./compiler/target/debug/sondc f.snd -o /tmp/x`.
 
 ## What does NOT exist (won't compile)
-- **`pub`**: there is no visibility. Just `fn name(...)`. Flat namespace (everything is visible via `include`).
 - **Overloading**: one name = ONE function. Do NOT define `fn f(a)` and `fn f(a, b)`. Use distinct names.
 - **`&x` as "address of x"**: `&` is ONLY bitwise AND. There is no address-of operator for a variable.
   For an out-param (e.g. the status of `wait4`): use a local array `let st[1]`, pass `st` (it is an
@@ -29,6 +28,13 @@ mistakes a model makes every time. ALWAYS verify by compiling: `./compiler/targe
   and **`syscall(num, a1..a6) -> i64`** (Linux x86-64 ABI). The numbers live in `lib/x86_64/linux/syscall-nums.snd`.
 - Shifts: `>>` arithmetic (sign), `>>>` logical (zero-fill). Bitwise `& | ^ ~`. Logical `&& || not`.
 - `include "path.snd"` (relative to the including file; recursive; de-duplicated; flat namespace).
+- Visibility: `pub fn` / `pub let` (and `priv`, the default). `include` still splices the file, so
+  everything it defines is callable from the includer, `pub` or not. `pub` marks the module
+  surface: only `pub` names are reachable as `m::name` after `import m`, and only `pub fn` is
+  exported by `sondc --shared`. A non-`pub` name that collides with another file's is renamed per
+  file, so two files may each keep a private helper of the same name. Two `pub fn` of the same
+  name spliced in by `include` are a compile error; through `import` they are told apart by
+  their qualifier.
 
 ## Reference pattern (run a command, already in `lib/x86_64/linux/proc.snd`)
 ```sond
