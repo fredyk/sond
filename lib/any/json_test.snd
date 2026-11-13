@@ -361,6 +361,9 @@ test "json: a handle that names no node is refused by the encoders" {
     let out: u8[16]
     assert_eq(json_encode_into(0 - 1, out, 16), JSON_ENC_ERR_NODE)
     assert_eq(json_encode_canonical_into(0 - 1, out, 16), JSON_ENC_ERR_NODE)
+    let arr = json_new_arr()
+    json_arr_push(arr, 0 - 1)
+    assert_eq(json_encode_into(arr, out, 16), JSON_ENC_ERR_NODE)
 }
 
 test "json: canonical encoding sorts object keys bytewise, at every depth" {
