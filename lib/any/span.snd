@@ -21,6 +21,9 @@
 //                                        does not fit in i64 (and the result is then 0)
 //   span_all_alnum_or(p, n, extra)       1 when every byte is ASCII alphanumeric or one of the
 //                                        bytes of the string `extra`
+//   span_all_print(p, n)                 1 when every byte is printable ASCII (0x20..0x7e)
+//   span_find(p, n, from, c)             the first index >= from (and >= 0) holding the byte c,
+//                                        or -1
 
 include "any/ascii.snd"
 include "any/strings.snd"
@@ -108,4 +111,31 @@ priv fn span_has_byte(p: i64, n: i64, c: i64) -> i64 {
         if span_at(p, n, i) == c { return 1 }
     }
     0
+}
+
+// The number of bytes of p[0..n) that are not printable ASCII.
+priv fn span_count_not_print(p: i64, n: i64) -> (r: i64) ensures { r >= 0 } effects [] {
+    let mut bad = 0
+    let mut i = 0
+    for i < n invariant { bad >= 0; bad <= i; i >= 0 } {
+        if ascii_is_print(span_at(p, n, i)) == 0 { bad = bad + 1 }
+        i = i + 1
+    }
+    bad
+}
+
+pub fn span_all_print(p: i64, n: i64) -> (r: i64) ensures { r >= 0; r <= 1 } effects [] {
+    if span_count_not_print(p, n) == 0 { 1 } else { 0 }
+}
+
+// The search stops at the first hit: found is -1 until then, and an index inside the range
+// once it is set.
+pub fn span_find(p: i64, n: i64, from: i64, c: i64) -> (r: i64) ensures { r >= -1 } effects [] {
+    let mut found = -1
+    let mut i = if from < 0 { 0 } else { from }
+    for i < n && found < 0 invariant { found >= -1; i >= 0 } {
+        if span_at(p, n, i) == c { found = i }
+        i = i + 1
+    }
+    found
 }

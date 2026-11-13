@@ -126,3 +126,18 @@ test "hex: a decode of an encode returns the original bytes" {
     assert_eq(hex_decode(enc, 512, dec, 256), 256)
     assert_eq(same(src, dec, 256), 1)
 }
+
+test "hex: a range is lowercase hex only when every byte is a lowercase digit" {
+    let ok: string = "09af"
+    assert_eq(hex_is_lower(ok.utf8, 4), 1)
+    let up: string = "09aF"
+    assert_eq(hex_is_lower(up.utf8, 4), 0)
+    let g: string = "0g"
+    assert_eq(hex_is_lower(g.utf8, 2), 0)
+    let nul: u8[2]
+    nul[0] = 0
+    nul[1] = 0x61
+    assert_eq(hex_is_lower(nul, 2), 0)
+    assert_eq(hex_is_lower(ok.utf8, 0), 1)
+    assert_eq(hex_is_lower(ok.utf8, -1), 0)
+}
