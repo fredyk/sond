@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/crypto/cipher/xor.snd.
+//
+// Sixteen lines with no test of their own: `sond test lib` listed it as a file no gate reads.
+// It is not a cipher anyone should encrypt with, and that is the reason it needs pinning rather
+// than the reason to leave it: what it promises is a round trip and a key that repeats, and a
+// caller who gets back something that is not the plaintext has no way to tell from here.
+
+include "any/crypto/cipher/xor.snd"
+include "x86_64/linux/testing.snd"
+
+let CLARO: string = "Ladies and Gentlemen of the class of '99"
+let CLAVE: string = "sond"
+
+let mut buf[8]      // 64 bytes
+let mut copia[8]
+
+test "xoring twice with the same key gives the plaintext back" {
+    for i in 0..40 { poke8(buf + i, peek8(CLARO.utf8 + i)) }
+    xor_crypt(buf, 40, CLAVE.utf8, 4)
+    // Encrypted: the buffer no longer holds the plaintext.
+    let mut iguales = 0
+    for i in 0..40 {
+        if peek8(buf + i) == peek8(CLARO.utf8 + i) { iguales = iguales + 1 }
+    }
+    assert(iguales < 40)
+    xor_crypt(buf, 40, CLAVE.utf8, 4)
+    for i in 0..40 {
+        assert_eq(peek8(buf + i), peek8(CLARO.utf8 + i))
+    }
+}
+
+test "the key repeats, byte for byte, over a message that is not a multiple of it" {
+    // 40 bytes under a 4-byte key is ten whole repeats; 39 stops mid-key, which is the case
+    // where an off-by-one in the modulo shows up.
+    for i in 0..39 { poke8(buf + i, peek8(CLARO.utf8 + i)) }
+    xor_crypt(buf, 39, CLAVE.utf8, 4)
+    for i in 0..39 {
+        assert_eq(peek8(buf + i), peek8(CLARO.utf8 + i) ^ peek8(CLAVE.utf8 + (i % 4)))
+    }
+}
+
+test "a single-byte key is a plain XOR of every byte" {
+    let clave: string = "K"
+    for i in 0..40 { poke8(buf + i, peek8(CLARO.utf8 + i)) }
+    xor_crypt(buf, 40, clave.utf8, 1)
+    for i in 0..40 {
+        assert_eq(peek8(buf + i), peek8(CLARO.utf8 + i) ^ 75)
+    }
+}
+
+test "a length of zero touches nothing" {
+    for i in 0..40 { poke8(buf + i, peek8(CLARO.utf8 + i)) }
+    for i in 0..40 { poke8(copia + i, peek8(buf + i)) }
+    assert_eq(xor_crypt(buf, 0, CLAVE.utf8, 4), 0)
+    for i in 0..40 {
+        assert_eq(peek8(buf + i), peek8(copia + i))
+    }
+}

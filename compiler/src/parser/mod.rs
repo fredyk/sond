@@ -7,7 +7,6 @@ use crate::ast::{
     ProviderDef, Signature, Stmt, StructDef, Type, UnOp, UseDecl, Visibility,
 };
 use crate::token::Token;
-use std::collections::HashMap;
 use std::fmt;
 
 /// Why the parser stopped, and WHERE. The line and column are positions in the text the parser
@@ -57,11 +56,6 @@ pub struct Parser {
     ports: Vec<PortDef>,
     /// `extern fn` declarations collected while parsing the program.
     externs: Vec<Signature>,
-    /// The source text of each `string` binding, so `s.utf8` can hand over the very bytes the
-    /// literal was written with instead of re-encoding the characters.
-    string_bytes: HashMap<String, String>,
-    /// Byte count of the `.utf8` just parsed, to type the binding it initializes.
-    utf8_len: Option<usize>,
     /// Top-level `provides` (per-target implementations) collected while parsing.
     providers: Vec<ProviderDef>,
     /// Top-level `use Port` directives collected while parsing.
@@ -109,8 +103,6 @@ impl Parser {
             enums: Vec::new(),
             ports: Vec::new(),
             externs: Vec::new(),
-            string_bytes: HashMap::new(),
-            utf8_len: None,
             providers: Vec::new(),
             uses: Vec::new(),
             no_struct_lit: false,
@@ -166,8 +158,7 @@ impl Parser {
                     | Token::Impl
                     | Token::Test
             )
-        ) || (matches!(self.peek(), Some(Token::Ident(k)) if k == "extern")
-            && self.tokens.get(self.pos + 1) == Some(&Token::Fn))
+        ) || self.abre_extern()
         {
             // `impl` opens one of two blocks, told apart by a `for` after the name:
             //   `impl Iface for Target { fn .. }`  a per-target interface implementation
@@ -176,14 +167,17 @@ impl Parser {
             //   `impl Type { fn m(self, ..) .. }`  inherent methods: each becomes a free function
             //                                      `Type_m` with `self` typed as the struct;
             //                                      `p.m(a)` lowers to `Type_m(p, a)` by desugar.
-            // `extern fn name(params) -> T`: a function this program CALLS but does not define,
-            // resolved by the linker. `extern` is a contextual keyword (a plain identifier
-            // elsewhere), recognized only here, directly before `fn`.
-            if matches!(self.peek(), Some(Token::Ident(k)) if k == "extern")
-                && self.tokens.get(self.pos + 1) == Some(&Token::Fn)
-            {
+            // `(pub|priv)? extern fn name(params) -> T`: a function this program CALLS but does
+            // not define, resolved by the linker. `extern` is a contextual keyword (a plain
+            // identifier elsewhere), recognized only here, directly before `fn`. The visibility
+            // goes in FRONT of it, like on every other declaration -- a header is nothing but
+            // public declarations without bodies, and without this it could not say `pub`.
+            if self.abre_extern() {
+                let vis = self.parse_visibility();
                 self.advance(); // `extern`
-                let sig = self.parse_signature();
+                self.expect(Token::Fn);
+                let name = self.expect_ident();
+                let sig = self.parse_sig_tail(vis, name);
                 self.externs.push(sig);
                 self.skip_semicolons();
                 continue;
@@ -245,6 +239,7 @@ impl Parser {
                         value,
                         array_len,
                         ty,
+                        refinement: _,
                     } = self.parse_let()
                     else {
                         unreachable!("parse_let returns a Let")
@@ -283,11 +278,29 @@ impl Parser {
                 ),
             );
         }
+        let mut all: Vec<&mut Function> = funcs.iter_mut().collect();
+        for p in &mut self.providers {
+            all.extend(p.methods.iter_mut());
+        }
+        utf8::resolve_string_bytes(&self.globals, &mut all);
         funcs
     }
 
     /// Eats an optional `pub`/`priv` prefix and returns the visibility. Absent =
     /// `Priv` (private by default).
+    /// Whether an `extern fn` declaration starts here, with or without the visibility every other
+    /// declaration accepts. `extern` is a contextual keyword: a plain identifier anywhere else, so
+    /// what makes it one is the `fn` right after it.
+    fn abre_extern(&self) -> bool {
+        let n = if matches!(self.peek(), Some(Token::Pub | Token::Priv)) {
+            self.pos + 1
+        } else {
+            self.pos
+        };
+        matches!(self.tokens.get(n), Some(Token::Ident(k)) if k == "extern")
+            && self.tokens.get(n + 1) == Some(&Token::Fn)
+    }
+
     fn parse_visibility(&mut self) -> Visibility {
         if self.eat(Token::Pub) {
             Visibility::Pub
@@ -700,6 +713,7 @@ impl Parser {
                                 ty: None,
                                 value: first,
                                 array_len: None,
+                                refinement: Vec::new(),
                             });
                             sink_tail(&mut body); // increment must run AFTER the body, not before
                             // ...and before every `continue`, which jumps past the end of the
@@ -724,6 +738,7 @@ impl Parser {
                                     ty: None,
                                     value: end,
                                     array_len: None,
+                                    refinement: Vec::new(),
                                 });
                                 Expr::Var(name)
                             };
@@ -755,6 +770,7 @@ impl Parser {
                                         Box::new(Expr::Var(idx.clone())),
                                     ),
                                     array_len: None,
+                                    refinement: Vec::new(),
                                 },
                                 for_line,
                             );
@@ -771,6 +787,7 @@ impl Parser {
                                 ty: None,
                                 value: Expr::Int(0),
                                 array_len: None,
+                                refinement: Vec::new(),
                             });
                             stmts.push(Stmt::For {
                                 cond: Some(Expr::Binary(
@@ -1008,6 +1025,15 @@ impl Parser {
                 }
             }
         }
+        // `let y: T where P = value` refines the binding: `P` is a predicate the value has to
+        // prove, and only then is it carried as a fact about `y`. A chain of `&&` contributes each
+        // conjunct separately (a bare comparison, which is what the prover knows how to use).
+        // It is consumed HERE, between the type and the `=`, which is where it is written: that
+        // way the rest of parse_let still sees an `=` right in front of the value.
+        let mut refinement = Vec::new();
+        if self.eat(Token::Where) {
+            split_conjuncts(self.parse_expr(), &mut refinement);
+        }
         // `let s: string = "..."`: `string` IS a type — a view of bytes whose length the
         // compiler counted when it emitted the literal, so it indexes with the same bounds check
         // as any other view and never has to be walked until a NUL turns up. Lowered here to
@@ -1044,8 +1070,8 @@ impl Parser {
                 unreachable!("peeked above")
             };
             // The characters are what `s` holds; the original bytes stay reachable through
-            // `s.utf8`, which is the only way to get them and says so at the call site.
-            self.string_bytes.insert(name.clone(), text.clone());
+            // `s.utf8` (see `utf8.rs`), which is the only way to get them and says so at the
+            // call site.
             // The value stays the LITERAL; the type says it is a view of code points. The codegen
             // interns those in `.rodata` — constant data emitted once, not rebuilt on every call
             // of the function it sits in.
@@ -1056,9 +1082,9 @@ impl Parser {
                 ty,
                 value: Expr::Str(text),
                 array_len,
+                refinement,
             };
         }
-        self.utf8_len = None;
         let value = if self.eat(Token::Eq) {
             // `let buf: T[n] = {a, b, c}`: a view declared WITH its contents. Braces rather than
             // brackets, which already mean an array literal for `let a[N] = [..]`, and read here
@@ -1080,26 +1106,14 @@ impl Parser {
         } else {
             Expr::Int(0)
         };
-        // `let b = s.utf8` is a view of BYTES, and its length is their count — typed here so the
-        // binding carries it, the same way any other view does.
-        // `let b = s.utf8` is a view of BYTES — but only when the value IS that request. A
-        // `.utf8` buried inside a larger expression (`let n = f(a, s.utf8)`) says nothing about
-        // what `n` is, and typing it as a view made an ordinary integer look like a buffer.
-        let is_utf8_value = matches!(&value, Expr::Field(inner, f)
-            if f == "utf8" && matches!(inner.as_ref(), Expr::Str(_)));
-        let ty = match (ty, self.utf8_len.take()) {
-            (None, Some(n)) if is_utf8_value => Some(Type::View(
-                Box::new(Type::Named("u8".to_string())),
-                Some(n.to_string()),
-            )),
-            (t, _) => t,
-        };
+        // `let b = s.utf8` gets its byte length in `utf8.rs`, where `s` is resolved.
         Stmt::Let {
             mutable,
             name,
             ty,
             value,
             array_len,
+            refinement,
         }
     }
 
@@ -1498,5 +1512,6 @@ fn expr_assigns_path(e: &Expr, path: &str) -> bool {
 }
 
 mod expr;
+mod utf8;
 #[cfg(test)]
 mod tests;

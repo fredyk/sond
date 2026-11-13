@@ -183,10 +183,31 @@ fn fe_neg(r, a) {
 }
 
 fn fe_cmov(r, a, b, c) {
-    // if c != 0, r = a; else r = b
-    r[0] = a[0]; r[1] = a[1]; r[2] = a[2]; r[3] = a[3]; r[4] = a[4]
-    r[5] = a[5]; r[6] = a[6]; r[7] = a[7]; r[8] = a[8]; r[9] = a[9]
-    r[10] = a[10]; r[11] = a[11]; r[12] = a[12]; r[13] = a[13]; r[14] = a[14]; r[15] = a[15]
+    // r = a when c is nonzero, r = b when c is zero, WITHOUT branching on c. This is the
+    // selection an ed25519 ladder makes once per bit of the scalar, so a branch here leaks the
+    // scalar through timing and through the instruction trace. It used to copy `a` and ignore
+    // both `b` and `c` outright -- every caller would have got the same point back.
+    //
+    // `(c | -c) >> 63` is an arithmetic shift: -1 (all ones) for every nonzero c, i64::MIN
+    // included, and 0 for c == 0. `b ^ (m & (a ^ b))` then picks a side bit by bit, which holds
+    // for limbs that are not yet reduced, negative ones included.
+    let m = (c | (0 - c)) >> 63
+    r[0] = b[0] ^ (m & (a[0] ^ b[0]))
+    r[1] = b[1] ^ (m & (a[1] ^ b[1]))
+    r[2] = b[2] ^ (m & (a[2] ^ b[2]))
+    r[3] = b[3] ^ (m & (a[3] ^ b[3]))
+    r[4] = b[4] ^ (m & (a[4] ^ b[4]))
+    r[5] = b[5] ^ (m & (a[5] ^ b[5]))
+    r[6] = b[6] ^ (m & (a[6] ^ b[6]))
+    r[7] = b[7] ^ (m & (a[7] ^ b[7]))
+    r[8] = b[8] ^ (m & (a[8] ^ b[8]))
+    r[9] = b[9] ^ (m & (a[9] ^ b[9]))
+    r[10] = b[10] ^ (m & (a[10] ^ b[10]))
+    r[11] = b[11] ^ (m & (a[11] ^ b[11]))
+    r[12] = b[12] ^ (m & (a[12] ^ b[12]))
+    r[13] = b[13] ^ (m & (a[13] ^ b[13]))
+    r[14] = b[14] ^ (m & (a[14] ^ b[14]))
+    r[15] = b[15] ^ (m & (a[15] ^ b[15]))
 }
 
 fn fe_copy(r, a) {
@@ -477,39 +498,3 @@ fn fe_eq(a, b) -> i64 {
     acc = acc | t[8] | t[9] | t[10] | t[11] | t[12] | t[13] | t[14] | t[15]
     if acc == 0 { 1 } else { 0 }
 }
-
-fn print_fe(a) {
-    print_int(a[0])
-    print(",")
-    print_int(a[1])
-    print(",")
-    print_int(a[2])
-    print(",")
-    print_int(a[3])
-    print(",")
-    print_int(a[4])
-    print(",")
-    print_int(a[5])
-    print(",")
-    print_int(a[6])
-    print(",")
-    print_int(a[7])
-    print(",")
-    print_int(a[8])
-    print(",")
-    print_int(a[9])
-    print(",")
-    print_int(a[10])
-    print(",")
-    print_int(a[11])
-    print(",")
-    print_int(a[12])
-    print(",")
-    print_int(a[13])
-    print(",")
-    print_int(a[14])
-    print(",")
-    print_int(a[15])
-    print("")
-}
-

@@ -1,0 +1,99 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/x86_64/linux/proc.snd: fork + execve + wait4.
+//
+// The module had no gate of its own, and its failure mode is the quiet kind: `run` returns the
+// child's exit code, so "the command failed" and "the command was never there" and "fork did not
+// work" all have to be different numbers, or a caller cannot act on any of them.
+//
+// The commands are the ones every POSIX system ships in the same place, and each is exercised
+// for its status alone -- nothing here depends on what they print.
+
+include "x86_64/linux/proc.snd"
+include "x86_64/linux/testing.snd"
+
+let TRUE_PATH: string  = "/bin/true"
+let FALSE_PATH: string = "/bin/false"
+let SH_PATH: string    = "/bin/sh"
+let NADA_PATH: string  = "/bin/no-existe-este-programa-4b1c"
+
+let mut argv[4]
+let mut arg_c: string = "-c"
+let mut arg_salida: string = "exit 42"
+
+test "a command that succeeds reports zero" {
+    poke64(argv, TRUE_PATH.utf8)
+    poke64(argv + 8, 0)
+    assert_eq(run(TRUE_PATH.utf8, argv), 0)
+}
+
+test "a command that fails reports its own code, not a generic error" {
+    poke64(argv, FALSE_PATH.utf8)
+    poke64(argv + 8, 0)
+    assert_eq(run(FALSE_PATH.utf8, argv), 1)
+}
+
+test "the exit code comes back whole, not just success or failure" {
+    // 42 rather than 1: the status word has to be shifted, and reading it raw gives 10752.
+    poke64(argv, SH_PATH.utf8)
+    poke64(argv + 8, arg_c.utf8)
+    poke64(argv + 16, arg_salida.utf8)
+    poke64(argv + 24, 0)
+    assert_eq(run(SH_PATH.utf8, argv), 42)
+}
+
+test "a program that is not there is 127, the shell's own answer for it" {
+    // execve fails in the child, which exits 127 rather than running on as a second copy of the
+    // parent -- which is what makes this the interesting case: a fork whose exec fails and does
+    // not exit would come back through the test harness and report every test twice.
+    poke64(argv, NADA_PATH.utf8)
+    poke64(argv + 8, 0)
+    assert_eq(run(NADA_PATH.utf8, argv), 127)
+}
+
+// The two ways `run` can fail before the child's code ever exists. Both are provoked for real,
+// on this process alone: the harness forks a child per test, so what is done here dies with it.
+let SYS_prlimit64 = 302
+let RLIMIT_NPROC = 6
+let SIGCHLD = 17
+let SIG_IGN = 1
+let SIG_DFL = 0
+
+let mut lim[2]      // struct rlimit64 { rlim_cur, rlim_max }
+let mut viejo[2]
+let mut act[4]      // struct sigaction { handler, flags, restorer, mask }
+
+test "a fork that cannot happen is -1, not a child that never ran" {
+    // The process limit is dropped to one, which this user is thousands over, so fork fails with
+    // EAGAIN. Without this branch `run` would fall through to wait4 on a negative pid.
+    assert_eq(syscall(SYS_prlimit64, 0, RLIMIT_NPROC, 0, viejo), 0)
+    poke64(lim, 1)
+    poke64(lim + 8, peek64(viejo + 8))
+    assert_eq(syscall(SYS_prlimit64, 0, RLIMIT_NPROC, lim, 0), 0)
+    poke64(argv, TRUE_PATH.utf8)
+    poke64(argv + 8, 0)
+    let r = run(TRUE_PATH.utf8, argv)
+    // Restored before the assert: a failure here must not leave the rest of this child unable to
+    // fork, which would look like a hang instead of a failed assertion.
+    syscall(SYS_prlimit64, 0, RLIMIT_NPROC, viejo, 0)
+    assert_eq(r, 0 - 1)
+}
+
+test "a program that ignores SIGCHLD gets -1 instead of a made-up exit code" {
+    // Ignoring SIGCHLD is how a server keeps from accumulating zombies, and it makes the kernel
+    // reap children itself: wait4 then has nothing to wait for and returns ECHILD. The exit code
+    // is genuinely unavailable, and saying -1 is the only honest answer -- returning 0 would tell
+    // the caller a command succeeded that nobody watched.
+    poke64(act, SIG_IGN)
+    poke64(act + 8, 0)
+    poke64(act + 16, 0)
+    poke64(act + 24, 0)
+    assert_eq(syscall(SYS_rt_sigaction, SIGCHLD, act, 0, 8), 0)
+    poke64(argv, TRUE_PATH.utf8)
+    poke64(argv + 8, 0)
+    let r = run(TRUE_PATH.utf8, argv)
+    poke64(act, SIG_DFL)
+    syscall(SYS_rt_sigaction, SIGCHLD, act, 0, 8)
+    assert_eq(r, 0 - 1)
+}

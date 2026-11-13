@@ -31,6 +31,12 @@ pub fn bytes_get(b: i64, i: i64) -> i64 {
     peek8(peek64(b) + i)
 }
 
+// The address of the backing buffer, for handing to a syscall that takes a pointer
+// (`write`, `send`, ...). The handle itself is the header's address, not the data's.
+pub fn bytes_data(b: i64) -> i64 {
+    peek64(b)
+}
+
 // Append one byte, doubling the backing buffer (copying the old bytes) when full.
 pub fn bytes_push(b: i64, byte: i64) {
     let len = peek64(b + 8)

@@ -132,9 +132,13 @@ fn signature(f: &Function) -> String {
         .map(|p| format!("{}: {}", p.name, type_name(&p.ty)))
         .collect::<Vec<_>>()
         .join(", ");
+    // `extern`, and not a bare `pub fn`, because a signature with no body is a DECLARATION: a
+    // function the consumer calls and the linker resolves, which is precisely what a header
+    // promises. Written as `pub fn` it read as a definition whose `{` never arrived, and the front
+    // end of this same compiler refused the file.
     let mut s = match &f.ret {
-        Some(t) => format!("pub fn {}({params}) -> {}", f.name, type_name(t)),
-        None => format!("pub fn {}({params})", f.name),
+        Some(t) => format!("pub extern fn {}({params}) -> {}", f.name, type_name(t)),
+        None => format!("pub extern fn {}({params})", f.name),
     };
     if !f.requires.is_empty() {
         s.push_str(&format!(" requires {{ {} }}", render_props(&f.requires)));
@@ -301,7 +305,7 @@ mod tests {
         let h = emit_header(src, &funcs, &[], &[], &[]);
         assert!(h.contains("// Adds two numbers."), "first doc line kept");
         assert!(h.contains("// Wraps on overflow."), "second doc line kept");
-        assert!(h.contains("pub fn add"), "signature kept");
+        assert!(h.contains("pub extern fn add"), "signature kept, as the declaration it is");
         assert!(!h.contains("secret"), "private fn and its comment excluded");
     }
 
@@ -312,7 +316,7 @@ mod tests {
         let mut p = Parser::new(tokenize(src));
         let funcs = p.parse_program();
         let h = emit_header(src, &funcs, &[], &[], &[]);
-        assert!(h.contains("pub fn dec(x: i64) -> i64"), "signature");
+        assert!(h.contains("pub extern fn dec(x: i64) -> i64"), "signature");
         assert!(h.contains("requires { x > 0 }"), "precondition rendered");
         assert!(h.contains("ensures { x >= 0 }"), "postcondition rendered");
         assert!(!h.contains("x - 1"), "body still stripped");
@@ -332,7 +336,7 @@ mod tests {
         let h = emit_header(src, &funcs, &structs, &globals, &[]);
 
         assert!(
-            h.contains("pub fn add(a: i64, b: i64) -> i64"),
+            h.contains("pub extern fn add(a: i64, b: i64) -> i64"),
             "public signature kept"
         );
         assert!(!h.contains("a + b"), "body stripped");
@@ -344,6 +348,54 @@ mod tests {
             "global initializer (implementation) omitted"
         );
         assert!(!h.contains("K"), "private global omitted");
+    }
+
+    /// A header has to be a file the compiler that wrote it can read back.
+    ///
+    /// This is not documentation: `tools/install.sh` publishes it to `dist/include/` and to
+    /// `~/.local/include/sond/` as THE artifact a consumer compiles against. Measured over `lib/`
+    /// on 05/09/2026: 132 of the 193 headers emitted were rejected by the very front end that
+    /// wrote them, every one of them at a `pub fn` whose `{` never came. Nothing caught it because
+    /// every test above reads the header as TEXT, and text that reads right can still be
+    /// unparseable.
+    ///
+    /// A signature with no body is not a definition missing something: it is a DECLARATION, which
+    /// this language already spells `extern fn` -- a function the program calls and the linker
+    /// resolves. That is exactly what a header promises.
+    #[test]
+    fn the_header_this_module_writes_is_a_file_the_front_end_can_read() {
+        let src = "// Adds two numbers.\n\
+                   pub fn add(a: i64, b: i64) -> i64 { a + b }\n\
+                   pub fn dec(x: i64) -> i64 requires { x > 0 } ensures { x >= 0 } { x - 1 }\n\
+                   pub struct P { x: i64 }\n\
+                   pub let N = 5";
+        let mut p = Parser::new(tokenize(src));
+        let funcs = p.parse_program();
+        let structs = p.take_structs();
+        let globals = p.take_globals();
+        let h = emit_header(src, &funcs, &structs, &globals, &[]);
+
+        // The parser refuses by panicking, which is how the driver catches it too.
+        let leido = std::panic::catch_unwind(|| {
+            let mut p = Parser::new(tokenize(&h));
+            let f = p.parse_program();
+            (f.len(), p.take_externs(), p.take_structs().len(), p.take_globals().len())
+        });
+        let (cuerpos, externs, structs, globals) = match leido {
+            Ok(v) => v,
+            Err(_) => panic!("the front end cannot parse the header this module wrote:\n{h}"),
+        };
+        // Nothing in a header has a body, so nothing arrives as a definition.
+        assert_eq!(cuerpos, 0, "a header declares, it does not define:\n{h}");
+        assert_eq!(externs.len(), 2, "both public functions declared:\n{h}");
+        assert!(externs.iter().any(|s| s.name == "add"), "add declared:\n{h}");
+        let dec = externs.iter().find(|s| s.name == "dec").expect("dec declared");
+        // The contract IS the interface: it has to survive the round trip, not just the text.
+        assert_eq!(dec.requires.len(), 1, "precondition parsed back:\n{h}");
+        assert_eq!(dec.ensures.len(), 1, "postcondition parsed back:\n{h}");
+        assert_eq!(dec.vis, Visibility::Pub, "a header carries only public items:\n{h}");
+        assert_eq!(structs, 1, "the struct parsed back:\n{h}");
+        assert_eq!(globals, 1, "the global parsed back:\n{h}");
     }
 }
 

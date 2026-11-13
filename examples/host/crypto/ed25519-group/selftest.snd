@@ -4,6 +4,10 @@
 
 include "any/crypto/group/ed25519-group.snd"
 
+// Expected public key for RFC 8032 Test 1 as 32 bytes (LE memory layout). The vector belongs to
+// whoever checks against it, not to the library being checked.
+let EXPECTED[4] = [0xb70ab18201985ad7, 0x3a0764c9d3fe4bd5, 0x2523a6daf372e10e, 0x1a5107f7681a02af]
+
 fn main() -> i64 {
     let bz[16]
     fe_one(bz)

@@ -7,19 +7,32 @@
 // and tls_read then move arbitrary application data, sealing/opening one record at a time.
 // This is the streaming counterpart of the single-shot tls_get, and the basis of a TLS tunnel.
 //
-// A session is a heap block:
-//   +0   fd (i64)            +8   client app seq      +16  server app seq
-//   +24  client key (32)     +56  client iv (12)
-//   +68  server key (32)     +100 server iv (12)
+// A session is a heap block. The scratch buffers live IN it, not in a per-call allocation:
+// this arena has no free, so a tunnel that read a million records used to burn twenty gigabytes
+// to hold one. Holding the decrypted record here is also what lets a read that did not fit the
+// caller's buffer be finished by the next one.
+//   +0     fd (i64)            +8     client app seq      +16    server app seq
+//   +24    client key (32)     +56    client iv (12)
+//   +68    server key (32)     +100   server iv (12)
+//   +112   last alert          +120   plaintext still owed  +128  where it starts
+//   +136   record scratch (20000)     +20136 plaintext (16640)    +36776 seal scratch (16640)
 
 include "any/tls/auth.snd"
 include "any/tls/chain.snd"
+
+let TLS_SESS_REC = 136          // 20000 bytes: one record off the wire, header included
+let TLS_SESS_PLAIN = 20136      // 16640 bytes: the decrypted record, kept across calls
+let TLS_SESS_SEAL = 36776       // 16640 bytes: what tls_write hands to the socket
+let TLS_SESS_BYTES = 53416
 
 fn tls_sess_fd(s: i64) -> i64 { peek64(s) }
 fn tls_sess_ckey(s: i64) -> i64 { s + 24 }
 fn tls_sess_civ(s: i64) -> i64 { s + 56 }
 fn tls_sess_skey(s: i64) -> i64 { s + 68 }
 fn tls_sess_siv(s: i64) -> i64 { s + 100 }
+fn tls_sess_rec(s: i64) -> i64 { s + TLS_SESS_REC }
+fn tls_sess_plain(s: i64) -> i64 { s + TLS_SESS_PLAIN }
+fn tls_sess_seal(s: i64) -> i64 { s + TLS_SESS_SEAL }
 
 // The last alert the peer sent on this session, as (level << 8) | description, or -1 if none.
 //
@@ -164,7 +177,7 @@ fn tls_connect_fd(fd: i64, sni: i64, snilen: i64, alpn: i64, alpnlen: i64, roots
     // application traffic keys (master secret, transcript through the server Finished)
     let master[32]
     tls_derive_master_secret(hs, master)
-    let sess = heap_alloc(128)
+    let sess = heap_alloc(TLS_SESS_BYTES)
     poke64(sess, fd)
     poke64(sess + 8, 0)                             // client app seq
     poke64(sess + 16, 0)                            // server app seq
@@ -180,18 +193,23 @@ fn tls_connect_fd(fd: i64, sni: i64, snilen: i64, alpn: i64, alpnlen: i64, roots
     sess
 }
 
-// Sends `n` bytes of application data over the session, sealed as one or more TLS records
-// (each at most 16384 plaintext bytes) at the client application sequence. Returns n, or a
-// negative value if a write failed.
+// Sends `n` bytes of application data over the session, sealed as one or more TLS records at
+// the client application sequence. Returns n, or a negative value if a write failed.
+//
+// The split is TLS_CONTENT_MAX, the limit `tls_seal` itself enforces. It used to be a 16384
+// written here by hand, one byte above what seal accepts because the inner plaintext also
+// carries the content type: every write of 16384 bytes or more sealed to -1 and went out as a
+// failed write.
 fn tls_write(sess: i64, buf: i64, n: i64) -> i64 {
     let fd = tls_sess_fd(sess)
-    let sealed = heap_alloc(16640)
+    let sealed = tls_sess_seal(sess)
     let mut off = 0
     for off < n {
         let mut chunk = n - off
-        if chunk > 16384 { chunk = 16384 }
+        if chunk > TLS_CONTENT_MAX { chunk = TLS_CONTENT_MAX }
         let seq = peek64(sess + 8)
         let sl = tls_seal(tls_sess_ckey(sess), tls_sess_civ(sess), seq, 23, buf + off, chunk, sealed)
+        if sl < 0 { return 0 - 1 }
         if write_buf(fd, sealed, sl) < 0 { return 0 - 1 }
         poke64(sess + 8, seq + 1)
         off = off + chunk
@@ -204,14 +222,30 @@ fn tls_write(sess: i64, buf: i64, n: i64) -> i64 {
 // NewSessionTicket is skipped, and a close_notify (or EOF) returns 0. Returns a negative value
 // on a hard read/decrypt error. One TLS record per call.
 fn tls_read(sess: i64, buf: i64, cap: i64) -> i64 {
+    // What a previous call could not fit goes out first, before the socket is touched at all.
+    // Without this, a record bigger than `cap` used to be decrypted straight into the caller's
+    // buffer -- writing past it -- and then reported as `cap`, losing the rest for good.
+    let pend = peek64(sess + 120)
+    if pend > 0 {
+        let src = tls_sess_plain(sess) + peek64(sess + 128)
+        let mut n = pend
+        if n > cap { n = cap }
+        for i in 0..n { poke8(buf + i, peek8(src + i)) }
+        poke64(sess + 120, pend - n)
+        poke64(sess + 128, peek64(sess + 128) + n)
+        return n
+    }
     let fd = tls_sess_fd(sess)
-    let rec = heap_alloc(20000)
+    let rec = tls_sess_rec(sess)
+    let plain = tls_sess_plain(sess)
     for {
         let rl = tls_read_record(fd, rec, 20000)
         if rl <= 0 { return 0 }                     // EOF or read error: connection closed
         if peek8(rec) == 23 {
             let seq = peek64(sess + 16)
-            let m = tls_open(tls_sess_skey(sess), tls_sess_siv(sess), seq, rec, rl, buf)
+            // Decrypt into the session's own buffer: `cap` is the caller's room, and a record
+            // may be up to 16384 bytes whatever the caller asked for.
+            let m = tls_open(tls_sess_skey(sess), tls_sess_siv(sess), seq, rec, rl, plain)
             if m < 0 { return 0 - 1 }
             poke64(sess + 16, seq + 1)
             let typ = m >> 32
@@ -219,12 +253,16 @@ fn tls_read(sess: i64, buf: i64, cap: i64) -> i64 {
             if typ == 21 {
                 // Record WHICH alert before reporting the end, so the caller can tell a polite
                 // close_notify (level 1, description 0) from a refusal.
-                if dl >= 2 { poke64(sess + 112, (peek8(buf) << 8) | peek8(buf + 1)) }
+                if dl >= 2 { poke64(sess + 112, (peek8(plain) << 8) | peek8(plain + 1)) }
                 return 0
             }
             if typ == 23 {
-                if dl > cap { return cap }
-                return dl
+                let mut n = dl
+                if n > cap { n = cap }
+                for i in 0..n { poke8(buf + i, peek8(plain + i)) }
+                poke64(sess + 120, dl - n)
+                poke64(sess + 128, n)
+                return n
             }
             // any other inner type (22 NewSessionTicket, etc.): skip, read the next record
         }

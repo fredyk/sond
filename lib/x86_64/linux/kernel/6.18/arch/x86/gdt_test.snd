@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for arch/x86/gdt.snd: the descriptors the kernel builds for itself.
+//
+// A descriptor table is bytes in memory. Filling it needs no privilege and no hardware, so it
+// can be checked here, byte by byte, on this machine; the one instruction that DOES need ring 0
+// is `lgdt`, and it stays alone in `gdt_init`. While the whole thing sat behind that
+// instruction nothing measured it, and `sond test lib` listed gdt.snd as unmeasured.
+//
+// What is asserted is not a table copied out of a manual: it is that each descriptor holds the
+// limit, the type and the privilege it was BUILT WITH. A limit written as 0xFFFFF and stored as
+// 0x0FFFF is wrong whatever the manual says, and that is what this file found.
+
+include "x86_64/linux/testing.snd"
+include "gdt.snd"
+
+// The 20-bit limit a descriptor actually holds: bytes 0-1 are limit[15:0] and the low nibble of
+// byte 6 is limit[19:16]. Split across the entry because the 386 grew the field and left the
+// old bytes where the 286 had them.
+fn desc_limit(idx: i64) -> i64 {
+    let low = peek16(gdt_table + idx * 8)
+    let high = peek8(gdt_table + idx * 8 + 6) & 0x0F
+    low | (high << 16)
+}
+
+// The 32-bit base, in the four places the descriptor keeps it.
+fn desc_base(idx: i64) -> i64 {
+    let e = gdt_table + idx * 8
+    let b = peek8(e + 2) | (peek8(e + 3) << 8)
+    b | (peek8(e + 4) << 16) | (peek8(e + 7) << 24)
+}
+
+// The access byte: P | DPL | S | type.
+fn desc_access(idx: i64) -> i64 { peek8(gdt_table + idx * 8 + 5) }
+
+// The privilege a selector needs to load this descriptor.
+fn desc_dpl(idx: i64) -> i64 { (desc_access(idx) >> 5) & 3 }
+
+// Byte 6 holds limit[19:16] in its low nibble and four flags above it: AVL, L, D/B, G, in that
+// order. The order is not taken from memory: `modify_ldt(2)` installs a descriptor and hands the
+// eight raw bytes back, and it puts G in bit 7 and D/B in bit 6; GRUB's relocator, which is what
+// walks this machine into long mode, carries the 64-bit code descriptor as byte 6 = 0xAF and the
+// 32-bit one as 0xCF, so the bit that says "64-bit" is bit 5 and the one below it is AVL.
+fn desc_avl(idx: i64) -> i64 { (peek8(gdt_table + idx * 8 + 6) >> 4) & 1 }
+fn desc_l(idx: i64) -> i64 { (peek8(gdt_table + idx * 8 + 6) >> 5) & 1 }
+fn desc_db(idx: i64) -> i64 { (peek8(gdt_table + idx * 8 + 6) >> 6) & 1 }
+fn desc_g(idx: i64) -> i64 { (peek8(gdt_table + idx * 8 + 6) >> 7) & 1 }
+
+test "the first entry is the null descriptor the processor requires" {
+    gdt_build()
+    assert_eq(peek64(gdt_table), 0)
+}
+
+test "the kernel code descriptor keeps the whole limit it was built with" {
+    gdt_build()
+    assert_eq(desc_limit(1), 0xFFFFF)
+}
+
+test "the kernel data descriptor keeps the whole limit it was built with" {
+    // With G=1 the limit counts 4 KiB pages, so a limit truncated to 0x0FFFF describes 256 MiB
+    // instead of 4 GiB. Every kernel access above that boundary faults, and the fault points at
+    // the access, never at the descriptor built once at boot.
+    gdt_build()
+    assert_eq(desc_limit(2), 0xFFFFF)
+}
+
+test "every descriptor is flat: base zero" {
+    gdt_build()
+    assert_eq(desc_base(1), 0)
+    assert_eq(desc_base(2), 0)
+    assert_eq(desc_base(3), 0)
+}
+
+test "the code descriptor is present, a segment, and executable" {
+    gdt_build()
+    // P=1 (bit 7), S=1 (bit 4: a code/data segment and not a system one), and the type nibble
+    // 1010b: code, readable, non-conforming.
+    assert_eq(desc_access(1) & 0x80, 0x80)
+    assert_eq(desc_access(1) & 0x10, 0x10)
+    assert_eq(desc_access(1) & 0x0F, 0x0A)
+}
+
+test "the data descriptor is present, a segment, and writable" {
+    gdt_build()
+    assert_eq(desc_access(2) & 0x80, 0x80)
+    assert_eq(desc_access(2) & 0x10, 0x10)
+    // 0010b: data, writable, grows up.
+    assert_eq(desc_access(2) & 0x0F, 0x02)
+}
+
+test "the code descriptor says 64-bit, which is the whole reason this table exists" {
+    // Without L the processor reads that segment as 32-bit compatibility code. A kernel that
+    // reloads CS with it leaves long mode by the back door, and the table looks right in a dump:
+    // every other field is what it should be.
+    gdt_build()
+    assert_eq(desc_l(1), 1)
+}
+
+test "a 64-bit code segment declares no default operand size" {
+    // L=1 with D=1 is a reserved combination; the processor is entitled to fault on it, and what
+    // it faults on is the far transfer, not the descriptor.
+    gdt_build()
+    assert_eq(desc_db(1), 0)
+}
+
+test "the data descriptors do not claim to be long-mode code" {
+    // L is defined for code segments. A data descriptor that sets it is writing a bit whose
+    // meaning is not defined there, and it got set by ORing 0xF0 for a limit nibble.
+    gdt_build()
+    assert_eq(desc_l(2), 0)
+    assert_eq(desc_l(3), 0)
+}
+
+test "nothing sets AVL, which belongs to whoever writes the system, and nobody here uses it" {
+    gdt_build()
+    assert_eq(desc_avl(1), 0)
+    assert_eq(desc_avl(2), 0)
+    assert_eq(desc_avl(3), 0)
+}
+
+test "the limits are page granular, or 0xFFFFF would mean one megabyte" {
+    gdt_build()
+    assert_eq(desc_g(1), 1)
+    assert_eq(desc_g(2), 1)
+    assert_eq(desc_g(3), 1)
+}
+
+test "the kernel descriptors are ring 0 and the user one is ring 3" {
+    // The fourth entry exists to be loaded by userland later. Built with DPL=0 it is a second
+    // kernel descriptor wearing a user selector: ring 3 loading it takes a general protection
+    // fault, and the entry meant to prevent that looks fine in a hex dump.
+    gdt_build()
+    assert_eq(desc_dpl(1), 0)
+    assert_eq(desc_dpl(2), 0)
+    assert_eq(desc_dpl(3), 3)
+}
+
+test "the user descriptor is a data segment like the kernel one, and not a copy of it" {
+    gdt_build()
+    assert_eq(desc_access(3) & 0x1F, desc_access(2) & 0x1F)
+    assert_ne(desc_access(3), desc_access(2))
+}
+
+test "the pseudo-descriptor points at the table and stops at its last byte" {
+    // `lgdt` reads a limit that is the size MINUS ONE: written as the size, the processor would
+    // accept one entry past the end of the table.
+    gdt_build()
+    assert_eq(peek16(gdt_ptr), 47)
+    assert_eq(peek64(gdt_ptr + 2), gdt_table)
+}
+
+test "building twice leaves the same table" {
+    // It runs once at boot today. A second call has to be a no-op and not an accumulation: the
+    // bytes are written, never ORed into what was there.
+    gdt_build()
+    let uno = peek64(gdt_table + 8)
+    let dos = peek64(gdt_table + 16)
+    let tres = peek64(gdt_table + 24)
+    gdt_build()
+    assert_eq(peek64(gdt_table + 8), uno)
+    assert_eq(peek64(gdt_table + 16), dos)
+    assert_eq(peek64(gdt_table + 24), tres)
+}
+
+test "each selector names its own entry, with the privilege that entry grants" {
+    // A selector is index | RPL. `SEL_KDATA | 3` is not the user selector: it is the KERNEL
+    // entry requested at ring 3, which the processor refuses.
+    assert_eq(gdt_sel_kdata() / 8, 2)
+    assert_eq(gdt_sel_kdata() & 3, 0)
+    assert_eq(gdt_sel_udata() / 8, 3)
+    assert_eq(gdt_sel_udata() & 3, 3)
+}

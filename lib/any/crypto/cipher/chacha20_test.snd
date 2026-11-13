@@ -16,12 +16,15 @@ include "any/crypto/cipher/chacha20.snd"
 include "x86_64/linux/testing.snd"
 
 let PT_TEXT: string = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+let KS_HEX: string = "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4ed2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e"
 let CT_HEX: string = "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d"
 
 let mut key[4]      // 32 bytes
 let mut nonce[2]    // 12 bytes, rounded up to whole words
 let mut ct[15]      // 114 bytes
 let mut back[15]
+let mut ks[8]       // 64 bytes: one ChaCha20 block
+let mut ks2[8]
 
 fn hexval(c: i64) -> i64 {
     if c >= 48 && c <= 57 { return c - 48 }
@@ -43,6 +46,15 @@ fn eq_hex(buf: i64, n: i64, hexstr: i64) -> i64 {
 fn setup() {
     for i in 0..32 { poke8(key + i, i) }
     for i in 0..12 { poke8(nonce + i, 0) }
+    poke8(nonce + 7, 0x4a)
+}
+
+// The §2.3.2 nonce differs from the one above in one byte, and that byte is the point: it is
+// what the RFC's block vector was produced with.
+fn setup_block_vector() {
+    for i in 0..32 { poke8(key + i, i) }
+    for i in 0..12 { poke8(nonce + i, 0) }
+    poke8(nonce + 3, 9)
     poke8(nonce + 7, 0x4a)
 }
 
@@ -83,4 +95,24 @@ test "a different counter gives a different keystream" {
     setup()
     chacha20_xor(key, nonce, 2, PT_TEXT.utf8, ct, 114)
     assert_eq(eq_hex(ct, 114, CT_HEX.utf8), 0)
+}
+
+test "the RFC 8439 §2.3.2 block is the keystream the RFC prints" {
+    // The block function under its own vector, not through `chacha20_xor`: a keystream that is
+    // wrong in the same way the XOR is wrong would still round-trip and still look right.
+    setup_block_vector()
+    chacha20_block(key, nonce, 1, ks)
+    assert_eq(eq_hex(ks, 64, KS_HEX.utf8), 1)
+}
+
+test "consecutive block counters give different blocks" {
+    // The counter is what makes a long message more than the same 64 bytes repeated.
+    setup_block_vector()
+    chacha20_block(key, nonce, 1, ks)
+    chacha20_block(key, nonce, 2, ks2)
+    let mut iguales = 0
+    for i in 0..64 {
+        if peek8(ks + i) == peek8(ks2 + i) { iguales = iguales + 1 }
+    }
+    assert(iguales < 64)
 }

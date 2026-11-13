@@ -10,7 +10,8 @@
 //! Runs BEFORE struct desugaring, so it sees the original `p.field` form.
 
 use crate::ast::{
-    Arg, BinOp, Block, EnumDef, Expr, Function, Global, Param, Stmt, StructDef, Type, UnOp,
+    Arg, BinOp, Block, EnumDef, Expr, Function, Global, Param, Signature, Stmt, StructDef, Type,
+    UnOp,
 };
 
 /// Exhaustiveness: every `match` on a sum type must cover ALL of its enum's variants,
@@ -162,7 +163,7 @@ pub fn check_struct_mutability(funcs: &[Function], structs: &[StructDef]) -> Res
 /// the moment the author writes `if c { .. }` around the thing being guarded, and the clean
 /// compile then reads as permission. That is worse than having no check at all, and it lands on
 /// the shape every accept loop has: `for { let c = accept(); if c >= 0 { spawn handle(c) } }`.
-fn nested_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
+pub(crate) fn nested_blocks<'a>(e: &'a Expr, out: &mut Vec<&'a Block>) {
     match e {
         Expr::If {
             cond,
@@ -231,7 +232,7 @@ fn nested_blocks_of_block<'a>(b: &'a Block, out: &mut Vec<&'a Block>) {
 
 /// Every block reachable from a statement's own expressions (its `for` body is separate: a caller
 /// that tracks loop nesting needs to treat that one differently).
-fn nested_blocks_of_stmt<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
+pub(crate) fn nested_blocks_of_stmt<'a>(s: &'a Stmt, out: &mut Vec<&'a Block>) {
     match s {
         Stmt::Let { value, .. }
         | Stmt::Expr(value)
@@ -939,6 +940,249 @@ pub fn check_par_confluence(funcs: &[Function], globals: &[Global]) -> Result<()
 /// Rejects a `graph { .. }` block whose nodes form a dependency CYCLE (`node a = b  node b = a`):
 /// there is no order in which to evaluate them, so it cannot be scheduled (RFC-0008 §10 forbids
 /// pure data cycles in v1). A DFS with an in-progress mark finds a back edge.
+/// Every name the backends emit without a declaration anywhere in the program. The union across
+/// targets on purpose: `serial_init` exists only on PIC16 and `readkey` only on UEFI, and a name
+/// that belongs to ANOTHER backend is a refusal for that backend to make ("no codegen for X on
+/// this target"), not a missing definition. What this list is for is the third case -- a name that
+/// exists nowhere at all -- which used to travel all the way to codegen and come out as the
+/// compiler's own limitation.
+///
+/// Kept honest by `every_backend_builtin_is_listed`, which reads the match arms out of the backend
+/// sources: a builtin added there without a line here fires that test red.
+pub const BUILTIN_NAMES: &[&str] = &[
+    // x86-64 (codegen/builtins.rs)
+    "addr_of",
+    "alloc",
+    "argc",
+    "argv",
+    "arena_tcb",
+    "asm",
+    "atomic_add64",
+    "atomic_cas64",
+    "cstr",
+    "envp",
+    "exit_boot_services",
+    "halt",
+    "inb",
+    "inl",
+    "inw",
+    "lidt",
+    "outb",
+    "outl",
+    "outw",
+    "peek16",
+    "peek32",
+    "peek64",
+    "peek8",
+    "peekf32",
+    "peekf64",
+    "poke16",
+    "poke32",
+    "poke64",
+    "poke8",
+    "pokef32",
+    "pokef64",
+    "poweroff",
+    "print",
+    "print_char",
+    "print_int",
+    "read_cs",
+    "readkey",
+    "serial_int",
+    "serial_print",
+    "serial_putc",
+    "swtch",
+    "syscall",
+    "write",
+    // PIC16 (codegen/pic16.rs)
+    "delay",
+    "delay_loop",
+    "serial_getc",
+    "serial_init",
+];
+
+/// Rejects a statement that can never run: one that follows a `return`, `break` or `continue` in
+/// the same block. It is always a mistake -- the author believes those lines run -- and it is
+/// invisible, because nothing fails: the program does the right thing for the wrong reason, and
+/// the lines sit there being read as if they meant something.
+///
+/// It also drags a whole repository under its coverage gate. `sond test` requires 80% and
+/// unreachable statements cannot be covered by any test, so the number cannot be fixed by writing
+/// more of them -- only by deleting code that was never running.
+pub fn check_unreachable_statements(funcs: &[Function]) -> Result<(), String> {
+    fn walk_block(b: &Block, fname: &str) -> Result<(), String> {
+        for (i, s) in b.stmts.iter().enumerate() {
+            if matches!(s, Stmt::Return(_) | Stmt::Break | Stmt::Continue)
+                && i + 1 < b.stmts.len()
+            {
+                let line = b.stmt_lines.get(i + 1).copied().unwrap_or(0);
+                let kind = match s {
+                    Stmt::Return(_) => "return",
+                    Stmt::Break => "break",
+                    _ => "continue",
+                };
+                return Err(format!(
+                    "function `{fname}`: the statement at line {line} can never run -- the \
+                     `{kind}` above it always leaves the block"
+                ));
+            }
+            match s {
+                Stmt::For { body, .. } => walk_block(body, fname)?,
+                Stmt::Let { value, .. }
+                | Stmt::Return(Some(value))
+                | Stmt::Expr(value)
+                | Stmt::Spawn(value)
+                | Stmt::Assign { value, .. } => walk_expr(value, fname)?,
+                _ => {}
+            }
+        }
+        match &b.tail {
+            Some(t) => walk_expr(t, fname),
+            None => Ok(()),
+        }
+    }
+
+    fn walk_expr(e: &Expr, fname: &str) -> Result<(), String> {
+        match e {
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                walk_block(then_branch, fname)?;
+                match else_branch {
+                    Some(b) => walk_block(b, fname),
+                    None => Ok(()),
+                }
+            }
+            Expr::Match { arms, .. } => {
+                for a in arms {
+                    walk_block(&a.body, fname)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    for f in funcs {
+        walk_block(&f.body, &f.name)?;
+    }
+    Ok(())
+}
+
+/// Rejects a call to a name that is not defined anywhere: not a function in the program, not an
+/// `extern`, not a struct or enum constructor, not a builtin of any backend.
+///
+/// It compiled until codegen and then died with `not yet implemented: x64 codegen for
+/// builtin/function `read_file``, which reads as a hole in the compiler. It is not: `read_file` is
+/// declared in `lib/x86_64/linux/io.snd` and the program simply never included it. The author goes
+/// looking for a compiler bug, and the one line missing is theirs. Naming the call, in the check
+/// phase, with the line it sits on, is what makes the mistake findable.
+pub fn check_calls_resolve(
+    funcs: &[Function],
+    externs: &[Signature],
+    structs: &[StructDef],
+    enums: &[EnumDef],
+) -> Result<(), String> {
+    let mut known: HashSet<&str> = HashSet::new();
+    known.extend(funcs.iter().map(|f| f.name.as_str()));
+    known.extend(externs.iter().map(|e| e.name.as_str()));
+    known.extend(structs.iter().map(|s| s.name.as_str()));
+    for e in enums {
+        known.insert(e.name.as_str());
+        known.extend(e.variants.iter().map(|v| v.name.as_str()));
+    }
+    known.extend(BUILTIN_NAMES.iter().copied());
+
+    fn walk_expr(e: &Expr, known: &HashSet<&str>, fname: &str, line: u32) -> Result<(), String> {
+        if let Expr::Call(callee, _) = e
+            && let Expr::Var(name) = callee.as_ref()
+            // A `__`-prefixed name is synthesized by the compiler itself (the test harness, the
+            // debug agent, a lowered call), never written by an author, so it is not this
+            // check's business.
+            && !name.starts_with("__")
+            && !known.contains(name.as_str())
+        {
+            return Err(format!(
+                "function `{fname}`: `{name}` is not defined at line {line} -- no function, \
+                 `extern`, type or builtin by that name; `include` the module that declares it, \
+                 or write it"
+            ));
+        }
+        match e {
+            Expr::Binary(_, l, r) | Expr::Index(l, r) => {
+                walk_expr(l, known, fname, line)?;
+                walk_expr(r, known, fname, line)
+            }
+            Expr::Unary(_, x) | Expr::Field(x, _) | Expr::Cast(x, _) => {
+                walk_expr(x, known, fname, line)
+            }
+            Expr::Call(c, args) => {
+                walk_expr(c, known, fname, line)?;
+                for a in args {
+                    walk_expr(&a.value, known, fname, line)?;
+                }
+                Ok(())
+            }
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                walk_expr(cond, known, fname, line)?;
+                walk_block(then_branch, known, fname, line)?;
+                match else_branch {
+                    Some(b) => walk_block(b, known, fname, line),
+                    None => Ok(()),
+                }
+            }
+            Expr::Match { scrutinee, arms } => {
+                walk_expr(scrutinee, known, fname, line)?;
+                for a in arms {
+                    walk_block(&a.body, known, fname, line)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn walk_block(b: &Block, known: &HashSet<&str>, fname: &str, line: u32) -> Result<(), String> {
+        for (i, s) in b.stmts.iter().enumerate() {
+            // `stmts` and `stmt_lines` are parallel by index; a block that lost its lines (a
+            // synthesized one) falls back to the line of whatever encloses it.
+            let sl = b.stmt_lines.get(i).copied().unwrap_or(line);
+            match s {
+                Stmt::Let { value, .. }
+                | Stmt::Return(Some(value))
+                | Stmt::Expr(value)
+                | Stmt::Spawn(value) => walk_expr(value, known, fname, sl)?,
+                Stmt::Assign { target, value } => {
+                    walk_expr(target, known, fname, sl)?;
+                    walk_expr(value, known, fname, sl)?;
+                }
+                Stmt::For { cond, body, .. } => {
+                    if let Some(c) = cond {
+                        walk_expr(c, known, fname, sl)?;
+                    }
+                    walk_block(body, known, fname, sl)?;
+                }
+                _ => {}
+            }
+        }
+        match &b.tail {
+            Some(t) => walk_expr(t, known, fname, b.stmt_lines.last().copied().unwrap_or(line)),
+            None => Ok(()),
+        }
+    }
+
+    for f in funcs {
+        walk_block(&f.body, &known, &f.name, 0)?;
+    }
+    Ok(())
+}
+
 /// Rejects a call whose argument count does not match the callee's declaration.
 ///
 /// Both directions compiled in silence. Too MANY arguments: the extras were evaluated and
@@ -1129,7 +1373,8 @@ pub fn check_no_duplicate_functions(funcs: &[Function]) -> Result<(), String> {
 }
 
 /// The `__cov_` prefix is RESERVED for the compiler's coverage bookkeeping: `sond test
-/// --coverage` publishes `__cov_total`, `__cov_ptr`, `__cov_nfns` and `__cov_fn_table` as
+/// --coverage` publishes `__cov_total`, `__cov_ptr`, `__cov_nfns`, `__cov_fn_table` and
+/// `__cov_loc_table` as
 /// `.data` symbols on its own, and its synthesized harness reads and writes them. Author
 /// code may neither USE nor BIND an identifier with that prefix — any such name would
 /// either reach into compiler internals as if it were an ordinary variable, or collide
@@ -1145,7 +1390,8 @@ fn reject_cov_prefix(kind: &str, name: &str) -> Result<(), String> {
         Err(format!(
             "cannot declare {kind} `{name}`: the `__cov_` prefix is reserved for the coverage \
              bookkeeping the compiler publishes itself (`__cov_total`, `__cov_ptr`, \
-             `__cov_nfns`, `__cov_fn_table`, for `sond test --coverage`). Rename it without \
+             `__cov_nfns`, `__cov_fn_table`, `__cov_loc_table`, for `sond test --coverage`). \
+             Rename it without \
              the `__cov_` prefix."
         ))
     } else {
@@ -1193,7 +1439,13 @@ pub fn check_undeclared_variables(
     // everywhere else the names are refused, by the prefix rejection on binds above and by
     // the reserved-prefix error on unresolved uses below. Predeclaring them in every
     // function of every program is what let a user program read `__cov_ptr` in silence.
-    let cov_reserved: [&str; 4] = ["__cov_total", "__cov_ptr", "__cov_nfns", "__cov_fn_table"];
+    let cov_reserved: [&str; 5] = [
+        "__cov_total",
+        "__cov_ptr",
+        "__cov_nfns",
+        "__cov_fn_table",
+        "__cov_loc_table",
+    ];
     // Collect all enum variant names and function names — they are identifiers, not variables.
     let mut known_names: HashSet<String> = HashSet::new();
     for e in enums {
@@ -1210,7 +1462,7 @@ pub fn check_undeclared_variables(
         func: &Function,
         globals: &[Global],
         known_names: &HashSet<String>,
-        cov_reserved: &[&str; 4],
+        cov_reserved: &[&str],
     ) -> Result<(), String> {
         let mut scopes: ScopeStack = Vec::new();
         let mut top: HashSet<String> = HashSet::new();
@@ -1230,27 +1482,26 @@ pub fn check_undeclared_variables(
             top.insert(n.clone());
         }
         scopes.push(top);
-        check_undeclared_block(&func.body, &mut scopes, &func.name, 0)?;
-        // `requires` lives at the top of the function, so parameters (and
-        // globals) are in scope.  The caller of the function is what
-        // guarantees the preconditions, so the expressions are still valid
-        // Sond and need the normal undeclared-variable check.
+        // Contracts are checked BEFORE walking the body, and against a COPY of the scope.
+        // `requires` and `ensures` are evaluated at the function boundary, where only the
+        // parameters, the globals and —in `ensures`— the return name exist. Walking the
+        // body first lets its top-level `let`s land in this very scope, so a typo pointing
+        // at an implementation local passes for good: the same trap that used to let a typo
+        // through in an `invariant`.
+        let mut boundary = scopes.clone();
         for e in &func.requires {
-            check_undeclared_expr(e, &mut scopes, &func.name, 0)?;
+            check_undeclared_expr(e, &mut boundary, &func.name, 0)?;
         }
-        // `ensures` also sees all parameters; and if the function has a
-        // named return value (`-> (r: T)`) then `r` is bound in the scope
-        // by a `let` placed by the compiler before this check runs (the
-        // desugar pass inserts it).  Until desugaring the name may be
-        // absent from our scope stack, so we add the named return
-        // explicitly when present.
+        // The return name (`-> (r: T)`) lives only in the `ensures`: it goes into the copy,
+        // never into the scope the body is walked with.
         if let Some(ref ret_name) = func.ret_name {
             reject_cov_prefix("return value", ret_name)?;
-            scopes.last_mut().unwrap().insert(ret_name.clone());
+            boundary.last_mut().unwrap().insert(ret_name.clone());
         }
         for e in &func.ensures {
-            check_undeclared_expr(e, &mut scopes, &func.name, 0)?;
+            check_undeclared_expr(e, &mut boundary, &func.name, 0)?;
         }
+        check_undeclared_block(&func.body, &mut scopes, &func.name, 0)?;
         Ok(())
     }
     for f in funcs {
@@ -1291,10 +1542,18 @@ fn check_undeclared_stmt(
             ty: _,
             value,
             array_len: _,
+            refinement,
         } => {
             check_undeclared_expr(value, scopes, fname, line)?;
             reject_cov_prefix("variable", name)?;
             scopes.last_mut().unwrap().insert(name.clone());
+            // The refinement talks about the name just bound, so it is checked AFTER that
+            // name enters the scope. A typo there is the same as a typo in an invariant: the
+            // predicate cannot be proven, the bound reaches nowhere, and the program compiles
+            // believing it did.
+            for p in refinement {
+                check_undeclared_expr(p, scopes, fname, line)?;
+            }
         }
         Stmt::Assign { target, value } => {
             check_undeclared_expr(target, scopes, fname, line)?;
@@ -2991,8 +3250,8 @@ fn raw_access_bytes(name: &str) -> Option<i64> {
     Some(match name {
         "peek8" | "poke8" => 1,
         "peek16" | "poke16" => 2,
-        "peek32" | "poke32" => 4,
-        "peek64" | "poke64" => 8,
+        "peek32" | "poke32" | "peekf32" | "pokef32" => 4,
+        "peek64" | "poke64" | "peekf64" | "pokef64" => 8,
         _ => return None,
     })
 }
@@ -3361,6 +3620,17 @@ fn negate_cond(e: &Expr) -> Option<Expr> {
     let Expr::Binary(op, l, r) = e else {
         return None;
     };
+    // De Morgan on a disjunctive guard: `!(a || b)` is `!a && !b`, so the two-sided bound written
+    // as ONE guard clause — `if n < 0 || n >= 23 { return }` — yields BOTH bounds to the code
+    // after it, which is how a table lookup is normally guarded. Every disjunct must negate for
+    // the conjunction to be sound, so one that cannot be expressed drops the whole fact.
+    if let BinOp::Or = op {
+        return Some(Expr::Binary(
+            BinOp::And,
+            Box::new(negate_cond(l)?),
+            Box::new(negate_cond(r)?),
+        ));
+    }
     let nop = match op {
         BinOp::Lt => BinOp::Ge,
         BinOp::Le => BinOp::Gt,
@@ -3513,11 +3783,37 @@ fn bounds_block(
                 value,
                 array_len,
                 ty,
+                refinement,
                 ..
             } => {
                 bounds_expr(value, fname, sizes, flow, params, funcs, stmt_line)?;
+                // A refinement `let y: T where P = value` is TRUSTED only if the value provably
+                // satisfies it (verified against the value's own contract — a call's `ensures`).
+                if !refinement.is_empty()
+                    && !crate::verify::value_satisfies(
+                        value,
+                        refinement,
+                        &flow.assumptions(),
+                        name,
+                        params,
+                        funcs,
+                    )
+                {
+                    return Err(format!(
+                        "function `{fname}`: cannot prove the value satisfies the refinement \
+                         `where ..` on `{name}` at line {stmt_line}; the bound must be PROVEN, \
+                         not asserted"
+                    ));
+                }
                 // Rebinding the name drops any prior fact/const/counter about it.
                 flow.invalidate(name);
+                // Carry each verified refinement as a fact (and interval bound) about `name` — a
+                // value bound the flow could not otherwise infer (it came from the value's
+                // contract), now usable for downstream indexing and arithmetic.
+                for p in refinement {
+                    flow.facts.push(p.clone());
+                    seed_interval_bound(flow, p);
+                }
                 // `let a: u32[] = backing` over an array whose size is known: the view's length is
                 // not missing, it is the backing store's capacity IN ELEMENTS (4 words of backing
                 // hold 8 `u32`s). Recording it means a local view is checked exactly like the array
@@ -3656,16 +3952,21 @@ fn bounds_block(
                 {
                     if else_branch.is_none() && block_diverges(then_branch) {
                         if let Some(neg) = negate_cond(cond) {
-                            seed_interval_bound(flow, &neg);
-                            flow.facts.push(neg);
+                            // Each conjunct is seeded on its own: the interval analysis reads a
+                            // `v OP const` shape, and a raw `&&` is not one of those.
+                            for c in conjuncts(&neg) {
+                                seed_interval_bound(flow, c);
+                                flow.facts.push(c.clone());
+                            }
                         }
                     } else if let Some(eb) = else_branch
                         && block_diverges(eb)
                         && !block_diverges(then_branch)
                     {
-                        let c = cond.as_ref().clone();
-                        seed_interval_bound(flow, &c);
-                        flow.facts.push(c);
+                        for c in conjuncts(cond) {
+                            seed_interval_bound(flow, c);
+                            flow.facts.push(c.clone());
+                        }
                     }
                 }
             }
@@ -3942,18 +4243,18 @@ fn bounds_expr(
             // Only the case both halves of which are known: `ptr` is the name of an array whose
             // size was recorded by `let a[N]`, and `len` is a constant. A length that comes from
             // a variable, or a pointer with no known size, is not decided either way.
-            let mut apuntado: Option<&str> = None;
-            let mut prometido: Option<i64> = None;
-            for (campo, valor) in fields {
-                if campo == "ptr" {
-                    if let Expr::Var(v) = valor.as_ref() {
-                        apuntado = Some(v.as_str());
+            let mut pointed_at: Option<&str> = None;
+            let mut promised: Option<i64> = None;
+            for (field, value) in fields {
+                if field == "ptr" {
+                    if let Expr::Var(v) = value.as_ref() {
+                        pointed_at = Some(v.as_str());
                     }
-                } else if campo == "len" {
-                    prometido = const_index(valor);
+                } else if field == "len" {
+                    promised = const_index(value);
                 }
             }
-            if let (Some(ptr), Some(len)) = (apuntado, prometido)
+            if let (Some(ptr), Some(len)) = (pointed_at, promised)
                 && let Some(&n) = sizes.get(ptr)
                 && len > n
             {
@@ -4108,6 +4409,16 @@ mod tests {
         let funcs = p.parse_program();
         let globals = p.take_globals();
         check_string_literal_types(&funcs, &globals)
+    }
+
+    fn calls_resolve(src: &str) -> Result<(), String> {
+        let (toks, lines, _cols) = tokenize_located(src);
+        let mut p = Parser::with_lines(toks, lines);
+        let funcs = p.parse_program();
+        let externs = p.take_externs();
+        let structs = p.take_structs();
+        let enums = p.take_enums();
+        check_calls_resolve(&funcs, &externs, &structs, &enums)
     }
 
     fn bounds(src: &str) -> Result<(), String> {
@@ -4498,6 +4809,196 @@ mod tests {
     }
 
     #[test]
+    fn a_two_sided_guard_written_as_one_or_refines_the_continuation() {
+        // The idiomatic way to bound an index on both sides is ONE guard with `||`:
+        // `if n < 0 || n >= 23 { return 0 }`. Reaching the code after it means the whole
+        // disjunction was false, and `!(a || b)` is `!a && !b`: BOTH bounds hold. This is the
+        // shape of every table lookup written as a guard clause.
+        let src = "let mut letters[23]\n\
+                   fn pick(n: i64) -> i64 { if n < 0 || n >= 23 { return 0 }\nletters[n] }\n\
+                   fn main() -> i64 { pick(3) }";
+        assert!(
+            bounds(src).is_ok(),
+            "a guard on `||` must establish both `n >= 0` and `n < 23`"
+        );
+    }
+
+    #[test]
+    fn a_guard_on_an_and_gives_no_facts_because_its_negation_is_a_disjunction() {
+        // `if n >= 0 && n < 23 { return 0 }` negates to `n < 0 || n >= 23`: a disjunction, which
+        // says nothing about either side on its own. Assuming a conjunct of it would be unsound,
+        // so the index after the guard stays correctly unproven.
+        let src = "let mut letters[23]\n\
+                   fn pick(n: i64) -> i64 { if n >= 0 && n < 23 { return 0 }\nletters[n] }\n\
+                   fn main() -> i64 { pick(3) }";
+        assert!(
+            bounds(src).is_err(),
+            "the negation of a conjunction is a disjunction: no usable fact"
+        );
+    }
+
+    #[test]
+    fn a_diverging_else_contributes_both_halves_of_its_and_condition() {
+        // The mirror shape: the check is in the THEN branch and the `else` is what returns.
+        // Reaching the code after it means the condition held, and a condition written as
+        // `a && b` holds in both halves — each is a fact on its own.
+        let src = "let mut letters[23]\n\
+                   fn pick(n: i64) -> i64 { if n >= 0 && n < 23 { } else { return 0 }\nletters[n] }\n\
+                   fn main() -> i64 { pick(3) }";
+        assert!(
+            bounds(src).is_ok(),
+            "both conjuncts of a checked condition must survive the guard"
+        );
+    }
+
+    #[test]
+    fn a_call_to_a_name_nobody_defined_names_the_missing_definition() {
+        // `read_file` lives in `lib/x86_64/linux/io.snd`; a program that forgets to `include` it
+        // used to reach codegen and die with "not yet implemented: x64 codegen for
+        // builtin/function `read_file`" -- a diagnosis that sends the author to fix the compiler
+        // when what is missing is one line of their own file.
+        let err = calls_resolve("fn main() -> i64 { read_file(0, 0, 64) }").unwrap_err();
+        assert!(err.contains("read_file"), "must name the call: {err}");
+        assert!(
+            err.contains("not defined") && err.contains("include"),
+            "must say what is missing and how to supply it: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_call_reports_the_line_it_is_written_on() {
+        // Lines:
+        //   1  fn main() -> i64 {
+        //   2      let n = 1
+        //   3      read_file(n, 0, 64)   <- here
+        //   4  }
+        // The function name alone is not a location in a file of any size.
+        let err = calls_resolve("fn main() -> i64 {\n    let n = 1\n    read_file(n, 0, 64)\n}")
+            .unwrap_err();
+        assert!(
+            err.contains("at line 3"),
+            "must point at the call site: {err}"
+        );
+    }
+
+    #[test]
+    fn a_call_to_a_declared_function_resolves() {
+        assert!(calls_resolve("fn helper() -> i64 { 1 }\nfn main() -> i64 { helper() }").is_ok());
+    }
+
+    #[test]
+    fn a_call_to_a_builtin_resolves() {
+        // `poke8` has no declaration anywhere: the backend emits it. The check must know the
+        // builtins or it would reject every program that touches memory.
+        assert!(calls_resolve("fn main() -> i64 { poke8(0, 0)\n0 }").is_ok());
+    }
+
+    #[test]
+    fn every_backend_builtin_is_listed() {
+        // BUILTIN_NAMES is a second copy of what the backends dispatch on, and a second copy
+        // rots. This reads the arms straight out of the backend sources, so a builtin added
+        // there and not here fires red instead of surfacing months later as a program that the
+        // checker rejects and the codegen would have compiled.
+        let x64 = include_str!("codegen/builtins.rs");
+        let pic = include_str!("codegen/pic16.rs");
+        let mut found: Vec<String> = Vec::new();
+        // x86-64: `"name" =>`, `"a" | "b" =>`, `"name" if guard =>`, at the head of a line.
+        for line in x64.lines() {
+            let t = line.trim_start();
+            if !t.starts_with('"') {
+                continue;
+            }
+            let Some(head) = t.split("=>").next() else {
+                continue;
+            };
+            if !t.contains("=>") {
+                continue;
+            }
+            for piece in head.split('|') {
+                let piece = piece.trim();
+                if let Some(rest) = piece.strip_prefix('"')
+                    && let Some(end) = rest.find('"')
+                {
+                    found.push(rest[..end].to_string());
+                }
+            }
+        }
+        // PIC16 dispatches on `(name, arity)`: `("serial_init", 0) =>`.
+        for line in pic.lines() {
+            let t = line.trim_start();
+            if let Some(rest) = t.strip_prefix("(\"")
+                && let Some(end) = rest.find('"')
+                && t.contains("=>")
+            {
+                found.push(rest[..end].to_string());
+            }
+        }
+        assert!(
+            found.len() > 30,
+            "the backend sources were read wrong: only {} arms found",
+            found.len()
+        );
+        let listed: HashSet<&str> = BUILTIN_NAMES.iter().copied().collect();
+        let missing: Vec<&String> = found
+            .iter()
+            .filter(|n| !listed.contains(n.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these builtins are dispatched by a backend and missing from BUILTIN_NAMES: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn a_call_to_a_builtin_of_another_backend_resolves() {
+        // `serial_init` is a PIC16 builtin. The x86-64 backend has no codegen for it, and that
+        // refusal belongs to the backend: this check only rules out names that exist NOWHERE.
+        assert!(calls_resolve("fn main() -> i64 { serial_init()\n0 }").is_ok());
+    }
+
+    fn unreachable_stmts(src: &str) -> Result<(), String> {
+        let (toks, lines, _cols) = tokenize_located(src);
+        let mut p = Parser::with_lines(toks, lines);
+        let funcs = p.parse_program();
+        check_unreachable_statements(&funcs)
+    }
+
+    #[test]
+    fn a_statement_written_after_a_return_is_rejected_by_the_line_it_sits_on() {
+        // Nothing fails at runtime when this is compiled: the program does the right thing for
+        // the wrong reason, and the lines below the `return` are read as if they meant something.
+        let err = unreachable_stmts("fn f(n: i64) -> i64 {\nlet mut m = n\nreturn m\nm = m + 1\n}")
+            .expect_err("a statement below a `return` must be rejected");
+        assert!(err.contains("line 4"), "the message must name line 4; got: {err}");
+        assert!(err.contains("can never run"), "the message must say why; got: {err}");
+        assert!(err.contains("`f`"), "the message must name the function; got: {err}");
+    }
+
+    #[test]
+    fn a_return_inside_an_if_leaves_the_code_after_the_if_reachable() {
+        // The `return` ends the `if` block, not the function body: everything below the `if` runs
+        // whenever the guard is false. Rejecting this would be rejecting every early exit.
+        assert!(
+            unreachable_stmts("fn f(n: i64) -> i64 {\nif n < 0 { return 0 }\nlet m = n + 1\nm\n}")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_statement_written_after_a_break_is_rejected_too() {
+        // `break` and `continue` leave the block exactly like `return` does.
+        let err = unreachable_stmts("fn f() -> i64 { let mut i = 0\nfor i < 4 { break\ni = i + 1 }\n0 }")
+            .expect_err("a statement below a `break` must be rejected");
+        assert!(err.contains("line 3"), "the message must name line 3; got: {err}");
+        assert!(err.contains("`break`"), "the message must name the `break`; got: {err}");
+    }
+
+    #[test]
+    fn a_return_as_the_last_statement_of_a_block_is_not_dead_code() {
+        assert!(unreachable_stmts("fn f(n: i64) -> i64 {\nreturn n\n}").is_ok());
+    }
+
+    #[test]
     fn does_not_propagate_an_ensures_mentioning_an_unmapped_parameter() {
         // With a KEYWORD argument the parameters are not positionally mapped, so an `ensures`
         // that mentions a parameter must NOT be assumed (the bare param name could alias an
@@ -4537,6 +5038,63 @@ mod tests {
             ),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn a_refined_let_carries_a_call_derived_bound() {
+        // A REFINEMENT type on a local (`let y: i64 where 0 <= y && y < 4 = ..`) is VERIFIED
+        // against the value's source contract (`byte`'s `ensures`) and then carried as a fact, so
+        // `a[y]` is provable.
+        let src = "fn byte() -> (r: i64) ensures { r >= 0; r < 4 } { 0 }\n\
+                   fn f() -> i64 { let a[4]\nlet y: i64 where 0 <= y && y < 4 = byte()\na[y] }";
+        assert!(
+            bounds(src).is_ok(),
+            "the refined bound must make a[y] provable: {:?}",
+            bounds(src).err()
+        );
+    }
+
+    /// Proof that the refinement earns its keep: here the flow does NOT get there on its own.
+    /// The callee's `ensures` confines the result to [1, 4], but the subtraction escapes it, so
+    /// without the `where` the index is rejected. With it, the bound is proven at the binding and
+    /// carried onward as a fact.
+    #[test]
+    fn a_refinement_proves_what_the_bounds_flow_alone_does_not() {
+        let with = "fn one_to_four() -> (r: i64) ensures { r >= 1; r <= 4 } { 4 }\n\
+                    fn f() -> i64 { let a[4]\nlet y: i64 where 0 <= y && y < 4 = one_to_four() - 1\na[y] }";
+        let without = "fn one_to_four() -> (r: i64) ensures { r >= 1; r <= 4 } { 4 }\n\
+                       fn f() -> i64 { let a[4]\nlet y = one_to_four() - 1\na[y] }";
+        assert!(
+            bounds(with).is_ok(),
+            "with the refinement the index is proven: {:?}",
+            bounds(with).err()
+        );
+        assert!(
+            bounds(without).is_err(),
+            "without the refinement the flow falls short: if this turns green the test measures nothing"
+        );
+    }
+
+    #[test]
+    fn a_refinement_provable_by_the_interval_analysis_is_accepted() {
+        // A refinement the LINEAR evaluator cannot verify (it bails on `&`) but the INTERVAL
+        // analysis can -- `x & 255` is confined to [0, 255] -- must not be surprisingly rejected.
+        let src =
+            "fn f(x: i64) -> i64 { let a[256]\nlet y: i64 where 0 <= y && y < 256 = x & 255\na[y] }";
+        assert!(
+            bounds(src).is_ok(),
+            "a refinement the interval analysis proves must be accepted: {:?}",
+            bounds(src).err()
+        );
+    }
+
+    #[test]
+    fn rejects_a_refinement_the_value_does_not_provably_satisfy() {
+        // SOUNDNESS: a refinement is TRUSTED only after it is PROVEN of the value. An unbounded
+        // parameter does not satisfy `y < 4`, so the refined binding is rejected (it cannot be
+        // asserted, only proven).
+        let err = bounds("fn f(x: i64) -> i64 { let y: i64 where y < 4 = x\ny }").unwrap_err();
+        assert!(err.contains("refinement"), "salio: {err}");
     }
 
     #[test]
@@ -6778,12 +7336,16 @@ pub fn check_no_raw_access_to_declared_buffers(
         matches!(
             name,
             "peek8" | "peek16" | "peek32" | "peek64" | "poke8" | "poke16" | "poke32" | "poke64"
+                | "peekf32" | "peekf64" | "pokef32" | "pokef64"
         )
     }
     // Every variable named anywhere in an expression.
     fn names_in(e: &Expr, out: &mut Vec<String>) {
         match e {
             Expr::Var(n) => out.push(n.clone()),
+            // `s.utf8` is not `s`: it is the address of the literal's BYTES, a buffer with no
+            // declared length, which is exactly what raw access is for.
+            Expr::Field(_, f) if f == "utf8" => {}
             Expr::Field(b, _) | Expr::Unary(_, b) | Expr::Cast(b, _) => names_in(b, out),
             Expr::Binary(_, a, b) | Expr::Index(a, b) => {
                 names_in(a, out);
@@ -8374,6 +8936,57 @@ mod invariant_undeclared {
         );
     }
 
+    /// A BODY local does not exist for `requires`: the precondition is evaluated on entry,
+    /// when nothing in the body has been declared yet. Seeing it there is the same trap that
+    /// used to let a typo through in an `invariant`.
+    #[test]
+    fn body_local_not_visible_in_requires() {
+        let err = check_undeclared(
+            "fn f(x: i64) -> i64 requires { bodyOnly > 0 } {\n\
+             let bodyOnly = x\n\
+             bodyOnly\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("bodyOnly"),
+            "a body local must not be in scope in `requires`, got: {err}"
+        );
+    }
+
+    /// Same for `ensures`: the postcondition talks about the parameters and the return
+    /// value, never about the implementation's internal variables.
+    #[test]
+    fn body_local_not_visible_in_ensures() {
+        let err = check_undeclared(
+            "fn f(x: i64) -> (r: i64) ensures { bodyOnly > 0 } {\n\
+             let bodyOnly = x\n\
+             bodyOnly\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("bodyOnly"),
+            "a body local must not be in scope in `ensures`, got: {err}"
+        );
+    }
+
+    /// The return name lives in the `ensures`, not in the body: using it inside the body
+    /// is an undeclared name.
+    #[test]
+    fn named_return_not_visible_in_body() {
+        let err = check_undeclared(
+            "fn f(x: i64) -> (r: i64) ensures { r > 0 } {\n\
+             r + x\n\
+             }",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains('r'),
+            "the return name is not declared inside the body, got: {err}"
+        );
+    }
+
     /// Regression: undeclared variable in `ensures` is rejected.
     #[test]
     fn undeclared_in_ensures_is_rejected() {
@@ -8400,38 +9013,38 @@ mod invariant_undeclared {
     #[test]
     fn no_ellipsis_in_check_undeclared_stmt() {
         let source = include_str!("check.rs");
-        let desde = source
+        let from = source
             .find("fn check_undeclared_stmt(")
             .expect("the function this guard protects must exist");
-        let abre = source[desde..]
+        let open_brace = source[from..]
             .find(") -> Result<(), String> {")
-            .map(|i| desde + i + ") -> Result<(), String> {".len() - 1)
+            .map(|i| from + i + ") -> Result<(), String> {".len() - 1)
             .expect("the function signature must end in an opening brace");
 
-        let mut profundidad = 0usize;
-        let mut fin = abre;
-        for (i, c) in source[abre..].char_indices() {
+        let mut depth = 0usize;
+        let mut end = open_brace;
+        for (i, c) in source[open_brace..].char_indices() {
             match c {
-                '{' => profundidad += 1,
+                '{' => depth += 1,
                 '}' => {
-                    profundidad -= 1;
-                    if profundidad == 0 {
-                        fin = abre + i;
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open_brace + i;
                         break;
                     }
                 }
                 _ => {}
             }
         }
-        assert!(fin > abre, "the function body must be delimited");
+        assert!(end > open_brace, "the function body must be delimited");
 
-        let cuerpo: String = source[abre..fin]
+        let body: String = source[open_brace..end]
             .lines()
             .map(|l| l.split("//").next().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            !cuerpo.contains(".."),
+            !body.contains(".."),
             "check_undeclared_stmt must name every field of every Stmt arm: a bare `..` there \
              lets a field be added to the enum and never checked, which is how the `invariant` \
              clause went unwalked"
@@ -8617,7 +9230,7 @@ mod coverage_harness_globals {
         // the harness touches (`syscall`, `peek64`, `print`, `__test_report`) is a call
         // target, which this check does not police.
         let tests = parse_fns("test \"a\" { let x = 1 }\ntest \"b\" { let y = 2 }");
-        let main = crate::testing::synth_coverage_harness(&tests, 80);
+        let main = crate::testing::synth_coverage_harness(&tests, 80, false);
         let sys_globals: Vec<Global> = ["SYS_mmap", "SYS_fork", "SYS_exit", "SYS_wait4", "SYS_write"]
             .iter()
             .map(|n| Global {

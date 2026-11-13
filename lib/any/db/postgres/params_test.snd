@@ -1,0 +1,333 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Test of db/postgres/params.snd: the PostgreSQL extended-query frontend messages
+// (Parse/Bind/Describe/Execute/Sync) and the `$1..$n` runner. Two halves:
+//   - the byte layout of each message, read back with a `u8[]` view (no socket);
+//   - `pgp_run` over a real 127.0.0.1 loopback socket, with a forked CHILD scripting a
+//     server that speaks the extended protocol: a row-producing reply and an
+//     ErrorResponse carrying the SQLSTATE the caller must be able to read.
+
+include "any/db/postgres/params.snd"
+include "x86_64/linux/testing.snd"
+
+let SQL_SELECT: string = "SELECT v FROM t WHERE v = $1"
+let SQL_INSERT: string = "INSERT INTO t (v) VALUES ($1)"
+let ARG_HELLO: string = "hello"
+let COLNAME: string = "v"
+let CMD_TAG: string = "SELECT 1"
+let SQLSTATE_UNIQUE: string = "23505"
+let SEVERITY: string = "ERROR"
+let ERRMSG: string = "duplicate key value violates unique constraint"
+
+// --- scripted extended-protocol server (runs in the forked child) ---
+
+fn srv_send_auth(fd: i64, code: i64) {
+    let b: u8[9] = heap_alloc(9)
+    let mut p = pgp_u8(b, 82)                       // 'R'
+    p = pgp_u32(p, 8)
+    pgp_u32(p, code)
+    write_buf(fd, b, 9)
+}
+
+fn srv_send_ready(fd: i64) {
+    let b: u8[6] = heap_alloc(6)
+    let mut p = pgp_u8(b, 90)                       // 'Z'
+    p = pgp_u32(p, 5)
+    pgp_u8(p, 73)                                   // 'I'
+    write_buf(fd, b, 6)
+}
+
+fn srv_send_parsecomplete(fd: i64) {
+    let b: u8[5] = heap_alloc(5)
+    let p = pgp_u8(b, 49)                           // '1'
+    pgp_u32(p, 4)
+    write_buf(fd, b, 5)
+}
+
+fn srv_send_bindcomplete(fd: i64) {
+    let b: u8[5] = heap_alloc(5)
+    let p = pgp_u8(b, 50)                           // '2'
+    pgp_u32(p, 4)
+    write_buf(fd, b, 5)
+}
+
+fn srv_send_rowdesc1(fd: i64, name: string) {
+    let b: u8[128] = heap_alloc(128)
+    let nlen = strlen(name.utf8)
+    let mut p = pgp_u8(b, 84)                       // 'T'
+    p = pgp_u32(p, 4 + 2 + nlen + 1 + 18)
+    p = pgp_u16(p, 1)
+    p = pgp_copy(p, name.utf8, nlen)
+    p = pgp_u8(p, 0)
+    let mut k = 0
+    for k < 18 { p = pgp_u8(p, 0); k = k + 1 }
+    write_buf(fd, b, p - b)
+}
+
+fn srv_send_datarow1(fd: i64, val: string) {
+    let b: u8[128] = heap_alloc(128)
+    let n = strlen(val.utf8)
+    let mut p = pgp_u8(b, 68)                       // 'D'
+    p = pgp_u32(p, 4 + 2 + 4 + n)
+    p = pgp_u16(p, 1)
+    p = pgp_u32(p, n)
+    p = pgp_copy(p, val.utf8, n)
+    write_buf(fd, b, p - b)
+}
+
+fn srv_send_cmdcomplete(fd: i64, tag: string) {
+    let b: u8[128] = heap_alloc(128)
+    let n = strlen(tag.utf8)
+    let mut p = pgp_u8(b, 67)                       // 'C'
+    p = pgp_u32(p, 4 + n + 1)
+    p = pgp_copy(p, tag.utf8, n)
+    p = pgp_u8(p, 0)
+    write_buf(fd, b, p - b)
+}
+
+fn srv_send_error_state(fd: i64, state: string, msg: string) {
+    let b: u8[256] = heap_alloc(256)
+    let sn = strlen(SEVERITY.utf8)
+    let stn = strlen(state.utf8)
+    let mn = strlen(msg.utf8)
+    let mut p = pgp_u8(b, 69)                       // 'E'
+    p = pgp_u32(p, 4 + 2 + sn + 2 + stn + 2 + mn + 1)
+    p = pgp_u8(p, 83)                               // 'S' severity
+    p = pgp_copy(p, SEVERITY.utf8, sn)
+    p = pgp_u8(p, 0)
+    p = pgp_u8(p, 67)                               // 'C' SQLSTATE
+    p = pgp_copy(p, state.utf8, stn)
+    p = pgp_u8(p, 0)
+    p = pgp_u8(p, 77)                               // 'M' message
+    p = pgp_copy(p, msg.utf8, mn)
+    p = pgp_u8(p, 0)
+    pgp_u8(p, 0)                                    // end of the field list
+    write_buf(fd, b, p - b + 1)
+}
+
+fn srv_drain_startup(fd: i64) {
+    let h: u8[4] = heap_alloc(4)
+    pg_read_exact_fd(fd, h, 4)
+    let len = h[0] * 16777216 + h[1] * 65536 + h[2] * 256 + h[3]
+    if len > 4 {
+        let body: u8[512] = heap_alloc(512)
+        pg_read_exact_fd(fd, body, len - 4)
+    }
+}
+
+fn srv_drain_one(fd: i64, conn: i64) {
+    let b = heap_alloc(8192)
+    pg_read_msg(conn, b, 8192)
+}
+
+// Reads framed frontend messages until Sync ('S'): the whole extended-query batch.
+fn srv_drain_until_sync(fd: i64) {
+    let b = heap_alloc(8192)
+    let conn = pg_conn_plain(fd)
+    for {
+        let mlen = pg_read_msg(conn, b, 8192)
+        if mlen <= 0 { return }
+        let t: u8[1] = b
+        if t[0] == 83 { return }
+    }
+}
+
+// kind 0: a one-row reply. kind 1: an ErrorResponse carrying SQLSTATE 23505.
+fn srv_serve(sfd: i64, kind: i64) {
+    let afd = accept_sock(sfd, 0, 0)
+    if afd < 0 { syscall(SYS_exit, 2) }
+    srv_drain_startup(afd)
+    srv_send_auth(afd, 3)                           // cleartext
+    srv_drain_one(afd, pg_conn_plain(afd))          // PasswordMessage
+    srv_send_auth(afd, 0)
+    srv_send_ready(afd)
+    srv_drain_until_sync(afd)
+    if kind == 0 {
+        srv_send_parsecomplete(afd)
+        srv_send_bindcomplete(afd)
+        srv_send_rowdesc1(afd, COLNAME)
+        srv_send_datarow1(afd, ARG_HELLO)
+        srv_send_cmdcomplete(afd, CMD_TAG)
+    } else {
+        if kind == 1 {
+            srv_send_error_state(afd, SQLSTATE_UNIQUE, ERRMSG)
+        } else {
+            close_fd(afd)                           // kind 2: hang up with no reply
+            syscall(SYS_exit, 0)
+        }
+    }
+    srv_send_ready(afd)
+    close_fd(afd)
+}
+
+let mut srv_sfd = 0
+let mut srv_pid = 0
+
+fn spawn_server(port: i64, kind: i64) {
+    let ip = 0x7f000001
+    srv_sfd = sock(AF_INET, SOCK_STREAM, 0)
+    set_reuseaddr(srv_sfd)
+    let sa[2]
+    sockaddr_in_build(sa, ip, port)
+    bind_sock(srv_sfd, sa, 16)
+    listen_sock(srv_sfd, 4)
+    srv_pid = syscall(SYS_fork)
+    if srv_pid == 0 {
+        srv_serve(srv_sfd, kind)
+        syscall(SYS_exit, 0)
+    }
+}
+
+fn join_server() {
+    close_fd(srv_sfd)
+    let st[1]
+    syscall(SYS_wait4, srv_pid, st, 0, 0)
+}
+
+// --- byte layout (no socket) ---
+
+test "pg params: Parse message layout" {
+    let sql: string = "SELECT 1"
+    let nsql = strlen(sql.utf8)
+    assert_eq(pgp_parse_size(nsql), 17)             // 9 + 8 bytes of SQL
+    let buf: u8[32] = heap_alloc(32)
+    let end = pgp_write_parse(buf, sql.utf8, nsql)
+    assert_eq(end - buf, 17)
+    assert_eq(buf[0], 80)                           // 'P'
+    assert_eq(buf[1], 0)                            // length 16 = 8 + 8
+    assert_eq(buf[2], 0)
+    assert_eq(buf[3], 0)
+    assert_eq(buf[4], 16)
+    assert_eq(buf[5], 0)                            // unnamed statement
+    assert_eq(buf[6], 83)                           // 'S' of SELECT
+    assert_eq(buf[14], 0)                           // NUL ending the query
+    assert_eq(buf[15], 0)                           // zero parameter type OIDs
+    assert_eq(buf[16], 0)
+}
+
+test "pg params: Bind message layout, text vs NULL" {
+    let p0: string = "ab"
+    let args[3]
+    args[0] = p0.utf8
+    args[1] = 0                                     // SQL NULL
+    args[2] = 0                                     // also NULL, to exercise -1 twice
+    let ps = Slice { ptr: args, len: args.len }
+    // 13 + 4*3 params + 2 text bytes (the two NULLs add no bytes)
+    assert_eq(pgp_bind_size(ps), 27)
+    let buf: u8[64] = heap_alloc(64)
+    let end = pgp_write_bind(buf, ps)
+    assert_eq(end - buf, 27)
+    assert_eq(buf[0], 66)                           // 'B'
+    assert_eq(buf[4], 26)                           // length 26 = 12 + 12 + 2
+    assert_eq(buf[5], 0)                            // unnamed portal
+    assert_eq(buf[6], 0)                            // unnamed statement
+    assert_eq(buf[7], 0)                            // zero format codes -> all text
+    assert_eq(buf[8], 0)
+    assert_eq(buf[9], 0)                            // three parameters
+    assert_eq(buf[10], 3)
+    assert_eq(buf[11], 0)                           // param 0 length 2
+    assert_eq(buf[12], 0)
+    assert_eq(buf[13], 0)
+    assert_eq(buf[14], 2)
+    assert_eq(buf[15], 97)                          // 'a'
+    assert_eq(buf[16], 98)                          // 'b'
+    assert_eq(buf[17], 255)                         // param 1: -1 (NULL)
+    assert_eq(buf[18], 255)
+    assert_eq(buf[19], 255)
+    assert_eq(buf[20], 255)
+    assert_eq(buf[21], 255)                         // param 2: -1 (NULL)
+    assert_eq(buf[22], 255)
+    assert_eq(buf[23], 255)
+    assert_eq(buf[24], 255)
+    assert_eq(buf[25], 0)                           // zero result format codes -> text
+    assert_eq(buf[26], 0)
+}
+
+test "pg params: Describe, Execute and Sync layout" {
+    let b: u8[32] = heap_alloc(32)
+    let e1 = pgp_write_describe(b)
+    assert_eq(e1 - b, 7)
+    assert_eq(b[0], 68)                             // 'D'
+    assert_eq(b[4], 6)                              // length
+    assert_eq(b[5], 80)                             // describe the PORTAL
+    assert_eq(b[6], 0)                              // unnamed portal
+    let e2 = pgp_write_execute(b)
+    assert_eq(e2 - b, 10)
+    assert_eq(b[0], 69)                             // 'E'
+    assert_eq(b[4], 9)
+    assert_eq(b[5], 0)                              // unnamed portal
+    assert_eq(b[9], 0)                              // no row limit
+    let e3 = pgp_write_sync(b)
+    assert_eq(e3 - b, 5)
+    assert_eq(b[0], 83)                             // 'S'
+    assert_eq(b[4], 4)
+}
+
+// --- the runner over a loopback socket ---
+
+test "pg params: query params returns rows over loopback" {
+    let port = 54350
+    spawn_server(port, 0)
+    let host: string = "127.0.0.1"
+    let u: string = "u"
+    let pw: string = "secret"
+    let db: string = "db"
+    let conn = pgx_connect(host.utf8, port, u.utf8, pw.utf8, db.utf8)
+    assert_eq(pgx_ok(conn), 1)
+
+    let args[2]
+    args[0] = ARG_HELLO.utf8
+    args[1] = 0                                     // a NULL parameter in the batch
+    let ps = Slice { ptr: args, len: args.len }
+    let r = pgx_query_params(conn, SQL_SELECT.utf8, ps)
+    assert_eq(pgx_res_ok(r), 1)
+    assert_eq(pgx_ncols(r), 1)
+    assert_eq(pgx_nrows(r), 1)
+    assert_eq(streq(pgx_val(r, 0, 0), ARG_HELLO.utf8), 1)
+    assert_eq(streq(pgx_res_cmd(r), CMD_TAG.utf8), 1)
+    assert_eq(pgx_res_sqlstate(r), 0)               // no error: no SQLSTATE
+    pgx_close(conn)
+    join_server()
+}
+
+test "pg params: exec params reports the SQLSTATE of an ErrorResponse" {
+    let port = 54351
+    spawn_server(port, 1)
+    let host: string = "127.0.0.1"
+    let u: string = "u"
+    let pw: string = "secret"
+    let db: string = "db"
+    let conn = pgx_connect(host.utf8, port, u.utf8, pw.utf8, db.utf8)
+    assert_eq(pgx_ok(conn), 1)
+
+    let args[1]
+    args[0] = ARG_HELLO.utf8
+    let ps = Slice { ptr: args, len: args.len }
+    let r = pgx_exec_params(conn, SQL_INSERT.utf8, ps)
+    assert_eq(pgx_res_ok(r), 0)
+    assert_eq(streq(pgx_res_sqlstate(r), SQLSTATE_UNIQUE.utf8), 1)
+    assert_eq(streq(pgx_res_error(r), ERRMSG.utf8), 1)
+    pgx_close(conn)
+    join_server()
+}
+
+test "pg params: a server that hangs up during the batch reads as an empty result" {
+    let port = 54352
+    spawn_server(port, 2)
+    let host: string = "127.0.0.1"
+    let u: string = "u"
+    let pw: string = "secret"
+    let db: string = "db"
+    let conn = pgx_connect(host.utf8, port, u.utf8, pw.utf8, db.utf8)
+    assert_eq(pgx_ok(conn), 1)
+
+    let args[1]
+    args[0] = ARG_HELLO.utf8
+    let ps = Slice { ptr: args, len: args.len }
+    let r = pgx_query_params(conn, SQL_SELECT.utf8, ps)
+    assert_eq(pgx_nrows(r), 0)                      // the read loop stopped on EOF
+    assert_eq(pgx_res_sqlstate(r), 0)
+    pgx_close(conn)
+    join_server()
+}

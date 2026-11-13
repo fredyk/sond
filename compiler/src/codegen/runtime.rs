@@ -452,7 +452,16 @@ impl Codegen {
         }
         let strings = std::mem::take(&mut self.strings);
         if self.uefi {
-            // Note: efi_main already emitted `.data` for sond_systab.
+            // Declared, not inherited. This used to lean on the `.data` that `efi_main` opens
+            // for `sond_systab`, and in between the module's zeroed arrays are emitted, which
+            // open `.bss`: the strings fell inside it and `as` refused the whole file with
+            // "attempt to store non-zero value in section `.bss'", pointing at the string's line
+            // rather than at whoever left the section open. The section in force is global state
+            // of the file: whoever writes says where it writes.
+            self.line(".data");
+            // Pointers to these labels are stored as `.quad`, and a section that declares no
+            // alignment records AddrAlign 1 and may begin anywhere.
+            self.line(".p2align 3");
             for (label, bytes) in &strings {
                 let mut units: Vec<String> = bytes
                     .chars()

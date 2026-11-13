@@ -10,7 +10,7 @@
 //! test failed.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
 /// Locate `sondc`: prefer one sitting next to this `sond` binary, else fall back to `PATH`.
@@ -31,6 +31,8 @@ fn usage() -> ExitCode {
         "usage: sond <command> [args]\n\n\
          commands:\n  \
          test  <file.snd>   build the file's test blocks and run them\n  \
+         test  <dir>        run every gate in the tree, and name what no gate reads\n  \
+         \x20                 (--timeout=N seconds per gate, default 600)\n  \
          build <file.snd>   compile the file to a native binary\n  \
          run   <file.snd>   compile the file and run it"
     );
@@ -44,6 +46,73 @@ fn run_binary(path: &PathBuf) -> ExitCode {
         Err(e) => {
             eprintln!("sond: cannot run `{}`: {e}", path.display());
             ExitCode::FAILURE
+        }
+    }
+}
+
+unsafe extern "C" {
+    /// `kill(2)`. A negative `pid` signals every process in that process group.
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+/// Spawns `cmd` as the leader of a process group of its own, so the whole tree it grows can be
+/// signalled later with one call.
+///
+/// Nothing that `sond` starts is ever a single process. The test harness forks a child per test
+/// so a crashing test cannot take the run down with it, which puts the code that actually spins
+/// one level below whatever `Child::kill` can reach. Without a group of its own, killing a hung
+/// gate kills the bookkeeping and leaves the loop running.
+fn spawn_in_group(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+    // ETXTBSY is not a failure, it is a race: another process forked while this binary was still
+    // open for writing, and `exec` refuses until that descriptor is gone. It shows up exactly
+    // when the machine is busy, which is when a run can least afford to be filed as broken.
+    for _ in 0..50 {
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            otro => return otro,
+        }
+    }
+    cmd.spawn()
+}
+
+/// SIGKILL to a process group, by the group leader's pid.
+fn kill_group(leader: u32) {
+    // SAFETY: kill(2) with a negative pid and SIGKILL; the pid is one this process spawned and
+    // has not reaped, so it cannot have been reused by an unrelated process.
+    unsafe {
+        kill(-(leader as i32), 9);
+    }
+}
+
+/// Waits for `child` up to `deadline`, killing it if it runs past. `None` means it was killed.
+///
+/// A gate that never finishes does not fail: it holds the run with nothing on screen, which reads
+/// exactly like a slow machine until somebody gives up. So the wait has a deadline HERE, in the
+/// tool, rather than in whatever the caller happened to wrap the command in.
+///
+/// What gets killed is the process GROUP, not the process. A grandchild that survives keeps a
+/// core at 100% for as long as the machine is up, and -- because it inherited the run's stdout --
+/// it holds that pipe open: the same run finished in 20s writing to a file and had not returned
+/// after 200s through a pipe. `child` must therefore come from `spawn_in_group`.
+fn wait_for(mut child: std::process::Child, deadline: std::time::Duration) -> Option<bool> {
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.success()),
+            Ok(None) => {
+                if started.elapsed() >= deadline {
+                    kill_group(child.id());
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => return Some(false),
         }
     }
 }
@@ -67,12 +136,139 @@ fn compile(sondc: &PathBuf, file: &str, out: &PathBuf, extra: &[&str]) -> bool {
     }
 }
 
-fn temp_out(file: &str, suffix: &str) -> PathBuf {
-    let stem = std::path::Path::new(file)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("sond");
-    env::temp_dir().join(format!("{stem}{suffix}"))
+/// A scratch directory of this run's own, removed when it goes out of scope.
+///
+/// The compiled test harness cannot be named after the source file. `mod.snd` is `mod.snd` in
+/// every directory on the machine, and `sond` runs many at a time -- a fleet of agents, `make
+/// -j`, two terminals. Sharing one path means one run executes the binary another just wrote,
+/// or deletes it out from under a run that is still going. Measured on twenty concurrent pairs
+/// of a passing and a failing file: the failing one reported success four times.
+///
+/// The name is unpredictable and the directory is created, never opened: `create_dir` fails if
+/// the name is taken, so exclusivity comes from the kernel and not from hoping the number is
+/// unused. 0700 keeps another user on the machine from putting a binary where this one is about
+/// to run.
+struct Scratch {
+    dir: PathBuf,
+}
+
+impl Scratch {
+    fn new() -> Option<Scratch> {
+        use std::os::unix::fs::PermissionsExt;
+        let base = env::temp_dir();
+        for attempt in 0..64u32 {
+            let n = azar(attempt);
+            let dir = base.join(format!(".sond-{}-{n:016x}", std::process::id()));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => {
+                    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+                    return Some(Scratch { dir });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    eprintln!("sond: cannot create a scratch directory in {}: {e}", base.display());
+                    return None;
+                }
+            }
+        }
+        eprintln!("sond: cannot create a scratch directory in {}", base.display());
+        None
+    }
+
+    fn join(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Clears the scratch of runs that are no longer alive: the processes first, then the directory.
+///
+/// `Drop` does not run on SIGKILL, and Ctrl-C at the terminal reaches `sond` but not a gate that
+/// now lives in a process group of its own. Whoever makes the mess cannot be the only one who
+/// clears it, so every run starts by reconciling: if the pid in a scratch name is not a live
+/// `sond`, that run is over and whatever is still executing out of its directory is an orphan
+/// holding a core.
+///
+/// A pid that IS a live `sond` is left strictly alone. Several run at once here -- a fleet of
+/// agents, `make -j`, two terminals -- and a sweep that cannot tell them apart deletes the binary
+/// the run next door is about to execute.
+fn barrer_restos() {
+    let base = env::temp_dir();
+    let Ok(entries) = std::fs::read_dir(&base) else { return };
+    let mut dead: Vec<PathBuf> = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(leftover) = name.strip_prefix(".sond-") else { continue };
+        let Some((pid, _)) = leftover.split_once('-') else { continue };
+        let Ok(pid) = pid.parse::<u32>() else { continue };
+        if !es_un_sond_vivo(pid) {
+            dead.push(e.path());
+        }
+    }
+    if dead.is_empty() {
+        return;
+    }
+    kill_what_runs_from(&dead);
+    for d in &dead {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}
+
+/// Is `pid` a running `sond`? A pid alone is not enough: pids are reused, and a scratch whose
+/// number now belongs to something else is an orphan just the same.
+fn es_un_sond_vivo(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+        Ok(c) => c.trim_end() == "sond",
+        Err(_) => false,
+    }
+}
+
+/// SIGKILL to every process whose executable lives under one of `dirs`.
+fn kill_what_runs_from(dirs: &[PathBuf]) {
+    let Ok(procs) = std::fs::read_dir("/proc") else { return };
+    for e in procs.flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) else { continue };
+        if dirs.iter().any(|d| exe.starts_with(d)) {
+            // SAFETY: kill(2) on a pid read from /proc; the worst a reused pid can do here is
+            // outlive the check, and the executable path is the one this tool wrote.
+            unsafe {
+                kill(pid as i32, 9);
+            }
+        }
+    }
+}
+
+/// 64 unpredictable bits, from the kernel when it will give them and from the clock when it will
+/// not. Only the name depends on this; whether the directory is ours is decided by `create_dir`.
+fn azar(attempt: u32) -> u64 {
+    use std::io::Read;
+    let mut b = [0u8; 8];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom")
+        && f.read_exact(&mut b).is_ok()
+    {
+        return u64::from_ne_bytes(b);
+    }
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    t.wrapping_mul(6364136223846793005).wrapping_add(attempt as u64)
+}
+
+/// The per-gate deadline from `--timeout=N` seconds (default 600).
+fn deadline(args: &[String]) -> std::time::Duration {
+    std::time::Duration::from_secs(
+        args.iter()
+            .find_map(|a| a.strip_prefix("--timeout="))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(600),
+    )
 }
 
 /// The coverage threshold from `--min-coverage=N` (default 80).
@@ -83,23 +279,312 @@ fn min_coverage(args: &[String]) -> u32 {
         .unwrap_or(80)
 }
 
+/// What a gate run came back with.
+///
+/// `Fallo` and `NoArranca` both end in "no verdict", and reporting them the same way is how a
+/// machine with no compiler on it produced a report saying the tests were slow. They are
+/// different facts and the run says which one it got.
+enum Veredicto {
+    Paso,
+    Fallo,
+    Colgada,
+    NoArranca(String),
+}
+
 /// Mandatory gate: compile the file's `test` blocks with coverage instrumentation and run
 /// them. Returns true iff every test passed AND coverage met the threshold. The run's output
 /// (per-test results + the coverage line) goes to the user. This is what makes tests a
 /// compilation requirement, no artifact is produced unless it holds.
 fn run_gated_tests(sondc: &PathBuf, file: &str, min_cov: u32) -> bool {
-    let testbin = temp_out(file, ".gatebin");
+    match run_gated_tests_deadline(sondc, file, min_cov, None) {
+        Veredicto::Paso => true,
+        Veredicto::NoArranca(e) => {
+            eprintln!("sond: {e}");
+            false
+        }
+        _ => false,
+    }
+}
+
+/// The gate, with an optional deadline covering the compile AND the run.
+///
+/// `Colgada` means it was killed for running past the deadline, which is a different answer from
+/// `Fallo` and has to be reported as its own thing: "did not finish" is what a hung test looks
+/// like, and calling it a failure hides which one it was.
+fn run_gated_tests_deadline(
+    sondc: &PathBuf,
+    file: &str,
+    min_cov: u32,
+    deadline: Option<std::time::Duration>,
+) -> Veredicto {
+    let Some(scratch) = Scratch::new() else {
+        return Veredicto::NoArranca("cannot create a scratch directory".to_string());
+    };
+    let testbin = scratch.join("gate");
     let min = format!("--min-coverage={min_cov}");
     let flags = ["--test", "--coverage", min.as_str()];
-    if !compile(sondc, file, &testbin, &flags) {
-        return false;
+    match deadline {
+        None => {
+            if !compile(sondc, file, &testbin, &flags) {
+                return Veredicto::Fallo;
+            }
+            match Command::new(&testbin).status() {
+                Ok(s) if s.success() => Veredicto::Paso,
+                Ok(_) => Veredicto::Fallo,
+                Err(e) => Veredicto::NoArranca(format!("cannot run the gate for {file}: {e}")),
+            }
+        }
+        Some(p) => {
+            let started = std::time::Instant::now();
+            let child = match spawn_in_group(
+                Command::new(sondc)
+                    .args(flags)
+                    .arg(file)
+                    .arg("-o")
+                    .arg(&testbin)
+                    .stdout(Stdio::null()),
+            ) {
+                Ok(h) => h,
+                Err(e) => {
+                    return Veredicto::NoArranca(format!("cannot run `{}`: {e}", sondc.display()));
+                }
+            };
+            match wait_for(child, p) {
+                None => return Veredicto::Colgada,
+                Some(false) => return Veredicto::Fallo,
+                Some(true) => {}
+            }
+            let left = p.saturating_sub(started.elapsed());
+            let child = match spawn_in_group(&mut Command::new(&testbin)) {
+                Ok(h) => h,
+                Err(e) => {
+                    return Veredicto::NoArranca(format!("cannot run the gate for {file}: {e}"));
+                }
+            };
+            match wait_for(child, left) {
+                None => Veredicto::Colgada,
+                Some(true) => Veredicto::Paso,
+                Some(false) => Veredicto::Fallo,
+            }
+        }
     }
-    let ok = Command::new(&testbin)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    let _ = std::fs::remove_file(&testbin);
-    ok
+}
+
+/// What `sondc --entry-info` says about one file: how many `test` blocks it declares, and which
+/// files its coverage gate answers for.
+struct EntryInfo {
+    tests: usize,
+    covers: Vec<PathBuf>,
+    /// Functions of its own a gate could measure. Zero means no gate can exist for this file --
+    /// a header of constants, or the test harness, whose every function the coverage build skips
+    /// -- so it is not a hole in the tree, and asking for a `_test.snd` beside it asks for a gate
+    /// that would measure nothing.
+    measurable: usize,
+}
+
+/// `Err` is the compiler not running at all -- a different fact from a file that does not
+/// resolve, and one that makes every answer after it meaningless. `Ok(None)` is the file.
+fn entry_info(sondc: &PathBuf, file: &Path) -> Result<Option<EntryInfo>, String> {
+    let out = match Command::new(sondc).arg("--entry-info").arg(file).output() {
+        Ok(o) => o,
+        Err(e) => return Err(format!("cannot run `{}`: {e}", sondc.display())),
+    };
+    if !out.status.success() {
+        // A file that does not even resolve is not silently skipped: it is not measured either.
+        eprint!("{}", String::from_utf8_lossy(&out.stderr));
+        return Ok(None);
+    }
+    let texto = String::from_utf8_lossy(&out.stdout);
+    Ok(Some(EntryInfo {
+        tests: texto
+            .lines()
+            .find_map(|l| l.strip_prefix("tests: "))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0),
+        covers: texto
+            .lines()
+            .filter_map(|l| l.strip_prefix("covers: "))
+            .map(PathBuf::from)
+            .collect(),
+        measurable: texto
+            .lines()
+            .find_map(|l| l.strip_prefix("measurable: "))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0),
+    }))
+}
+
+/// Every `.snd` under `dir`, sorted, so a run reports the same order twice.
+fn snd_files(dir: &Path) -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    let mut pila = vec![dir.to_path_buf()];
+    while let Some(d) = pila.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') {
+                continue;
+            }
+            if p.is_dir() {
+                pila.push(p);
+            } else if p.extension().is_some_and(|x| x == "snd") {
+                v.push(p);
+            }
+        }
+    }
+    v.sort();
+    v
+}
+
+/// `sond test <dir>`: run every gate in the tree, then say what no gate reads.
+///
+/// A single file passing its own gate says nothing about the tree it lives in. A module that no
+/// entry includes and that has no test file of its own is in NOBODY's denominator: it ships
+/// unread, and every command in this toolchain reports success, because nobody ever pointed one
+/// at it. Measured across the Sond projects on this machine, 58 files of 174 were in that state.
+///
+/// Which files an entry answers for is not decided here: it is asked of `sondc --entry-info`,
+/// which reports the same scope the gate itself runs on.
+/// Whether the NAME of a file promises a test suite. `<name>_test.snd` is the one shape the whole
+/// toolchain reads as "the gate of `<name>`": the runner collects it, `cov_scope` takes what it
+/// includes out of everybody else's denominator, and the tree report stops asking for a gate next
+/// to `<name>`. A file that takes that name owes tests.
+fn es_suite(f: &Path) -> bool {
+    f.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("_test.snd"))
+}
+
+fn test_tree(sondc: &PathBuf, dir: &Path, min_cov: u32, deadline: std::time::Duration) -> ExitCode {
+    let files = snd_files(dir);
+    if files.is_empty() {
+        eprintln!("sond test: no .snd files under `{}`", dir.display());
+        return ExitCode::from(2);
+    }
+
+    let mut medidos: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut entries: Vec<PathBuf> = Vec::new();
+    let mut without_tests: Vec<PathBuf> = Vec::new();
+    let mut ilegibles: Vec<PathBuf> = Vec::new();
+    for f in &files {
+        match entry_info(sondc, f) {
+            Ok(Some(info)) if info.tests > 0 => {
+                entries.push(f.clone());
+                for c in info.covers {
+                    medidos.insert(std::fs::canonicalize(&c).unwrap_or(c));
+                }
+            }
+            // A file NAMED like a suite that declares no `test` block is a dead gate, and it gets
+            // said out loud. Before this, the runner simply skipped it and then accused the module
+            // beside it of having no test file -- while the test file sat right there, written and
+            // dead. Whoever read that went looking for a file that already existed. So what such a
+            // file covers counts as spoken for: the fault is one, and it is the missing tests.
+            Ok(Some(info)) if es_suite(f) => {
+                without_tests.push(f.clone());
+                medidos.insert(std::fs::canonicalize(f).unwrap_or_else(|_| f.clone()));
+                for c in info.covers {
+                    medidos.insert(std::fs::canonicalize(&c).unwrap_or(c));
+                }
+            }
+            // Nothing here a gate could read, so there is no gate to ask for.
+            Ok(Some(info)) if info.measurable == 0 => {
+                medidos.insert(std::fs::canonicalize(f).unwrap_or_else(|_| f.clone()));
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => ilegibles.push(f.clone()),
+            // With no compiler there is nothing to say about the tree: reporting every file as
+            // unmeasured would be a diagnosis of the code for a fault of the machine.
+            Err(e) => {
+                eprintln!("sond: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let mut fallos: Vec<PathBuf> = Vec::new();
+    let mut colgadas: Vec<PathBuf> = Vec::new();
+    for e in &entries {
+        println!("== {}", e.display());
+        match run_gated_tests_deadline(sondc, &e.to_string_lossy(), min_cov, Some(deadline)) {
+            Veredicto::Paso => {}
+            Veredicto::Fallo => fallos.push(e.clone()),
+            Veredicto::Colgada => {
+                println!("   did not finish within {}s", deadline.as_secs());
+                colgadas.push(e.clone());
+            }
+            Veredicto::NoArranca(msg) => {
+                eprintln!("sond: {msg}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    // A file is unmeasured unless some entry answers for it. An entry itself is a gate, not a
+    // subject: it is measured by definition.
+    let canon: std::collections::HashSet<PathBuf> = entries
+        .iter()
+        .map(|e| std::fs::canonicalize(e).unwrap_or_else(|_| e.clone()))
+        .collect();
+    let without_gate: Vec<&PathBuf> = files
+        .iter()
+        .filter(|f| {
+            let c = std::fs::canonicalize(f).unwrap_or_else(|_| (*f).clone());
+            !canon.contains(&c) && !medidos.contains(&c)
+        })
+        .collect();
+
+    println!();
+    println!(
+        "{} file(s), {} gate(s), {} failed, {} hung, {} unmeasured, {} without tests",
+        files.len(),
+        entries.len(),
+        fallos.len(),
+        colgadas.len(),
+        without_gate.len(),
+        without_tests.len()
+    );
+    for f in &fallos {
+        println!("  FAILED   {}", f.display());
+    }
+    for f in &colgadas {
+        println!("  HUNG     {}", f.display());
+    }
+    for f in &without_gate {
+        println!("  NO GATE  {}", f.display());
+    }
+    for f in &without_tests {
+        println!("  NO TESTS {}", f.display());
+    }
+    for f in &ilegibles {
+        println!("  UNREAD   {}", f.display());
+    }
+    if !without_gate.is_empty() {
+        eprintln!(
+            "sond: {} file(s) above are in no entry's coverage denominator: nothing measures \
+             them. Give each one a `<name>_test.snd` beside it, or include it from an entry that \
+             answers for it.",
+            without_gate.len()
+        );
+    }
+    if !without_tests.is_empty() {
+        eprintln!(
+            "sond: {} file(s) above are named `_test.snd` and declare no `test` block: they run \
+             nothing, and their name is what tells the rest of the toolchain that what they \
+             include is already measured. Give each one its `test` blocks, or rename it so it \
+             stops answering for code it never reads.",
+            without_tests.len()
+        );
+    }
+    if fallos.is_empty()
+        && colgadas.is_empty()
+        && without_gate.is_empty()
+        && without_tests.is_empty()
+        && ilegibles.is_empty()
+    {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 fn main() -> ExitCode {
@@ -107,6 +592,7 @@ fn main() -> ExitCode {
     if args.len() < 2 {
         return usage();
     }
+    barrer_restos();
     let sondc = find_sondc();
     match args[1].as_str() {
         "test" => {
@@ -120,6 +606,10 @@ fn main() -> ExitCode {
                 eprintln!("sond test: missing <file.snd>");
                 return ExitCode::from(2);
             };
+            let path = std::path::Path::new(file);
+            if path.is_dir() {
+                return test_tree(&sondc, path, min_coverage(&args), deadline(&args));
+            }
             if run_gated_tests(&sondc, file, min_coverage(&args)) {
                 ExitCode::SUCCESS
             } else {
@@ -169,13 +659,14 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::FAILURE;
             }
-            let out = temp_out(file, ".runbin");
+            let Some(scratch) = Scratch::new() else {
+                return ExitCode::FAILURE;
+            };
+            let out = scratch.join("run");
             if !compile(&sondc, file, &out, &[]) {
                 return ExitCode::FAILURE;
             }
-            let code = run_binary(&out);
-            let _ = std::fs::remove_file(&out);
-            code
+            run_binary(&out)
         }
         other => {
             eprintln!("sond: unknown command `{other}`");

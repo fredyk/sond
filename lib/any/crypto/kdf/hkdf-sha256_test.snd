@@ -1,79 +1,128 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Jhon Magdalena Vila and the Sond contributors
 //
-// Test of hkdf-sha256.snd against RFC 5869 official vectors (TC1 and TC3).
-// Returns 0 if all pass, !=0 if any fail.
+// Tests for lib/any/crypto/kdf/hkdf-sha256.snd against the official RFC 5869 vectors.
+//
+// This file used to be a `main` that printed FAIL and returned a code, and the suite runner only
+// collects files with `test "` blocks: nothing had been running it, so HKDF -- which is what
+// derives the traffic keys of the TLS stack in this same tree -- had no test that anyone ever
+// asked for. `sond test lib` listed it as a file no gate reads.
+//
+// The vectors are the RFC's own, not values this implementation produced. TC2 is the one that
+// matters most for the code: its salt is 80 bytes, over HMAC's 64-byte block, which is the only
+// input that takes the "hash the key first" branch of hmac_sha256.
 
-include "x86_64/linux/io.snd"
-include "any/strings.snd"
 include "any/crypto/kdf/hkdf-sha256.snd"
+include "x86_64/linux/testing.snd"
 
-fn puts(s: i64) { write_buf(1, s, strlen(s)) }
+// RFC 5869 Test Case 1: 22-byte IKM, 13-byte salt, 10-byte info, L = 42.
+let TC1_PRK: string = "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5"
+let TC1_OKM: string = "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+// Test Case 2: 80-byte IKM, 80-byte salt, 80-byte info, L = 82.
+let TC2_PRK: string = "06a6b88c5853361a06104c9ceb35b45cef760014904671014a193f40c15fc244"
+let TC2_OKM: string = "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87"
+// Test Case 3: the same IKM as TC1 with no salt and no info, L = 42.
+let TC3_PRK: string = "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04"
+let TC3_OKM: string = "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8"
+
+let mut ikm[10]     // 80 bytes, enough for TC1's 22 and TC2's 80
+let mut salt[10]
+let mut info[10]
+let mut prk[4]      // 32 bytes
+let mut okm[11]     // 82 bytes
 
 fn hexval(c: i64) -> i64 {
-    if c >= 48 && c <= 57 { return c - 48 }       // 0-9
-    if c >= 97 && c <= 102 { return c - 87 }      // a-f
-    c - 55                                        // A-F
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    c - 55
 }
 
-// 1 if buf[0..n] matches the hex string `hexstr` (2 chars per byte), 0 if not.
+// 1 if the `n` bytes at `buf` are the ones `hexstr` spells out.
 fn eq_hex(buf: i64, n: i64, hexstr: i64) -> i64 {
-    let mut i = 0
-    for i < n {
+    for i in 0..n {
         let hi = hexval(peek8(hexstr + i * 2))
         let lo = hexval(peek8(hexstr + i * 2 + 1))
-        if peek8(buf + i) != (hi * 16 + lo) {
-            return 0
-        }
-        i = i + 1
+        if peek8(buf + i) != (hi * 16 + lo) { return 0 }
     }
     1
 }
 
-fn main() -> i64 {
-    // --- RFC 5869 Test Case 1 ---
-    let ikm[22]
-    let mut i = 0
-    for i < 22 { poke8(ikm + i, 0x0b) i = i + 1 }
-    let salt[13]
-    i = 0
-    for i < 13 { poke8(salt + i, i) i = i + 1 }          // 00..0c
-    let info[10]
-    i = 0
-    for i < 10 { poke8(info + i, 0xf0 + i) i = i + 1 }    // f0..f9
+// Fills `n` bytes at `p` with the ascending run the RFC describes, starting at `first`.
+fn fill_run(p: i64, first: i64, n: i64) {
+    for i in 0..n { poke8(p + i, (first + i) & 0xff) }
+}
 
-    let prk[32]
+fn setup_tc1() {
+    for i in 0..22 { poke8(ikm + i, 0x0b) }
+    fill_run(salt, 0x00, 13)
+    fill_run(info, 0xf0, 10)
+}
+
+fn setup_tc2() {
+    fill_run(ikm, 0x00, 80)
+    fill_run(salt, 0x60, 80)
+    fill_run(info, 0xb0, 80)
+}
+
+test "RFC 5869 TC1: extract gives the PRK the RFC prints" {
+    setup_tc1()
     hkdf_extract(salt, 13, ikm, 22, prk)
-    let __f0_46: string = "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5"
-    if eq_hex(prk, 32, __f0_46.utf8) == 0 {
-        let __f0_48: string = "FAIL TC1 PRK\n"
-        puts(__f0_48.utf8) return 1
-    }
-    let okm[42]
+    assert_eq(eq_hex(prk, 32, TC1_PRK.utf8), 1)
+}
+
+test "RFC 5869 TC1: expand gives the 42-byte OKM the RFC prints" {
+    setup_tc1()
+    hkdf_extract(salt, 13, ikm, 22, prk)
     hkdf_expand(prk, info, 10, okm, 42)
-    let __f0_53: string = "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
-    if eq_hex(okm, 42, __f0_53.utf8) == 0 {
-        let __f0_55: string = "FAIL TC1 OKM\n"
-        puts(__f0_55.utf8) return 1
-    }
+    assert_eq(eq_hex(okm, 42, TC1_OKM.utf8), 1)
+}
 
-    // --- RFC 5869 Test Case 3 (empty salt and info, L=42) ---
-    let prk3[32]
-    hkdf_extract(0, 0, ikm, 22, prk3)
-    let __f0_62: string = "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04"
-    if eq_hex(prk3, 32, __f0_62.utf8) == 0 {
-        let __f0_64: string = "FAIL TC3 PRK\n"
-        puts(__f0_64.utf8) return 1
-    }
-    let okm3[42]
-    hkdf_expand(prk3, 0, 0, okm3, 42)
-    let __f0_69: string = "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8"
-    if eq_hex(okm3, 42, __f0_69.utf8) == 0 {
-        let __f0_71: string = "FAIL TC3 OKM\n"
-        puts(__f0_71.utf8) return 1
-    }
+test "RFC 5869 TC2: a salt longer than HMAC's block is hashed, not truncated" {
+    // 80 bytes of salt against a 64-byte block. Truncating instead of hashing would give a
+    // different PRK for the same inputs, and every key derived from it would be wrong -- while
+    // still looking like 32 perfectly random bytes.
+    setup_tc2()
+    hkdf_extract(salt, 80, ikm, 80, prk)
+    assert_eq(eq_hex(prk, 32, TC2_PRK.utf8), 1)
+}
 
-    let __f0_75: string = "OK hkdf-sha256 (RFC 5869 TC1+TC3)\n"
-    puts(__f0_75.utf8)
-    0
+test "RFC 5869 TC2: 82 bytes of output span three HMAC rounds and the last is cut, not padded" {
+    // L = 82 needs T(1)..T(3), so this is what proves the counter chaining: T(2) is computed
+    // over T(1) || info || 2, and the final block is used only as far as L asks.
+    setup_tc2()
+    hkdf_extract(salt, 80, ikm, 80, prk)
+    // The whole buffer is poisoned, past L included: the last T block is 96 bytes of keystream
+    // for 82 bytes of room.
+    for i in 0..88 { poke8(okm + i, 0xee) }
+    hkdf_expand(prk, info, 80, okm, 82)
+    assert_eq(eq_hex(okm, 82, TC2_OKM.utf8), 1)
+    // Nothing was written past L: the 96 bytes of the three T blocks do not overflow into the
+    // caller's buffer.
+    assert_eq(peek8(okm + 82), 0xee)
+}
+
+test "RFC 5869 TC3: no salt is not the same as a salt of nothing" {
+    // With slen = 0 the extract has to behave as if the salt were 32 zero bytes. The vector is
+    // what says whether it does.
+    setup_tc1()
+    hkdf_extract(0, 0, ikm, 22, prk)
+    assert_eq(eq_hex(prk, 32, TC3_PRK.utf8), 1)
+    hkdf_expand(prk, 0, 0, okm, 42)
+    assert_eq(eq_hex(okm, 42, TC3_OKM.utf8), 1)
+}
+
+test "a PRK that differs in one bit gives a different OKM" {
+    // The output must depend on the whole PRK. If expand ignored part of it, two different keys
+    // would derive the same traffic secrets, which no vector on its own would catch.
+    setup_tc1()
+    hkdf_extract(salt, 13, ikm, 22, prk)
+    hkdf_expand(prk, info, 10, okm, 42)
+    poke8(prk, peek8(prk) ^ 1)
+    let mut otro[6] // 48 bytes
+    hkdf_expand(prk, info, 10, otro, 42)
+    let mut iguales = 0
+    for i in 0..42 {
+        if peek8(okm + i) == peek8(otro + i) { iguales = iguales + 1 }
+    }
+    assert(iguales < 42)
 }

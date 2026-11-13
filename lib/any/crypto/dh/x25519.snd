@@ -31,17 +31,6 @@ fn x25_limb_shift(i: i64) -> i64 { (51 * i + 1) / 2 }
 // Width of limb i in bits: 26 for even i, 25 for odd i.
 fn x25_limb_bits(i: i64) -> i64 { x25_limb_shift(i + 1) - x25_limb_shift(i) }
 
-fn x25_limb_mask(i: i64) -> i64 { (1 << x25_limb_bits(i)) - 1 }
-
-// Limb i of 2p, used by fe_sub to stay non-negative. p = 2^255 - 19, which in
-// this layout is "every limb full" minus 19 in the lowest limb.
-fn x25_two_p_limb(i: i64) -> i64 {
-    if i == 0 {
-        return 2 * ((1 << 26) - 19)
-    }
-    2 * x25_limb_mask(i)
-}
-
 fn x25_fe_copy(c: [], a: []) {
     let mut i = 0
     for i < x25_NLIMBS { c[i] = a[i]; i = i + 1 }

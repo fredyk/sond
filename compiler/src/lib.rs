@@ -19,12 +19,23 @@ pub mod ports;
 pub mod deps;
 pub mod sha256;
 pub mod resolve;
+pub mod scratch;
 pub mod testing;
 pub mod token;
 pub mod typeck;
 pub mod verify;
 
-use ast::{EnumDef, Function, Global, StructDef};
+/// The `sondc` flags that ASK about a file instead of compiling it: they answer on stdout and
+/// produce no artefact.
+///
+/// It lives here, in one place, because the driver's cache hit copies a binary to `output` --
+/// without `-o`, the source's base name in the caller's directory -- and returns BEFORE the
+/// question is read. That was fixed once by naming `--entry-info` by hand, and `--emit-header`
+/// was left out: with a warm cache, `tools/install.sh` published the line "sondc: wrote native
+/// x86-64 binary ..." as a header. A list is the only thing that also covers the next one.
+pub const QUERIES: &[&str] = &["--entry-info", "--emit-header"];
+
+use ast::{EnumDef, Function, Global, Signature, StructDef};
 use std::collections::HashSet;
 
 /// The shared compilation pipeline: checks and desugars run between parsing
@@ -47,6 +58,7 @@ pub fn lower_program(
     globals: &mut [Global],
     structs: &mut Vec<StructDef>,
     enums: &[EnumDef],
+    externs: &[Signature],
     target: &str,
 ) -> Result<(), String> {
     // ── checks (pre-desugar) ─────────────────────────────────────────────
@@ -54,6 +66,8 @@ pub fn lower_program(
     check::check_no_duplicate_functions(funcs)?;
     check::check_spawn_not_in_loop(funcs)?;
     check::check_call_arity(funcs)?;
+    check::check_calls_resolve(funcs, externs, structs, enums)?;
+    check::check_unreachable_statements(funcs)?;
     check::check_par_let_arity(funcs)?;
     check::check_par_confluence(funcs, globals)?;
     check::check_graph_acyclic(funcs)?;

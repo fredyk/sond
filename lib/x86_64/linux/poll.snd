@@ -12,6 +12,7 @@ let POLLIN = 1
 let POLLOUT = 4
 let POLLERR = 8
 let POLLHUP = 16
+let POLLNVAL = 32
 
 // Writes entry i of the pollfd array: fd + events, revents to 0.
 fn pollfd_set(arr: i64, i: i64, fd: i64, events: i64) {
@@ -28,4 +29,33 @@ fn pollfd_revents(arr: i64, i: i64) -> i64 {
 // poll(arr, nfds, timeout_ms). Returns # of fds with events, 0 on timeout, <0 on error.
 fn poll_fds(arr: i64, nfds: i64, timeout_ms: i64) -> i64 {
     syscall(SYS_poll, arr, nfds, timeout_ms)
+}
+
+// Can this one fd be read right now, waiting up to timeout_ms for it?
+// 1 = yes; 0 = the deadline passed with nothing; a negative poll(2) return is passed through so
+// an interrupted wait is not read as "no".
+//
+// Written by hand at each call site this becomes set_nonblock + one read, and that is a race:
+// the read runs before the bytes have crossed the socket, comes back EAGAIN, and the test fails
+// on a loaded machine while passing on an idle one.
+//
+// POLLHUP, POLLERR and POLLNVAL count as readable on purpose. The question is "will a read make
+// progress", and on a closed peer it does: it returns 0, which is how the caller learns it is
+// over. A wait for POLLIN alone never ends there.
+//
+// POLLNVAL -- the fd is not open -- is the same answer for a different reason: the read comes
+// back EBADF at once. Left out, it collapsed into the 0 that means "the deadline passed with
+// nothing", and `while poll_readable(fd, t) == 0 { }` on a closed descriptor spins forever: the
+// answer never changes and nothing ever fails.
+fn poll_readable(fd: i64, timeout_ms: i64) -> i64 {
+    let pfd[1]
+    pollfd_set(pfd, 0, fd, POLLIN)
+    let r = poll_fds(pfd, 1, timeout_ms)
+    if r < 0 { return r }
+    if r == 0 { return 0 }
+    // Anything else is yes. `poll` counts the fds whose revents is nonzero, and asking for
+    // POLLIN the kernel can only add POLLERR, POLLHUP or POLLNVAL -- every one of which means a
+    // read returns instead of blocking. Testing those bits here would be a branch that cannot
+    // be taken: unreachable code that reads as a case the caller has to think about.
+    1
 }

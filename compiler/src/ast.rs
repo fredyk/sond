@@ -261,6 +261,11 @@ pub enum Stmt {
         ty: Option<Type>,
         value: Expr,
         array_len: Option<i64>,
+        /// `let y: T where P = value` — refinement predicates the value must PROVABLY satisfy
+        /// (a `&&` chain splits into one conjunct each). Verified at the binding, then carried as
+        /// facts about `y` downstream (a value bound the bounds/overflow analysis can use). Empty
+        /// for an ordinary `let`.
+        refinement: Vec<Expr>,
     },
     /// `target = value`, e.g. `source.balance = source.balance - amount`.
     Assign { target: Expr, value: Expr },

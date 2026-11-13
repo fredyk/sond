@@ -1,0 +1,207 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/db/postgres/params.snd: the PostgreSQL EXTENDED QUERY protocol, so a statement
+// carries its values as `$1..$n` parameters instead of text concatenated into the SQL. The
+// server parses the statement once and receives the values separately, which makes SQL
+// injection impossible by construction rather than by careful quoting.
+//
+// One round trip is the frontend batch Parse + Bind + Describe + Execute + Sync, written into
+// a single heap buffer and sent as one write (client.snd's pg_send). The replies fold into the
+// SAME result model as the Simple Query path (result.snd's pg_result_absorb and `pgx_*`
+// accessors), because the backend messages are the same (RowDescription, DataRow,
+// CommandComplete, ErrorResponse, ReadyForQuery); ParseComplete/BindComplete/NoData are
+// ignored by the fold. The one addition is the ErrorResponse SQLSTATE ('C' field), read out
+// with pgx_res_sqlstate so the caller can tell 23505 from any other failure without parsing
+// prose.
+//
+// `params` is a Slice of i64: each element is either 0 (SQL NULL) or the address of a
+// NUL-terminated string. Values travel in the TEXT format and result columns come back in the
+// TEXT format, matching what a Simple Query already answers.
+//
+// Byte building uses `u8[]` views over a heap buffer, never raw pointer loads/stores: each
+// field is written by a helper that binds a view of exactly the bytes it touches and advances
+// the cursor.
+
+include "any/db/postgres/client.snd"
+include "any/db/postgres/result.snd"
+include "x86_64/linux/heap.snd"
+include "x86_64/linux/vec.snd"
+include "any/strings.snd"
+
+// Writes one byte at `dst`, returns `dst + 1`.
+fn pgp_u8(dst: i64, v: i64) -> i64 {
+    let d: u8[1] = dst
+    d[0] = v & 0xff
+    dst + 1
+}
+
+// Writes a 2-byte big-endian integer at `dst`, returns `dst + 2`.
+fn pgp_u16(dst: i64, v: i64) -> i64 {
+    let d: u8[2] = dst
+    d[0] = (v >> 8) & 0xff
+    d[1] = v & 0xff
+    dst + 2
+}
+
+// Writes a 4-byte big-endian integer at `dst`, returns `dst + 4`. A negative value is written
+// as its low 32 bits (all ones for -1), which is exactly the length of a NULL Bind parameter.
+fn pgp_u32(dst: i64, v: i64) -> i64 {
+    let d: u8[4] = dst
+    d[0] = (v >> 24) & 0xff
+    d[1] = (v >> 16) & 0xff
+    d[2] = (v >> 8) & 0xff
+    d[3] = v & 0xff
+    dst + 4
+}
+
+// Copies `n` bytes from the address `src` to `dst`, returns `dst + n`.
+fn pgp_copy(dst: i64, src: i64, n: i64) -> i64 {
+    if n > 0 {
+        let s: u8[n] = src
+        let d: u8[n] = dst
+        for i in 0..n { d[i] = s[i] }
+    }
+    dst + n
+}
+
+// Total bytes of the parameter VALUES (text), NULLs contributing nothing.
+fn pgp_params_textlen(params: Slice) -> i64 {
+    let mut total = 0
+    let mut i = 0
+    for i < params.len {
+        let v = params[i]
+        if v != 0 { total = total + strlen(v) }
+        i = i + 1
+    }
+    total
+}
+
+// Parse: 'P' | int32 | statement-cstr | query-cstr | int16 nparamtypes (0 = infer).
+fn pgp_parse_size(nsql: i64) -> i64 { 9 + nsql }
+
+fn pgp_write_parse(dst: i64, sql: i64, nsql: i64) -> i64 {
+    let mut p = dst
+    p = pgp_u8(p, 80)                               // 'P'
+    p = pgp_u32(p, 8 + nsql)                        // length excludes the type byte
+    p = pgp_u8(p, 0)                                // unnamed statement
+    p = pgp_copy(p, sql, nsql)
+    p = pgp_u8(p, 0)                                // query NUL
+    pgp_u16(p, 0)                                   // zero parameter type OIDs: the server infers
+}
+
+// Bind: 'B' | int32 | portal-cstr | statement-cstr | int16 nformats (0=text) | int16 nparams |
+//       per param (int32 length, -1 = NULL, then bytes) | int16 nresultformats (0=text).
+fn pgp_bind_size(params: Slice) -> i64 {
+    13 + 4 * params.len + pgp_params_textlen(params)
+}
+
+fn pgp_write_bind(dst: i64, params: Slice) -> i64 {
+    let n = params.len
+    let blen = 12 + 4 * n + pgp_params_textlen(params)
+    let mut p = dst
+    p = pgp_u8(p, 66)                               // 'B'
+    p = pgp_u32(p, blen)
+    p = pgp_u8(p, 0)                                // unnamed portal
+    p = pgp_u8(p, 0)                                // unnamed statement
+    p = pgp_u16(p, 0)                               // all parameters in the text format
+    p = pgp_u16(p, n)
+    let mut k = 0
+    for k < n {
+        let v = params[k]
+        if v == 0 {
+            p = pgp_u32(p, 0 - 1)                   // SQL NULL: length -1, no bytes follow
+        } else {
+            let vl = strlen(v)
+            p = pgp_u32(p, vl)
+            p = pgp_copy(p, v, vl)
+        }
+        k = k + 1
+    }
+    pgp_u16(p, 0)                                   // all result columns in the text format
+}
+
+// Describe: 'D' | int32 | 'P' | portal-cstr (the portal, so the row metadata reflects the
+// bound parameters). Returns the RowDescription, or NoData for a statement with no result.
+fn pgp_write_describe(dst: i64) -> i64 {
+    let mut p = dst
+    p = pgp_u8(p, 68)                               // 'D'
+    p = pgp_u32(p, 6)
+    p = pgp_u8(p, 80)                               // 'P' = portal
+    pgp_u8(p, 0)                                    // unnamed portal
+}
+
+// Execute: 'E' | int32 | portal-cstr | int32 max-rows (0 = unlimited).
+fn pgp_write_execute(dst: i64) -> i64 {
+    let mut p = dst
+    p = pgp_u8(p, 69)                               // 'E'
+    p = pgp_u32(p, 9)
+    p = pgp_u8(p, 0)                                // unnamed portal
+    pgp_u32(p, 0)
+}
+
+// Sync: 'S' | int32 4. Ends the batch and makes the backend leave its error state, so the
+// connection is usable again after an ErrorResponse.
+fn pgp_write_sync(dst: i64) -> i64 {
+    let mut p = dst
+    p = pgp_u8(p, 83)                               // 'S'
+    pgp_u32(p, 4)
+}
+
+// The query buffer for a result: the same five words pgx_query's result has, plus word [5] for
+// the SQLSTATE. pg_result_absorb only touches words [0..5), so it folds into this unchanged.
+fn pgp_result_new() -> i64 {
+    let r = heap_alloc(48)
+    r[0] = 1                                        // ok until an ErrorResponse
+    r[1] = 0
+    r[2] = 0
+    r[3] = 0
+    r[4] = vec_new()
+    r[5] = 0
+    r
+}
+
+// Runs one extended-protocol batch: builds Parse+Bind[+Describe]+Execute+Sync, sends it, and
+// folds the replies into a fresh result. `describe` != 0 asks for the RowDescription (a query
+// that returns rows); 0 skips it (a command that only completes). Returns the result handle.
+fn pgp_run(conn: i64, sql: i64, params: Slice, describe: i64) -> i64 {
+    let nsql = strlen(sql)
+    let mut size = pgp_parse_size(nsql) + pgp_bind_size(params) + 15   // + Execute (10) + Sync (5)
+    if describe != 0 { size = size + 7 }
+    let buf = heap_alloc(size)
+    let mut p = buf
+    p = pgp_write_parse(p, sql, nsql)
+    p = pgp_write_bind(p, params)
+    if describe != 0 { p = pgp_write_describe(p) }
+    p = pgp_write_execute(p)
+    p = pgp_write_sync(p)
+    pg_send(conn, buf, p - buf)
+
+    let r = pgp_result_new()
+    let mbuf = heap_alloc(65536)
+    for {
+        let mlen = pg_read_msg(conn, mbuf, 65536)
+        if mlen <= 0 { break }                      // connection error: return what we have
+        if pg_msg_type(mbuf) == 69 {                // 'E' ErrorResponse
+            let sp = pg_error_field_ptr(mbuf, 67)   // 'C' SQLSTATE
+            if sp != 0 { r[5] = pg_dup(sp, strlen(sp)) }
+        }
+        if pg_result_absorb(r, mbuf) == 1 { break } // ReadyForQuery ends the cycle
+    }
+    r
+}
+
+// Runs a statement with `$1..$n` parameters and returns its result (no row description).
+fn pgx_exec_params(conn: i64, sql: i64, params: Slice) -> i64 {
+    pgp_run(conn, sql, params, 0)
+}
+
+// Runs a query with `$1..$n` parameters and returns its rows and columns.
+fn pgx_query_params(conn: i64, sql: i64, params: Slice) -> i64 {
+    pgp_run(conn, sql, params, 1)
+}
+
+// The SQLSTATE of the last ErrorResponse on a result from pgx_exec_params/pgx_query_params
+// (e.g. "23505"), or 0 when the statement succeeded. Read it instead of matching the message
+// text to decide what to do about a failure.
+fn pgx_res_sqlstate(r: i64) -> i64 { r[5] }

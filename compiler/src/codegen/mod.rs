@@ -329,16 +329,19 @@ pub fn emit_windows_g(
 /// it executed into a shared buffer reached through the global `__cov_ptr` (which the test
 /// harness points at an `mmap(MAP_SHARED)` region before forking each test). The total number
 /// of points is published as `__cov_total`. Used only by the `sond test` coverage build.
+/// `locate` turns a line of the SPLICED buffer the compiler parses into the `file:line` a person
+/// can open. Without it the report would name lines of a file nobody wrote.
 pub fn emit_program_coverage_g(
     globals: &[Global],
     structs: &[StructDef],
     funcs: &[Function],
-    scope: &HashSet<String>,
+    scope: Option<&HashSet<String>>,
+    locate: &dyn Fn(u32) -> String,
 ) -> String {
     let mut cg = Codegen {
         check_contracts: true,
         coverage: true,
-        cov_scope: scope.clone(),
+        cov_scope: scope.cloned(),
         ..Default::default()
     };
     cg.set_globals(globals);
@@ -347,8 +350,10 @@ pub fn emit_program_coverage_g(
     cg.global_names.insert("__cov_ptr".to_string());
     cg.global_names.insert("__cov_total".to_string());
     cg.global_names.insert("__cov_nfns".to_string());
-    // The harness indexes `__cov_fn_table` by address, so it resolves like an array global.
+    // The harness indexes `__cov_fn_table` and `__cov_loc_table` by address, so they resolve
+    // like array globals.
     cg.global_arrays.insert("__cov_fn_table".to_string());
+    cg.global_arrays.insert("__cov_loc_table".to_string());
     emit_all(&mut cg, structs, funcs, "main");
     cg.line(".globl main");
     cg.line("main:");
@@ -371,6 +376,15 @@ pub fn emit_program_coverage_g(
         .iter()
         .map(|(name, start, count)| (cg.intern_string(name), name.len(), *start, *count))
         .collect();
+    // And one `file:line` per point, so a missed point is a place and not a search.
+    let cov_lines = cg.cov_lines.clone();
+    let locs: Vec<(String, usize)> = cov_lines
+        .iter()
+        .map(|line| {
+            let texto = locate(*line);
+            (cg.intern_string(&texto), texto.len())
+        })
+        .collect();
     cg.emit_rodata();
     let total = cg.cov_points;
     let nfns = table.len();
@@ -384,6 +398,10 @@ pub fn emit_program_coverage_g(
     cg.line("__cov_fn_table:");
     for (label, len, start, count) in table {
         cg.line(&format!("    .quad {label}, {len}, {start}, {count}"));
+    }
+    cg.line("__cov_loc_table:");
+    for (label, len) in locs {
+        cg.line(&format!("    .quad {label}, {len}"));
     }
     cg.emit_gnu_stack_note();
     cg.out
@@ -1043,13 +1061,25 @@ struct Codegen {
     /// Per-instrumented-function coverage ranges: `(name, first_point_id, point_count)`. Emitted
     /// as `__cov_fn_table` so the harness can name which functions are not fully covered.
     cov_fns: Vec<(String, usize, usize)>,
-    /// The function names coverage is scoped to (the code the entry is responsible for). Empty
-    /// = cover every non-skipped function (used when no scope is supplied).
-    cov_scope: HashSet<String>,
+    /// The source line of each coverage point, by point id. Naming the function is not enough to
+    /// act on: `tls_handshake_auth` is 130 lines, and "not fully covered" over it is a reading
+    /// task, not a location. Emitted (resolved to file and line) as `__cov_loc_table`.
+    cov_lines: Vec<u32>,
+    /// The function names coverage is scoped to (the code the entry is responsible for).
+    /// `None` = no scope was supplied, so cover every non-skipped function. `Some(empty)` is a
+    /// scope like any other and covers NOTHING: an entry whose modules are all measured by gates
+    /// of their own answers for nothing, and reading that as "cover everything" reported it at
+    /// 100% over code it is not responsible for.
+    cov_scope: Option<HashSet<String>>,
     /// Names of the module-level globals (to resolve a `Var` to a `.data` label).
     global_names: HashSet<String>,
     /// The scalar globals to emit in `.data`, as `(label, constant value)`.
     global_data: Vec<(String, i64)>,
+    /// The value kind of each SCALAR global (`let NAME: f64`, `let mut X: i64`, ...), so
+    /// `ty_of` resolves a module-level `Var` to its float/int path. A scalar `f64` global
+    /// holds IEEE double bits; without this it defaulted to i64 and reads took the integer
+    /// path (`movq` + `cvtsi2sd`), corrupting the value.
+    global_scalar_types: HashMap<String, Ty>,
     /// String-valued globals: `(global name, interned .rodata label)`. `let MSG = "hi"` stores the
     /// ADDRESS of the NUL-terminated bytes, a valid compile-time constant, so a `Var` load yields a
     /// cstr pointer (what strlen/json/etc. expect).
@@ -1145,12 +1175,20 @@ struct Codegen {
 /// (`main`), the test bodies themselves (always run, and their coverage is uninteresting),
 /// and the testing library. Coverage measures the code under test, not the test scaffold.
 fn should_skip_coverage(func: &Function) -> bool {
-    func.is_test
-        || func.name == "main"
-        || matches!(
-            func.name.as_str(),
-            "assert" | "assert_eq" | "assert_ne" | "fail" | "__test_report"
-        )
+    func.is_test || never_instrumented(&func.name)
+}
+
+/// The names a coverage build never instruments, by name alone.
+///
+/// The scope is decided in `resolve.rs` and the instrumentation here, and while the two read the
+/// same list from different places they can disagree: a scope holding only names that are never
+/// instrumented looks non-empty there and measures nothing here, which is how the entry that had
+/// delegated its whole denominator was reported as a hole. One list, one reading.
+pub fn never_instrumented(name: &str) -> bool {
+    matches!(
+        name,
+        "main" | "assert" | "assert_eq" | "assert_ne" | "fail" | "__test_report"
+    )
 }
 
 impl Codegen {
@@ -1180,7 +1218,10 @@ impl Codegen {
         // testing library (measuring those is noise, and the harness must run its `__cov_ptr`
         // setup before any mark fires); and, when a coverage scope is set, only functions in
         // it (the entry's own code, not already-tested transitive dependencies).
-        let in_scope = self.cov_scope.is_empty() || self.cov_scope.contains(&func.name);
+        let in_scope = self
+            .cov_scope
+            .as_ref()
+            .is_none_or(|s| s.contains(&func.name));
         self.cov_active = self.coverage && !should_skip_coverage(func) && in_scope;
         // Does this function return a small struct/enum by value? If so, the body leaves
         // its base ADDRESS in %rax; the return point expands that to the value in RAX:RDX.
@@ -1528,7 +1569,23 @@ impl Codegen {
                     g.name
                 )
             });
-            self.global_data.push((g.name.clone(), value));
+            // Record the scalar global's declared value kind so `ty_of` sends its reads
+            // and writes down the correct path (an `f64` global uses `movsd`, not `movq`).
+            let kind = g.ty.as_ref().map_or(Ty::I64, kind_of_type);
+            if let Some(ty) = &g.ty {
+                self.global_scalar_types
+                    .insert(g.name.clone(), kind_of_type(ty));
+            }
+            // An `f64` global's `.data` word must be the IEEE double BIT PATTERN, so the SSE
+            // read (`movsd`) sees the number. A written integer initializer (`let G: f64 = 5`)
+            // is converted here; writing the integer 5 and loading the word as a double would
+            // give a denormal, silently not 5.0.
+            let word = if kind.is_float() {
+                (value as f64).to_bits() as i64
+            } else {
+                value
+            };
+            self.global_data.push((g.name.clone(), word));
         }
     }
 
@@ -2348,12 +2405,13 @@ fn emit_lock(&mut self, name: &str, body: &Block) {
     /// Emits a coverage mark for the next statement, records that this point executed, into
     /// the shared buffer via `__cov_ptr`. A no-op unless `coverage` is on (so ordinary builds
     /// are byte-identical). Uses `%r11`, a scratch register free at a statement boundary.
-    fn cov_mark(&mut self) {
+    fn cov_mark(&mut self, line: u32) {
         if !self.cov_active {
             return;
         }
         let id = self.cov_points;
         self.cov_points += 1;
+        self.cov_lines.push(line);
         self.line("    movq __cov_ptr(%rip), %r11");
         self.line(&format!("    movq $1, {}(%r11)", id * 8));
     }
@@ -2363,7 +2421,7 @@ fn emit_lock(&mut self, name: &str, body: &Block) {
         // each `if`/`match` branch is emitted as its own block (recursive `block()` call) and
         // gets its own mark, so this is branch-level coverage, and it captures expression-
         // bodied blocks (a tail with no statements) that per-statement marking would miss.
-        self.cov_mark();
+        self.cov_mark(block.stmt_lines.first().copied().unwrap_or(0));
         for (i, stmt) in block.stmts.iter().enumerate() {
             // RFC-0016 --debug checkpoint: announce the statement's source line before running it,
             // and hand the agent this function's frame base (%rbp) so it can read the debuggee's
@@ -2636,7 +2694,20 @@ fn emit_lock(&mut self, name: &str, body: &Block) {
                             self.line(&format!("    movq %rax, {off}(%rbp)"));
                         }
                     } else if self.global_names.contains(name) {
-                        self.line(&format!("    movq %rax, {name}(%rip)"));
+                        // The TARGET's declared kind decides the store, not the value's:
+                        // assigning an integer constant to an `f64` global must write a double,
+                        // or the SSE read (`movsd`) would see the integer's bit pattern as a
+                        // denormal instead of the number.
+                        let target_kind =
+                            self.global_scalar_types.get(name).copied().unwrap_or(kind);
+                        if target_kind.is_float() {
+                            if !kind.is_float() {
+                                self.line("    cvtsi2sdq %rax, %xmm0");
+                            }
+                            self.line(&format!("    movsd %xmm0, {name}(%rip)"));
+                        } else {
+                            self.line(&format!("    movq %rax, {name}(%rip)"));
+                        }
                     } else {
                         panic!("codegen: assignment to unknown variable `{name}`");
                     }
@@ -2713,6 +2784,17 @@ fn emit_lock(&mut self, name: &str, body: &Block) {
                      * the value at the end of one iteration might differ from what it
                      * was before entering the loop). */
                     let before_loop = self.save_string_state();
+                    // A string assigned anywhere in the body already differs at the TOP of the
+                    // second iteration, so every use inside the loop, even one written before the
+                    // assignment, must treat its text as unknown.
+                    let mut assigned = HashSet::new();
+                    assigned_vars(body, &mut assigned);
+                    if let Some(c) = cond {
+                        assigned_vars_in_expr(c, &mut assigned);
+                    }
+                    for var in &assigned {
+                        self.string_rodata_cur.remove(var);
+                    }
                     let start = self.fresh_label("for");
                     let end = self.fresh_label("endfor");
                     self.scopes.push(Scope::Loop {
@@ -2879,3 +2961,36 @@ mod runtime;
 mod tests;
 #[cfg(test)]
 mod testutil;
+
+/// Every variable a block assigns (`name = ..`), at any depth: nested blocks, loops, branches.
+fn assigned_vars(b: &Block, out: &mut HashSet<String>) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Assign {
+                target: Expr::Var(n),
+                ..
+            } => {
+                out.insert(n.clone());
+            }
+            Stmt::For { body, .. } | Stmt::Lock { body, .. } => assigned_vars(body, out),
+            _ => {}
+        }
+        let mut inner = Vec::new();
+        crate::check::nested_blocks_of_stmt(s, &mut inner);
+        for blk in inner {
+            assigned_vars(blk, out);
+        }
+    }
+    if let Some(t) = &b.tail {
+        assigned_vars_in_expr(t, out);
+    }
+}
+
+/// `assigned_vars` for the blocks an expression contains (an `if`, a `match`).
+fn assigned_vars_in_expr(e: &Expr, out: &mut HashSet<String>) {
+    let mut inner = Vec::new();
+    crate::check::nested_blocks(e, &mut inner);
+    for blk in inner {
+        assigned_vars(blk, out);
+    }
+}

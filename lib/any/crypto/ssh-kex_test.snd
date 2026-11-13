@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// Tests for lib/any/crypto/ssh-kex.snd, the server side of curve25519-sha256.
+//
+// The exchange hash is the one value in the protocol that both ends compute separately and
+// never send: if the server's H differs from the client's by one byte, the client rejects the
+// signature and the connection dies with no clue as to why. So the expected H here comes from
+// the RFCs, computed outside this codebase, and not from what this code happens to produce.
+//
+// RFC 8731 §3.1 on the shared secret: "The 32 or 56 bytes of X are converted into K by
+// interpreting the octets as an unsigned fixed-length integer encoded in network byte order",
+// and "that K value is encoded as a variable-length signed 'mpint' before being fed to the hash
+// algorithm".
+
+include "any/crypto/ssh-kex.snd"
+include "x86_64/linux/testing.snd"
+
+let EPH[4]  = [0x0807060504030201, 0x100f0e0d0c0b0a09, 0x1817161514131211, 0x201f1e1d1c1b1a19]
+let QC[4]   = [0x4746454443424140, 0x4f4e4d4c4b4a4948, 0x5756555453525150, 0x5f5e5d5c5b5a5958]
+let HSK[4]  = [0x605afdef9db1619d, 0xc42cec92f44a84ba, 0x1969327b69c54944, 0x607fae1c03ac3b70]
+let HPUB[4] = [0xb70ab18201985ad7, 0x3a0764c9d3fe4bd5, 0x2523a6daf372e10e, 0x1a5107f7681a02af]
+
+let EXP_QS[4] = [0xc8932014bc7ca307, 0xb46ce8101bdc55b7, 0xed53a86ad14a3726, 0x7c1c6db8b2c0df0b]
+let EXP_K[4]  = [0x3830325cf1a6499a, 0x58c7a75e55eac449, 0xfafb1f0ae77afedf, 0x11cf1e4519edb074]
+let EXP_H[4]  = [0x1cde168769eac8eb, 0x6d74baef3423d935, 0xab03db0473c2a3df, 0x79907003848fe625]
+let EXP_SIG[8] = [
+    0xc6a8ba59b1efa82d, 0xd962a0ab8b8cf2da, 0xf8f89a9f61d44758, 0x210465f6567eab53,
+    0x37a8b1b019c21303, 0x7cadbed0c214be08, 0x50932190d436e5f3, 0x0298d440083e1085
+]
+
+let VC: string = "SSH-2.0-a"
+let VS: string = "SSH-2.0-b"
+let EDSTR: string = "ssh-ed25519"
+
+let mut ic[1]
+let mut is[1]
+let mut qs[4]
+let mut k[4]
+let mut h[4]
+let mut sig[8]
+let mut wire[8]
+
+fn run_kex() {
+    poke8(ic, 0x14)
+    poke8(is, 0x14)
+    server_kex(EPH, QC, HSK, HPUB, VC.utf8, VS.utf8, ic, is, EDSTR.utf8, qs, k, h, sig)
+}
+
+test "the server ephemeral public key and the shared secret are the X25519 ones" {
+    run_kex()
+    assert_eq(bytes_cmp(qs, EXP_QS, 32), 1)
+    assert_eq(bytes_cmp(k, EXP_K, 32), 1)
+}
+
+test "the exchange hash and the signature over it are the ones the RFCs describe" {
+    run_kex()
+    assert_eq(bytes_cmp(h, EXP_H, 32), 1)
+    assert_eq(bytes_cmp(sig, EXP_SIG, 64), 1)
+}
+
+test "a 32-bit length goes on the wire most significant byte first" {
+    for i in 0..8 { poke8(wire + i, 0xAA) }
+    sshkex_poke32be(wire, 0x01020304)
+    assert_eq(peek8(wire), 0x01)
+    assert_eq(peek8(wire + 1), 0x02)
+    assert_eq(peek8(wire + 2), 0x03)
+    assert_eq(peek8(wire + 3), 0x04)
+    assert_eq(peek8(wire + 4), 0xAA)
+    // Only the low 32 bits: the length field is four bytes wide whatever it is handed.
+    sshkex_poke32be(wire, 0)
+    for i in 0..4 { assert_eq(peek8(wire + i), 0) }
+}
+
+test "wcopy returns where it stopped, so writes can be chained" {
+    let mut src[4]
+    for i in 0..32 { poke8(src + i, i + 1) }
+    for i in 0..64 { poke8(wire + i, 0xAA) }
+    assert_eq(sshkex_wcopy(wire, 3, src, 4), 7)
+    assert_eq(peek8(wire + 2), 0xAA)      // nothing written before the offset
+    assert_eq(peek8(wire + 3), 1)
+    assert_eq(peek8(wire + 6), 4)
+    assert_eq(peek8(wire + 7), 0xAA)      // nor after the length
+    // A copy of nothing moves the offset by nothing.
+    assert_eq(sshkex_wcopy(wire, 3, src, 0), 3)
+}
+
+test "an SSH string is its length and then its bytes" {
+    let mut src[4]
+    for i in 0..32 { poke8(src + i, 0x55) }
+    for i in 0..64 { poke8(wire + i, 0xAA) }
+    assert_eq(sshkex_wstr(wire, 0, src, 3), 7)
+    assert_eq(peek8(wire), 0)
+    assert_eq(peek8(wire + 1), 0)
+    assert_eq(peek8(wire + 2), 0)
+    assert_eq(peek8(wire + 3), 3)
+    assert_eq(peek8(wire + 4), 0x55)
+    assert_eq(peek8(wire + 6), 0x55)
+    assert_eq(peek8(wire + 7), 0xAA)
+    // An empty string is four zero bytes and nothing else.
+    assert_eq(sshkex_wstr(wire, 8, src, 0), 12)
+    for i in 8..12 { assert_eq(peek8(wire + i), 0) }
+    assert_eq(peek8(wire + 12), 0xAA)
+}
+
+test "an mpint drops leading zeros, keeps a sign byte, and writes zero as nothing" {
+    let mut src[4]
+    for i in 0..64 { poke8(wire + i, 0xAA) }
+
+    // Top bit set: 33 bytes, with a 0x00 in front so it does not read as negative.
+    for i in 0..32 { poke8(src + i, 0x11) }
+    poke8(src, 0x80)
+    assert_eq(sshkex_wmpint(wire, 0, src, 32), 37)
+    assert_eq(peek8(wire + 3), 33)
+    assert_eq(peek8(wire + 4), 0)
+    assert_eq(peek8(wire + 5), 0x80)
+    assert_eq(peek8(wire + 36), 0x11)
+    assert_eq(peek8(wire + 37), 0xAA)
+
+    // Top bit clear: the 32 bytes as they are, no padding.
+    poke8(src, 0x7F)
+    assert_eq(sshkex_wmpint(wire, 0, src, 32), 36)
+    assert_eq(peek8(wire + 3), 32)
+    assert_eq(peek8(wire + 4), 0x7F)
+
+    // Leading zeros are not part of the number: they come off, and the byte after them decides
+    // whether a sign byte is needed after all.
+    poke8(src, 0)
+    poke8(src + 1, 0)
+    poke8(src + 2, 0x01)
+    assert_eq(sshkex_wmpint(wire, 0, src, 32), 34)
+    assert_eq(peek8(wire + 3), 30)
+    assert_eq(peek8(wire + 4), 0x01)
+    poke8(src + 2, 0xFE)
+    assert_eq(sshkex_wmpint(wire, 0, src, 32), 35)
+    assert_eq(peek8(wire + 3), 31)
+    assert_eq(peek8(wire + 4), 0)
+    assert_eq(peek8(wire + 5), 0xFE)
+
+    // Zero is a length of zero and no bytes at all, not 32 zero bytes.
+    for i in 0..32 { poke8(src + i, 0) }
+    for i in 0..64 { poke8(wire + i, 0xAA) }
+    assert_eq(sshkex_wmpint(wire, 0, src, 32), 4)
+    for i in 0..4 { assert_eq(peek8(wire + i), 0) }
+    assert_eq(peek8(wire + 4), 0xAA)
+}

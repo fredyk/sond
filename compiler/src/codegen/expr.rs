@@ -12,7 +12,12 @@ impl Codegen {
     pub(crate) fn ty_of(&self, e: &Expr) -> Ty {
         match e {
             Expr::Decimal(_) => Ty::F64,
-            Expr::Var(n) => self.var_types.get(n).copied().unwrap_or(Ty::I64),
+            Expr::Var(n) => self
+                .var_types
+                .get(n)
+                .or_else(|| self.global_scalar_types.get(n))
+                .copied()
+                .unwrap_or(Ty::I64),
             // Arithmetic carries the kind; comparisons/bitwise/logic are i64 (bool) and
             // fall through to the default below.
             Expr::Binary(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, l, r) => {
@@ -20,6 +25,12 @@ impl Codegen {
             }
             Expr::Call(callee, _) => {
                 if let Expr::Var(name) = callee.as_ref() {
+                    // Float-returning builtins: a value read from memory as a double or a
+                    // single, delivered in %xmm0 (the SSE path). They are not user functions,
+                    // so they are not in `fn_ret_types`.
+                    if name == "peekf64" || name == "peekf32" {
+                        return Ty::F64;
+                    }
                     self.fn_ret_types.get(name).copied().unwrap_or(Ty::I64)
                 } else {
                     Ty::I64
@@ -151,6 +162,15 @@ impl Codegen {
                         let label = self.string_rodata_cur[var_name].clone();
                         self.line(&format!("    leaq {label}(%rip), %rax"));
                     }
+                    // A string that was given a literal, but whose literal HERE depends on the
+                    // path taken (a branch, an earlier iteration): its slot holds code points,
+                    // not bytes, and no single literal is right. The same refusal as passing it.
+                    Expr::Var(var_name)
+                        if self.string_vars.contains(var_name)
+                            && self.string_assignments.contains_key(var_name) =>
+                    {
+                        panic!("{}", self.string_unknown_error(var_name));
+                    }
                     _ => {
                         // Untracked string param or other source: load from the stack slot.
                         // After d58a0ad this is already the bytes pointer.
@@ -248,7 +268,7 @@ impl Codegen {
 
     /// Evaluates an operand to a float in `%xmm0`, promoting an integer operand with
     /// `cvtsi2sd` (so `2.0 * n` works with `n: i64`).
-    fn fexpr_operand(&mut self, e: &Expr) {
+    pub(crate) fn fexpr_operand(&mut self, e: &Expr) {
         if self.ty_of(e).is_float() {
             self.fexpr(e);
         } else {

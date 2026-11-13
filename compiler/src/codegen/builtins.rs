@@ -1,15 +1,52 @@
 //! Codegen for calls: user-function calls and the builtin operations
 //! (`print`, `print_int`, memory, UEFI console/keyboard/serial, boot services).
 
-use super::{ARG_REGS, Codegen, MS_ARG_REGS};
+use super::{ARG_REGS, Codegen, MS_ARG_REGS, SSE_ARG_REGS};
 use crate::ast::{Arg, Expr};
 
 impl Codegen {
     /// Emits a call. Currently the only builtin with codegen is `write(fd, str)`,
     /// which issues a raw `sys_write` syscall, the first I/O primitive, and the
     /// foundation for a Sond init that talks to the console.
+    /// Evaluates one call argument and stages its 8 bytes on top of the CPU stack, so the
+    /// register loads can happen after every argument is evaluated (no mid-evaluation clobber).
+    /// A float value is pushed from %xmm0; an integer (or pointer/string) from %rax.
+    fn stage_call_arg(&mut self, arg: &Arg, is_float: bool) {
+        // A tracked local `string` variable resolves to its interned UTF-8 address (INTEGER
+        // class); an untracked one cannot be sent and is a compile error.
+        if let Expr::Var(vname) = &arg.value {
+            if let Some(label) = self.string_rodata_cur.get(vname) {
+                let label = label.clone();
+                self.line(&format!("    leaq {label}(%rip), %rax"));
+                self.line("    pushq %rax");
+                return;
+            } else if self.string_vars.contains(vname) {
+                panic!("{}", self.string_unknown_error(vname));
+            }
+        }
+        self.expr(&arg.value);
+        if is_float {
+            self.line("    subq $8, %rsp");
+            self.line("    movsd %xmm0, (%rsp)");
+        } else {
+            self.line("    pushq %rax");
+        }
+    }
+
     pub(crate) fn call(&mut self, callee: &Expr, args: &[Arg]) {
         let Expr::Var(name) = callee else {
+            // `m.helper()` is what everyone coming from another language writes, and up to here
+            // it reached the message as a raw AST node. A dot reads a FIELD, and a field is not
+            // callable; another module's name takes two colons. Saying so here costs one line and
+            // saves someone digging through the compiler to find out it is a Field.
+            if let Expr::Field(base, field) = callee
+                && let Expr::Var(m) = base.as_ref()
+            {
+                panic!(
+                    "`{m}.{field}(..)` is not a call: another module's name is written \
+                     `{m}::{field}(..)`. The dot reads a field, and a field is not callable."
+                );
+            }
             todo!("x64 codegen for call of {callee:?}");
         };
         // A call to an `extern fn`: the platform's C ABI, not Sond's. On Windows that is the
@@ -39,60 +76,63 @@ impl Codegen {
             self.line(&format!("    addq ${bytes}, %rsp"));
             return;
         }
-        // A call to another user function: evaluate the arguments, load them into
-        // the System V argument registers, and call. Result is left in %rax.
+        // A call to another user function, via the System V AMD64 convention. Each argument
+        // is classified INDEPENDENTLY by class, exactly as the callee prologue binds them:
+        // an `f64` (SSE class) fills the next %xmm register, every other type (INTEGER class,
+        // including pointers and strings) fills the next general register; an argument that
+        // overflows the registers of its own class spills to the stack in declaration order.
+        // Mixing the two classes was the bug this replaced: the old path treated every
+        // argument as INTEGER, so a float was evaluated into %xmm0 and then a junk %rax was
+        // pushed in its place, losing every float but the last and shifting the ints.
         if self.fn_names.contains(name) {
-            let n = args.len();
-            let reg = n.min(ARG_REGS.len());
-            let stack_n = n - reg; // arguments 7.. go on the stack (System V)
+            // Per-argument class and its register slot within that class (None = spills).
+            let mut int_i = 0usize;
+            let mut sse_i = 0usize;
+            // target: Some((is_float, reg_index)) for a register argument, None for a stack one.
+            let mut targets: Vec<Option<(bool, usize)>> = Vec::with_capacity(args.len());
+            for arg in args {
+                let is_f = self.ty_of(&arg.value).is_float();
+                if is_f && sse_i < SSE_ARG_REGS.len() {
+                    targets.push(Some((true, sse_i)));
+                    sse_i += 1;
+                } else if !is_f && int_i < ARG_REGS.len() {
+                    targets.push(Some((false, int_i)));
+                    int_i += 1;
+                } else {
+                    targets.push(None);
+                }
+            }
+            let stack_idx: Vec<usize> = (0..args.len()).filter(|&i| targets[i].is_none()).collect();
+            let reg_idx: Vec<usize> = (0..args.len()).filter(|&i| targets[i].is_some()).collect();
+            let stack_n = stack_idx.len();
             // Keep %rsp 16-aligned at the call: pad if an odd number of stack args.
             let pad = (stack_n % 2) * 8;
             if pad > 0 {
                 self.line("    subq $8, %rsp");
             }
-            // Stack args pushed high-to-low so arg7 sits at the lowest address.
-            for arg in args[reg..].iter().rev() {
-                if let Expr::Var(vname) = &arg.value {
-                    if let Some(label) = self.string_rodata_cur.get(vname) {
-                        self.line(&format!("    leaq {label}(%rip), %rax"));
-                        self.line("    pushq %rax");
-                        continue;
-                    } else if self.string_vars.contains(vname) {
-                        panic!("{}", self.string_unknown_error(vname));
-                    }
-                }
-                self.expr(&arg.value);
-                self.line("    pushq %rax");
+            // Stack (overflow) args pushed high-to-low so the first one sits at the lowest address.
+            for &i in stack_idx.iter().rev() {
+                let is_f = targets[i].is_none() && self.ty_of(&args[i].value).is_float();
+                self.stage_call_arg(&args[i], is_f);
             }
-            // Register args: evaluate, stage on the stack, then pop into registers.
-            for arg in &args[..reg] {
-                // A tracked local `string` variable → use its UTF-8 rodata
-                // label directly, so the callee receives the same bytes it
-                // would get from a literal.  An untracked string variable is
-                // a compile error: the compiler cannot know what text it
-                // holds at runtime.
-                if let Expr::Var(vname) = &arg.value {
-                    if let Some(label) = self.string_rodata_cur.get(vname) {
-                        // Tracked string variable: emit rodata load.
-                        self.line(&format!("    leaq {label}(%rip), %rax"));
-                        self.line("    pushq %rax");
-                        continue;
-                    } else if self.string_vars.contains(vname) {
-                        // The variable is tracked as a `string` but has no rodata
-                        // label in the trace — it came from a function parameter or
-                        // some path the compiler cannot prove.  This must be a
-                        // compile error.
-                        panic!("{}", self.string_unknown_error(vname));
-                    }
-                }
-                self.expr(&arg.value);
-                self.line("    pushq %rax");
+            // Register args: evaluate and stage each on the stack (so a later argument's
+            // evaluation cannot clobber an already-loaded register), then load them all.
+            for &i in &reg_idx {
+                let (is_f, _) = targets[i].unwrap();
+                self.stage_call_arg(&args[i], is_f);
             }
-            for i in (0..reg).rev() {
-                self.line(&format!("    popq {}", ARG_REGS[i]));
+            // Pop staged register args back in reverse: the last staged is on top.
+            for &i in reg_idx.iter().rev() {
+                match targets[i].unwrap() {
+                    (true, ri) => {
+                        self.line(&format!("    movsd (%rsp), {}", SSE_ARG_REGS[ri]));
+                        self.line("    addq $8, %rsp");
+                    }
+                    (false, ri) => self.line(&format!("    popq {}", ARG_REGS[ri])),
+                }
             }
             self.line(&format!("    call {name}"));
-            let cleanup = stack_n * 8 + pad;
+            let cleanup = stack_n as i64 * 8 + pad as i64;
             if cleanup > 0 {
                 self.line(&format!("    addq ${cleanup}, %rsp"));
             }
@@ -436,6 +476,38 @@ impl Codegen {
                 self.expr(&args[1].value); // val -> %rax
                 self.line("    popq %rcx"); // ptr -> %rcx
                 self.line("    movl %eax, (%rcx)");
+            }
+            // Float (SSE) memory access: move an IEEE double (`f64`) or single (`float`)
+            // between a pointer and an %xmm register. The integer peek/poke family cannot
+            // carry a float value correctly (it would reinterpret the bits as an integer);
+            // these are the counterpart for the SSE class. A `float*` audio buffer (LADSPA
+            // ports are `float*`) is read and written with the f32 pair.
+            "peekf64" => {
+                assert_eq!(args.len(), 1, "peekf64 expects (ptr)");
+                self.expr(&args[0].value); // ptr -> %rax
+                self.line("    movsd (%rax), %xmm0"); // load double -> %xmm0
+            }
+            "peekf32" => {
+                assert_eq!(args.len(), 1, "peekf32 expects (ptr)");
+                self.expr(&args[0].value); // ptr -> %rax
+                self.line("    cvtss2sd (%rax), %xmm0"); // load single, widen to double
+            }
+            "pokef64" => {
+                assert_eq!(args.len(), 2, "pokef64 expects (ptr, val)");
+                self.expr(&args[0].value); // ptr -> %rax
+                self.line("    pushq %rax");
+                self.fexpr_operand(&args[1].value); // val -> %xmm0 (promoting an int)
+                self.line("    popq %rcx"); // ptr -> %rcx
+                self.line("    movsd %xmm0, (%rcx)");
+            }
+            "pokef32" => {
+                assert_eq!(args.len(), 2, "pokef32 expects (ptr, val)");
+                self.expr(&args[0].value); // ptr -> %rax
+                self.line("    pushq %rax");
+                self.fexpr_operand(&args[1].value); // val -> %xmm0 (promoting an int)
+                self.line("    popq %rcx"); // ptr -> %rcx
+                self.line("    cvtsd2ss %xmm0, %xmm0"); // narrow double -> single
+                self.line("    movss %xmm0, (%rcx)");
             }
             // serial_putc(c): write one byte to COM1 (0x3F8) via port I/O. Ring-0
             // only (UEFI/kernel), but it needs NO firmware, it survives

@@ -195,3 +195,30 @@ test "encodes null and empties" {
     let e = json_encode(json_new_obj())
     assert_eq(json_type(json_parse(peek64(e), bytes_len(e))), JSON_OBJ)
 }
+
+// A handle that names no node -- a key that is not there, a document that did not parse -- must
+// still be classifiable. `json_type` is the gate every caller goes through to find out whether a
+// node is usable, so it is the one accessor that has to answer for ANY handle: a guard written as
+// `if json_type(x) != JSON_OBJ { ... }` exists precisely to turn away the bad input, and it cannot
+// be the thing that crashes on it.
+
+test "the type of a key that is not in the object is JSON_NONE" {
+    let __sn0: string = "{\"other\": 1}"
+    let o = parse(__sn0.utf8)
+    let __sn1: string = "missing"
+    assert_eq(json_type(json_get(o, __sn1.utf8)), JSON_NONE)
+}
+
+test "the type of a document that did not parse is JSON_NONE" {
+    let __sn2: string = "{not json"
+    assert_eq(json_type(parse(__sn2.utf8)), JSON_NONE)
+}
+
+test "a key that is absent is not the same as a key whose value is null" {
+    let __sn3: string = "{\"z\": null}"
+    let o = parse(__sn3.utf8)
+    let __sn4: string = "z"
+    assert_eq(json_type(json_get(o, __sn4.utf8)), JSON_NULL)
+    let __sn5: string = "nope"
+    assert_eq(json_type(json_get(o, __sn5.utf8)), JSON_NONE)
+}

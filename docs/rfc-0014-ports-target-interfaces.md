@@ -201,7 +201,7 @@ enforcement is free when it lands.)
 The remaining steps, downstream product/backend work, not language work:
 
 1. `impl Serial for pic16` with the bit-bang body **in Sond**, under `lib/pic/16F/684/serial.snd`
-   (the maintainer's placement: reusable per-target libraries live in the language repo, the product only uses
+   (JMV's placement: reusable per-target libraries live in the language repo, the product only uses
    them). This requires the pic16 backend primitives currently in flight (a read-`peek8`, a
    variable-value `poke8`, and a cycle-exact delay), because today the bit-bang is a **backend
    intrinsic emitted by name** in `pic16.rs` (the `serial_getc:`/`serial_putc:` asm), not Sond, and

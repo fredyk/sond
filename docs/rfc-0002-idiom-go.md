@@ -95,7 +95,7 @@ A pure function without effects uses `effects [] { ... }`. A function without co
 **Before**:
 ```sond
 -- Calculates the VAT quota
-fn compute_vat(base: Money, tipo: Percent) -> Money
+fn compute_vat(base: Money, rate: Percent) -> Money
     -- The base must be non-negative
     requires: base >= 0.00
     = impl:
@@ -105,7 +105,7 @@ fn compute_vat(base: Money, tipo: Percent) -> Money
 **Now**:
 ```sond
 // Calculates the VAT quota
-fn compute_vat(base: Money, tipo: Percent) -> Money
+fn compute_vat(base: Money, rate: Percent) -> Money
 requires {
     // The base must be non-negative
     base >= 0.00
@@ -191,12 +191,12 @@ The termination rule adopts Go's mechanism: `;` is **implicitly inserted** at en
 
 ```sond
 // Expression continuing on next line: group on one line or with parens
-let total = items.map(fn(i) => i.precio)
+let total = items.map(fn(i) => i.price)
 
 // Also valid with explicit parens
 let total = (
     items
-        .map(fn(i) => i.precio)
+        .map(fn(i) => i.price)
 )
 ```
 
@@ -485,7 +485,7 @@ type Account = {
     id: IdAccount,
     titular: String,
     mutable saldo: Money,
-    estado: EstadoAccount,
+    state: EstadoAccount,
 } where self.saldo >= 0.00
 
 // Transfer with balance conservation
@@ -505,8 +505,8 @@ requires {
     origen.id != destino.id
 
     // Both accounts are active (not frozen)
-    origen.estado == EstadoAccount::Activa
-    destino.estado == EstadoAccount::Activa
+    origen.state == EstadoAccount::Activa
+    destino.state == EstadoAccount::Activa
 }
 ensures {
     // Conservation invariant: the sum of balances is maintained
@@ -562,22 +562,22 @@ modulo api_tareas {
         title.len() > 0 and title.len() <= 200
     }
     effects [DB] {
-        let tarea = Task {
+        let task = Task {
             id: generar_id(),
             title: title,
             completed: false,
         }
-        guardar_en_db(tarea)?
-        Ok(tarea)
+        guardar_en_db(task)?
+        Ok(task)
     }
 
     @server
     fn toggle_tarea(id: u64) -> Result<Task, Error>
     effects [DB] {
-        let mut tarea = buscar_por_id(id)?
-        tarea.completed = not tarea.completed
-        actualizar_en_db(tarea)?
-        Ok(tarea)
+        let mut task = buscar_por_id(id)?
+        task.completed = not task.completed
+        actualizar_en_db(task)?
+        Ok(task)
     }
 }
 
@@ -594,25 +594,25 @@ effects [Red] {
 
         // Input for new task
         input(
-            valor: nuevo_title,
+            value: nuevo_title,
             on_cambio: fn(v) => nuevo_title = v,
         ),
-        boton(
+        button(
             "Add",
             fn() {
                 if nuevo_title.len() > 0 {
                     // Call to the server API
-                    let tarea = fetch_api("/tareas", POST, nuevo_title)
-                    tareas = tareas ++ [tarea]
+                    let task = fetch_api("/tareas", POST, nuevo_title)
+                    tareas = tareas ++ [task]
                     nuevo_title = ""
                 }
             },
         ),
 
         // Task list (reactive: updates when `tareas` changes)
-        lista(
+        list(
             tareas,
-            fn(tarea) => item_tarea(tarea, &reactive tareas),
+            fn(task) => item_tarea(task, &reactive tareas),
         ),
     )
 }
@@ -621,16 +621,16 @@ effects [Red] {
 // (`&reactive`), never captured by closure from external scope:
 // this respects the "zero action at a distance" principle (Pillar 3). The child
 // can only touch the state it was given, and its Red effect is visible.
-fn item_tarea(tarea: Task, lista: &reactive List<Task>) -> UI<Task>
+fn item_tarea(task: Task, list: &reactive List<Task>) -> UI<Task>
 effects [Red] {
     div(
-        texto(tarea.title),
-        boton(
-            if tarea.completed { "Uncheck" } else { "Complete" },
+        text(task.title),
+        button(
+            if task.completed { "Uncheck" } else { "Complete" },
             fn() {
-                let actualizada = fetch_api("/tareas/" + tarea.id, PUT)
+                let actualizada = fetch_api("/tareas/" + task.id, PUT)
                 // Update the task in the received reactive list
-                lista = lista.map(
+                list = list.map(
                     fn(t) => if t.id == actualizada.id { actualizada } else { t },
                 )
             },
@@ -708,24 +708,24 @@ When AI generates or modifies code, it can introduce formatting variations (inde
 
 Unformatted input:
 ```sond
-fn calcular(base:Money,tipo:Percent)->(vat_amount:Money)requires{base>=0.00 tipo in [0.0,4.0,10.0,21.0]}ensures{vat_amount>=0.00}effects[]{round_accounting(base*tipo/100.0,decimals=2)}
+fn compute(base:Money,rate:Percent)->(vat_amount:Money)requires{base>=0.00 rate in [0.0,4.0,10.0,21.0]}ensures{vat_amount>=0.00}effects[]{round_accounting(base*rate/100.0,decimals=2)}
 ```
 
 Formatted output:
 ```sond
-fn calcular(
+fn compute(
     base: Money,
-    tipo: Percent,
+    rate: Percent,
 ) -> (vat_amount: Money)
 requires {
     base >= 0.00
-    tipo in [0.0, 4.0, 10.0, 21.0]
+    rate in [0.0, 4.0, 10.0, 21.0]
 }
 ensures {
     vat_amount >= 0.00
 }
 effects [] {
-    round_accounting(base * tipo / 100.0, decimals=2)
+    round_accounting(base * rate / 100.0, decimals=2)
 }
 ```
 

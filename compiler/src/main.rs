@@ -99,8 +99,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let cov_files = resolved.cov_files.clone();
     let mut src = resolved.src;
     let cov_scope = resolved.cov_scope;
+    let cov_delegated = resolved.cov_delegated;
+    let own_funcs = resolved.own_funcs;
     let spans = resolved.spans;
     // RFC-0016: in a --debug build, append the debug agent, WRITTEN IN SOND (see `debug_agent`). The
     // per-statement checkpoint (emitted by codegen) calls `__dbg_step(line)`; the agent is the Sond
@@ -137,7 +140,18 @@ fn main() -> ExitCode {
     let is_test_build = args.iter().any(|a| a == "--test");
     // The PIC16 path uses gpasm and produces a HEX, not an ELF/PE, keep it out of the x86
     // binary cache (whose hit message and copied artefact assume a native binary).
-    let cache_path = if is_test_build || pic16 {
+    //
+    // A QUERY is a question about the file, and a question must not produce an artefact. The
+    // cache hit below copies a binary out under `output` -- which, with no `-o`, is the source's
+    // basename in the CALLER's working directory -- and returns before the query is ever read.
+    // `sond test <dir>` asks this of every file it sweeps, so a run from inside a checkout was
+    // dropping an ELF next to the sources for each one whose cache was warm.
+    //
+    // Which flags those are is `sondc::QUERIES`, not a name written here: this was fixed once
+    // for `--entry-info` alone, and `--emit-header` -- whose stdout `tools/install.sh` redirects
+    // straight into the header it PUBLISHES -- kept returning the cache line as the header.
+    let solo_pregunta = args.iter().any(|a| sondc::QUERIES.contains(&a.as_str()));
+    let cache_path = if is_test_build || pic16 || solo_pregunta {
         None
     } else {
         build_cache_path(&src, target_tag)
@@ -219,6 +233,27 @@ fn main() -> ExitCode {
         }
     }
 
+    // `--entry-info`: what a tool needs to reason about a whole tree, from the compiler that
+    // decides it rather than from a second copy of the rule that drifts. Two facts:
+    //   tests: N        how many `test` blocks the parser saw (0 = this file is not an entry)
+    //   covers: <path>  one line per file this entry answers for in its coverage denominator
+    //   measurable: N   how many functions of ITS OWN a gate could measure
+    // A module that appears in no entry's `covers:` is a module no gate ever reads -- unless
+    // `measurable` is 0, in which case there is no gate to give it: a file of pure constants,
+    // or the test harness itself, whose every function the coverage build skips by name.
+    if args.iter().any(|a| a == "--entry-info") {
+        println!("tests: {}", funcs.iter().filter(|f| f.is_test).count());
+        for f in &cov_files {
+            println!("covers: {}", f.display());
+        }
+        let medibles = own_funcs
+            .iter()
+            .filter(|n| !sondc::codegen::never_instrumented(n))
+            .count();
+        println!("measurable: {medibles}");
+        return ExitCode::SUCCESS;
+    }
+
     // `test "..." { .. }` blocks are inert in an ordinary compile, only `sond test`
     // gathers and runs them. In `--test` mode, keep the tests, drop the file's own
     // `main`, and synthesize a harness `main` that runs each test; otherwise drop the
@@ -242,7 +277,7 @@ fn main() -> ExitCode {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(80);
         let harness = if coverage {
-            sondc::testing::synth_coverage_harness(&funcs, min_coverage)
+            sondc::testing::synth_coverage_harness(&funcs, min_coverage, cov_delegated)
         } else {
             sondc::testing::synth_harness(&funcs)
         };
@@ -264,7 +299,14 @@ fn main() -> ExitCode {
     // it: the checks now share one exit, and a compiler that says which file it is talking about
     // is the behaviour worth keeping when the two spellings meet.
     if let Err(msg) =
-        sondc::lower_program(&mut funcs, &mut globals, &mut structs, &enums, lower_target)
+        sondc::lower_program(
+            &mut funcs,
+            &mut globals,
+            &mut structs,
+            &enums,
+            &externs,
+            lower_target,
+        )
     {
         // The line numbers these checks carry are lines of the SPLICED text. Translate them back
         // into the file the line was written in, and name that file when it is not the entry --
@@ -314,6 +356,21 @@ fn main() -> ExitCode {
     // the block closes. Runs last: a pure, semantically-neutral rename of body locals.
     sondc::desugar::disambiguate_shadows(&mut funcs);
 
+    // A coverage point's id means nothing to a person: it has to come back as the file and line
+    // they can open. The spliced buffer knows where each of its lines came from; this carries it
+    // through to the report the gate prints.
+    // An empty scope means two different things and only the resolver can tell them apart: no
+    // scope was decided (measure everything), or the entry delegated its whole denominator to
+    // the gates next door (measure nothing).
+    let cov_scope_arg = if cov_scope.is_empty() && !cov_delegated {
+        None
+    } else {
+        Some(&cov_scope)
+    };
+    let cov_locate = |line: u32| match spans.locate_line(line) {
+        Some(loc) => format!("{}:{}", loc.file.display(), loc.line),
+        None => format!("{input}:{line}"),
+    };
     let asm = match std::panic::catch_unwind(|| {
         if pic16 {
             sondc::codegen::pic16::emit_pic16(&funcs)
@@ -326,7 +383,7 @@ fn main() -> ExitCode {
         } else if shared || object {
             emit_shared_g(&globals, &structs, &funcs)
         } else if coverage {
-            emit_program_coverage_g(&globals, &structs, &funcs, &cov_scope)
+            emit_program_coverage_g(&globals, &structs, &funcs, cov_scope_arg, &cov_locate)
         } else if debug {
             emit_program_debug_g(&globals, &structs, &funcs)
         } else {
@@ -685,7 +742,7 @@ mod pic16_assemble_tests {
         let result = pic16_result(Err(io_err), &hex_path);
         assert!(
             result.is_err(),
-            "no se puede lanzar gpasm → error; result={result:?}"
+            "gpasm cannot be spawned -> error; result={result:?}"
         );
         let err = result.unwrap_err();
         assert!(

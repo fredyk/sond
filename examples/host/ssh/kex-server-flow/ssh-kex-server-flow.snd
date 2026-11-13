@@ -7,8 +7,8 @@
 // Ed25519 signature over H), and build a KEX_ECDH_REPLY carrying the real K_S,
 // Q_S and signature. Test vectors: RFC 7748 §6.1 (server = "Alice", client sends
 // "Bob"'s public) so Q_S and K are checked against the standard; H and the
-// signature are computed for real (their correctness is pinned against a Python
-// reference in ssh/kex-server). Host-verified.
+// signature are computed for real (what pins those is lib/any/crypto/ssh-kex_test.snd,
+// against the RFCs). Host-verified.
 
 include "any/crypto/ssh-kex.snd"
 
@@ -87,8 +87,8 @@ fn main() -> i64 {
     poke8(qc_in + 24, 0xad) poke8(qc_in + 25, 0xfc) poke8(qc_in + 26, 0x7e) poke8(qc_in + 27, 0x14)
     poke8(qc_in + 28, 0x6f) poke8(qc_in + 29, 0x88) poke8(qc_in + 30, 0x2b) poke8(qc_in + 31, 0x4f)
 
-    // Host key + transcript fields (test values; H/sig correctness is pinned in
-    // ssh/kex-server, here they just have to compute for real).
+    // Host key + transcript fields (test values; what pins H and the signature is
+    // lib/any/crypto/ssh-kex_test.snd, here they just have to compute for real).
     let hpub[4] let hsk[4] let mut i = 0
     for i < 32 { poke8(hpub + i, 0x20 + i)  poke8(hsk + i, i)  i = i + 1 }
     let edname[2] // "ssh-ed25519"

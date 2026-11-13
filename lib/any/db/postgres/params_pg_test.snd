@@ -1,0 +1,280 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// End-to-end test of db/postgres/params.snd against a REAL PostgreSQL 17 server in a rootless
+// container (no sudo). The test owns the container's whole life: it removes a leftover with the
+// same name, starts `postgres:17-alpine` on 127.0.0.1:55605 with database `ba_l1`, waits for
+// readiness with retries, drives the scenarios below over one connection, then stops the
+// container. Every check accumulates into `fails` and the single aborting assert is at the very
+// end, AFTER the stop, so a failure can never leak the container.
+//
+// Docker is reached through its rootless socket, whose path is built from the current uid
+// (`unix:///run/user/<uid>/docker.sock`), so there is no machine-specific literal and no
+// environment inherited from the shell: `run` execs with an empty environment.
+//
+// What the star scenario proves: a value coming from outside (here `'); DROP TABLE t; --`) is
+// stored and read back LITERALLY, and the table is still there afterwards. `$1` cannot become
+// SQL because the server parses the statement before it ever sees the value.
+
+include "any/db/postgres/params.snd"
+include "x86_64/linux/proc.snd"
+include "x86_64/linux/capture.snd"
+include "x86_64/linux/testing.snd"
+
+let DOCKER: string = "/usr/bin/docker"
+let DOCKER_FLAG_HOST: string = "-H"
+let DOCKER_HOST_PREFIX: string = "unix:///run/user/"
+let DOCKER_HOST_SUFFIX: string = "/docker.sock"
+let DOCKER_CMD_RM: string = "rm"
+let DOCKER_CMD_RUN: string = "run"
+let DOCKER_CMD_STOP: string = "stop"
+let FLAG_FORCE: string = "-f"
+let FLAG_DETACH: string = "-d"
+let FLAG_RM: string = "--rm"
+let FLAG_NAME: string = "--name"
+let FLAG_ENV: string = "-e"
+let FLAG_PUBLISH: string = "-p"
+let FLAG_TIME: string = "-t"
+let ZERO: string = "0"
+let PG_IMAGE: string = "postgres:17-alpine"
+let PG_CONTAINER: string = "ba-pg-l1"
+let PG_PUBLISH: string = "127.0.0.1:55605:5432"
+let PG_ENV_PASS: string = "POSTGRES_PASSWORD=ba_l1_test_pw"
+let PG_ENV_DB: string = "POSTGRES_DB=ba_l1"
+let PG_HOST: string = "127.0.0.1"
+let PG_PORT = 55605
+let PG_USER: string = "postgres"
+let PG_PASS: string = "ba_l1_test_pw"
+let PG_DB: string = "ba_l1"
+
+let SQL_CREATE_T: string = "CREATE TABLE t (id serial PRIMARY KEY, v text)"
+let SQL_INSERT_T: string = "INSERT INTO t (v) VALUES ($1)"
+let SQL_SELECT_T: string = "SELECT v FROM t ORDER BY id"
+let SQL_SELECT_T_ONE: string = "SELECT v FROM t WHERE v = $1"
+let SQL_COUNT_T: string = "SELECT count(*) FROM t"
+let SQL_CREATE_U: string = "CREATE TABLE u (id int PRIMARY KEY, v text)"
+let SQL_INSERT_U: string = "INSERT INTO u (id, v) VALUES ($1, $2)"
+let SQL_SELECT_U: string = "SELECT v FROM u WHERE id = $1"
+let SQL_BEGIN: string = "BEGIN"
+let SQL_ROLLBACK: string = "ROLLBACK"
+let SQL_COMMIT: string = "COMMIT"
+let INJECTION: string = "'); DROP TABLE t; --"
+let EMPTY: string = ""
+let ONE: string = "1"
+let TWO: string = "2"
+let THREE: string = "3"
+let FOUR: string = "4"
+let VAL_X: string = "x"
+let VAL_Y: string = "y"
+let SQLSTATE_UNIQUE: string = "23505"
+
+// Builds `unix:///run/user/<uid>/docker.sock` (NUL-terminated) into `buf`.
+fn build_host(buf: i64) {
+    let mut p = pgp_copy(buf, DOCKER_HOST_PREFIX.utf8, strlen(DOCKER_HOST_PREFIX.utf8))
+    p = p + itoa(syscall(SYS_getuid), p)
+    p = pgp_copy(p, DOCKER_HOST_SUFFIX.utf8, strlen(DOCKER_HOST_SUFFIX.utf8))
+    pgp_u8(p, 0)
+}
+
+// Removes a leftover `ba-pg-l1` (best effort), then starts a fresh detached container. Returns
+// the `docker run` exit code (0 on success, 127 if docker itself could not be exec'd).
+fn docker_start() -> i64 {
+    let mut host[64]
+    build_host(host)
+    let argv[16]
+    argv[0] = DOCKER.utf8
+    argv[1] = DOCKER_FLAG_HOST.utf8
+    argv[2] = host
+    argv[3] = DOCKER_CMD_RM.utf8
+    argv[4] = FLAG_FORCE.utf8
+    argv[5] = PG_CONTAINER.utf8
+    argv[6] = 0
+    let sink[8]
+    run_capture(DOCKER.utf8, argv, sink, 64)        // best effort; its stderr is discarded
+
+    argv[0] = DOCKER.utf8
+    argv[1] = DOCKER_FLAG_HOST.utf8
+    argv[2] = host
+    argv[3] = DOCKER_CMD_RUN.utf8
+    argv[4] = FLAG_DETACH.utf8
+    argv[5] = FLAG_RM.utf8
+    argv[6] = FLAG_NAME.utf8
+    argv[7] = PG_CONTAINER.utf8
+    argv[8] = FLAG_ENV.utf8
+    argv[9] = PG_ENV_PASS.utf8
+    argv[10] = FLAG_ENV.utf8
+    argv[11] = PG_ENV_DB.utf8
+    argv[12] = FLAG_PUBLISH.utf8
+    argv[13] = PG_PUBLISH.utf8
+    argv[14] = PG_IMAGE.utf8
+    argv[15] = 0
+    run(DOCKER.utf8, argv)
+}
+
+// Stops the test's own container (`--rm` removes it).
+fn docker_stop() -> i64 {
+    let mut host[64]
+    build_host(host)
+    let argv[8]
+    argv[0] = DOCKER.utf8
+    argv[1] = DOCKER_FLAG_HOST.utf8
+    argv[2] = host
+    argv[3] = DOCKER_CMD_STOP.utf8
+    argv[4] = FLAG_TIME.utf8
+    argv[5] = ZERO.utf8
+    argv[6] = PG_CONTAINER.utf8
+    argv[7] = 0
+    run(DOCKER.utf8, argv)
+}
+
+fn sleep_ms(ms: i64) {
+    let ts[2]
+    ts[0] = ms / 1000
+    ts[1] = (ms % 1000) * 1000000
+    syscall(SYS_nanosleep, ts, 0)
+}
+
+// Tries to connect until the server authenticates, `tries` times 500 ms apart. Returns the
+// connection, or 0 if it never came up.
+fn wait_ready(tries: i64) -> i64 {
+    let mut n = 0
+    for n < tries {
+        let conn = pgx_connect(PG_HOST.utf8, PG_PORT, PG_USER.utf8, PG_PASS.utf8, PG_DB.utf8)
+        if conn != 0 {
+            if pgx_ok(conn) == 1 { return conn }
+            pgx_close(conn)
+        }
+        sleep_ms(500)
+        n = n + 1
+    }
+    0
+}
+
+// Counts a failed check (printing its code) without aborting, so the caller can always stop the
+// container before the single aborting assert.
+fn note(code: i64, cond: i64, fails: i64) -> i64 {
+    if cond == 0 {
+        print("  FAILED check #")
+        print_int(code)
+        print("\n")
+        fails + 1
+    } else {
+        fails
+    }
+}
+
+test "pg params: real PostgreSQL 17 end to end" {
+    let started = docker_start()
+    let mut fails = 0
+    if started != 0 {
+        docker_stop()
+        print("  docker run could not start the container\n")
+        assert(0)
+        return
+    }
+    let conn = wait_ready(80)
+    if conn == 0 {
+        docker_stop()
+        print("  the PostgreSQL container never became ready\n")
+        assert(0)
+        return
+    }
+
+    // --- schema ---
+    let r_ct = pgx_query(conn, SQL_CREATE_T.utf8)
+    fails = note(1, pgx_res_ok(r_ct), fails)
+    let r_cu = pgx_query(conn, SQL_CREATE_U.utf8)
+    fails = note(2, pgx_res_ok(r_cu), fails)
+
+    // --- star: an outside value stays a value ---
+    let pi[1]
+    pi[0] = INJECTION.utf8
+    let psi = Slice { ptr: pi, len: pi.len }
+    let r_ins = pgx_exec_params(conn, SQL_INSERT_T.utf8, psi)
+    fails = note(3, pgx_res_ok(r_ins), fails)
+    let r_get = pgx_query_params(conn, SQL_SELECT_T_ONE.utf8, psi)
+    fails = note(4, pgx_res_ok(r_get), fails)
+    fails = note(5, pgx_nrows(r_get) == 1, fails)
+    fails = note(6, streq(pgx_val(r_get, 0, 0), INJECTION.utf8), fails)
+    let r_cnt = pgx_query(conn, SQL_COUNT_T.utf8)   // the table survived the payload
+    fails = note(7, pgx_res_ok(r_cnt), fails)
+    fails = note(8, streq(pgx_val(r_cnt, 0, 0), ONE.utf8), fails)
+
+    // --- NULL is not the empty string, and vice versa ---
+    let pn[1]
+    pn[0] = 0
+    let psn = Slice { ptr: pn, len: pn.len }
+    fails = note(9, pgx_res_ok(pgx_exec_params(conn, SQL_INSERT_T.utf8, psn)), fails)
+    let pe[1]
+    pe[0] = EMPTY.utf8
+    let pse = Slice { ptr: pe, len: pe.len }
+    fails = note(10, pgx_res_ok(pgx_exec_params(conn, SQL_INSERT_T.utf8, pse)), fails)
+    let ea[1]
+    let pse0 = Slice { ptr: ea, len: 0 }
+    let r_all = pgx_query_params(conn, SQL_SELECT_T.utf8, pse0)
+    fails = note(11, pgx_res_ok(r_all), fails)
+    fails = note(12, pgx_nrows(r_all) == 3, fails)
+    fails = note(13, pgx_val(r_all, 1, 0) == 0, fails)             // SQL NULL
+    fails = note(14, pgx_val(r_all, 2, 0) != 0, fails)             // "" is a real value
+    fails = note(15, streq(pgx_val(r_all, 2, 0), EMPTY.utf8), fails)
+
+    // --- 23505 read as SQLSTATE, and the connection still works afterwards ---
+    let pu[2]
+    pu[0] = ONE.utf8
+    pu[1] = VAL_X.utf8
+    let psu = Slice { ptr: pu, len: pu.len }
+    fails = note(16, pgx_res_ok(pgx_exec_params(conn, SQL_INSERT_U.utf8, psu)), fails)
+    let r_dup = pgx_exec_params(conn, SQL_INSERT_U.utf8, psu)
+    fails = note(17, pgx_res_ok(r_dup) == 0, fails)
+    fails = note(18, streq(pgx_res_sqlstate(r_dup), SQLSTATE_UNIQUE.utf8), fails)
+    fails = note(19, pgx_res_error(r_dup) != 0, fails)
+    fails = note(20, pgx_res_ok(pgx_query(conn, SQL_COUNT_T.utf8)), fails)   // still usable
+
+    // --- transactions on one connection ---
+    fails = note(21, pgx_res_ok(pgx_query(conn, SQL_BEGIN.utf8)), fails)
+    let p2[2]
+    p2[0] = TWO.utf8
+    p2[1] = VAL_X.utf8
+    let ps2 = Slice { ptr: p2, len: p2.len }
+    fails = note(22, pgx_res_ok(pgx_exec_params(conn, SQL_INSERT_U.utf8, ps2)), fails)
+    fails = note(23, pgx_res_ok(pgx_query(conn, SQL_ROLLBACK.utf8)), fails)
+    let q2[1]
+    q2[0] = TWO.utf8
+    let psq2 = Slice { ptr: q2, len: q2.len }
+    let r_gone = pgx_query_params(conn, SQL_SELECT_U.utf8, psq2)
+    fails = note(24, pgx_res_ok(r_gone), fails)
+    fails = note(25, pgx_nrows(r_gone) == 0, fails)                // the ROLLBACK discarded it
+
+    // an error inside a transaction, then ROLLBACK, leaves the connection usable
+    fails = note(26, pgx_res_ok(pgx_query(conn, SQL_BEGIN.utf8)), fails)
+    let r_dup2 = pgx_exec_params(conn, SQL_INSERT_U.utf8, psu)     // duplicate: 23505 inside the tx
+    fails = note(27, pgx_res_ok(r_dup2) == 0, fails)
+    fails = note(28, pgx_res_ok(pgx_query(conn, SQL_ROLLBACK.utf8)), fails)
+    let p3[2]
+    p3[0] = THREE.utf8
+    p3[1] = VAL_Y.utf8
+    let ps3 = Slice { ptr: p3, len: p3.len }
+    fails = note(29, pgx_res_ok(pgx_exec_params(conn, SQL_INSERT_U.utf8, ps3)), fails)
+
+    // COMMIT persists
+    fails = note(30, pgx_res_ok(pgx_query(conn, SQL_BEGIN.utf8)), fails)
+    let p4[2]
+    p4[0] = FOUR.utf8
+    p4[1] = VAL_Y.utf8
+    let ps4 = Slice { ptr: p4, len: p4.len }
+    fails = note(31, pgx_res_ok(pgx_exec_params(conn, SQL_INSERT_U.utf8, ps4)), fails)
+    fails = note(32, pgx_res_ok(pgx_query(conn, SQL_COMMIT.utf8)), fails)
+    let q4[1]
+    q4[0] = FOUR.utf8
+    let psq4 = Slice { ptr: q4, len: q4.len }
+    let r_four = pgx_query_params(conn, SQL_SELECT_U.utf8, psq4)
+    fails = note(33, pgx_res_ok(r_four), fails)
+    fails = note(34, pgx_nrows(r_four) == 1, fails)
+
+    pgx_close(conn)
+    docker_stop()
+    print("  pg params e2e: ")
+    print_int(fails)
+    print(" failed check(s)\n")
+    assert_eq(fails, 0)
+}

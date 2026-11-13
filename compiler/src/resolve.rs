@@ -525,6 +525,27 @@ pub fn resolve_includes_scoped_with_resolver(
 pub struct ResolvedProgram {
     pub src: String,
     pub cov_scope: HashSet<String>,
+    /// The files this entry answers for: the ones that contributed a function to `cov_scope`.
+    ///
+    /// Derived from the scope after it is decided, never from a second reading of the rule. The
+    /// question it exists to answer is "which entry, if any, measures this module", and a tree
+    /// with modules that no entry claims is a tree with code no gate ever reads.
+    pub cov_files: Vec<PathBuf>,
+    /// True when the denominator came out EMPTY because every module this entry includes is
+    /// measured by a gate of its own.
+    ///
+    /// An empty denominator is otherwise a failure: `covered * 100 / 0` divides by zero, and
+    /// `0 * 100 < 80 * 0` is false, so an entry answering for nothing would sail through at
+    /// 100%. But an integration suite whose every include has a `_test.snd` next door is not a
+    /// hole -- all of that code IS in somebody's denominator -- and re-measuring it here would
+    /// make the figure mean "what this file happens to include". The two look identical from
+    /// inside the harness, so the difference is decided here, where the includes are known.
+    pub cov_delegated: bool,
+    /// The functions the ENTRY FILE itself defines. What it answers is "is there anything here a
+    /// gate could ever measure": a file of pure constants, or one holding only the assertions the
+    /// coverage build skips by name, cannot be given a gate, and listing it as unmeasured asks
+    /// for one that could not exist.
+    pub own_funcs: Vec<String>,
     pub spans: SpanMap,
 }
 
@@ -719,6 +740,10 @@ pub fn resolve_includes_located_with_resolver(
     let mut spans: Vec<SpliceLine> = Vec::new();
     let mut depth0 = HashSet::new();
     let mut depth1 = HashSet::new();
+    // Which file each depth-1 function came from, so the scope rule below can ask of each module
+    // the only question that matters: is anybody else measuring it?
+    let mut depth1_files: std::collections::HashMap<PathBuf, HashSet<String>> =
+        std::collections::HashMap::new();
     let ns = Namespaces {
         resolve_map: &resolve_map,
         module_maps: &module_maps,
@@ -734,6 +759,7 @@ pub fn resolve_includes_located_with_resolver(
         0,
         &mut depth0,
         &mut depth1,
+        &mut depth1_files,
         &ns,
         &g.import_errors,
         &g.aliases,
@@ -753,16 +779,92 @@ pub fn resolve_includes_located_with_resolver(
         .file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.ends_with("_test.snd"));
+    let depth0_names: Vec<String> = depth0.iter().cloned().collect();
+    // Set when this entry's denominator came out empty because every module it includes is
+    // measured by a gate of its own. That is not a hole -- all of it IS in somebody's
+    // denominator -- so the gate has nothing to fail on. Distinct from an entry that includes
+    // nothing measurable at all, which is a hole and does fail.
+    let mut cov_delegated = false;
     let scope = if is_test_file {
-        if depth1.is_empty() { depth0 } else { depth1 }
+        if depth1.is_empty() {
+            depth0
+        } else {
+            // A module with a gate of its own is already measured there, and counting it again
+            // here makes this figure mean something else: not "what this entry answers for" but
+            // "what it happens to include". Measured on the standard library, `xml_test.snd` came
+            // out at 77% carrying five functions of `bytes.snd` that `bytes_test.snd` covers next
+            // door -- and the only way to pass was to test `bytes` a second time inside the xml
+            // suite.
+            //
+            // And when that leaves nothing at all -- an integration suite over modules that
+            // every one of them has a gate next door, which is what `x509/realcert_test.snd`
+            // is -- the entry answers for nothing NEW, and says so instead of borrowing a
+            // denominator it does not own.
+            let yo = std::fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf());
+            let mut s: HashSet<String> = HashSet::new();
+            let mut alguno_delegado = false;
+            for (file, names) in &depth1_files {
+                if measured_by_another_test_file(file, &yo) {
+                    alguno_delegado = true;
+                    continue;
+                }
+                s.extend(
+                    names
+                        .iter()
+                        .filter(|n| !crate::codegen::never_instrumented(n))
+                        .cloned(),
+                );
+            }
+            cov_delegated = s.is_empty() && alguno_delegado;
+            s
+        }
     } else if depth0.is_empty() {
         depth1
     } else {
-        depth0
+        // A program answers for its own functions AND for every module of its own that nothing
+        // else measures. Leaving the includes out wholesale rested on "each module has its own
+        // `_test.snd`", which nothing checked: a module without one was in NO denominator, and
+        // `sond test main.snd` reported 100% having read the entry file and nothing else.
+        //
+        // Two things stay out, and for the same reason they were out before: the standard
+        // library (it lives under an include root, not beside the entry, and a program is not on
+        // the hook for it), and a module that HAS its own `_test.snd` (already measured there,
+        // and counting it twice would stop the figure meaning "the code this entry answers for").
+        let mut s = depth0;
+        let entry_dir = entry
+            .parent()
+            .map(|d| if d.as_os_str().is_empty() { Path::new(".") } else { d })
+            .unwrap_or_else(|| Path::new("."));
+        let entry_dir = std::fs::canonicalize(entry_dir).unwrap_or_else(|_| entry_dir.to_path_buf());
+        for (file, names) in &depth1_files {
+            if file.parent().is_none_or(|d| d != entry_dir) {
+                continue;
+            }
+            if measured_by_its_own_test_file(file) {
+                continue;
+            }
+            s.extend(names.iter().cloned());
+        }
+        s
     };
+    // Which files the scope came from. Asked of the finished scope, so it cannot disagree with it.
+    let mut cov_files: Vec<PathBuf> = Vec::new();
+    if depth0_names.iter().any(|n| scope.contains(n)) {
+        cov_files.push(entry.to_path_buf());
+    }
+    for (file, names) in &depth1_files {
+        if names.iter().any(|n| scope.contains(n)) {
+            cov_files.push(file.clone());
+        }
+    }
+    cov_files.sort();
+
     Ok(ResolvedProgram {
         src: out,
         cov_scope: scope,
+        cov_files,
+        cov_delegated,
+        own_funcs: depth0_names,
         spans: SpanMap {
             entry: entry.to_path_buf(),
             lines: spans,
@@ -913,6 +1015,29 @@ fn include_closure(
     seen
 }
 
+/// Whether `file` has a `<name>_test.snd` beside it: the file whose whole job is to measure it.
+/// That sibling is what lets a program leave the module out of its own denominator without the
+/// code going unmeasured.
+fn measured_by_its_own_test_file(file: &Path) -> bool {
+    test_file_of(file).is_some_and(|t| t.exists())
+}
+
+/// Like [`measured_by_its_own_test_file`], but somebody ELSE has to be the one measuring it.
+///
+/// The subject of `xml_test.snd` is `xml.snd`, whose test file is that very entry. Asking only
+/// "does a `_test.snd` exist beside it" excludes the entry's own subject, empties the scope, and
+/// the fallback then puts everything back -- which is how the first cut of this changed nothing.
+fn measured_by_another_test_file(file: &Path, entry_canon: &Path) -> bool {
+    test_file_of(file).is_some_and(|t| {
+        t.exists() && std::fs::canonicalize(&t).unwrap_or(t) != entry_canon
+    })
+}
+
+fn test_file_of(file: &Path) -> Option<PathBuf> {
+    let stem = file.file_stem().and_then(|s| s.to_str())?;
+    Some(file.with_file_name(format!("{stem}_test.snd")))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_into(
     path: &Path,
@@ -921,6 +1046,7 @@ fn resolve_into(
     depth: usize,
     depth0: &mut HashSet<String>,
     depth1: &mut HashSet<String>,
+    depth1_files: &mut std::collections::HashMap<PathBuf, HashSet<String>>,
     ns: &Namespaces,
     import_errors: &[(PathBuf, usize, String)],
     aliases: &std::collections::HashMap<String, String>,
@@ -974,6 +1100,7 @@ fn resolve_into(
                 depth + 1,
                 depth0,
                 depth1,
+                depth1_files,
                 ns,
                 import_errors,
                 aliases,
@@ -992,6 +1119,7 @@ fn resolve_into(
                         depth + 1,
                         depth0,
                         depth1,
+                        depth1_files,
                         ns,
                         import_errors,
                         aliases,
@@ -1017,7 +1145,8 @@ fn resolve_into(
                             depth0.insert(name);
                         }
                         1 => {
-                            depth1.insert(name);
+                            depth1.insert(name.clone());
+                            depth1_files.entry(canon.clone()).or_default().insert(name);
                         }
                         _ => {}
                     }
@@ -1156,7 +1285,6 @@ fn parse_import_alias(line: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // One counter for the WHOLE test module, so every fixture path is unique across all tests,
@@ -1175,7 +1303,7 @@ mod tests {
     // than the reason. Same compilation must resolve the same way however the path is written.
     #[test]
     fn a_relative_entry_finds_the_project_lib_like_an_absolute_one_does() {
-        let dir = std::env::temp_dir().join(format!("sond_rel_{}_{}", std::process::id(), uid()));
+        let dir = crate::scratch::Scratch::new("sond_rel");
         std::fs::create_dir_all(dir.join("lib/mylib")).unwrap();
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(
@@ -1211,23 +1339,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn tmp(name: &str, body: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("{}_{}", uid(), name));
-        writeln!(std::fs::File::create(&p).unwrap(), "{body}").unwrap();
+    /// Writes `name` inside `dir` (a scratch directory the caller holds, so it is deleted when
+    /// the test ends) and returns its path. Files a test wants to see each other have to live in
+    /// ONE directory: an include spelled `"lib.snd"` resolves relative to the including file.
+    fn tmp(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, format!("{body}\n")).unwrap();
         p
     }
 
     // A fresh temp directory that is a `lib/` root: `root/lib/<subpath>` plus a `root/main.snd`
     // entry that includes `include_line`. Returns the entry path. Used to exercise include
     // resolution against a walk-up `lib/` root without touching the real ~/.local/lib/sond.
-    fn lib_fixture(subpath: &str, body: &str, include_line: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("sond_res_{}_{}", std::process::id(), uid()));
+    /// A project whose `lib/` holds one file, and whose entry includes it. The returned value IS
+    /// the entry path (it derefs to it) and owns the tree: it has to be held for the length of the
+    /// test, which is what stops the fixture from deleting itself before it is read.
+    fn lib_fixture(subpath: &str, body: &str, include_line: &str) -> crate::scratch::Scratch {
+        let root = crate::scratch::Scratch::new("sond_res");
         let lib_file = root.join("lib").join(subpath);
         std::fs::create_dir_all(lib_file.parent().unwrap()).unwrap();
         std::fs::write(&lib_file, body).unwrap();
-        let entry = root.join("main.snd");
-        std::fs::write(&entry, format!("{include_line}\nfn main() -> i64 {{ 0 }}")).unwrap();
-        entry
+        std::fs::write(root.join("main.snd"), format!("{include_line}\nfn main() -> i64 {{ 0 }}"))
+            .unwrap();
+        root.exposing("main.snd")
     }
 
     #[test]
@@ -1277,7 +1411,7 @@ mod tests {
     fn a_bare_and_a_full_include_of_the_same_file_are_deduped() {
         // `include "serial"` and `include "any/serial.snd"` name the same file; it must appear
         // once, not twice (which would be duplicate definitions).
-        let root = std::env::temp_dir().join(format!("sond_resd_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_resd");
         let lib_file = root.join("lib").join("any").join("serial.snd");
         std::fs::create_dir_all(lib_file.parent().unwrap()).unwrap();
         std::fs::write(&lib_file, "fn serial_putc(b: i64) { }").unwrap();
@@ -1300,7 +1434,9 @@ mod tests {
         // When an include cannot be resolved on any root, the error must name the file that was
         // not found, NOT the entry file. Before this, every read failure was blamed on the entry,
         // so a missing `any/json.snd` read as "cannot read main.snd", which is deeply misleading.
+        let dir = crate::scratch::Scratch::new("sond_res");
         let main = tmp(
+            &dir,
             "sond_missinginc.snd",
             "include \"any/does_not_exist_xyz.snd\"\nfn main() -> i64 { 0 }",
         );
@@ -1318,7 +1454,7 @@ mod tests {
     #[test]
     fn a_colliding_private_helper_is_file_scoped_a_unique_one_is_left_alone() {
         let root =
-            std::env::temp_dir().join(format!("sond_fscope_{}_{}", std::process::id(), uid()));
+            crate::scratch::Scratch::new("sond_fscope");
         std::fs::create_dir_all(&root).unwrap();
         // Two included libs each define a PRIVATE `secret` (a collision); libb also has a unique
         // private `only_b`. The entry includes both.
@@ -1366,7 +1502,7 @@ mod tests {
         // call resolved to nothing. A caller must bind to the definition visible in ITS include
         // closure.
         let root =
-            std::env::temp_dir().join(format!("sond_xfile_{}_{}", std::process::id(), uid()));
+            crate::scratch::Scratch::new("sond_xfile");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.snd"), "fn shared() -> i64 { 1 }").unwrap();
         std::fs::write(root.join("b.snd"), "fn shared() -> i64 { 2 }").unwrap();
@@ -1424,7 +1560,7 @@ mod tests {
         // The same file-scoping must cover module-level `let` globals, not only functions: two
         // bignum libraries each define a private `let MASK = ...` and use it internally, and a
         // program that pulls in both would otherwise fail with "declared more than once".
-        let root = std::env::temp_dir().join(format!("sond_glob_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_glob");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("a.snd"),
@@ -1461,7 +1597,7 @@ mod tests {
         // A global defined in ONE file and used in another (a shared constant) must NOT be
         // mangled: it does not collide, so cross-file use keeps working.
         let root =
-            std::env::temp_dir().join(format!("sond_globshare_{}_{}", std::process::id(), uid()));
+            crate::scratch::Scratch::new("sond_globshare");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("k.snd"), "let SHARED = 42").unwrap();
         std::fs::write(
@@ -1484,10 +1620,12 @@ mod tests {
 
     #[test]
     fn inlines_an_included_file_once() {
-        let lib = tmp("sond_lib.snd", "fn helper() -> i64 { 42 }");
+        let dir = crate::scratch::Scratch::new("sond_inline");
+        let lib = tmp(&dir, "sond_lib.snd", "fn helper() -> i64 { 42 }");
         let libname = lib.file_name().unwrap().to_str().unwrap();
         // main includes the lib TWICE; it must appear only once.
         let main = tmp(
+            &dir,
             "sond_main.snd",
             &format!(
                 "include \"{libname}\"\ninclude \"{libname}\"\nfn main() -> i64 {{ helper() }}"
@@ -1504,12 +1642,15 @@ mod tests {
         // worth anything if it measures the code under test. A `_test.snd` file that happens
         // to define a helper of its own must not shrink the denominator to that helper: that
         // turns "1 of 5 library functions covered" into a green "1 of 1".
+        let dir = crate::scratch::Scratch::new("sond_covscope");
         let lib = tmp(
+            &dir,
             "sond_covlib.snd",
             "fn a1() -> i64 { 1 }\nfn a2() -> i64 { 2 }\nfn a3() -> i64 { 3 }",
         );
         let libname = lib.file_name().unwrap().to_str().unwrap();
         let entry = tmp(
+            &dir,
             "sond_covscope_test.snd",
             &format!("include \"{libname}\"\nfn helper() -> i64 {{ 7 }}\ntest \"t\" {{ }}"),
         );
@@ -1522,17 +1663,195 @@ mod tests {
         );
     }
 
+
+    // A directory that is its own little project: `<root>/src/` holds the entry and its modules,
+    // `<root>/lib/` is a library root. Returns the root. `tmp()` puts everything in the shared
+    // temp dir, where every fixture is a sibling of every other, so it cannot tell a project's
+    // own module from a dependency.
+    fn project_fixture() -> crate::scratch::Scratch {
+        let root = crate::scratch::Scratch::new("sond_proj");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_program_covers_the_module_of_its_own_that_nothing_else_measures() {
+        // The gate is worth what it measures. Before this, the scope of a program entry was its
+        // OWN functions and nothing else, on the assumption that each module it includes is
+        // already measured by its own `_test.snd`. Nothing checked that assumption, so a module
+        // without one was in nobody's denominator: `sond test main.snd` covered one function of
+        // its own and printed 100% while the rest of the program went unread.
+        let root = project_fixture();
+        std::fs::write(
+            root.join("src/motor.snd"),
+            "fn arranca() -> i64 { 1 }\nfn para() -> i64 { 2 }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.snd"),
+            "include \"motor.snd\"\nfn mia() -> i64 { arranca() }\ntest \"t\" { }\n",
+        )
+        .unwrap();
+        let (_, scope) = resolve_includes_scoped(&root.join("src/main.snd")).unwrap();
+        assert!(scope.contains("mia"), "its own functions, as before");
+        assert!(
+            scope.contains("arranca") && scope.contains("para"),
+            "and the module nobody else measures: {scope:?}"
+        );
+    }
+
+    #[test]
+    fn the_files_an_entry_answers_for_are_reported_alongside_the_scope() {
+        // Names alone cannot answer "is anybody measuring this file". Somebody has to walk a tree
+        // and ask, of every module in it, which entry counts it -- and the answer has to come from
+        // the same decision the gate runs on, not from a second copy of the rule that drifts.
+        let root = project_fixture();
+        std::fs::write(root.join("src/motor.snd"), "fn arranca() -> i64 { 1 }\n").unwrap();
+        std::fs::write(root.join("src/frenos.snd"), "fn frena() -> i64 { 2 }\n").unwrap();
+        std::fs::write(root.join("src/frenos_test.snd"), "include \"frenos.snd\"\ntest \"t\" { }\n")
+            .unwrap();
+        std::fs::write(
+            root.join("src/main.snd"),
+            "include \"motor.snd\"\ninclude \"frenos.snd\"\nfn mia() -> i64 { arranca() }\ntest \"t\" { }\n",
+        )
+        .unwrap();
+
+        let r = resolve_includes_scoped_located(&root.join("src/main.snd")).unwrap();
+        let nombres: HashSet<String> = r
+            .cov_files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(nombres.contains("main.snd"), "the entry answers for itself: {nombres:?}");
+        assert!(nombres.contains("motor.snd"), "and for the module nobody else measures");
+        assert!(
+            !nombres.contains("frenos.snd"),
+            "but not for the one that has its own test file: {nombres:?}"
+        );
+
+        // A test file answers for what it includes, never for its own scaffolding.
+        let t = resolve_includes_scoped_located(&root.join("src/frenos_test.snd")).unwrap();
+        let nombres: HashSet<String> = t
+            .cov_files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(nombres.contains("frenos.snd"), "the subject: {nombres:?}");
+        assert!(!nombres.contains("frenos_test.snd"), "not the harness: {nombres:?}");
+    }
+
+    #[test]
+    fn a_test_file_does_not_answer_for_a_module_that_has_a_gate_of_its_own() {
+        // Measured on the standard library: `webdav/xml_test.snd` came out at 77% -- under the
+        // gate -- carrying five functions of `bytes.snd`, which `bytes_test.snd` already covers
+        // next door. The only way to pass was to write tests for `bytes` inside the xml suite,
+        // which is duplicated work AND a figure that stops meaning "what this entry answers for".
+        let root = project_fixture();
+        std::fs::write(root.join("src/xml.snd"), "fn parse() -> i64 { 1 }\n").unwrap();
+        std::fs::write(root.join("src/bytes.snd"), "fn push() -> i64 { 2 }\n").unwrap();
+        std::fs::write(root.join("src/bytes_test.snd"), "include \"bytes.snd\"\ntest \"t\" { }\n")
+            .unwrap();
+        std::fs::write(
+            root.join("src/xml_test.snd"),
+            "include \"xml.snd\"\ninclude \"bytes.snd\"\ntest \"t\" { }\n",
+        )
+        .unwrap();
+
+        let r = resolve_includes_scoped_located(&root.join("src/xml_test.snd")).unwrap();
+        assert!(r.cov_scope.contains("parse"), "the subject is in: {:?}", r.cov_scope);
+        assert!(
+            !r.cov_scope.contains("push"),
+            "a module measured by its own gate is not counted twice: {:?}",
+            r.cov_scope
+        );
+        let nombres: HashSet<String> = r
+            .cov_files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(nombres.contains("xml.snd"), "{nombres:?}");
+        assert!(!nombres.contains("bytes.snd"), "{nombres:?}");
+    }
+
+    #[test]
+    fn a_test_file_whose_includes_are_all_measured_elsewhere_delegates_instead_of_answering() {
+        // An integration suite over modules that all have gates of their own answers for nothing
+        // NEW, and that is not a hole: every one of those modules is already in somebody's
+        // denominator. Measuring them a second time here would make the figure mean "what this
+        // file happens to include". So it says so, and the gate has nothing to fail on.
+        //
+        // The distinction that matters: an entry whose denominator is empty because it DELEGATED
+        // it, against one that is empty because it includes nothing measurable at all. The second
+        // is a hole; the first is the system working.
+        let root = project_fixture();
+        std::fs::write(root.join("src/bytes.snd"), "fn push() -> i64 { 2 }\n").unwrap();
+        std::fs::write(root.join("src/bytes_test.snd"), "include \"bytes.snd\"\ntest \"t\" { }\n")
+            .unwrap();
+        std::fs::write(
+            root.join("src/integracion_test.snd"),
+            "include \"bytes.snd\"\ntest \"t\" { }\n",
+        )
+        .unwrap();
+
+        let r = resolve_includes_scoped_located(&root.join("src/integracion_test.snd")).unwrap();
+        assert!(
+            !r.cov_scope.contains("push"),
+            "a module measured by its own gate is not counted twice: {:?}",
+            r.cov_scope
+        );
+        assert!(r.cov_delegated, "and the empty denominator is a delegation, not a hole");
+    }
+
+    #[test]
+    fn an_entry_that_includes_nothing_measurable_is_not_delegating() {
+        // Nobody else is measuring anything on its behalf, so an empty denominator here is the
+        // hole `x509/realcert_test.snd` was mistaken for: the gate has to fail on it.
+        let root = project_fixture();
+        std::fs::write(root.join("src/solo_test.snd"), "test \"t\" { }\n").unwrap();
+
+        let r = resolve_includes_scoped_located(&root.join("src/solo_test.snd")).unwrap();
+        assert!(!r.cov_delegated, "nothing was handed to anyone else: {:?}", r.cov_scope);
+    }
+
+    #[test]
+    fn a_module_with_its_own_test_file_stays_out_of_the_programs_denominator() {
+        // The other half: a module that IS measured elsewhere must not be counted twice, or every
+        // program would drag its whole tested tree into its own number and the figure would stop
+        // meaning "the code this entry answers for".
+        let root = project_fixture();
+        std::fs::write(root.join("src/motor.snd"), "fn arranca() -> i64 { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("src/motor_test.snd"),
+            "include \"motor.snd\"\ntest \"t\" { }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.snd"),
+            "include \"motor.snd\"\nfn mia() -> i64 { arranca() }\ntest \"t\" { }\n",
+        )
+        .unwrap();
+        let (_, scope) = resolve_includes_scoped(&root.join("src/main.snd")).unwrap();
+        assert!(scope.contains("mia"), "its own functions");
+        assert!(
+            !scope.contains("arranca"),
+            "motor_test.snd already answers for it: {scope:?}"
+        );
+    }
     #[test]
     fn a_program_is_still_measured_on_its_own_functions() {
-        // The counterpart: a program that includes the standard library is not on the hook
-        // for covering the standard library.
-        let lib = tmp("sond_progdep.snd", "fn dep() -> i64 { 1 }");
-        let libname = lib.file_name().unwrap().to_str().unwrap();
-        let entry = tmp(
-            "sond_prog.snd",
-            &format!("include \"{libname}\"\nfn mine() -> i64 {{ dep() }}\ntest \"t\" {{ }}"),
-        );
-        let (_, scope) = resolve_includes_scoped(&entry).unwrap();
+        // The counterpart: a program that includes the standard library is not on the hook for
+        // covering the standard library. The dependency has to LIVE like one for this to be the
+        // question -- under a `lib/` root rather than beside the entry -- or the fixture is a
+        // program's own module wearing the name of a dependency, which is the case above.
+        let root = project_fixture();
+        std::fs::write(root.join("lib/dep.snd"), "fn dep() -> i64 { 1 }\n").unwrap();
+        std::fs::write(
+            root.join("src/prog.snd"),
+            "include \"dep.snd\"\nfn mine() -> i64 { dep() }\ntest \"t\" { }\n",
+        )
+        .unwrap();
+        let (_, scope) = resolve_includes_scoped(&root.join("src/prog.snd")).unwrap();
         assert!(scope.contains("mine"), "its own functions");
         assert!(!scope.contains("dep"), "not its dependencies");
     }
@@ -1551,7 +1870,7 @@ mod tests {
         // and `module::name` says which one you mean. Resolved here, at include time, into the
         // symbol that module actually defines -- so the lexer, the parser and the code generator
         // never see a `::` and nothing downstream changes.
-        let root = std::env::temp_dir().join(format!("sond_ns1_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_ns1");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("dns.snd"), "pub fn resolve() -> i64 { 7 }").unwrap();
         let entry = root.join("main.snd");
@@ -1575,7 +1894,7 @@ mod tests {
     fn two_modules_may_export_the_same_name_when_each_use_says_which() {
         // The point of the whole exercise. Today two libraries that both export `read` cannot be
         // used by one program at all: it is a hard "defined more than once". Qualified, they can.
-        let root = std::env::temp_dir().join(format!("sond_ns2_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_ns2");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("disk.snd"), "pub fn read() -> i64 { 1 }").unwrap();
         std::fs::write(root.join("net.snd"), "pub fn read() -> i64 { 2 }").unwrap();
@@ -1602,7 +1921,7 @@ mod tests {
         // The diagnostic is the feature. Left alone, the ambiguous name would compile to
         // something undefined and the error would land in the code generator, naming a mangled
         // symbol nobody wrote.
-        let root = std::env::temp_dir().join(format!("sond_ns3_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_ns3");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("disk.snd"), "pub fn read() -> i64 { 1 }").unwrap();
         std::fs::write(root.join("net.snd"), "pub fn read() -> i64 { 2 }").unwrap();
@@ -1625,7 +1944,7 @@ mod tests {
 
     #[test]
     fn a_qualified_name_cannot_reach_a_module_that_is_not_included() {
-        let root = std::env::temp_dir().join(format!("sond_ns4_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_ns4");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("dns.snd"), "pub fn resolve() -> i64 { 7 }").unwrap();
         let entry = root.join("main.snd");
@@ -1638,7 +1957,7 @@ mod tests {
     fn a_qualified_name_cannot_reach_a_private_helper() {
         // `pub` is what a module offers; qualifying must not be a way around it, or the
         // visibility that already exists would stop meaning anything the moment `::` landed.
-        let root = std::env::temp_dir().join(format!("sond_ns5_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_ns5");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("dns.snd"),
@@ -1665,7 +1984,7 @@ mod tests {
         // survives is the include's -- and the old code renamed BOTH definitions to
         // `name__f<id>`, i.e. a `global `O_RDWR__f1` is declared more than once` duplicate. The
         // entry's own definition must stay bare; only the include's is file-scoped.
-        let root = std::env::temp_dir().join(format!("sond_entglob_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_entglob");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.snd"), "let O_RDWR = 2\npub fn a() -> i64 { O_RDWR }").unwrap();
         let entry = root.join("main.snd");
@@ -1705,7 +2024,7 @@ mod tests {
         // private module-level global of the same name (both depth >= 1, both with ids). Each
         // must be file-scoped to its own definition and its own uses -- no duplicate, no
         // rebinding where one file starts reading the other's value.
-        let root = std::env::temp_dir().join(format!("sond_nestglob_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_nestglob");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("io.snd"), "let O_ROLE = 1\npub fn io_role() -> i64 { O_ROLE }").unwrap();
         std::fs::write(
@@ -1758,7 +2077,7 @@ mod tests {
     #[test]
     fn a_qualified_name_for_a_module_without_exports_fails_resolution() {
         // A module that exports nothing cannot be queried for any name via `::`.
-        let root = std::env::temp_dir().join(format!("sond_ns6_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_ns6");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("empty.snd"), "// no functions, no exports").unwrap();
         let entry = root.join("main.snd");
@@ -1773,10 +2092,10 @@ mod tests {
 
     // ── import directive tests ────────────────────────────────────────────
 
-    // CP1: `import strings` empalma el módulo y `strings::itoa(7)` resuelve.
+    // CP1: `import strings` splices the module in and `strings::itoa(7)` resolves.
     #[test]
     fn an_import_empalmes_the_module_and_qualified_name_resolves() {
-        let root = std::env::temp_dir().join(format!("sond_imp1_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_imp1");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/strings.snd"),
@@ -1800,10 +2119,10 @@ mod tests {
         );
     }
 
-    // CP2: `import strings as str` alias renombra el módulo en ese fichero.
+    // CP2: `import strings as str` renames the module inside that file.
     #[test]
     fn an_import_as_alias_renames_the_module_and_original_name_is_gone() {
-        let root = std::env::temp_dir().join(format!("sond_imp2_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_imp2");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/strings.snd"),
@@ -1842,7 +2161,7 @@ mod tests {
     // CP3: A private function of the imported module is NOT reachable via `::`.
     #[test]
     fn a_private_fn_of_an_imported_module_is_not_reachable() {
-        let root = std::env::temp_dir().join(format!("sond_imp3_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_imp3");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/math.snd"),
@@ -1866,7 +2185,7 @@ mod tests {
     // saying it must be declared.
     #[test]
     fn an_import_of_an_unknown_name_is_a_hard_error_with_line() {
-        let root = std::env::temp_dir().join(format!("sond_imp4_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_imp4");
         std::fs::create_dir_all(&root).unwrap();
         let entry = root.join("main.snd");
         std::fs::write(
@@ -1892,7 +2211,7 @@ mod tests {
     // CP5: Importing the same module twice does not duplicate definitions.
     #[test]
     fn importing_the_same_module_twice_does_not_duplicate() {
-        let root = std::env::temp_dir().join(format!("sond_imp5_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_imp5");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/strings.snd"),
@@ -1916,7 +2235,7 @@ mod tests {
     // CP6: An `import` and an `include` of the same file do not define twice.
     #[test]
     fn import_and_include_of_the_same_file_dedup() {
-        let root = std::env::temp_dir().join(format!("sond_imp6_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_imp6");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/strings.snd"),
@@ -1940,7 +2259,7 @@ mod tests {
     // CP7: `import` only valid at top level; inside a function is an error with line.
     #[test]
     fn an_import_inside_a_function_is_an_error_with_line() {
-        let root = std::env::temp_dir().join(format!("sond_imp7_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_imp7");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/strings.snd"),
@@ -1967,7 +2286,7 @@ mod tests {
     // CP8: An alias that clashes with an already-visible module name is an error.
     #[test]
     fn an_alias_that_clashes_with_a_visible_module_name_is_an_error() {
-        let root = std::env::temp_dir().join(format!("sond_imp8_{}_{}", std::process::id(), uid()));
+        let root = crate::scratch::Scratch::new("sond_imp8");
         std::fs::create_dir_all(root.join("lib")).unwrap();
         std::fs::write(
             root.join("lib/strings.snd"),
@@ -2001,7 +2320,7 @@ mod tests {
     /// entry path + combined text + a handle to the map.
     fn three_include_fixture() -> (PathBuf, ResolvedProgram) {
         let root =
-            std::env::temp_dir().join(format!("sond_spans_{}_{}", std::process::id(), uid()));
+            crate::scratch::Scratch::new("sond_spans");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.snd"), "fn a_ok() -> i64 { 1 }\n").unwrap();
         std::fs::write(
@@ -2070,7 +2389,7 @@ mod tests {
         // `shared__f<id>`, and every column after it shifts. The map has to undo that, so a
         // position landing anywhere inside the mangled name points at the name the author wrote.
         let root =
-            std::env::temp_dir().join(format!("sond_spancol_{}_{}", std::process::id(), uid()));
+            crate::scratch::Scratch::new("sond_spancol");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.snd"), "fn shared() -> i64 { 1 }\n").unwrap();
         std::fs::write(root.join("b.snd"), "fn shared() -> i64 { 2 }\n").unwrap();
@@ -2116,7 +2435,7 @@ mod tests {
         // The graph pass tokenizes every file to learn the names it defines; the refusal used to
         // escape with a line number in a nameless file, which the driver then blamed on the entry.
         let root =
-            std::env::temp_dir().join(format!("sond_spanlex_{}_{}", std::process::id(), uid()));
+            crate::scratch::Scratch::new("sond_spanlex");
         std::fs::create_dir_all(&root).unwrap();
         let bad = root.join("bad.snd");
         std::fs::write(&bad, "fn ok() -> i64 { 1 }\nfn bad() -> i64 { 1 ? 2 }\n").unwrap();

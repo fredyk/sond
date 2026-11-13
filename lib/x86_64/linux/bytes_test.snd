@@ -176,3 +176,21 @@ test "bytes_from_str with a variable gives the same UTF-8 bytes as the literal" 
     assert_eq(bytes_get(b, 2), 177)
     assert_eq(bytes_get(b, 3), 98)
 }
+
+// Writing a Bytes to a descriptor (write(2), a socket) needs the address of its backing
+// buffer, not a copy. bytes_data is that address; callers use it instead of reaching into
+// the handle's header themselves.
+test "bytes_data is the address of the buffer's first byte" {
+    let b = bytes_from_str("ABC")
+    assert_ne(bytes_data(b), 0)
+    assert_eq(peek8(bytes_data(b)), 65)
+    assert_eq(peek8(bytes_data(b) + 1), 66)
+    assert_eq(peek8(bytes_data(b) + 2), 67)
+}
+
+test "bytes_data tracks the buffer as it grows" {
+    let b = bytes_new()
+    let mut i = 0
+    for i < 64 { bytes_push(b, i & 255)  i = i + 1 }
+    assert_eq(peek8(bytes_data(b) + 63), 63)
+}

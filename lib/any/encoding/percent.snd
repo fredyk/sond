@@ -1,0 +1,128 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Jhon Magdalena Vila and the Sond contributors
+//
+// lib/any/encoding/percent.snd: percent-encoding and decoding (RFC 3986), with the
+// application/x-www-form-urlencoded variation that treats '+' as a space.
+//
+// The two flavours are separate functions on purpose: the same '+' is a literal plus in
+// a query string and a space in a form body, and choosing the wrong one silently changes
+// a parameter's value. Decoding rejects a truncated '%' (fewer than two hex digits left)
+// and a '%' followed by a non-hex digit, so a malformed escape fails instead of leaking
+// the raw bytes through.
+//
+// Encoding keeps the RFC 3986 unreserved set (ALPHA / DIGIT / '-' / '.' / '_' / '~')
+// as-is, escapes everything else as an uppercase %XX, and in the form variant maps a
+// space to '+' (a literal '+' becomes %2B). Buffers are caller-provided:
+// decoding writes at most `n` bytes, encoding at most `3 * n` (measured here, not
+// guessed, since the worst case is every input byte a three-character escape).
+//
+//   pct_decode(text, n, out)       query: '%XX' decoded, '+' kept
+//   pct_decode_form(text, n, out)  form:  '%XX' decoded, '+' -> space
+//   pct_encode(text, n, out)       query: space -> %20
+//   pct_encode_form(text, n, out)  form:  space -> '+'
+// Decode returns the byte count or -1 on malformed input; encode returns the byte count.
+
+let PCT_HEX_UP = "0123456789ABCDEF"
+
+// The 4-bit value of one hexadecimal digit, or -1 if the character is not one.
+fn pct_hexval(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }          // 0-9
+    if c >= 65 && c <= 70 { return c - 55 }          // A-F
+    if c >= 97 && c <= 102 { return c - 87 }         // a-f
+    0 - 1
+}
+
+// 1 if `c` is in the RFC 3986 unreserved set, else 0. These are the bytes an encoder may
+// leave in the clear; every other byte becomes a %XX triplet.
+fn pct_unreserved(c: i64) -> i64 {
+    if c >= 65 && c <= 90 { return 1 }               // A-Z
+    if c >= 97 && c <= 122 { return 1 }              // a-z
+    if c >= 48 && c <= 57 { return 1 }               // 0-9
+    if c == 45 || c == 46 || c == 95 || c == 126 { return 1 }   // - . _ ~
+    0
+}
+
+// Percent-decoding with a flag for the form variant. A small state machine over one input
+// byte per iteration keeps the output counter provably within the input length: the
+// decoded text is never longer than its source.
+fn pct_decode_impl(src: i64, n: i64, out: i64, form: i64) -> i64 {
+    let s: u8[n] = src
+    let o: u8[n] = out
+    let mut w = 0
+    let mut st = 0
+    let mut hi = 0
+    let mut bad = 0
+    let mut i = 0
+    for i < n invariant { w <= i } {
+        let c = s[i]
+        let sst = st
+        let mut emit = c
+        let mut doemit = 1
+        if sst == 0 && c == 37 { doemit = 0  st = 1 }                       // '%'
+        if sst == 0 && c != 37 && form == 1 && c == 43 { emit = 32 }         // '+' -> space
+        let h = pct_hexval(c)
+        if sst == 1 && h < 0 { bad = 1 }
+        if sst == 1 && h >= 0 { doemit = 0  hi = h  st = 2 }
+        let l = pct_hexval(c)
+        if sst == 2 && l < 0 { bad = 1 }
+        if sst == 2 && l >= 0 { emit = (hi * 16 + l) & 255  st = 0 }
+        if doemit == 1 { o[w] = emit  w = w + 1 }
+        i = i + 1
+    }
+    if st != 0 { bad = 1 }                                                   // truncated '%'
+    if bad == 1 { return 0 - 1 }
+    w
+}
+
+pub fn pct_decode(src: i64, n: i64, out: i64) -> i64 {
+    pct_decode_impl(src, n, out, 0)
+}
+
+pub fn pct_decode_form(src: i64, n: i64, out: i64) -> i64 {
+    pct_decode_impl(src, n, out, 1)
+}
+
+// Percent-encoding with a flag for the form variant. It writes a three-slot expanded form
+// in place, then compacts it: a reserved byte is represented by itself or its %XX triplet,
+// and the two unused slots (of a one-byte token) are zero. No encoded byte is ever zero --
+// a NUL in the input is escaped as %00 -- so zero is an unambiguous filler.
+fn pct_encode_impl(src: i64, n: i64, out: i64, form: i64) -> i64 {
+    let hex: u8[16] = PCT_HEX_UP
+    let s: u8[n] = src
+    let m = n * 3
+    let o: u8[m] = out
+    for i in 0..n {
+        let c = s[i]
+        if form == 1 && c == 32 {
+            o[i * 3] = 43                                 // ' '
+            o[i * 3 + 1] = 0
+            o[i * 3 + 2] = 0
+        } else {
+            if pct_unreserved(c) == 1 {
+                o[i * 3] = c
+                o[i * 3 + 1] = 0
+                o[i * 3 + 2] = 0
+            } else {
+                o[i * 3] = 37                             // '%'
+                o[i * 3 + 1] = hex[(c >> 4) & 15]
+                o[i * 3 + 2] = hex[c & 15]
+            }
+        }
+    }
+    let mut w = 0
+    let mut j = 0
+    for j < m invariant { w <= j } {
+        let c = o[j]
+        if c != 0 { o[w] = c  w = w + 1 }
+        j = j + 1
+    }
+    w
+}
+
+pub fn pct_encode(src: i64, n: i64, out: i64) -> i64 {
+    pct_encode_impl(src, n, out, 0)
+}
+
+pub fn pct_encode_form(src: i64, n: i64, out: i64) -> i64 {
+    pct_encode_impl(src, n, out, 1)
+}

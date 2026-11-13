@@ -38,3 +38,44 @@ test "absent key returns the default" {
     let __s6_37: string = "b"
     assert_eq(map_get(m, bytes_from_cstr(__s6_37.utf8), 99), 99)
 }
+
+// Iteration is public API: callers that need to walk a map (headers, a route table) must not
+// reach into its two vecs themselves. These functions are the only supported way in, so the
+// layout (parallel keys/vals) stays this module's private business.
+
+test "a new map has length zero" {
+    let m = map_new()
+    assert_eq(map_len(m), 0)
+}
+
+test "map_len counts the entries" {
+    let m = map_new()
+    let __lit5: string = "a"
+    map_set(m, bytes_from_cstr(__lit5.utf8), 1)
+    let __lit6: string = "b"
+    map_set(m, bytes_from_cstr(__lit6.utf8), 2)
+    assert_eq(map_len(m), 2)
+}
+
+test "map_len does not grow when a key is updated in place" {
+    let m = map_new()
+    let __lit7: string = "k"
+    map_set(m, bytes_from_cstr(__lit7.utf8), 1)
+    let __lit8: string = "k"
+    map_set(m, bytes_from_cstr(__lit8.utf8), 2)
+    assert_eq(map_len(m), 1)
+}
+
+test "map_key_at and map_val_at walk the entries in insertion order" {
+    let m = map_new()
+    let __lit9: string = "width"
+    map_set(m, bytes_from_cstr(__lit9.utf8), 640)
+    let __lit10: string = "height"
+    map_set(m, bytes_from_cstr(__lit10.utf8), 480)
+    let __s7_68: string = "width"
+    assert_eq(bytes_eq(map_key_at(m, 0), bytes_from_cstr(__s7_68.utf8)), 1)
+    assert_eq(map_val_at(m, 0), 640)
+    let __s8_70: string = "height"
+    assert_eq(bytes_eq(map_key_at(m, 1), bytes_from_cstr(__s8_70.utf8)), 1)
+    assert_eq(map_val_at(m, 1), 480)
+}

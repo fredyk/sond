@@ -151,11 +151,11 @@ type Percent = f64
     -- at each construction of the type
 
 -- A type with a compound invariant
-type RangoFecha = {
-    inicio: Fecha,
-    fin: Fecha
+type DateRange = {
+    start: Date,
+    end: Date
 }
-    where self.inicio <= self.fin
+    where self.start <= self.end
     -- Destructuring in the where has access to fields
 ```
 
@@ -253,19 +253,19 @@ There are no mutable global variables in Sond. Shared state is passed explicitly
 -- global mutable_counter = 0  -- PROHIBITED
 
 -- Instead, state is an explicit parameter
-type EstadoContador = { mutable valor: i64 }
+type CounterState = { mutable value: i64 }
 
-fn incrementar(estado: &mut EstadoContador) -> ()
-    ensures estado.valor == old(estado.valor) + 1
+fn increment(state: &mut CounterState) -> ()
+    ensures state.value == old(state.value) + 1
     = impl:
-        estado.valor = estado.valor + 1
+        state.value = state.value + 1
 ```
 
 #### 3.3.3 Explicit effects in the signature
 
 ```sond
 -- A function that performs I/O declares it in its type
-fn leer_configuracion(ruta: Ruta) -> Result<Configuracion, ErrorIO>
+fn read_config(path: Path) -> Result<Config, IoError>
     effects: [IO]
     -- The compiler knows this function has I/O effects
     -- and can verify it's not called in pure contexts
@@ -274,7 +274,7 @@ fn leer_configuracion(ruta: Ruta) -> Result<Configuracion, ErrorIO>
 fn calcular_total(items: List<Item>) -> Money
     -- Without `effects: [IO]`, the compiler rejects calls to functions with I/O
     = impl:
-        sum(items, fn(i) => i.precio)  -- correct
+        sum(items, fn(i) => i.price)  -- correct
         leer_archivo("config.txt")     -- error: undeclared IO effect
 ```
 
@@ -299,23 +299,23 @@ phantom type CapEnv        -- environment variable access
 
 -- formatInvoice can only do what its capabilities allow
 fn format_invoice(
-    factura: Factura,
+    invoice: Invoice,
     _red: CapRed  -- IF it received CapRed, it CAN do network I/O
 ) -> Result<Bytes, ErrorFormato>
     effects: [IO]
     = impl:
         -- OK: has CapRed, can send
-        enviar_a_servidor(factura)
+        send_to_server(invoice)
 
 -- if it does NOT receive CapRed, it's physically incapable of networking
 fn format_invoice_local(
-    factura: Factura
+    invoice: Invoice
     -- NO CapRed parameter
 ) -> Result<Bytes, ErrorFormato>
     -- Without CapRed, the compiler rejects any calls to functions requiring CapRed
     = impl:
-        enviar_a_servidor(factura)  -- error: CapRed not available in scope
-        generar_pdf(factura)        -- OK if CapFS is available
+        send_to_server(invoice)  -- error: CapRed not available in scope
+        generar_pdf(invoice)        -- OK if CapFS is available
 ```
 
 #### 3.4.2 Static sandbox
@@ -325,7 +325,7 @@ AI-generated code runs in a sandbox defined by its capabilities:
 ```sond
 -- An AI component that processes user data
 fn procesar_entrada_usuario(
-    datos: DatosUsuario,
+    data: DatosUsuario,
     _cap_db: CapDB,          -- can read/write DB
     _cap_env: CapEnv          -- can read config
     -- NO CapRed: cannot send data to the Internet
@@ -337,8 +337,8 @@ fn procesar_entrada_usuario(
         -- it cannot make network calls, cannot write files,
         -- can only access DB and Env
         let config = leer_env("API_KEY")    -- OK: has CapEnv
-        let registro = buscar_en_db(datos.id)  -- OK: has CapDB
-        Ok(procesar(registro, config))
+        let registro = find_in_db(data.id)  -- OK: has CapDB
+        Ok(process(registro, config))
 ```
 
 This solves the fundamental problem of AI-generated code: you don't need to trust that AI didn't inject a hidden `curl` or a malicious `write`. If it doesn't have the capability, the compiler rejects it. It's not a convention: it's a theorem.
@@ -543,7 +543,7 @@ fn obtener_item(items: List<Item>, idx: Indice) -> Item
 type Percent = f64 where self >= 0.0 and self <= 100.0
 
 -- Dependent types for dates
-type FechaNoFutura = Fecha where self <= fecha_actual()
+type NotFutureDate = Date where self <= today()
 ```
 
 ### 5.3 Effect system
@@ -571,7 +571,7 @@ fn procesar_pago(
 ) -> Result<ConfirmacionPago, ErrorPago>
     effects: [Red, DB, Crypto]
     = impl:
-        let hash = sha256(pago.datos)    -- OK: has CapCrypto
+        let hash = sha256(pago.data)    -- OK: has CapCrypto
         let registro = guardar_en_db(pago) -- OK: has CapDB
         let confirmacion = enviar_a_pasarela(pago) -- OK: has CapRed
         Ok(Confirmacion { hash, registro, confirmacion })
@@ -581,19 +581,19 @@ fn procesar_pago(
 
 ```sond
 -- Universal: for every i in a range, a property holds
-fn ordenada(lista: List<i32>) -> (resultado: bool)
-    ensures resultado == forall(i in 0..lista.len()-1): lista[i] <= lista[i+1]
+fn sorted(list: List<i32>) -> (result: bool)
+    ensures result == forall(i in 0..list.len()-1): list[i] <= list[i+1]
 
 -- Existential: at least one element satisfies
-fn contiene(lista: List<i32>, valor: i32) -> (resultado: bool)
-    ensures resultado == exists(i in 0..lista.len()): lista[i] == valor
+fn contains(list: List<i32>, value: i32) -> (result: bool)
+    ensures result == exists(i in 0..list.len()): list[i] == value
 
 -- Combination of quantifiers
-fn todos_positivos_o_album_vacio(album: Album) -> (resultado: bool)
+fn all_bright_or_empty_album(album: Album) -> (result: bool)
     ensures:
-        resultado == (
-            album.fotos.len() == 0
-            or forall(i in 0..album.fotos.len()): album.fotos[i].brillo > 0
+        result == (
+            album.photos.len() == 0
+            or forall(i in 0..album.photos.len()): album.photos[i].brightness > 0
         )
 ```
 
@@ -622,7 +622,7 @@ phantom type CapUI
 
 -- Capabilities are passed as parameters starting with _
 fn funcion_segura(
-    datos: DatosEntrada,
+    data: DatosEntrada,
     _cap_fs: CapFS,     -- can read files
     _cap_env: CapEnv    -- can read config
 ) -> Result<DatosSalida, Error>
@@ -630,7 +630,7 @@ fn funcion_segura(
     = impl:
         let config = leer_env("API_KEY")     -- OK: has CapEnv
         let reglas = leer_archivo("rules.txt") -- OK: has CapFS
-        Ok(procesar(datos, config, reglas))
+        Ok(process(data, config, reglas))
 ```
 
 ### 6.2 Capability composition
@@ -638,15 +638,15 @@ fn funcion_segura(
 ```sond
 -- A component that composes capabilities from others
 fn componente_completo(
-    datos: DatosUsuario,
+    data: DatosUsuario,
     _cap_db: CapDB,
     _cap_red: CapRed,
     _cap_crypto: CapCrypto
 ) -> Result<Respuesta, Error>
     effects: [DB, Red, Crypto]
     = impl:
-        let hash = sha256(datos)             -- OK: has CapCrypto
-        let registro = buscar_en_db(hash)    -- OK: has CapDB
+        let hash = sha256(data)             -- OK: has CapCrypto
+        let registro = find_in_db(hash)    -- OK: has CapDB
         let verificacion = verificar_con_api(registro) -- OK: has CapRed
         Ok(construir_respuesta(registro, verificacion))
 
@@ -657,7 +657,7 @@ fn solo_lectura(
 ) -> Result<Registro, Error>
     effects: [DB]
     = impl:
-        let registro = buscar_en_db(id)  -- OK
+        let registro = find_in_db(id)  -- OK
         Ok(registro)
         -- Cannot do network, crypto, FS, anything else
 ```
@@ -669,7 +669,7 @@ The capability model solves the fundamental problem:
 ```sond
 -- AI-generated code: the compiler guarantees it's safe
 fn procesar_datos_sensibles(
-    datos: DatosPersonales,
+    data: DatosPersonales,
     _cap_db: CapDB          -- can store in DB
     -- NO CapRed: CANNOT send data to the Internet
     -- NO CapFS: CANNOT write files
@@ -680,8 +680,8 @@ fn procesar_datos_sensibles(
         -- The AI implements this; the compiler guarantees that
         -- data never leaves the DB, never gets written to disk,
         -- never shows up in UI
-        let hash = hash_datos(datos)
-        guardar_en_db(hash, datos)
+        let hash = hash_datos(data)
+        guardar_en_db(hash, data)
         Ok(())
         -- If the AI tried something malicious, the compiler rejects it
 ```
@@ -698,22 +698,22 @@ The `@server`/`@client` location is a **type**, not a decorative annotation. The
 -- A module that lives on the server
 modulo api_usuarios {
     @server
-    fn obtener_usuario(id: IdUsuario) -> Result<Usuario, ErrorUsuario>
+    fn obtener_usuario(id: IdUsuario) -> Result<User, ErrorUsuario>
         effects: [DB]
         -- Only accessible from the server
         -- The compiler generates the HTTP/JSON endpoint automatically
         = impl:
-            buscar_en_db(id)
+            find_in_db(id)
 
     -- A module that lives on the client
     @client
-    fn mostrar_usuario(id: IdUsuario) -> UI<Usuario>
+    fn mostrar_usuario(id: IdUsuario) -> UI<User>
         effects: [Red]
         -- Only accessible from the browser
         -- The compiler generates the fetch call automatically
         = impl:
-            let usuario = fetch_api("/usuarios/" + id.to_string())
-            render_usuario(usuario)
+            let user = fetch_api("/users/" + id.to_string())
+            render_user(user)
 }
 
 -- The compiler generates:
@@ -731,18 +731,18 @@ Reactivity is a **language effect** with a dependency graph resolved at compile 
 ```sond
 -- A reactive component
 @client
-fn contador() -> UI<i32>
+fn counter() -> UI<i32>
     reactive:
-        let mutable contador = 0  -- reactive state
+        let mutable counter = 0  -- reactive state
 
         -- The compiler builds the dependency graph
         -- and automatically updates the UI when it changes
         = impl:
             div(
-                texto("Contador: " + contador.to_string()),
-                boton("Incrementar", fn() => contador += 1)
+                text("Counter: " + counter.to_string()),
+                button("Increment", fn() => counter += 1)
             )
-            -- When contador changes, only the affected
+            -- When counter changes, only the affected
             -- text is re-rendered, not the entire component
 ```
 
@@ -752,27 +752,27 @@ Async functions are **algebraic effects** with handlers, without function colori
 
 ```sond
 -- A function that can be sync or async depending on context
-fn cargar_datos(id: IdDato) -> Result<Datos, Error>
+fn load_data(id: DataId) -> Result<Data, Error>
     effects: [Temporal]
     -- The compiler generates sync OR async depending on the caller
     = impl:
-        let datos = buscar_en_db(id)
-        Ok(datos)
+        let data = find_in_db(id)
+        Ok(data)
 
 -- Sync caller (server with local DB)
-fn procesar_sync(datos: Datos) -> Result<Procesado, Error>
+fn process_sync(data: Data) -> Result<Processed, Error>
     effects: [DB]
     = impl:
-        let datos = cargar_datos(datos.id)  -- sync: local DB
-        Ok(procesar(datos))
+        let data = load_data(data.id)  -- sync: local DB
+        Ok(process(data))
 
 -- Async caller (browser with fetch)
 @client
-fn procesar_async(datos: Datos) -> UI<Procesado>
+fn process_async(data: Data) -> UI<Processed>
     effects: [Red]
     = impl:
-        let datos = cargar_datos(datos.id)  -- async: fetch to API
-        render(procesar(datos))
+        let data = load_data(data.id)  -- async: fetch to API
+        render(process(data))
 ```
 
 ### 7.4 Single-artifact deployment
@@ -785,16 +785,16 @@ A `.sond` file compiles to:
 
 ```sond
 -- Derived types
-type Usuario = {
+type User = {
     id: u64,
-    nombre: String,
+    name: String,
     email: String
-} where self.email.contiene("@")
+} where self.email.contains("@")
 
 -- The compiler generates:
--- CREATE TABLE usuarios (
+-- CREATE TABLE users (
 --     id BIGINT PRIMARY KEY,
---     nombre TEXT NOT NULL,
+--     name TEXT NOT NULL,
 --     email TEXT NOT NULL CHECK (email LIKE '%@%')
 -- );
 ```
@@ -812,7 +812,7 @@ Declarative sub-language for layouts, styles, and static data structures. It is 
 ```sond
 -- Declarative template (level 1)
 plantilla "FacturaLayout" = """
-    <div class="factura">
+    <div class="invoice">
         <h1>Invoice {{number}}</h1>
         <p>Date: {{date}}</p>
         <table>
@@ -833,10 +833,10 @@ plantilla "FacturaLayout" = """
 
 -- Declarative style (level 1)
 estilo FacturaEstilo = """
-    .factura { font-family: sans-serif; padding: 2rem; }
-    .factura h1 { color: #333; }
-    .factura table { width: 100%; border-collapse: collapse; }
-    .factura .fila { border-bottom: 1px solid #ddd; }
+    .invoice { font-family: sans-serif; padding: 2rem; }
+    .invoice h1 { color: #333; }
+    .invoice table { width: 100%; border-collapse: collapse; }
+    .invoice .fila { border-bottom: 1px solid #ddd; }
 """
 ```
 
@@ -846,22 +846,22 @@ Sub-language for database queries. Queries are **first-class types** that are st
 
 ```sond
 -- Typed query (level 2)
-query buscar_usuarios_activos: List<Usuario> = """
-    SELECT * FROM usuarios
+query buscar_usuarios_activos: List<User> = """
+    SELECT * FROM users
     WHERE activo = true
     AND fecha_registro > ?
-    ORDER BY nombre
+    ORDER BY name
 """
 -- Parameters are types, not strings
 -- The compiler verifies that columns exist
 -- and that types match
 
 -- Query with joins (level 2)
-query pedidos_con_cliente: List<{pedido: Pedido, cliente: Cliente}> = """
+query orders_with_customer: List<{order: Order, customer: Customer}> = """
     SELECT p.*, c.*
     FROM pedidos p
     JOIN clientes c ON p.cliente_id = c.id
-    WHERE p.estado = ?
+    WHERE p.state = ?
 """
 -- The compiler generates the return type automatically
 -- and verifies that selected columns exist
@@ -873,13 +873,13 @@ The full language level, with loops, recursion, effects, and complete verificati
 
 ```sond
 -- Full business logic (level 3)
-fn calcular_iva(base: Money, tipo: Percent) -> (vat_amount: Money)
-    requires tipo in [4.0, 10.0, 21.0]  -- standard Spanish VAT
+fn compute_vat(base: Money, rate: Percent) -> (vat_amount: Money)
+    requires rate in [4.0, 10.0, 21.0]  -- standard Spanish VAT
     ensures:
-        vat_amount == round(base * tipo / 100.0, decimals=2)
+        vat_amount == round(base * rate / 100.0, decimals=2)
         vat_amount >= 0.00
     = impl:
-        round(base * tipo / 100.0, decimals=2)
+        round(base * rate / 100.0, decimals=2)
 
 -- Verification covers rounding and edge cases automatically
 ```
@@ -988,8 +988,8 @@ fn transfer(
         source.id != dest.id
 
         -- Both accounts are active (not frozen)
-        source.estado == EstadoAccount::Activa
-        dest.estado == EstadoAccount::Activa
+        source.state == EstadoAccount::Activa
+        dest.state == EstadoAccount::Activa
 
     ensures:
         -- Conservation invariant: the sum of balances is maintained
@@ -1043,22 +1043,22 @@ modulo api_tareas {
         requires title.len() > 0 and title.len() <= 200
         effects: [DB]
         = impl:
-            let tarea = Task {
+            let task = Task {
                 id: generar_id(),
                 title: title,
                 completed: false
             }
-            guardar_en_db(tarea)
-            Ok(tarea)
+            guardar_en_db(task)
+            Ok(task)
 
     @server
     fn toggle_tarea(id: u64) -> Result<Task, Error>
         effects: [DB]
         = impl:
-            let mut tarea = buscar_por_id(id)?
-            tarea.completed = not tarea.completed
-            actualizar_en_db(tarea)
-            Ok(tarea)
+            let mut task = buscar_por_id(id)?
+            task.completed = not task.completed
+            actualizar_en_db(task)
+            Ok(task)
 }
 
 -- Client UI
@@ -1075,25 +1075,25 @@ fn app_tareas() -> UI<List<Task>>
 
                 -- Input for new task
                 input(
-                    valor: nuevo_title,
+                    value: nuevo_title,
                     on_cambio: fn(v) => nuevo_title = v
                 ),
-                boton(
+                button(
                     "Add",
                     fn() => {
                         if nuevo_title.len() > 0 {
                             -- Call to the server API
-                            let tarea = fetch_api("/tasks", POST, nuevo_title)
-                            tareas = tareas ++ [tarea]
+                            let task = fetch_api("/tasks", POST, nuevo_title)
+                            tareas = tareas ++ [task]
                             nuevo_title = ""
                         }
                     }
                 ),
 
                 -- Task list (reactive: updates when `tareas` changes)
-                lista(
+                list(
                     tareas,
-                    fn(tarea) => item_tarea(tarea, &reactive tareas)
+                    fn(task) => item_tarea(task, &reactive tareas)
                 )
             )
 
@@ -1101,17 +1101,17 @@ fn app_tareas() -> UI<List<Task>>
 -- (`&reactive`), never captured by closure from external scope:
 -- this respects the "zero action at a distance" principle (3.3). The child
 -- can only touch the state it was given, and its Red effect is visible.
-fn item_tarea(tarea: Task, lista: &reactive List<Task>) -> UI<Task>
+fn item_tarea(task: Task, list: &reactive List<Task>) -> UI<Task>
     effects: [Red]
     = impl:
         div(
-            texto(tarea.title),
-            boton(
-                if tarea.completed { "Uncheck" } else { "Complete" },
+            text(task.title),
+            button(
+                if task.completed { "Uncheck" } else { "Complete" },
                 fn() => {
-                    let actualizada = fetch_api("/tareas/" + tarea.id, PUT)
+                    let actualizada = fetch_api("/tareas/" + task.id, PUT)
                     -- Update the task in the received reactive list
-                    lista = lista.map(
+                    list = list.map(
                         fn(t) => if t.id == actualizada.id { actualizada } else { t }
                     )
                 }

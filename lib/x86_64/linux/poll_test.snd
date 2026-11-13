@@ -60,3 +60,47 @@ test "a closed writer wakes the poll without POLLIN having to be the reason" {
     assert(pollfd_revents(pfd, 0) & POLLHUP != 0)
     syscall(SYS_close, rd)
 }
+
+test "poll_readable says yes only once the byte is actually there" {
+    // The shape every network test needs and none of them had: ask whether this one fd has
+    // something to read, with a deadline. Written by hand it becomes `set_nonblock` plus one
+    // `read`, which is a race -- the read runs before the bytes have crossed, returns EAGAIN,
+    // and the test fails on a busy machine while passing on an idle one.
+    let p[1]
+    assert(syscall(SYS_pipe, p) >= 0)
+    let rd = peek32(p)
+    let wr = peek32(p + 4)
+    // Nothing written yet: the answer is no, and it comes back on its own.
+    assert_eq(poll_readable(rd, 50), 0)
+    assert_eq(syscall(SYS_write, wr, ONE_BYTE.utf8, 1), 1)
+    assert_eq(poll_readable(rd, 1000), 1)
+    syscall(SYS_close, rd)
+    syscall(SYS_close, wr)
+}
+
+test "poll_readable reports the writer hanging up, not just data" {
+    // A reader that waits for POLLIN alone waits forever on a peer that closed. The answer to
+    // "can I read now?" is yes there too: the read returns 0 and the caller learns it is over.
+    let p[1]
+    assert(syscall(SYS_pipe, p) >= 0)
+    let rd = peek32(p)
+    let wr = peek32(p + 4)
+    syscall(SYS_close, wr)
+    assert_eq(poll_readable(rd, 1000), 1)
+    syscall(SYS_close, rd)
+}
+
+test "a descriptor that is not open is not read as 'nothing yet'" {
+    // POLLNVAL: the fd is closed. `poll` returns 1 -- there IS an event -- but the event is
+    // "this is not a descriptor". Counting only POLLIN|POLLHUP|POLLERR turned that into the same
+    // 0 the deadline returns, so `while poll_readable(fd, t) == 0 { }` spins forever on a
+    // descriptor that will never be anything: the answer never changes and nothing ever fails.
+    let p[1]
+    assert(syscall(SYS_pipe, p) >= 0)
+    let rd = peek32(p)
+    let wr = peek32(p + 4)
+    syscall(SYS_close, rd)
+    syscall(SYS_close, wr)
+    // Not 0: a read on it returns EBADF at once, which is how the caller learns.
+    assert_ne(poll_readable(rd, 50), 0)
+}

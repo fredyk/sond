@@ -85,7 +85,6 @@ fn itoa(n: i64, buf: i64) -> i64 {
     let mut tmp_len = 0
 
     if val < 0 {
-        val = -val
         poke8(buf + 0, 45)
         len = 1
     }
@@ -96,12 +95,20 @@ fn itoa(n: i64, buf: i64) -> i64 {
         return 1
     }
 
-    // Build digits in reverse order into a temp buffer. The `tmp_len < 20` guard makes the buffer
-    // bound explicit and machine-checked; it never fires in practice (an i64 has at most 19
-    // decimal digits), so the output is unchanged.
+    // Build digits in reverse order into a temp buffer. The digits are taken from the value AS IT
+    // STANDS, sign included: negating it first is what loses the most negative i64, whose absolute
+    // value does not fit in an i64 at all -- `val = -val` left it negative, the loop never ran,
+    // and out came a lone "-" that reads like a number. A remainder of a negative number is
+    // negative here, so each digit is flipped as it comes.
+    //
+    // The `tmp_len < 20` guard makes the buffer bound explicit and machine-checked; it never fires
+    // in practice (an i64 has at most 19 decimal digits plus the sign), so the output is unchanged.
     let mut digits[20]
-    while val > 0 && tmp_len < 20 invariant { tmp_len <= 20 } {
-        let d = val % 10
+    while val != 0 && tmp_len < 20 invariant { tmp_len <= 20 } {
+        let mut d = val % 10
+        if d < 0 {
+            d = 0 - d
+        }
         digits[tmp_len] = d + 48
         tmp_len = tmp_len + 1
         val = val / 10
@@ -134,14 +141,18 @@ fn atoi(p: i64) -> i64 {
         i = 1
     }
 
+    // Stop at the first byte that is not a digit, terminator included. Skipping it and carrying
+    // on -- which is what this did -- reads "12a3" as 123 and "1 2" as 12: numbers that are not
+    // in the input, handed back with nothing to tell the caller they were made up.
     for {
         let c = peek8(p + i)
-        if c == 0 {
+        if c < 48 {
             break
         }
-        if c >= 48 && c <= 57 {
-            result = result * 10 + (c - 48)
+        if c > 57 {
+            break
         }
+        result = result * 10 + (c - 48)
         i = i + 1
     }
 

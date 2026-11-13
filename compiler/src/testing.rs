@@ -70,7 +70,7 @@ pub fn synth_harness(funcs: &[Function]) -> Function {
 /// `__cov_total` words (so the instrumentation in the forked children accumulates into it),
 /// points `__cov_ptr` at it, runs the tests, then counts the covered points and reports the
 /// coverage. Compiled with `emit_program_coverage_g`, which instruments the code under test.
-pub fn synth_coverage_harness(funcs: &[Function], min_coverage: u32) -> Function {
+pub fn synth_coverage_harness(funcs: &[Function], min_coverage: u32, delegated: bool) -> Function {
     let tests: Vec<&Function> = funcs.iter().filter(|f| f.is_test).collect();
     let n = tests.len();
     // PROT_READ|PROT_WRITE = 3; MAP_SHARED|MAP_ANONYMOUS = 1|32 = 33; fd = -1; offset = 0.
@@ -93,22 +93,37 @@ pub fn synth_coverage_harness(funcs: &[Function], min_coverage: u32) -> Function
          \x20       __i = __i + 1\n\
          \x20   }\n",
     );
-    // Name each function that is not fully covered, so a blocked build is actionable. Each
-    // __cov_fn_table entry is 4 words: [name_ptr, name_len, first_point, point_count].
+    // Name each function that is not fully covered AND where. Each __cov_fn_table entry is 4
+    // words: [name_ptr, name_len, first_point, point_count]; __cov_loc_table holds a
+    // [file:line ptr, len] pair per point, indexed by point id. The function alone is not a
+    // location: `tls_handshake_auth` is 130 lines, and closing its gap started by reading all
+    // of them to guess which seven of thirty-two points never ran.
     src.push_str(
         "    let mut __fi = 0\n\
          \x20   for __fi < __cov_nfns {\n\
          \x20       let __base = __cov_fn_table + __fi * 32\n\
+         \x20       let __first = peek64(__base + 16)\n\
+         \x20       let __cnt = peek64(__base + 24)\n\
          \x20       let __miss = 0\n\
          \x20       let mut __j = 0\n\
-         \x20       for __j < peek64(__base + 24) {\n\
-         \x20           if peek64(__buf + (peek64(__base + 16) + __j) * 8) == 0 { __miss = 1 }\n\
+         \x20       for __j < __cnt {\n\
+         \x20           if peek64(__buf + (__first + __j) * 8) == 0 { __miss = 1 }\n\
          \x20           __j = __j + 1\n\
          \x20       }\n\
          \x20       if __miss == 1 {\n\
          \x20           print(\"  not fully covered: \")\n\
          \x20           syscall(SYS_write, 1, peek64(__base), peek64(__base + 8))\n\
          \x20           print(\"\\n\")\n\
+         \x20           __j = 0\n\
+         \x20           for __j < __cnt {\n\
+         \x20               if peek64(__buf + (__first + __j) * 8) == 0 {\n\
+         \x20                   let __loc = __cov_loc_table + (__first + __j) * 16\n\
+         \x20                   print(\"      \")\n\
+         \x20                   syscall(SYS_write, 1, peek64(__loc), peek64(__loc + 8))\n\
+         \x20                   print(\"\\n\")\n\
+         \x20               }\n\
+         \x20               __j = __j + 1\n\
+         \x20           }\n\
          \x20       }\n\
          \x20       __fi = __fi + 1\n\
          \x20   }\n",
@@ -120,16 +135,40 @@ pub fn synth_coverage_harness(funcs: &[Function], min_coverage: u32) -> Function
     src.push_str("    print(\"/\")\n");
     src.push_str("    print_int(__n)\n");
     src.push_str("    print(\" (\")\n");
-    src.push_str("    print_int(__covered * 100 / __n)\n");
+    // An empty denominator is not 100%: `covered * 100 / 0` is a divide by zero, and the harness
+    // died with the line half printed, leaving the run with no verdict at all. It is also not a
+    // pass -- `0 * 100 < 80 * 0` is false -- so the entry that answers for nothing would have
+    // sailed through the gate. Both roads end at the same rule: measuring nothing is a failure.
+    src.push_str("    let __den = if __n == 0 { 1 } else { __n }\n");
+    src.push_str("    print_int(__covered * 100 / __den)\n");
     src.push_str("    print(\"%)\\n\")\n");
     // The gate: coverage below the threshold is a failure, distinct from test failures.
     // Integer form of `covered/n < min/100` is `covered*100 < min*n`.
     src.push_str(&format!(
-        "    let __gatefail = if __covered * 100 < {min_coverage} * __n {{ 1 }} else {{ 0 }}\n"
+        "    let mut __gatefail = if __covered * 100 < {min_coverage} * __n {{ 1 }} else {{ 0 }}\n"
     ));
     src.push_str(&format!(
         "    if __gatefail == 1 {{ print(\"coverage below {min_coverage}% threshold\\n\") }}\n"
     ));
+    // An empty denominator has two shapes and only one of them is a hole. `x509/realcert_test.snd`
+    // drives the DER walk with a real certificate and every module it includes has a `_test.snd`
+    // next door: it answers for nothing NEW, all of that code IS in somebody's denominator, and
+    // failing it would push whoever hits it to re-measure the neighbours here. The entry that
+    // includes nothing measurable at all is the hole, and that one still fails.
+    if delegated {
+        src.push_str(
+            "    if __n == 0 {\n\
+             \x20       print(\"nothing new here: the modules it includes are measured by their own gates\\n\")\n\
+             \x20   }\n",
+        );
+    } else {
+        src.push_str(
+            "    if __n == 0 {\n\
+             \x20       print(\"nothing measured: this entry answers for no instrumented code\\n\")\n\
+             \x20       __gatefail = 1\n\
+             \x20   }\n",
+        );
+    }
     src.push_str("    __failed + __gatefail\n}\n");
     parse_main(&src)
 }
@@ -163,7 +202,7 @@ mod tests {
     #[test]
     fn coverage_harness_maps_the_buffer_and_counts() {
         let funcs = parse("test \"a\" { let x = 1 }\ntest \"b\" { let y = 2 }");
-        let main = synth_coverage_harness(&funcs, 80);
+        let main = synth_coverage_harness(&funcs, 80, false);
         assert_eq!(main.name, "main");
         let src = format!("{:?}", main.body);
         // Reads the point count, mmaps a shared buffer, points __cov_ptr at it, and both

@@ -233,6 +233,18 @@ fn parses_the_fiscal_function_signature_and_requires() {
 }
 
 #[test]
+fn parses_a_where_refinement_on_a_local_into_its_conjuncts() {
+    // `let y: T where a && b = v` keeps each comparison separately: the prover works with one
+    // comparison at a time, not with the whole conjunction.
+    let mut p = Parser::new(tokenize("fn f() -> i64 { let y: i64 where 0 <= y && y < 4 = 2\ny }"));
+    let funcs = p.parse_program();
+    let Stmt::Let { refinement, .. } = &funcs[0].body.stmts[0] else {
+        panic!("the first statement has to be a let");
+    };
+    assert_eq!(refinement.len(), 2, "the && chain contributes two conjuncts: {refinement:?}");
+}
+
+#[test]
 fn parses_where_refinements_on_a_parameter_into_requires() {
     // `where 0 <= i && i < 10` on the parameter desugars to two preconditions.
     let f = parse_fn("fn get(i: i64 where 0 <= i && i < 10) -> i64 { i }");
@@ -999,9 +1011,9 @@ fn nothing_outside_ast_touches_a_block_s_statements_directly() {
             }
         }
     }
-    let raiz = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut culpables = Vec::new();
-    recorrer(&raiz, &mut culpables, &empujar, &meter);
+    recorrer(&root, &mut culpables, &empujar, &meter);
     assert!(
         culpables.is_empty(),
         "these push or insert into a Block's `stmts` without its line, which desynchronises \
@@ -1210,4 +1222,31 @@ fn writing_into_an_element_does_not_lift_the_length_bound() {
         captured_end_name(&reasigna_base[0]).is_some(),
         "assigning the whole slice moves its `len` with it, so the bound must be lifted"
     );
+}
+
+/// `pub extern fn`: a DECLARATION carries its visibility like everything else.
+///
+/// `extern fn` was recognized only as the very first token of a declaration, so the visibility
+/// that every other item accepts had nowhere to go: `pub extern fn f()` fell through to the
+/// global-`let` branch and was refused with `expected `let`, got `extern``. That is what kept a
+/// header -- which is nothing BUT public declarations without bodies -- from being a file this
+/// compiler can read.
+#[test]
+fn a_declaration_with_no_body_takes_a_visibility_like_any_other() {
+    let mut p = Parser::new(tokenize(
+        "pub extern fn add(a: i64, b: i64) -> i64\n\
+         priv extern fn oculta() -> i64\n\
+         extern fn suelta(x: i64) -> i64 requires { x > 0 }\n",
+    ));
+    let funcs = p.parse_program();
+    assert!(funcs.is_empty(), "a declaration defines nothing");
+    let ext = p.take_externs();
+    assert_eq!(ext.len(), 3, "all three declarations collected");
+    assert_eq!(ext[0].vis, Visibility::Pub, "`pub` reaches the declaration");
+    assert_eq!(ext[0].name, "add");
+    assert_eq!(ext[0].params.len(), 2, "the parameters survive the visibility");
+    assert_eq!(ext[1].vis, Visibility::Priv, "`priv` reaches it too");
+    // No visibility written is still the same declaration it was before this existed.
+    assert_eq!(ext[2].name, "suelta");
+    assert_eq!(ext[2].requires.len(), 1, "the contract survives");
 }
