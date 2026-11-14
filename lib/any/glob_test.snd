@@ -48,3 +48,58 @@ test "negative lengths match nothing" {
     assert_eq(m("*", -1, "a", 1), 0)
     assert_eq(m("*", 1, "a", -1), 0)
 }
+
+fn ml(l: string, llen: i64, s: string, slen: i64) -> i64 { glob_list_match(l.utf8, llen, s.utf8, slen) }
+
+test "a list matches when one of its comma-separated patterns does" {
+    assert_eq(ml("a*,b*", 5, "apple", 5), 1)
+    assert_eq(ml("a*,b*", 5, "banana", 6), 1)
+    assert_eq(ml("a*,b*", 5, "cherry", 6), 0)
+    assert_eq(ml("x", 1, "x", 1), 1)
+}
+
+test "a pattern after an exclamation mark excludes what it matches, wherever it is in the list" {
+    assert_eq(ml("a*,!a*-old", 10, "app", 3), 1)
+    assert_eq(ml("a*,!a*-old", 10, "app-old", 7), 0)
+    assert_eq(ml("!a*-old,a*", 10, "app-old", 7), 0)
+    assert_eq(ml("!a*", 3, "app", 3), 0)
+    assert_eq(ml("!a*", 3, "bob", 3), 0)
+}
+
+test "an empty pattern of a list matches nothing" {
+    assert_eq(ml("", 0, "", 0), 0)
+    assert_eq(ml(",", 1, "", 0), 0)
+    assert_eq(ml("a,", 2, "", 0), 0)
+    assert_eq(ml("a,,b", 4, "b", 1), 1)
+    assert_eq(ml("!,a", 3, "a", 1), 1)
+}
+
+test "a list with a negative length matches nothing" {
+    assert_eq(ml("*", -1, "a", 1), 0)
+    assert_eq(ml("*", 1, "a", -1), 0)
+}
+
+fn mi(p: string, plen: i64, s: string, slen: i64) -> i64 { glob_match_ascii_nocase(p.utf8, plen, s.utf8, slen) }
+
+test "ascii case-insensitive matching folds letters only" {
+    assert_eq(mi("*KEY*", 5, "api_key", 7), 1)
+    assert_eq(mi("*key*", 5, "API_KEY", 7), 1)
+    assert_eq(mi("A-Z", 3, "a-z", 3), 1)
+    assert_eq(mi("[", 1, "{", 1), 0)
+    assert_eq(mi("@", 1, "`", 1), 0)
+    assert_eq(mi("a", 1, "b", 1), 0)
+    assert_eq(m("*KEY*", 5, "api_key", 7), 0)
+    assert_eq(mi("*", -1, "a", 1), 0)
+    assert_eq(mi("*", 1, "a", -1), 0)
+}
+
+fn mli(l: string, llen: i64, s: string, slen: i64) -> i64 { glob_list_match_ascii_nocase(l.utf8, llen, s.utf8, slen) }
+
+test "a list can be matched ignoring ascii case" {
+    assert_eq(mli("*TOKEN*,*_B64", 13, "github_token", 12), 1)
+    assert_eq(mli("*TOKEN*,*_B64", 13, "cert_b64", 8), 1)
+    assert_eq(mli("*TOKEN*,!*_PUBLIC", 17, "token_public", 12), 0)
+    assert_eq(mli("*TOKEN*", 7, "region", 6), 0)
+    assert_eq(mli("*", -1, "a", 1), 0)
+    assert_eq(mli("*", 1, "a", -1), 0)
+}

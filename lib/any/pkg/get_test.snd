@@ -528,9 +528,9 @@ test "pkg: a use line missing any of its parts is refused" {
 test "pkg: a from line gives its value with the quotes off, and refuses what is not one" {
     let vo[1]
     let vl[1]
-    let con = bytes_from_str("    from \"github.com/fredyk/sond-strings@1111\"   ")
+    let con = bytes_from_str("    from \"github.com/example/strings@1111\"   ")
     assert_eq(pkg_line_is_from(con, 0, bytes_len(con), vo, vl), 1)
-    assert_eq(vl[0], 35)
+    assert_eq(vl[0], 31)
     assert_eq(bytes_get(con, vo[0]), 103) // 'g', the quote is gone
     // Unquoted is accepted too: the quotes are convention in what `sond get` writes, not syntax.
     let sin = bytes_from_str("from github.com/x/y@1")
@@ -637,9 +637,9 @@ test "pkg: the scheme is accepted in either form and does not become part of the
     let repo[16]
     let ref[16]
     let name[16]
-    assert_eq(pkg_parse_spec("https://github.com/fredyk/sond-strings@v1".utf8, host, owner, repo, ref, name), 0)
+    assert_eq(pkg_parse_spec("https://github.com/example/strings@v1".utf8, host, owner, repo, ref, name), 0)
     assert_eq(peek8(host), 103) // 'g' of github.com, not 'h' of https
-    assert_eq(pkg_parse_spec("http://github.com/fredyk/sond-strings@v1".utf8, host, owner, repo, ref, name), 0)
+    assert_eq(pkg_parse_spec("http://github.com/example/strings@v1".utf8, host, owner, repo, ref, name), 0)
     assert_eq(peek8(host), 103)
 }
 
@@ -719,8 +719,8 @@ let R_TREE_NO_ARR: string = "HTTP/1.1 200 OK\r\n\r\n{\"tree\":{\"path\":\"a.snd\
 let R_TREE_BASURA: string = "HTTP/1.1 200 OK\r\n\r\n{\"truncated\":false,\"tree\":[7,{\"path\":\"a.snd\"},{\"type\":9,\"path\":\"b.snd\"},{\"type\":\"tree\",\"path\":\"sub\"},{\"type\":\"blob\"},{\"type\":\"blob\",\"path\":5}]}"
 let R_TREE_DOS: string = "HTTP/1.1 200 OK\r\n\r\n{\"truncated\":false,\"tree\":[{\"type\":\"blob\",\"path\":\"a.snd\"},{\"type\":\"blob\",\"path\":\"b.snd\"}]}"
 
-fn h_owner() -> i64 { let s: string = "fredyk"; s.utf8 }
-fn h_repo() -> i64 { let s: string = "sond-strings"; s.utf8 }
+fn h_owner() -> i64 { let s: string = "example"; s.utf8 }
+fn h_repo() -> i64 { let s: string = "strings"; s.utf8 }
 fn h_ref() -> i64 { let s: string = "v1.4.2"; s.utf8 }
 
 // Arms the seam with a single recorded answer for the commits endpoint.
@@ -836,7 +836,7 @@ fn h_block_crlf(name: i64, src: i64, sha: i64, hash: i64) -> i64 {
     b
 }
 
-fn h_src() -> i64 { let s: string = "github.com/fredyk/sond-strings"; s.utf8 }
+fn h_src() -> i64 { let s: string = "github.com/example/strings"; s.utf8 }
 
 test "pkg: a deps.snd with CRLF line endings pins exactly what one with LF pins" {
     let troot: string = "/tmp/sond-pkg-t11"
@@ -844,7 +844,7 @@ test "pkg: a deps.snd with CRLF line endings pins exactly what one with LF pins"
     let dep: string = "/tmp/sond-pkg-t11/deps.snd"
     h_cfg(troot.utf8, cac.utf8, dep.utf8)
     h_rec_ok()
-    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    let spec: string = "github.com/example/strings@v1.4.2"
     assert_eq(pkg_get(spec.utf8), 0)
     // Same pin, same bytes, CRLF. If the CR rode along into the hash, the cache dir named by
     // it would not exist and this get would download the whole module again.
@@ -863,7 +863,7 @@ test "pkg: a block in a CRLF deps.snd is replaced, not appended to" {
     h_cfg(troot.utf8, cac.utf8, dep.utf8)
     h_write_file(dep.utf8, h_block_crlf(pkg_test_modname(), h_src(), TEST_SHA.utf8, EXPECTED_HASH.utf8))
     h_rec_ok2()
-    let spec2: string = "github.com/fredyk/sond-strings@v1.4.3"
+    let spec2: string = "github.com/example/strings@v1.4.3"
     assert_eq(pkg_get(spec2.utf8), 0)
     // One block, pinning the new commit: two would make the resolution ambiguous.
     let dbuf = heap_alloc(4096)
@@ -882,7 +882,7 @@ test "pkg: content that changed behind a pinned ref is refused, and nothing is w
     let dep: string = "/tmp/sond-pkg-t13/deps.snd"
     h_cfg(troot.utf8, cac.utf8, dep.utf8)
     h_rec_ok()
-    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    let spec: string = "github.com/example/strings@v1.4.2"
     assert_eq(pkg_get(spec.utf8), 0)
     let dbuf1 = heap_alloc(4096)
     let dlen1 = read_file(dep.utf8, dbuf1, 4096)
@@ -960,6 +960,6 @@ test "pkg: a deps.snd that cannot be written stops the get instead of half-doing
     bytes_push(vacio, 10)
     h_write_file(tope.utf8, vacio)
     h_rec_ok()
-    let spec: string = "github.com/fredyk/sond-strings@v1.4.2"
+    let spec: string = "github.com/example/strings@v1.4.2"
     assert_eq(pkg_get(spec.utf8), 0 - 7)
 }
