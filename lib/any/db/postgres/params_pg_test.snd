@@ -4,7 +4,7 @@
 // End-to-end test of db/postgres/params.snd against a REAL PostgreSQL 17 server in a rootless
 // container (no sudo). The test owns the container's whole life: it removes a leftover with the
 // same name, starts `postgres:17-alpine` on 127.0.0.1:55605 with database `ba_l1`, waits for
-// readiness with retries, drives the scenarios below over one connection, then stops the
+// readiness within a bounded budget, drives the scenarios below over one connection, then stops the
 // container. Every check accumulates into `fails` and the single aborting assert is at the very
 // end, AFTER the stop, so a failure can never leak the container.
 //
@@ -134,17 +134,35 @@ fn sleep_ms(ms: i64) {
     syscall(SYS_nanosleep, ts, 0)
 }
 
-// Tries to connect until the server authenticates, `tries` times 500 ms apart. Returns the
-// connection, or 0 if it never came up.
-fn wait_ready(tries: i64) -> i64 {
+// How long the test waits for the container to take a login, and how often it asks. A cold
+// start runs initdb and restarts the server before it listens for real, which on a loaded host
+// has taken well over 40 s; the budget is generous but finite, so a container that never comes
+// up still fails the test instead of hanging it.
+let PG_READY_BUDGET_MS = 180000
+let PG_READY_STEP_MS = 500
+
+// Milliseconds of CLOCK_MONOTONIC: it does not jump with the wall clock.
+fn mono_ms() -> i64 {
+    let ts[2]
+    syscall(SYS_clock_gettime, 1, ts)
+    ts[0] * 1000 + ts[1] / 1000000
+}
+
+// Asks the server on 127.0.0.1:`port` for a login every PG_READY_STEP_MS until it authenticates
+// or `budget_ms` of monotonic time has passed. A slow connect attempt counts against the budget
+// too. Returns the connection, or 0 when the budget ran out.
+fn wait_ready_within(port: i64, budget_ms: i64) -> i64 {
+    let deadline = mono_ms() + budget_ms
+    let most = budget_ms / PG_READY_STEP_MS + 2
     let mut n = 0
-    for n < tries {
-        let conn = pgx_connect(PG_HOST.utf8, PG_PORT, PG_USER.utf8, PG_PASS.utf8, PG_DB.utf8)
+    for n < most {
+        let conn = pgx_connect(PG_HOST.utf8, port, PG_USER.utf8, PG_PASS.utf8, PG_DB.utf8)
         if conn != 0 {
             if pgx_ok(conn) == 1 { return conn }
             pgx_close(conn)
         }
-        sleep_ms(500)
+        if mono_ms() >= deadline { return 0 }
+        sleep_ms(PG_READY_STEP_MS)
         n = n + 1
     }
     0
@@ -163,6 +181,25 @@ fn note(code: i64, cond: i64, fails: i64) -> i64 {
     }
 }
 
+test "pg params: the readiness budget outlasts a cold start on a loaded host, and is bounded" {
+    // A cold postgres:17-alpine runs initdb, restarts, and only then takes a login: on a host
+    // under I/O pressure that alone has taken over 40 s, so a budget of that size fails a correct
+    // client. The budget is generous but finite, so a container that never comes up still ends.
+    assert(PG_READY_BUDGET_MS >= 120000)
+    assert(PG_READY_BUDGET_MS <= 600000)
+}
+
+test "pg params: waiting on a port nobody serves gives up at its budget, not long after" {
+    let port = unused_loopback_port()
+    assert(port > 0)
+    let t0 = mono_ms()
+    let conn = wait_ready_within(port, 1500)
+    let elapsed = mono_ms() - t0
+    assert_eq(conn, 0)
+    assert(elapsed >= 1400)
+    assert(elapsed < 10000)
+}
+
 test "pg params: real PostgreSQL 17 end to end" {
     let started = docker_start()
     let mut fails = 0
@@ -172,10 +209,13 @@ test "pg params: real PostgreSQL 17 end to end" {
         assert(0)
         return
     }
-    let conn = wait_ready(80)
+    let conn = wait_ready_within(PG_PORT, PG_READY_BUDGET_MS)
     if conn == 0 {
         docker_stop()
-        print("  the PostgreSQL container never became ready\n")
+        print("  PostgreSQL in container ba-pg-l1 did not accept a login on 127.0.0.1:55605 within ")
+        print_int(PG_READY_BUDGET_MS / 1000)
+        print(" s (PG_READY_BUDGET_MS); a cold postgres:17-alpine image, a missing pull or a host\n")
+        print("  starved of I/O are the usual causes: `docker run` succeeded, so the daemon answered\n")
         assert(0)
         return
     }
